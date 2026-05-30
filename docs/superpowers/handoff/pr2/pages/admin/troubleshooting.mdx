@@ -1,0 +1,217 @@
+---
+title: "Troubleshooting"
+description: "Diagnose and fix common gateway, channel, and provider issues."
+audience: admin
+---
+
+# Troubleshooting
+
+Start here when something is not working. Most issues are diagnosed in two commands:
+
+```bash
+openclaw doctor         # config, health, and repair
+openclaw status --deep  # gateway + channel probe
+```
+
+See [Doctor](/admin/doctor) for the full check list, and [Health checks](/admin/gateway/health-checks) for status commands.
+
+## Failure signatures
+
+Match the symptom to the likely cause before digging deeper:
+
+| Symptom | Likely cause | First step |
+| ------- | ------------ | ---------- |
+| Gateway won't start, exits immediately | Unknown/invalid config key | `openclaw doctor --fix` |
+| Gateway won't start, "address in use" | Port collision | `lsof -i :18789`, change port |
+| Channel stopped working after an upgrade | Service on Bun or version-managed Node | `openclaw doctor` (offers Node migration) |
+| WhatsApp logged out / status 409-515 | Conflicting WhatsApp Web session | Relink (see below) |
+| Bot ignores DMs | `dmPolicy: "disabled"` or sender not in `allowFrom` | Check `channels.<channel>.dmPolicy` |
+| Bot ignores group messages | `groupPolicy` / missing mention | Check `groups` + `requireMention` |
+| "No credentials found" | Provider key not in `~/.openclaw/.env` | Add key, restart daemon |
+| 429 / rate limit | Single key over quota | Add rotation keys |
+| Browser WebSocket 1008 Unauthorized | Browser can't pass bearer token | Tailscale/trusted-proxy auth |
+| Tool blocked unexpectedly | Sandbox or tool policy | `openclaw sandbox explain` |
+
+## Gateway not starting
+
+<AccordionGroup>
+  <Accordion title="Port already in use">
+    ```bash
+    lsof -i :18789
+    ```
+
+    Change the port in `~/.openclaw/openclaw.json`:
+
+    ```json5
+    { gateway: { port: 18790 } }
+    ```
+
+    Then restart: `systemctl --user restart openclaw-gateway` (Linux) or `openclaw gateway start` (macOS/manual).
+  </Accordion>
+  <Accordion title="Unknown config keys">
+    The gateway refuses to start with unrecognised top-level keys:
+
+    ```bash
+    openclaw doctor --fix   # removes unknown keys, fills missing defaults
+    ```
+
+    Review the diff before restarting.
+  </Accordion>
+  <Accordion title="Systemd service installed but not running">
+    ```bash
+    systemctl --user status openclaw-gateway
+    journalctl --user -u openclaw-gateway -n 50
+    systemctl --user start openclaw-gateway
+    ```
+
+    If it keeps crashing, run in the foreground to see the error: `openclaw gateway --port 18789`.
+  </Accordion>
+  <Accordion title="Channels broke after an upgrade (Node vs Bun)">
+    WhatsApp and Telegram require a stable system **Node**, not Bun. Version-managed Node paths (nvm, fnm, volta, asdf) can break a background service after upgrades because the service does not load your shell init.
+
+    ```bash
+    openclaw doctor   # warns and offers to migrate to a system Node install
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## `openclaw` command not found
+
+```bash
+node -v         # should be v22+
+npm prefix -g   # should be in your PATH
+```
+
+```bash
+echo 'export PATH="$(npm prefix -g)/bin:$PATH"' >> ~/.zshrc
+source ~/.zshrc
+openclaw --version
+```
+
+## Channel issues
+
+<AccordionGroup>
+  <Accordion title="WhatsApp: logged out or not receiving messages">
+    ```bash
+    openclaw status --deep
+    ls -l ~/.openclaw/credentials/whatsapp/*/creds.json
+    ```
+
+    If credentials are stale or missing, relink (the phone holding the account must be online):
+
+    ```bash
+    openclaw channels logout --channel whatsapp
+    openclaw channels login --channel whatsapp --verbose
+    ```
+  </Accordion>
+  <Accordion title="WhatsApp: status codes 409-515 in logs">
+    A conflicting WhatsApp Web session is open. Close all other WhatsApp Web sessions, then relink. Status 515 auto-retries once after pairing — this is normal.
+  </Accordion>
+  <Accordion title="Telegram / Discord / Slack: bot not responding">
+    1. Confirm the bot token is still valid (not revoked in the provider console)
+    2. `openclaw channels status --channel telegram`
+    3. Check the allowlist: `channels.telegram.allowFrom` must include the sender
+    4. `openclaw channels logs --channel telegram --follow`
+  </Accordion>
+  <Accordion title="Bot ignores me in a group">
+    1. `groupPolicy` must be `open` or `allowlist` with the group allowlisted
+    2. The bot usually requires an @mention — set `requireMention: false` on the group to disable
+    3. Telegram: disable Privacy Mode in BotFather so the bot sees group messages
+    4. The sender must be in `groupAllowFrom` (or `allowFrom` as fallback)
+  </Accordion>
+  <Accordion title="No inbound messages from any channel">
+    1. `openclaw gateway status` — is it running?
+    2. Check `dmPolicy` — `"disabled"` means no DM replies
+    3. Check `allowFrom`
+    4. `openclaw security audit` — open DM policies are flagged
+  </Accordion>
+</AccordionGroup>
+
+## AI provider issues
+
+<AccordionGroup>
+  <Accordion title="No credentials found / provider not responding">
+    ```bash
+    openclaw models status
+    openclaw doctor
+    ```
+
+    If the key is in your shell but the daemon can't find it, it must be in `~/.openclaw/.env`:
+
+    ```bash
+    echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.openclaw/.env
+    systemctl --user restart openclaw-gateway
+    ```
+  </Accordion>
+  <Accordion title="Rate limit errors">
+    Configure key rotation:
+
+    ```bash
+    # ~/.openclaw/.env
+    ANTHROPIC_API_KEYS=sk-ant-key1,sk-ant-key2
+    ```
+
+    The gateway retries with the next key on 429 responses.
+  </Accordion>
+  <Accordion title="Anthropic: 'credential only authorized for Claude Code'">
+    Use an API key instead of the subscription setup-token:
+
+    ```bash
+    echo 'ANTHROPIC_API_KEY=sk-ant-...' >> ~/.openclaw/.env
+    systemctl --user restart openclaw-gateway
+    ```
+  </Accordion>
+  <Accordion title="'Model is not allowed'">
+    If `agents.defaults.models` is set, it is the allowlist for `/model`. Either add the model, clear the allowlist, or pick one from `openclaw models list`.
+  </Accordion>
+</AccordionGroup>
+
+## Control panel / web UI
+
+<AccordionGroup>
+  <Accordion title="Control panel not loading">
+    1. `openclaw gateway status`
+    2. Open `http://127.0.0.1:18789/` directly — if that works but another URL doesn't, check your remote access config
+    3. `openclaw dashboard` opens the correct URL automatically
+  </Accordion>
+  <Accordion title="WebSocket 1008 Unauthorized from browser">
+    Browsers can't pass bearer tokens in WebSocket handshakes. Use Tailscale Serve with `gateway.auth.allowTailscale: true`, [trusted-proxy auth](/admin/gateway/authentication), or connect via the macOS app / CLI.
+  </Accordion>
+</AccordionGroup>
+
+## Tools blocked unexpectedly
+
+If an agent says a tool is blocked, inspect the effective policy:
+
+```bash
+openclaw sandbox explain
+openclaw sandbox explain --json
+```
+
+This prints the sandbox mode, whether the session is sandboxed, the effective tool allow/deny and where it came from, and the elevated gates. See [Sandboxing](/admin/sandboxing).
+
+## Logs and diagnostics
+
+```bash
+openclaw logs --follow
+openclaw logs --json
+journalctl --user -u openclaw-gateway -f      # Linux
+openclaw channels logs --channel whatsapp --follow
+```
+
+For more detail:
+
+```bash
+OPENCLAW_LOG_LEVEL=debug openclaw gateway --port 18789
+```
+
+## Still stuck?
+
+```bash
+openclaw doctor --deep   # comprehensive scan including extra gateway installs
+```
+
+Read the output carefully — doctor usually identifies the fix. If not:
+
+- Check [GitHub Issues](https://github.com/ExpansionX/WednesdayAI-core/issues)
+- Ask in [Discord](https://discord.gg/clawd)

@@ -1,0 +1,352 @@
+---
+title: "Gateway configuration"
+description: "Configure the WednesdayAI gateway: all settings, their defaults, production impact, and worked examples."
+audience: admin
+---
+
+# Gateway configuration
+
+The gateway reads its configuration from `~/.openclaw/openclaw.json` at startup and watches the file for changes. Most settings apply immediately on save — no restart needed. A small number (port, bind address, TLS, plugins, session storage) require a restart; these are noted in each section.
+
+The config file uses **JSON5** syntax: standard JSON plus comments (`//`, `/* */`) and trailing commas. Unknown keys at the top level cause the gateway to refuse to start. Run `openclaw doctor` to identify unknown or invalid keys before restarting.
+
+## Config file location
+
+| Platform | Default path |
+| -------- | ------------ |
+| Linux / macOS | `~/.openclaw/openclaw.json` |
+| Custom path | `OPENCLAW_CONFIG_PATH=<absolute-path>` — useful for running multiple gateway instances on one host |
+
+If the file does not exist, the gateway starts with safe defaults.
+
+## Validating and repairing config
+
+```bash
+openclaw doctor          # identify unknown keys, invalid values, missing credentials
+openclaw doctor --fix    # auto-repair common issues (removes unknown keys, fills defaults)
+```
+
+`openclaw doctor` is safe against a live gateway — it reads the config file but does not modify it unless `--fix` is passed. See [Doctor](/admin/doctor) for the full check list.
+
+## Hot-reload behaviour
+
+The gateway file-watches the config in `hybrid` mode by default:
+
+| Mode | Behaviour |
+| ---- | --------- |
+| **`hybrid`** (default) | Auto-applies safe changes instantly; automatically restarts for critical changes |
+| `hot` | Auto-applies safe changes only; logs a warning and **drops** changes that would require a restart |
+| `restart` | Restarts the gateway on any config change |
+| `off` | Disables file watching; changes take effect on the next manual restart |
+
+**What requires a restart:**
+
+| Category | Fields | Restart? |
+| -------- | ------ | -------- |
+| Dynamic reads | `agents`, `routing`, `tools`, `ui`, `logging`, `identity`, `bindings` | No |
+| Hooks | `hooks` | No (hooks subsystem reloads) |
+| Channels | `channels.*` | No (per-channel adapter restarts) |
+| Session storage | `session.storage`, `session.storeAdapter`, `session.databaseUrl` | **Yes** |
+| Gateway server | `gateway.*` — port, bind, auth, tailscale, TLS, HTTP | **Yes** |
+| Infrastructure | `discovery`, `canvasHost`, `plugins`, `secrets.providers` | **Yes** |
+
+<Note>
+**Exceptions within `gateway.*`:** `gateway.reload`, `gateway.remote`, and `gateway.channelHealthCheckMinutes` do **not** trigger a full restart. **Exceptions within `agents`:** `agents.defaults.heartbeat`, `agents.defaults.model`, and the top-level `models` key trigger an in-process `restart-heartbeat` action, not a full restart.
+</Note>
+
+To restart manually on Linux:
+
+```bash
+systemctl --user restart openclaw-gateway.service
+```
+
+---
+
+## Top-level config keys
+
+Each key is optional unless noted. The full reference is at [Config reference](/reference/config).
+
+### `identity`
+
+Controls the bot's display name, theme colour, and emoji — cosmetic only.
+
+```json5
+{
+  identity: {
+    name: "WednesdayAI",
+    theme: "default",
+    emoji: "🤖",
+  },
+}
+```
+
+**Restart required:** No.
+
+---
+
+### `agents`
+
+Controls agent workspace, default model, heartbeat, and automation.
+
+```json5
+{
+  agents: {
+    defaults: {
+      workspace: "~/.openclaw/workspace",
+      model: {
+        primary: "anthropic/claude-sonnet-4-6", // provider/model format; pin in production
+      },
+      heartbeat: { every: "60m" },
+    },
+  },
+}
+```
+
+**Default workspace:** `~/.openclaw/workspace`. In production, set this to a persistent volume — not inside an ephemeral container layer.
+
+**Default model:** use the nested `model: { primary: "provider/model" }` shape. A bare string is deprecated. See [AI providers](/admin/providers).
+
+**Restart required:** No.
+
+---
+
+### `channels`
+
+Configures each channel provider. See the [channel guides](/admin/channels) for credentials.
+
+```json5
+{
+  channels: {
+    defaults: {
+      groupPolicy: "allowlist", // applies to all channels unless overridden
+    },
+    telegram: {
+      enabled: true,
+      botToken: "<YOUR_TOKEN>",
+      dmPolicy: "pairing", // set per-channel — no cross-channel default for dmPolicy
+    },
+  },
+}
+```
+
+<Note>
+`channels.defaults` only accepts `groupPolicy` and `heartbeat`. Setting `dmPolicy` there will make the gateway refuse to start — configure it on each channel.
+</Note>
+
+**DM policies:**
+
+| Policy | Effect |
+| ------ | ------ |
+| `pairing` (default) | New senders get a one-time pairing code; must be approved |
+| `allowlist` | Only senders in `allowFrom` — requires at least one entry |
+| `open` | All senders accepted — requires `allowFrom: ["*"]` |
+| `disabled` | DMs not accepted on this channel |
+
+Both `allowlist` and `open` require an explicit `allowFrom`; without it the gateway refuses to start.
+
+<Warning>
+`dmPolicy: "open"` lets anyone who can reach your bot message it. Use it only on private bots with restricted channel credentials.
+</Warning>
+
+**Group policies:** `groupPolicy` controls which **senders** can invoke the bot in groups (`allowlist` default, `open`, `disabled`), separate from the `channels.<channel>.groups` allowlist that controls which groups are in scope.
+
+**Pairing codes:** 8 characters, expire after 1 hour, max 3 pending per channel.
+
+**Restart required:** No — only the affected channel adapter restarts in-process. Some providers (e.g. WhatsApp) require re-authentication after credential changes.
+
+---
+
+### `gateway.auth`
+
+Controls authentication for the web control panel and gateway API. Configured under `gateway.auth`, not the top-level `auth` key.
+
+<Warning>
+Do not confuse `gateway.auth` (gateway access control) with the top-level `auth` key — `auth` is the LLM provider credential store and has no effect on gateway authentication.
+</Warning>
+
+```json5
+{
+  gateway: {
+    auth: {
+      mode: "token", // "none" | "token" | "password" | "trusted-proxy"
+      token: "<GENERATE_WITH: openssl rand -hex 32>",
+    },
+  },
+}
+```
+
+**Auth modes:**
+
+| Mode | Effect |
+| ---- | ------ |
+| `none` | No authentication — only safe for trusted local loopback |
+| `token` | Bearer token required for all API and control UI access |
+| `password` | Password-based auth for the control UI |
+| `trusted-proxy` | Delegate auth to an identity-aware reverse proxy |
+
+**Resolution order** (first match wins): a CLI `--auth-mode` override (token is ephemeral) → explicit `gateway.auth.mode` → password set in config/env → token set in config/env → neither, in which case it resolves to `token` and auto-generates a 48-character token (saved to config on the normal startup path).
+
+<Note>
+**Token rotation:** clearing `gateway.auth.token` is not enough if `OPENCLAW_GATEWAY_TOKEN` is set in the environment — the env var prevents regeneration. Update or remove it too. See [Authentication](/admin/gateway/authentication#rotating-the-gateway-token).
+</Note>
+
+**Restart required:** Yes. In `hybrid` mode, saving the config restarts automatically and drops active sessions.
+
+---
+
+### `secrets`
+
+Keep supported credentials out of plaintext config with **SecretRefs**. Each ref points at an environment variable, a local file, or an external resolver command:
+
+```json5
+{
+  secrets: {
+    providers: {
+      default: { source: "env" },
+    },
+  },
+  models: {
+    providers: {
+      openai: {
+        baseUrl: "https://api.openai.com/v1",
+        models: [{ id: "gpt-5", name: "gpt-5" }],
+        apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" },
+      },
+    },
+  },
+}
+```
+
+Refs are resolved into an in-memory snapshot at activation; startup fails fast if an active ref cannot resolve. See [Secrets management](/admin/secrets) for the full contract, file/exec providers, and the audit workflow.
+
+**Restart required:** Yes for `secrets.providers` changes.
+
+---
+
+### `tools`
+
+Controls which tools agents can use and the sandbox execution mode.
+
+```json5
+{
+  tools: {
+    allow: ["group:openclaw"], // tools available to all agents by default
+    deny: [],
+  },
+  agents: {
+    defaults: {
+      sandbox: {
+        mode: "off", // "off" | "non-main" | "all"
+      },
+    },
+  },
+}
+```
+
+`group:openclaw` includes all built-in tools. Sandbox modes isolate tool execution in Docker — see [Sandboxing](/admin/sandboxing).
+
+<Warning>
+When `sandbox.mode` is `off` (the default), tool code runs with the gateway process's permissions. Install only plugins you trust.
+</Warning>
+
+**Restart required:** No.
+
+---
+
+### `gateway`
+
+Network binding, port, and server-level settings.
+
+```json5
+{
+  gateway: {
+    port: 18789,        // default: 18789
+    bind: "loopback",   // default: "loopback" (127.0.0.1 only)
+    reload: { mode: "hybrid", debounceMs: 300 },
+  },
+}
+```
+
+**Bind modes and fallbacks:**
+
+| Mode | Effect |
+| ---- | ------ |
+| `loopback` (default) | 127.0.0.1 only; falls back to 0.0.0.0 only if 127.0.0.1 cannot bind (rare) |
+| `lan` | Binds to all interfaces (0.0.0.0) — reachable from any host, including a public NIC |
+| `auto` | Tries loopback, falls back to all interfaces |
+| `tailnet` | Tries the Tailscale interface; falls back to loopback then 0.0.0.0 — does not fail if Tailscale is down |
+| `custom` | Uses `gateway.customBindHost`; falls back to all interfaces if unavailable |
+
+In production, keep `bind: "loopback"` and use a reverse proxy or Tailscale for external access. After startup, verify the listening address:
+
+```bash
+ss -tlnp | grep 18789
+```
+
+<Warning>
+`lan`, `auto`, and the fallbacks for `loopback`/`tailnet`/`custom` can all bind to `0.0.0.0` (all interfaces). On a VPS this exposes the gateway to the internet. Always set `gateway.auth.mode: "token"` and add firewall rules before using non-loopback binds.
+</Warning>
+
+**Restart required:** Yes — automatic in `hybrid` mode.
+
+---
+
+## Recommended configurations
+
+### Minimal / development
+
+```json5
+{
+  channels: {
+    telegram: { enabled: true, botToken: "<YOUR_TOKEN>" },
+    defaults: { heartbeat: { showOk: false } },
+  },
+}
+```
+
+### Production — single instance
+
+```json5
+{
+  identity: { name: "WednesdayAI" },
+  agents: {
+    defaults: {
+      workspace: "/var/openclaw/workspace",
+      model: { primary: "anthropic/claude-sonnet-4-6" },
+      heartbeat: { every: "60m" },
+    },
+  },
+  channels: {
+    defaults: { groupPolicy: "allowlist", heartbeat: { showOk: false } },
+    telegram: {
+      enabled: true,
+      botToken: "<YOUR_TOKEN>",
+      dmPolicy: "pairing", // per-channel, not under channels.defaults
+    },
+  },
+  gateway: {
+    port: 18789,
+    bind: "loopback", // expose via reverse proxy, not directly
+    auth: { mode: "token", token: "<openssl rand -hex 32>" },
+    reload: { mode: "hybrid" },
+  },
+}
+```
+
+### Production — multi-gateway
+
+See [Multi-gateway setup](/admin/multi-gateway) for routing multiple instances and using `OPENCLAW_CONFIG_PATH` / `--profile` for per-instance isolation.
+
+---
+
+## Troubleshooting
+
+**Gateway refuses to start after a config change.** Run `openclaw doctor`. Common causes: an unknown key inside `channels.defaults` (only `groupPolicy` and `heartbeat` are accepted), a `dmPolicy`/`groupPolicy` value outside the enum, or a string where a number is expected (`port: "18789"`). Unknown channel _provider_ names at the top of `channels` are silently ignored, not rejected.
+
+**Hot-reload not picking up changes.** Confirm the process is running, check for validation errors (an invalid config is skipped with a log warning), and note that atomic-save editors can break the file watcher — restart the gateway.
+
+**Port/bind changes not taking effect.** In `hybrid` mode they trigger an automatic restart; check logs if it did not happen. In `hot` mode you must restart manually.
+
+---
+
+**Related:** [Authentication](/admin/gateway/authentication) · [Secrets](/admin/secrets) · [Sandboxing](/admin/sandboxing) · [Logging](/admin/gateway/logging) · [Health checks](/admin/gateway/health-checks) · [Config reference](/reference/config) · [Multi-gateway](/admin/multi-gateway)

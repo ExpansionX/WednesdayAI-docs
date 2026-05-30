@@ -1,0 +1,206 @@
+---
+title: "Remote access"
+description: "Reach the WednesdayAI control panel and gateway from outside localhost: SSH tunnels, Tailscale, reverse proxies with TLS, and remote CLI."
+audience: admin
+---
+
+# Remote access
+
+By default the WednesdayAI gateway binds to **loopback** (`127.0.0.1`) and is only reachable from the machine it runs on. This is intentional — it avoids exposing the gateway before auth is configured.
+
+<Info>
+**Recommended path:** Tailscale Serve. It gives you HTTPS, a stable hostname, and identity-based access control without changing the gateway bind address. The gateway stays on loopback.
+</Info>
+
+## Option 1 — Tailscale Serve (recommended)
+
+Tailscale Serve creates an HTTPS endpoint on your tailnet that proxies to the local gateway. The gateway stays on loopback; Tailscale handles routing and TLS.
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "serve" },
+  },
+}
+```
+
+After restarting, the control panel is available at `https://<hostname>.ts.net/` from any device on your tailnet.
+
+**Allow Tailscale identity auth** (skip token prompts for tailnet devices):
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "serve" },
+    auth: { allowTailscale: true },
+  },
+}
+```
+
+When `allowTailscale: true`, control-panel WebSocket connections from tailnet devices are accepted without a token; HTTP API endpoints still require token/password auth. This tokenless flow assumes the gateway host is trusted — set it to `false` if untrusted code may run there.
+
+## Option 2 — SSH tunnel
+
+An SSH tunnel forwards the gateway's loopback port to your local machine. No gateway config changes needed.
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 user@gateway-host
+```
+
+`http://127.0.0.1:18789/` on your local machine now reaches the remote gateway. Keep it alive across reconnects with autossh:
+
+```bash
+autossh -M 0 -N -o "ServerAliveInterval 30" -L 18789:127.0.0.1:18789 user@gateway-host
+```
+
+The macOS menubar app has built-in SSH tunnel management — **Settings → General → "WednesdayAI runs on" → Remote over SSH**.
+
+## Option 3 — Bind to tailnet IP directly
+
+```json5
+{
+  gateway: {
+    bind: "tailnet",
+    auth: { mode: "token", token: "replace-with-a-strong-token" },
+  },
+}
+```
+
+The gateway listens on your tailnet IP at port 18789. Access at `http://<tailscale-ip>:18789/`.
+
+<Warning>
+When binding to a non-loopback address, auth is **required** — the gateway refuses to start without it. Loopback (`http://127.0.0.1:18789/`) will not work in this mode; connect via the tailnet IP.
+</Warning>
+
+## Option 4 — LAN binding
+
+For trusted home networks where every device should have access:
+
+```json5
+{
+  gateway: {
+    bind: "lan",
+    auth: { mode: "token", token: "replace-with-a-strong-token" },
+  },
+}
+```
+
+**Not recommended for untrusted networks** — use Tailscale or SSH tunnels instead.
+
+## Option 5 — Reverse proxy with TLS
+
+To put the gateway behind nginx or Caddy (for a custom domain, a shared LAN cert, or in front of an identity-aware proxy), keep the gateway on loopback and terminate TLS at the proxy.
+
+<Tabs>
+  <Tab title="Caddy">
+    ```caddy
+    gateway.example.com {
+      reverse_proxy 127.0.0.1:18789
+    }
+    ```
+
+    Caddy provisions and renews TLS automatically. WebSocket upgrades are proxied without extra config.
+  </Tab>
+  <Tab title="nginx">
+    ```nginx
+    server {
+      listen 443 ssl;
+      server_name gateway.example.com;
+      ssl_certificate     /etc/ssl/certs/gateway.pem;
+      ssl_certificate_key /etc/ssl/private/gateway.key;
+
+      location / {
+        proxy_pass http://127.0.0.1:18789;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+      }
+    }
+    ```
+
+    The `Upgrade`/`Connection` headers are required for the control-panel WebSocket.
+  </Tab>
+</Tabs>
+
+If the proxy authenticates users (OIDC/SAML/oauth2-proxy), delegate auth with [trusted-proxy mode](/admin/gateway/authentication#trusted-proxy-auth-multi-user) and set `gateway.trustedProxies` to the proxy IP(s) only.
+
+<Warning>
+A reverse proxy that only terminates TLS does **not** authenticate callers. Keep `gateway.auth.mode: "token"` (or `"password"`) unless the proxy enforces identity and no path bypasses it.
+</Warning>
+
+## Public internet access (Tailscale Funnel)
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "funnel" },
+    auth: { mode: "password" },
+  },
+}
+```
+
+```bash
+echo 'OPENCLAW_GATEWAY_PASSWORD=replace-me' >> ~/.openclaw/.env
+```
+
+The gateway becomes reachable at `https://<hostname>.ts.net/`. Because anyone can reach it, a password is required.
+
+## Remote CLI
+
+To run CLI commands against a remote gateway without passing flags every time, persist a remote target:
+
+```json5
+{
+  gateway: {
+    mode: "remote",
+    remote: {
+      url: "ws://127.0.0.1:18789",        // adjust to your tunnel/tailnet URL
+      token: "your-token",
+      // tlsFingerprint: "<sha256>",       // pin the cert when using wss://
+    },
+  },
+}
+```
+
+`openclaw gateway status`, `openclaw models status`, `openclaw message send`, and similar then reach the remote gateway transparently.
+
+<Warning>
+When you pass `--url` to a command, the CLI does **not** fall back to config or environment credentials. Include `--token` (or `--password`) explicitly — missing credentials is an error. For `wss://` endpoints, pin the certificate with `gateway.remote.tlsFingerprint`.
+</Warning>
+
+## Security principles
+
+| Scenario | Recommended approach |
+| -------- | -------------------- |
+| Personal use, your own devices | Tailscale Serve + `allowTailscale: true` |
+| Personal use, minimal setup | SSH tunnel |
+| Team or multi-user access | Tailscale Serve + token auth, or trusted-proxy auth |
+| Custom domain / shared cert | Reverse proxy (Caddy/nginx) + token or proxy auth |
+| Public access (uncommon) | Tailscale Funnel + shared password |
+| Air-gapped / on-prem LAN | `bind: "lan"` + token auth + firewall |
+
+**Never expose `bind: "lan"` or `bind: "custom"` without a token or password** — non-loopback binds are rejected at startup without auth.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Control panel shows 'Unable to connect'">
+    1. Confirm the gateway is running: `openclaw gateway status` (on the host)
+    2. SSH tunnel: check the `ssh -N -L ...` process is up
+    3. Tailscale: verify both devices share a tailnet (`tailscale status`)
+    4. Confirm the port: `openclaw doctor` on the host shows the active port
+  </Accordion>
+  <Accordion title="WebSocket 1008 Unauthorized from a browser">
+    Browsers cannot send bearer tokens in WebSocket handshakes. Use Tailscale Serve with `allowTailscale: true`, trusted-proxy auth, or connect via the macOS app or CLI.
+  </Accordion>
+  <Accordion title="Gateway refuses to start after changing bind">
+    A non-loopback bind without auth is rejected. Add a token or password, or set `OPENCLAW_GATEWAY_TOKEN`.
+  </Accordion>
+  <Accordion title="Tailscale Serve not showing an HTTPS URL">
+    Run `tailscale serve status`. Ensure Tailscale is running and the gateway has started at least once with `tailscale.mode: "serve"`. Manual: `tailscale serve 18789`.
+  </Accordion>
+</AccordionGroup>
