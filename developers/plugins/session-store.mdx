@@ -1,0 +1,259 @@
+---
+title: "Session store adapters"
+description: "Plug in a custom session storage backend (Redis, DynamoDB, Postgres) via the plugin API."
+audience: developer
+doc-schema-version: 1
+---
+
+# Session store adapters
+
+By default, WednesdayAI stores sessions in a local JSON file (`~/.openclaw/agents/<agentId>/sessions/sessions.json`). Registering a custom session store adapter redirects that traffic to any external store — Postgres, Redis, DynamoDB, or anything that fits the interface.
+
+## When to use a custom adapter
+
+Use a custom adapter when:
+
+- You run WednesdayAI on multiple nodes and need sessions shared across all of them.
+- You want to query or report on session state from your own database.
+- You need session durability beyond a local filesystem.
+- You are building a multi-tenant deployment where session data must be isolated at the database level.
+
+For single-node personal installs the default filesystem adapter is fine. A custom adapter adds operational complexity; only add one if you have a concrete need.
+
+## Requirements
+
+- WednesdayAI gateway running with `plugins.entries` configured.
+- Your plugin must be loaded before the first session read (gateway startup order applies).
+- `warmCache()` is called once at gateway start; all subsequent reads are synchronous from the in-memory cache.
+
+## The `SessionStoreAdapter` interface
+
+Defined in `src/config/sessions/adapter.ts` and exported via `openclaw/plugin-sdk`:
+
+```typescript
+export type SessionStoreAdapter = {
+  /** Load a single session entry by key. Returns undefined if not found. */
+  load(sessionKey: string): SessionEntry | undefined;
+
+  /** Persist a single session entry. */
+  save(sessionKey: string, entry: SessionEntry): Promise<void>;
+
+  /** List all known session keys. */
+  list(): string[];
+
+  /** Remove a session entry by key. */
+  delete(sessionKey: string): Promise<void>;
+
+  /** Efficient bulk read. If provided, used instead of iterating list() + load(). */
+  toRecord?(): Record<string, SessionEntry>;
+
+  /** Pre-populate the in-memory cache on activation. */
+  warmCache?(): Promise<void>;
+};
+```
+
+### Method contracts
+
+| Method | Sync / Async | Purpose | Return |
+| ------ | ------------ | ------- | ------ |
+| `load(key)` | **Sync** | Fetch one entry from cache. Must be synchronous — called on the hot path. | `SessionEntry` or `undefined` |
+| `save(key, entry)` | Async | Write-through: update in-memory cache AND external store. | `Promise<void>` |
+| `list()` | **Sync** | Return all known keys from cache. | `string[]` |
+| `delete(key)` | Async | Remove from cache; mark as archived in external store. Soft-delete is recommended. | `Promise<void>` |
+| `toRecord()` | Sync, optional | Return entire cache as a plain object. Faster than iterating `list()` + `load()`. | `Record<string, SessionEntry>` |
+| `warmCache()` | Async, optional | Populate the in-memory cache from external storage at gateway start. | `Promise<void>` |
+
+**Critical constraint:** `load` and `list` must be synchronous. Implement a write-through in-memory cache (`Map<string, SessionEntry>`) so these methods never block on I/O. `save`, `delete`, and `warmCache` can be async.
+
+## Registering an adapter
+
+Call `api.registerSessionStoreAdapter(adapter)` inside your plugin's `register` function. Only one adapter can be active at a time; the last one registered wins.
+
+```typescript
+import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+import { MyCustomAdapter } from "./my-adapter.js";
+
+const plugin: OpenClawPluginDefinition = {
+  id: "my-session-store",
+  name: "My Session Store",
+
+  async register(api) {
+    const adapter = new MyCustomAdapter({
+      connectionString: api.pluginConfig?.connectionString as string,
+    });
+    api.registerSessionStoreAdapter(adapter);
+  },
+};
+
+export default plugin;
+```
+
+## `DatabaseSessionStoreAdapter` (Postgres)
+
+WednesdayAI ships a Postgres-backed adapter: `DatabaseSessionStoreAdapter` in `src/config/sessions/adapter-db.ts`, also exported via `openclaw/plugin-sdk`.
+
+It targets the `oc_sessions` table, using `(agent_id, session_key)` as the composite unique key. It upserts on save and sets `status = 'archived'` on delete (rows are never hard-deleted).
+
+### Configuration
+
+Provide the database connection URL via (checked in order):
+
+1. `OPENCLAW_DATABASE_URL` environment variable
+2. `session.databaseUrl` in `openclaw.json`
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    storeAdapter: "external",
+    databaseUrl: "postgres://user:password@db-host:5432/openclaw",
+  },
+}
+```
+
+### Using it from a plugin
+
+```typescript
+import pg from "pg";
+import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+import { DatabaseSessionStoreAdapter } from "openclaw/plugin-sdk";
+
+const plugin: OpenClawPluginDefinition = {
+  id: "postgres-session-store",
+  name: "Postgres Session Store",
+
+  async register(api) {
+    const connStr = api.pluginConfig?.databaseUrl as string;
+    if (!connStr) {
+      api.logger.error("postgres-session-store: databaseUrl is required");
+      return;
+    }
+
+    const pool = new pg.Pool({ connectionString: connStr });
+    const agentId = api.id;
+
+    const adapter = new DatabaseSessionStoreAdapter(pool, agentId);
+    await adapter.warmCache();
+
+    api.registerSessionStoreAdapter(adapter);
+    api.logger.info("postgres-session-store: adapter registered");
+  },
+};
+
+export default plugin;
+```
+
+`warmCache()` must complete before the gateway begins serving requests. The plugin loader awaits the `register` function, so calling it with `await` inside `register` is safe — do not defer it with `setTimeout` or fire-and-forget.
+
+## Minimal Redis example
+
+A self-contained Redis-backed adapter using the required write-through cache pattern:
+
+```typescript
+// plugins/redis-session-store/index.ts
+import type { SessionEntry, SessionStoreAdapter, OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+import { createClient } from "redis";
+
+class RedisSessionAdapter implements SessionStoreAdapter {
+  private readonly cache = new Map<string, SessionEntry>();
+
+  constructor(
+    private readonly client: ReturnType<typeof createClient>,
+    private readonly agentId: string,
+  ) {}
+
+  private key(sessionKey: string): string {
+    return `oc:sessions:${this.agentId}:${sessionKey}`;
+  }
+
+  load(sessionKey: string): SessionEntry | undefined {
+    return this.cache.get(sessionKey);
+  }
+
+  list(): string[] {
+    return [...this.cache.keys()];
+  }
+
+  async save(sessionKey: string, entry: SessionEntry): Promise<void> {
+    this.cache.set(sessionKey, entry);
+    await this.client.set(this.key(sessionKey), JSON.stringify(entry));
+  }
+
+  async delete(sessionKey: string): Promise<void> {
+    this.cache.delete(sessionKey);
+    await this.client.del(this.key(sessionKey));
+  }
+
+  toRecord(): Record<string, SessionEntry> {
+    return Object.fromEntries(this.cache);
+  }
+
+  async warmCache(): Promise<void> {
+    const pattern = `oc:sessions:${this.agentId}:*`;
+    const keys = await this.client.keys(pattern);
+    for (const k of keys) {
+      const raw = await this.client.get(k);
+      if (raw) {
+        const sessionKey = k.slice(`oc:sessions:${this.agentId}:`.length);
+        this.cache.set(sessionKey, JSON.parse(raw) as SessionEntry);
+      }
+    }
+  }
+}
+
+const plugin: OpenClawPluginDefinition = {
+  id: "redis-session-store",
+  name: "Redis Session Store",
+
+  async register(api) {
+    const redisUrl = (api.pluginConfig?.redisUrl as string) ?? "redis://localhost:6379";
+    const client = createClient({ url: redisUrl });
+    await client.connect();
+
+    const adapter = new RedisSessionAdapter(client, api.id);
+    await adapter.warmCache();
+
+    api.registerSessionStoreAdapter(adapter);
+    api.logger.info(`redis-session-store: registered (${client.options?.url})`);
+  },
+};
+
+export default plugin;
+```
+
+## Local vs external adapter trade-offs
+
+|  | Local filesystem | External (DB/Redis) |
+|--|-----------------|---------------------|
+| Setup | Zero config | Database + credentials |
+| Multi-node | No | Yes |
+| Durability | Filesystem | Database-level |
+| Read latency | Disk read at startup only (then cache) | Same — reads from in-memory cache |
+| Write latency | Single file lock + write | Cache write + async upsert |
+| Observability | `openclaw sessions` or parse JSONL | SQL queries / Redis keys |
+| Failure mode | File corruption | DB connection failure (cache still serves reads) |
+
+## Troubleshooting
+
+**Sessions not persisting after gateway restart**
+
+Check that `warmCache()` is completing successfully. If it fails silently, the cache is empty and sessions appear lost even though data is in the external store. Enable debug logging (`logging.level: "debug"`) to see warm-cache output at startup.
+
+**Adapter errors on save or delete**
+
+`save` and `delete` are async and fire-and-forget from the gateway's perspective — errors are logged but do not abort the request. Check database connectivity, credentials, and whether the connection pool is exhausted.
+
+**Adapter not active on the first request**
+
+If the first session read happens before your adapter is registered, the gateway falls back to the filesystem adapter. Always complete `warmCache()` and `registerSessionStoreAdapter()` inside the async `register` function — do not defer either call.
+
+**Multiple adapters**
+
+Only the last `registerSessionStoreAdapter` call wins. Avoid registering adapters from multiple plugins; consolidate into one.
+
+## Related
+
+- [Plugins overview](/users/tools/plugin)
+- [Session management concepts](/concepts/session)
+- [Your first plugin](/developers/plugins/your-first-plugin)
+- [Hooks](/developers/hooks)
