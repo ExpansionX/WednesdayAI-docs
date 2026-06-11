@@ -32,18 +32,25 @@ These are API surfaces that exist in source but lack documentation. Work through
 | `message:transcribed`, `message:preprocessed` standalone hook events | Missing from hooks docs | `developers/hooks.mdx` updated |
 | `openclaw health` scope gate + cache TTL | Missing from health-checks docs | `admin/gateway/health-checks.mdx` updated |
 | `api.registerSessionStoreAdapter()` | Listed in SDK table but does not exist | Row removed from `developers/sdk/index.mdx` |
+| `api.runtime.*` method signatures | Method signatures missing | `developers/sdk/index.mdx` expanded with key methods per sub-API |
+| `OpenClawPluginToolContext` full field table | 9 fields; docs showed ~4 | `developers/agent-tools.mdx` updated with full field table |
+| `api.registerCommand()` full guide | Table entry only; no guide | `developers/plugins/register-command.mdx` created |
+| `api.registerWebSearchProvider()` guide | No guide | `developers/plugins/web-search-provider.mdx` created |
+| System prompt `sections.*` full catalogue | Section list only; no mode types | `admin/gateway/system-prompt.mdx` updated with full catalogue table |
+| `before_prompt_build` `prependContext` return field | Hook listed but `prependContext` undocumented | `developers/hooks.mdx` updated with example and both return fields |
+| `HealthSummary` full field schema | Fields in prose only | `admin/gateway/health-checks.mdx` updated with full schema table |
+| Node.js version (22 → 24) | 6 pages listed Node 22 | Fixed across all 6 pages |
 
 ### Known gaps remaining (prioritised)
 
-| Surface | Source to check | Priority |
-| ------- | --------------- | -------- |
-| `api.runtime.*` method signatures | `src/plugins/types.ts` PluginRuntime type | Medium — high-level table in `developers/sdk/index.mdx`; method signatures missing |
-| `OpenClawPluginToolContext` fields | `src/plugins/types.ts` ~lines 73-88 | Medium — 9 fields in source; docs mention ~4 |
-| `api.registerCommand()` full guide | `src/plugins/types.ts` OpenClawPluginCommandDefinition | Medium — table entry only; no guide |
-| `api.registerWebSearchProvider()` guide | `src/plugins/types.ts` WebSearchProviderPlugin | Low |
-| System prompt `sections.*` full catalogue | `src/config/types.system-prompt.ts` | Low — overview in `admin/gateway/system-prompt.mdx`; per-section detail missing |
-| `before_prompt_build` return type: `prependContext` | `src/plugins/types.ts` PluginHookHandlerMap | Low — hook listed but `prependContext` field undocumented |
-| `HealthSummary` full field schema | `src/commands/health.ts` | Low — fields described in prose; no formal table |
+No high-priority gaps. Next audit should check:
+
+| Surface | Source to check | Notes |
+| ------- | --------------- | ----- |
+| `runtime.channel.*` internals | `src/plugins/runtime/channel.ts` | Intentionally undocumented; only relevant for channel adapter authors |
+| `ProviderPlugin` / `api.registerProvider()` | `src/plugins/types.ts` | No provider authoring guide exists |
+| `api.registerService()` / `OpenClawPluginService` | `src/plugins/types.ts` | No background-service guide exists |
+| `api.registerGatewayMethod()` | `src/plugins/types.ts` | No RPC registration guide exists |
 
 ### How to maintain
 
