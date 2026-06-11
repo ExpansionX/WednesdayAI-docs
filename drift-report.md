@@ -22,7 +22,7 @@ This file tracks two distinct quality signals:
 
 These are API surfaces that exist in source but lack documentation. Work through this list before each major release.
 
-### Fixed in this cycle (PR #6 + PR #7)
+### Fixed in this cycle (PR #6)
 
 | Surface | Gap | Fix |
 | ------- | --- | --- |
