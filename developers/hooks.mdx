@@ -69,7 +69,7 @@ These are the `PluginHookName` values accepted by `api.on(...)`. Fire timing and
 | Hook | Fires | Return honoured |
 | ---- | ----- | --------------- |
 | `before_model_resolve` | Before the model/provider is chosen for a run | Yes — override `modelOverride` / `providerOverride` |
-| `before_prompt_build` | Before the system prompt and context are assembled | Yes — `systemPrompt`, `prependContext` |
+| `before_prompt_build` | Before the system prompt and context are assembled | Yes — `systemPrompt` (appended after built sections), `prependContext` (inserted before the user turn) |
 | `before_context_send` | Just before messages are sent to the model | Yes — replace `messages` |
 | `before_agent_start` | Legacy combined pre-run hook | Yes — combines prompt-build and model-resolve results |
 | `llm_input` | After input is prepared for the model | No (observe) |
@@ -102,6 +102,25 @@ These are the `PluginHookName` values accepted by `api.on(...)`. Fire timing and
 | `context.prune` | Pruning context under token pressure | Yes — `messages`, `dropped`, `compactionHandled` |
 | `compaction.plan` | Planning a compaction pass | Yes — `plan`, `messages`, `contribution` |
 
+### `before_prompt_build` example
+
+```typescript
+api.on("before_prompt_build", (event, ctx) => {
+  // event.systemPrompt — the assembled system prompt (read-only; do not mutate)
+  // event.messages — session messages prepared for this run
+
+  return {
+    // Appended after the built system prompt sections:
+    systemPrompt: "Always respond in the user's language.",
+
+    // Inserted before the user turn in the message list:
+    prependContext: `Current user timezone: ${getUserTimezone(ctx.sessionKey)}`,
+  };
+});
+```
+
+Both `systemPrompt` and `prependContext` are optional — return either, both, or neither. `systemPrompt` is appended once per run after the full section build; `prependContext` is a plaintext string inserted into the context immediately before the user's message.
+
 <Tip>
   The `context.*` and `compaction.plan` hooks are the context-engine surface. A plugin that
   fully owns compaction can set `ownsCompaction: true` in its plugin definition (or return
@@ -132,7 +151,9 @@ metadata:
 ---
 ```
 
-Common standalone events include `command:new`, `command:reset`, `command:stop`, `command:compact`, `agent:bootstrap`, `agent:start`, `agent:end`, and `gateway:start`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
+Common standalone events include `command:new`, `command:reset`, `command:stop`, `command:compact`, `agent:bootstrap`, `gateway:start`, `message:received`, `message:transcribed`, and `message:preprocessed`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
+
+`message:transcribed` fires when an inbound audio message has been transcribed. `message:preprocessed` fires after the message has been enriched with links, images, and transcripts — immediately before routing. Both are useful for logging pipelines and external integrations that need the enriched message body without modifying the run.
 
 ### Bundled standalone hooks
 

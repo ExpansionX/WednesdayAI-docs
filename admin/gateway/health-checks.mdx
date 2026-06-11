@@ -42,13 +42,59 @@ openclaw health --json      # structured JSON output
 openclaw health --timeout 5000  # 5s timeout (default: 10s)
 ```
 
+The snapshot is cached for 30 seconds. To bypass the cache and force a live probe, pass `--probe`:
+
+```bash
+openclaw health --probe     # bypass cache, force fresh probes
+```
+
 Returns:
-- Per-channel connectivity probes
-- Session store summary
-- Linked credentials age
+- Per-channel connectivity probes (linked state, auth age, last probe result)
+- Session store summary (path, session count, recent session list)
+- Heartbeat interval and default agent ID
+- Per-agent health summaries
 - Probe duration
 
+The full response is only available to gateway connections authenticated with `operator.admin` scope. Non-admin connections receive a redacted summary without per-channel credential details.
+
 Exits non-zero if the gateway is unreachable or any probe fails.
+
+#### `--json` response schema
+
+`openclaw health --json` returns a `HealthSummary` object:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `ok` | `true` | Always `true` when the payload is present |
+| `ts` | `number` | Unix timestamp (ms) of the snapshot |
+| `durationMs` | `number` | Time taken to collect the snapshot |
+| `channels` | `Record<channelId, ChannelHealthSummary>` | Per-channel health — see below |
+| `channelOrder` | `string[]` | Display order for channels |
+| `channelLabels` | `Record<channelId, string>` | Human-readable channel labels |
+| `defaultAgentId` | `string` | The default agent id |
+| `agents` | `AgentHealthSummary[]` | Per-agent health summaries |
+| `sessions` | `{ path, count, recent[] }` | Session store: path, total count, recent session keys with age |
+
+**`ChannelHealthSummary`** (per channel, and per account for multi-account channels):
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `accountId` | `string` | Account identifier |
+| `configured` | `boolean \| undefined` | Whether the channel has a valid config |
+| `linked` | `boolean \| undefined` | Whether credentials are present and active |
+| `authAgeMs` | `number \| null \| undefined` | Age of the stored credentials in milliseconds |
+| `probe` | any | Last probe result from the channel adapter |
+| `lastProbeAt` | `number \| null \| undefined` | Unix timestamp of the last probe |
+
+**`AgentHealthSummary`**:
+
+| Field | Description |
+| ----- | ----------- |
+| `agentId` | The agent's id |
+| `name` | The agent's display name |
+| `isDefault` | Whether this is the default agent |
+| `heartbeat` | Heartbeat schedule and last-run summary |
+| `sessions` | Session store summary for this agent |
 
 ### `openclaw doctor`
 
@@ -132,7 +178,7 @@ openclaw models status --check
 
 Wire it into a systemd timer or cron job:
 
-```
+```text
 # /etc/cron.d/openclaw-health
 */5 * * * * openclaw-user /usr/local/bin/openclaw-healthcheck.sh ||   systemctl --user restart openclaw-gateway
 ```

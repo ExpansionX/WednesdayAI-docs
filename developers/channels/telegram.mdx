@@ -1,0 +1,202 @@
+---
+title: "Telegram channel — developer reference"
+description: "Hook filtering, message actions, forum topics, and channel-specific behavior for plugin authors targeting the Telegram channel."
+audience: developer
+doc-schema-version: 1
+---
+
+# Telegram channel — developer reference
+
+This page covers what plugin authors need when writing plugins that interact with the `telegram` channel: channel identifier, hook filtering, available message actions (including Telegram-specific actions), forum topic behavior, and gotchas to handle in plugin code.
+
+For building a new channel adapter from scratch, see [Channel adapters](/developers/channel-adapters). For the admin configuration reference, see [Admin: Telegram](/admin/channels/telegram).
+
+## Channel identifier
+
+The Telegram channel registers under the id `"telegram"`. Use this to filter hooks:
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.on("message_received", async (event, ctx) => {
+    if (ctx.channelId !== "telegram") return;
+
+    api.logger.info("Telegram message received", {
+      from: ctx.senderId,    // numeric Telegram user ID string
+      body: event.body,
+    });
+  });
+}
+```
+
+`ctx.channelId` is always `"telegram"` for messages, hooks, and tool calls originating from the Telegram channel.
+
+## Available hooks (Telegram-relevant)
+
+| Hook | Fires when | Notes |
+| ---- | ---------- | ----- |
+| `message_received` | Inbound Telegram message accepted | After allowlist/policy checks pass |
+| `before_tool_call` | Agent is about to call a tool | Filter on `ctx.channelId === "telegram"` |
+| `after_tool_call` | Tool call returned | |
+| `message_sending` | WednesdayAI is about to send a Telegram reply | Can modify `content` or `cancel` |
+| `message_sent` | Reply delivered to Telegram | |
+| `session_start` | New Telegram session created | |
+| `before_agent_start` | Agent loop begins for a Telegram message | |
+
+### Filtering to a specific account
+
+```typescript
+api.on("message_received", async (event, ctx) => {
+  if (ctx.channelId !== "telegram") return;
+  if (ctx.accountId !== "work") return;
+
+  // only handle the "work" Telegram bot account
+});
+```
+
+## Session keys
+
+Telegram session keys follow these patterns:
+
+| Chat type | Session key pattern |
+| --------- | ------------------- |
+| DM | `agent:<agentId>:telegram:dm:<userId>` |
+| Group | `agent:<agentId>:telegram:group:<chatId>` |
+| Forum topic | `agent:<agentId>:telegram:group:<chatId>:topic:<threadId>` |
+| DM with thread | `agent:<agentId>:telegram:dm:<userId>:thread:<threadId>` |
+
+Use `ctx.sessionKey` in hook handlers — do not construct keys manually.
+
+## Message actions
+
+Telegram supports richer message actions than most channels. Available actions:
+
+| Action | Method | Description |
+| ------ | ------ | ----------- |
+| `send` | `sendMessage` | Send text, media, or inline buttons |
+| `react` | `react` | Send a reaction emoji to a message |
+| `delete` | `deleteMessage` | Delete a message |
+| `edit` | `editMessage` | Edit a previously sent message |
+| `sticker` | (sticker) | Send a sticker by `fileId` |
+| `sticker-search` | (sticker-search) | Search cached stickers by query |
+| `topic-create` | `createForumTopic` | Create a forum topic in a supergroup |
+
+Gating via config:
+- `channels.telegram.actions.reactions` — default `true`
+- `channels.telegram.actions.sendMessage` — default `true`
+- `channels.telegram.actions.deleteMessage` — default `true`
+- `channels.telegram.actions.sticker` — default `false` (must be enabled explicitly)
+
+### Inline buttons
+
+Inline keyboards can be included in outbound messages when `capabilities.inlineButtons` scope allows:
+
+```typescript
+// Button payloads returned from a tool execute() function
+// are handled by the channel adapter's outbound adapter.
+// Structure your tool response to include the button payload,
+// then let the agent deliver it via the Telegram outbound adapter.
+```
+
+Callback button clicks are delivered back to the agent as text: `callback_data: <value>`.
+
+## Forum topics
+
+Forum supergroup topics are first-class in Telegram. Key behaviors for plugin authors:
+
+- Topic session key suffix: `:topic:<threadId>`
+- Replies and typing indicators target the topic thread
+- The general topic (`threadId=1`) is special: outbound `sendMessage` omits `message_thread_id` because Telegram rejects it for `threadId=1`
+- Topic config inherits from the parent group unless overridden (`requireMention`, `allowFrom`, `skills`, etc.)
+
+Check `ctx.sessionKey` to determine if a message originated from a forum topic:
+
+```typescript
+api.on("message_received", async (event, ctx) => {
+  if (ctx.channelId !== "telegram") return;
+  const isTopic = ctx.sessionKey.includes(":topic:");
+  const threadId = isTopic
+    ? ctx.sessionKey.split(":topic:")[1]
+    : null;
+  // ...
+});
+```
+
+## Reaction notifications as hook events
+
+When `reactionNotifications` is enabled, Telegram reaction events are enqueued as system messages like:
+
+```text
+Telegram reaction added: 👍 by Alice (@alice) on msg 42
+```
+
+These arrive as `message_received` events. Filter them by inspecting `event.body` if your hook should not act on reaction notifications.
+
+## Streaming behavior
+
+Telegram uses native `sendMessageDraft` (Bot API 9.5+, March 2026) in DMs and preview message + edits in groups when `streaming: "partial"` (default). This means:
+
+- In DMs: the message is updated in-place as tokens arrive (no second message)
+- In groups: a preview message is sent, then edited in-place; no second message is sent
+
+For complex replies (media payloads), streaming falls back to normal final delivery and cleans up the preview message. Plugin hooks on `message_sending` and `message_sent` fire once at final delivery, not for each streaming update.
+
+## Sender ID format
+
+Telegram sender IDs in `ctx.senderId` are numeric strings: `"123456789"`. The `telegram:` / `tg:` prefix is stripped internally before the ID reaches hook context. Do not add prefixes when comparing `ctx.senderId` to known IDs.
+
+```typescript
+api.on("message_received", async (event, ctx) => {
+  if (ctx.channelId !== "telegram") return;
+
+  // ✅ correct — numeric string, no prefix
+  if (ctx.senderId === "123456789") { /* admin */ }
+
+  // ❌ wrong — prefix was already stripped
+  if (ctx.senderId === "telegram:123456789") { /* never matches */ }
+});
+```
+
+## Plugin config access pattern
+
+Capture `api.pluginConfig` at registration time — do not access it inside `execute()`:
+
+```typescript
+export default function register(api: OpenClawPluginApi): void {
+  const config = api.pluginConfig;
+
+  api.on("message_received", async (event, ctx) => {
+    if (ctx.channelId !== "telegram") return;
+    const allowedChatId = config?.chatId as string | undefined;
+    if (allowedChatId && ctx.senderId !== allowedChatId) return;
+    // ...
+  });
+}
+```
+
+## Async safety
+
+Do not use synchronous blocking I/O in `register()` or hook handlers:
+
+```typescript
+import * as fs from "node:fs";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+// ❌ Blocks event loop during startup
+export default function register(api: OpenClawPluginApi): void {
+  const cfg = fs.readFileSync("./settings.json", "utf8");
+}
+
+// ✅ Async I/O
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const cfg = await fs.promises.readFile("./settings.json", "utf8");
+}
+```
+
+## Related
+
+- [Channel adapters](/developers/channel-adapters) — building a new channel from scratch
+- [Hooks](/developers/hooks) — full hook reference
+- [Agent tools](/developers/agent-tools) — registering plugin tools
+- [Admin: Telegram](/admin/channels/telegram) — configuration reference

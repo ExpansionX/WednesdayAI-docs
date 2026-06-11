@@ -1,0 +1,128 @@
+---
+title: "Session storage"
+description: "How to read session and conversation data from a plugin, and how session storage backends are configured."
+audience: developer
+doc-schema-version: 1
+---
+
+# Session storage
+
+WednesdayAI persists conversation history in a session store. Plugins can read session data using the plugin SDK's session access helpers. The storage backend (file, SQLite, Postgres) and optional Redis cache are configured by the administrator — plugins do not register or replace the backend.
+
+## Reading sessions from a plugin
+
+The plugin SDK exports `loadSessionStore` to read the current agent's session store:
+
+```typescript
+import { loadSessionStore } from "openclaw/plugin-sdk";
+import type { OpenClawPluginApi, SessionEntry } from "openclaw/plugin-sdk";
+import { Type } from "@sinclair/typebox";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTool({
+    name: "session_summary",
+    description: "Summarise recent conversation history",
+    parameters: Type.Object({}),
+    async execute(_id, _params) {
+      const store = await loadSessionStore();
+      const sessions = Object.values(store);
+      return {
+        content: [{
+          type: "text",
+          text: `${sessions.length} session(s) in store`,
+        }],
+      };
+    },
+  });
+}
+```
+
+`loadSessionStore()` returns `Promise<Record<string, SessionEntry>>`. Each key is a session key (e.g. `agent:<id>:telegram:dm:<userId>`); each value is a `SessionEntry`.
+
+### `SessionEntry` shape
+
+`SessionEntry` is exported from `openclaw/plugin-sdk`. Key fields:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `sessionKey` | `string` | Unique session identifier |
+| `agentId` | `string` | The agent this session belongs to |
+| `createdAt` | `number` | Unix timestamp (ms) of session creation |
+| `updatedAt` | `number` | Unix timestamp (ms) of last update |
+| `messages` | array | Stored conversation entries |
+
+### Guarding against storage errors
+
+Use `StorageReadAccessError` to handle permission-denied cases cleanly:
+
+```typescript
+import { loadSessionStore, StorageReadAccessError } from "openclaw/plugin-sdk";
+
+try {
+  const store = await loadSessionStore();
+  // use store
+} catch (err) {
+  if (err instanceof StorageReadAccessError) {
+    // Plugin does not have read access to this store
+    return { content: [{ type: "text", text: "Session data not accessible." }] };
+  }
+  throw err;
+}
+```
+
+### Querying conversation history
+
+`getConversationReadQuery` builds a query object for filtered reads:
+
+```typescript
+import { getConversationReadQuery } from "openclaw/plugin-sdk";
+
+const query = getConversationReadQuery({
+  sessionKey: ctx.sessionKey,
+  limit: 20,
+});
+```
+
+## Session storage backends (admin config)
+
+Backend selection and caching are administrator configuration, not plugin configuration. From `openclaw.json`:
+
+```json5
+{
+  sessions: {
+    storage: {
+      backend: "sqlite",      // "fs-jsonl" (default) | "sqlite" | "postgres"
+      cache: "redis",         // "none" (default) | "redis"
+      sqlitePath: "~/.openclaw/sessions.sqlite",
+      redisUrl: "redis://localhost:6379",
+      redis: {
+        keyPrefix: "oc:",
+        ttlSeconds: 86400,
+      },
+    },
+  },
+}
+```
+
+| Field | Default | Description |
+| ----- | ------- | ----------- |
+| `backend` | `"fs-jsonl"` | Storage engine: per-session JSONL files, SQLite, or PostgreSQL |
+| `cache` | `"none"` | In-memory / Redis write-through cache layer |
+| `databaseUrl` | — | PostgreSQL connection string (required when `backend: "postgres"`) |
+| `sqlitePath` | `~/.openclaw/sessions.sqlite` | SQLite file path |
+| `redisUrl` | `redis://localhost:6379` | Redis connection URL |
+| `redis.keyPrefix` | `"oc:"` | Namespace prefix for Redis keys |
+| `redis.ttlSeconds` | `86400` | TTL for Redis-cached session entries |
+| `fallbackToJsonlOnError` | `true` | Fall back to `fs-jsonl` if the backend fails |
+
+Restart the gateway after changing storage config: `systemctl --user restart openclaw-gateway`.
+
+<Warning>
+  Migrating between backends does not automatically copy existing session data.
+  Test on a non-production instance before switching in production.
+</Warning>
+
+## Related
+
+- [Plugin SDK reference](/developers/sdk) — full exported surface
+- [Admin: Gateway configuration](/admin/gateway/configuration) — where `sessions.storage` lives in the config file

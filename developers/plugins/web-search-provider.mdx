@@ -1,0 +1,128 @@
+---
+title: "Web search providers"
+description: "Register a custom web search backend using api.registerWebSearchProvider() so the agent can search the web via your provider."
+audience: developer
+doc-schema-version: 1
+---
+
+# Web search providers
+
+The agent uses a web search tool when it needs current information from the internet. By default WednesdayAI ships with support for Brave Search and SearXNG. Plugins can register additional providers — or replace the built-in ones — by implementing the `WebSearchProviderPlugin` interface.
+
+## Quick example
+
+```typescript
+import type {
+  OpenClawPluginApi,
+  WebSearchProviderPlugin,
+  WebSearchProviderContext,
+} from "openclaw/plugin-sdk";
+import { Type } from "@sinclair/typebox";
+
+const myProvider: WebSearchProviderPlugin = {
+  id: "my-search",
+  label: "My Search",
+  hint: "Custom search backend",
+  envVars: ["MY_SEARCH_API_KEY"],
+  autoDetectOrder: 50,
+
+  createTool: (ctx) => {
+    const apiKey = process.env.MY_SEARCH_API_KEY;
+    if (!apiKey) return null;   // not available → skip
+
+    return {
+      name: "web_search",
+      description: "Search the web via My Search",
+      parameters: Type.Object({
+        query: Type.String({ description: "Search query" }),
+      }),
+      async execute(_id, params) {
+        const results = await fetchResults(apiKey, params.query);
+        return {
+          content: [{ type: "text", text: JSON.stringify(results) }],
+        };
+      },
+    };
+  },
+};
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerWebSearchProvider(myProvider);
+}
+```
+
+## `WebSearchProviderPlugin` fields
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `id` | `string` | Yes | Unique lowercase identifier, e.g. `"brave-search"`. Must be stable — used in config to select the provider. |
+| `label` | `string` | Yes | Display name shown in logs and status output |
+| `hint` | `string` | Yes | Short description shown in provider selection UI |
+| `envVars` | `string[]` | Yes | Environment variable names that credential this provider. Used for auto-detection: if any listed var is set, the provider is considered available. |
+| `autoDetectOrder` | `number` | No | Auto-detection priority — lower = higher priority. If omitted, the provider is not auto-detected (requires explicit config). |
+| `createTool` | function | Yes | Returns the tool definition for this provider, or `null` if unavailable |
+
+## `createTool` contract
+
+`createTool` receives a `WebSearchProviderContext` and must return either a tool definition or `null`:
+
+- Return `null` when the provider is not available in this context (missing API key, base URL, etc.). The dispatcher tries the next candidate in priority order.
+- Return a tool definition that matches the standard `AnyAgentTool` shape — it will be registered as the active search tool.
+
+`createTool` is called once at startup per search invocation context, not per search query. Do not perform network requests inside `createTool` itself.
+
+## Auto-detection vs explicit config
+
+When multiple providers are registered, the gateway selects one using:
+
+1. **Explicit config** — `webSearch.provider: "my-search"` in `openclaw.json` (always wins)
+2. **Auto-detection** — providers with `autoDetectOrder` set, ordered ascending. The first one where `createTool` returns non-null is selected.
+3. **Fallback** — if no provider is configured or detected, web search is unavailable.
+
+Bundled providers use `autoDetectOrder: 10` (Brave Search) and `autoDetectOrder: 20` (SearXNG). Use `autoDetectOrder >= 50` for third-party providers to avoid conflicting with bundled defaults.
+
+## Admin configuration
+
+Admins select the active provider via config:
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  webSearch: {
+    provider: "my-search",   // explicit selection
+  },
+}
+```
+
+If not set, the lowest-`autoDetectOrder` available provider is used. The agent will not use web search if no provider is available — no error, the tool simply will not appear in the agent's tool list.
+
+## What not to do
+
+```typescript
+// ❌ Network request inside createTool — runs at startup, not per query
+createTool: (ctx) => {
+  const result = await fetch("https://api.example.com/validate");  // ❌
+  // ...
+}
+
+// ✅ Only check credentials/config availability; do real work inside execute()
+createTool: (ctx) => {
+  const apiKey = process.env.MY_SEARCH_API_KEY;
+  if (!apiKey) return null;  // ✅ availability check only
+
+  return {
+    name: "web_search",
+    // ...
+    async execute(_id, params) {
+      const result = await fetch(`https://api.example.com/search?q=${params.query}`);  // ✅
+      // ...
+    },
+  };
+}
+```
+
+## Related
+
+- [Agent tools](/developers/agent-tools) — general tool registration guide
+- [Plugin SDK reference](/developers/sdk) — full exported surface
+- [Admin: AI providers](/admin/providers/index) — configuring AI and search providers

@@ -1,0 +1,156 @@
+---
+title: "WhatsApp channel — developer reference"
+description: "Hook filtering, message actions, and channel-specific behavior for plugin authors targeting the WhatsApp channel."
+audience: developer
+doc-schema-version: 1
+---
+
+# WhatsApp channel — developer reference
+
+This page covers what plugin authors need to know when writing plugins that interact with the `whatsapp` channel: channel identifier, hook filtering patterns, available message actions, and channel-specific behavior to account for in plugin code.
+
+For building a new channel adapter from scratch, see [Channel adapters](/developers/channel-adapters). For the admin configuration reference, see [Admin: WhatsApp](/admin/channels/whatsapp).
+
+## Channel identifier
+
+The WhatsApp channel registers under the id `"whatsapp"`. Use this when filtering hooks by channel:
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.on("message_received", async (event, ctx) => {
+    if (ctx.channelId !== "whatsapp") return;
+
+    // WhatsApp-specific logic here
+    api.logger.info("WhatsApp message received", {
+      from: ctx.senderId,
+      body: event.body,
+    });
+  });
+}
+```
+
+`ctx.channelId` is always `"whatsapp"` for messages, hooks, and tool calls that originate from the WhatsApp channel.
+
+## Available hooks (WhatsApp-relevant)
+
+All standard plugin hooks fire for WhatsApp events. The most commonly used for channel-specific behavior:
+
+| Hook | Fires when | Notes |
+| ---- | ---------- | ----- |
+| `message_received` | Inbound WhatsApp message accepted | After allowlist/policy checks pass |
+| `before_tool_call` | Agent is about to call a tool | `ctx.channelId === "whatsapp"` for WhatsApp-originated calls |
+| `after_tool_call` | Tool call returned | Includes result |
+| `message_sending` | WednesdayAI is about to send a WhatsApp reply | Can modify `content` or `cancel` |
+| `message_sent` | Reply delivered to WhatsApp | |
+| `session_start` | New WhatsApp session created | |
+| `before_agent_start` | Agent loop begins for a WhatsApp message | |
+
+### Filtering to a specific account
+
+WhatsApp supports multiple linked accounts. Filter by account using `ctx.accountId`:
+
+```typescript
+api.on("message_received", async (event, ctx) => {
+  if (ctx.channelId !== "whatsapp") return;
+  if (ctx.accountId !== "work") return; // only handle the "work" account
+
+  // ...
+});
+```
+
+## Message actions
+
+WhatsApp supports the following message actions from agent tools or automation:
+
+| Action | Description |
+| ------ | ----------- |
+| `send` | Send a text message or media |
+| `react` | Send a reaction emoji to a message |
+
+Gating: `channels.whatsapp.actions.reactions` and `channels.whatsapp.actions.polls` must be `true` for those actions to be available.
+
+### Using message actions in a plugin tool
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { Type } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTool({
+    name: "whatsapp_react",
+    description: "React to a WhatsApp message with an emoji",
+    parameters: Type.Object({
+      messageId: Type.String({ description: "WhatsApp message stanza ID" }),
+      emoji: Type.String({ description: "Reaction emoji, e.g. '👍'" }),
+    }),
+    async execute(_id, params) {
+      // Reactions are handled by the channel adapter via message actions.
+      // Use api.runtime message action helpers when exposed, or return
+      // a structured response the agent can use to drive the action.
+      return {
+        content: [{ type: "text", text: `Reaction queued: ${params.emoji}` }],
+      };
+    },
+  });
+}
+```
+
+<Note>
+  Direct message action dispatch from plugin tools is handled through the agent's
+  response pipeline. Return structured action payloads from your tool and let the
+  channel adapter handle delivery.
+</Note>
+
+## Session keys
+
+WhatsApp session keys follow these patterns:
+
+| Chat type | Session key pattern |
+| --------- | ------------------- |
+| DM (default dmScope) | `agent:<agentId>:main` |
+| DM (per-peer) | `agent:<agentId>:whatsapp:dm:<peerId>` |
+| Group | `agent:<agentId>:whatsapp:group:<jid>` |
+
+Use `ctx.sessionKey` in hook handlers — do not construct session keys manually.
+
+## Channel-specific behaviors to handle in plugins
+
+**Baileys dependency is lazy-loaded.** The `whatsapp` bundled extension loads `@whiskeysockets/baileys` lazily at channel-activation time, not at gateway startup. Plugins that interact with the WhatsApp channel must not assume the Baileys library is available as a direct import — use only the `openclaw/plugin-sdk` surface.
+
+**Self-chat.** When the linked number is in `allowFrom`, self-chat safeguards are active: read receipts are skipped and the agent does not trigger on its own outbound messages. Hooks on `message_received` will not fire for self-sent messages.
+
+**Socket lock.** Only one Baileys socket can own an account's credentials directory at a time (enforced by a `.socket-owner.lock` file). If a plugin attempts gateway-level WhatsApp operations, it must not open a second Baileys connection against the same credentials directory.
+
+**Media placeholders.** Inbound media-only messages arrive normalized: `<media:image>`, `<media:video>`, `<media:audio>`, `<media:document>`, `<media:sticker>`. The raw Baileys message payload is not passed to hooks.
+
+**Status and broadcast chats are ignored.** Messages from `@status` and `@broadcast` JIDs are dropped before routing. Hooks will not fire for these.
+
+## Async safety
+
+Plugin tools and hook handlers run in the same Node.js event loop as the gateway. Do not use synchronous blocking I/O in tool `execute()` functions or hook handlers.
+
+```typescript
+import * as fs from "node:fs";
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+// ❌ Do not block the event loop
+export default function register(api: OpenClawPluginApi): void {
+  const data = fs.readFileSync("./config.json", "utf8");
+  // ...
+}
+
+// ✅ Use async I/O
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const data = await fs.promises.readFile("./config.json", "utf8");
+  // ...
+}
+```
+
+## Related
+
+- [Channel adapters](/developers/channel-adapters) — building a new channel from scratch
+- [Hooks](/developers/hooks) — full hook reference
+- [Agent tools](/developers/agent-tools) — registering plugin tools
+- [Admin: WhatsApp](/admin/channels/whatsapp) — configuration reference

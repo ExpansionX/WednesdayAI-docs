@@ -1,0 +1,142 @@
+---
+title: "Chat commands"
+description: "Register chat commands from a plugin that bypass the LLM and respond directly: api.registerCommand()."
+audience: developer
+doc-schema-version: 1
+---
+
+# Chat commands
+
+Plugins can register chat commands that the gateway handles directly — without involving the LLM. When a user sends `/my-command arg1 arg2`, the gateway routes it to your handler and sends the reply immediately. Use this for fast utility responses, status lookups, or in-chat controls that don't need an AI agent.
+
+Chat commands are distinct from agent tools: tools extend what the agent can call during a run; commands intercept messages before the agent runs.
+
+## Registering a command
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerCommand({
+    name: "ping",
+    description: "Check if the gateway is reachable",
+    acceptsArgs: false,
+    requireAuth: true,
+    handler: async (ctx) => {
+      return { text: "pong" };
+    },
+  });
+}
+```
+
+The command is available in any channel the user has configured. No restart is needed when a plugin loads.
+
+## `OpenClawPluginCommandDefinition` fields
+
+| Field | Type | Required | Description |
+| ----- | ---- | -------- | ----------- |
+| `name` | `string` | Yes | Command name without leading slash (e.g. `"ping"`, `"status"`). Lowercase, no spaces. |
+| `description` | `string` | Yes | Shown in `/help` and native Telegram/Discord command menus |
+| `acceptsArgs` | `boolean` | No | Whether the command accepts text after the name (default `false`) |
+| `requireAuth` | `boolean` | No | Only authorized senders can invoke this command (default `true`) |
+| `handler` | `PluginCommandHandler` | Yes | The function that runs when the command fires |
+
+## The handler
+
+The handler receives a `PluginCommandContext`:
+
+| Field | Type | Description |
+| ----- | ---- | ----------- |
+| `senderId` | `string \| undefined` | Sender identifier (channel-specific format) |
+| `channel` | `string` | Channel surface — `"telegram"`, `"discord"`, `"whatsapp"`, etc. |
+| `channelId` | `ChannelId \| undefined` | Provider channel id |
+| `isAuthorizedSender` | `boolean` | Whether the sender is on the allowlist |
+| `args` | `string \| undefined` | Raw text after the command name (present when `acceptsArgs: true`) |
+| `commandBody` | `string` | Full normalized command body |
+| `config` | `OpenClawConfig` | The resolved gateway config |
+| `from` | — | Inbound context sender (channel-specific) |
+| `accountId` | `string \| undefined` | The channel account id |
+| `messageThreadId` | — | Thread id (Telegram forum topics, Discord threads) |
+
+Return a `ReplyPayload` from the handler:
+
+```typescript
+// Minimal text reply
+return { text: "Done." };
+
+// Rich reply with media
+return {
+  text: "Here is your file:",
+  mediaUrl: "https://example.com/file.pdf",
+};
+
+// Error reply
+return { text: "Something went wrong.", isError: true };
+```
+
+## Using command arguments
+
+```typescript
+api.registerCommand({
+  name: "echo",
+  description: "Echo text back",
+  acceptsArgs: true,
+  handler: async (ctx) => {
+    const input = ctx.args?.trim();
+    if (!input) {
+      return { text: "Usage: /echo <text>" };
+    }
+    return { text: input };
+  },
+});
+```
+
+## Access control
+
+`requireAuth: true` (the default) means only senders on the channel's `allowFrom` list can invoke the command. Unauthorized senders receive no response and the invocation is silently dropped.
+
+Set `requireAuth: false` for commands intended for all users (e.g. a public status command):
+
+```typescript
+api.registerCommand({
+  name: "status",
+  description: "Check gateway status (public)",
+  requireAuth: false,
+  handler: async (_ctx) => {
+    return { text: "Gateway is running." };
+  },
+});
+```
+
+<Warning>
+  Commands with `requireAuth: false` respond to **any** sender regardless of
+  channel policy. Do not return sensitive information from unauthenticated commands.
+</Warning>
+
+## Name collision
+
+If two plugins register the same command name, both register but only one runs (last registration wins). Use namespaced names to avoid collisions: `my-plugin_status` rather than `status`.
+
+## Async safety
+
+Handlers are called in the gateway's event loop. Do not perform synchronous blocking I/O inside a handler.
+
+```typescript
+// ❌ Blocks the event loop
+handler: (_ctx) => {
+  const data = fs.readFileSync("./config.json", "utf8");
+  return { text: data };
+}
+
+// ✅ Async I/O
+handler: async (_ctx) => {
+  const data = await fs.promises.readFile("./config.json", "utf8");
+  return { text: data };
+}
+```
+
+## What's next
+
+- [Agent tools](/developers/agent-tools) — extend what the AI agent can call during a run
+- [Hooks](/developers/hooks) — observe or modify the run lifecycle
+- [Plugin SDK reference](/developers/sdk) — full exported surface

@@ -1,0 +1,191 @@
+---
+title: "System prompt"
+description: "Customise what the agent knows at session start: presets, section toggles, project context files, and per-agent overrides."
+audience: admin
+doc-schema-version: 1
+---
+
+# System prompt
+
+WednesdayAI assembles the agent's system prompt from a set of named sections at run time. The default prompt is comprehensive; you can slim it down with a preset, toggle individual sections, inject custom content, and control which project context files are included. All configuration is under `agents.defaults.systemPrompt` (shared across agents) or `agents.<agentId>.systemPrompt` (per-agent override).
+
+Changes take effect when the gateway restarts. Restart: `systemctl --user restart openclaw-gateway`.
+
+## Presets
+
+The fastest way to change the prompt's size and scope is a preset:
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  agents: {
+    defaults: {
+      systemPrompt: {
+        preset: "lean",   // "default" | "lean" | "minimal"
+      },
+    },
+  },
+}
+```
+
+| Preset | Effect |
+| ------ | ------ |
+| `"default"` | All sections enabled. Full-featured context, longer prompt. |
+| `"lean"` | Disables documentation, runtime, model aliases. Compacts tooling and skills sections. Uses progressive skill rendering. Good balance of capability and token cost. |
+| `"minimal"` | Disables documentation, runtime, model aliases, reply tags, messaging, voice, reactions, silent replies, heartbeats. Tooling renders names only. Skills compact + progressive. Lowest token cost. |
+
+## Per-agent override
+
+Named agents can override the shared default. The per-agent config merges over `agents.defaults.systemPrompt`:
+
+```json5
+{
+  agents: {
+    defaults: {
+      systemPrompt: { preset: "lean" },
+    },
+    assistant: {
+      systemPrompt: {
+        preset: "default",   // this agent uses the full prompt
+      },
+    },
+  },
+}
+```
+
+## Section toggles
+
+Individual sections can be turned off or customised without changing the preset. Use the `sections` map with the section name as the key:
+
+```json5
+{
+  agents: {
+    defaults: {
+      systemPrompt: {
+        preset: "default",
+        sections: {
+          documentation: "off",    // remove the slash-command reference
+          modelAliases: "off",     // remove the model alias list
+          heartbeats: "off",       // disable heartbeat task list injection
+        },
+      },
+    },
+  },
+}
+```
+
+### Section catalogue
+
+| Section | Mode type | Content |
+| ------- | --------- | ------- |
+| `identity` | Standard | Agent name, personality, and identity context |
+| `tooling` | Generated | Tool definitions and calling instructions — `"compact"` reduces detail, `"names"` lists only tool names |
+| `toolCallStyle` | Standard | How the agent should format and sequence tool calls |
+| `safety` | Standard | Safety and behaviour guidelines |
+| `cliQuickReference` | Standard | Slash-command cheat sheet (`/new`, `/reset`, `/model`, etc.) |
+| `skills` | Generated | Loaded skill descriptions — `"compact"` condenses, `"names"` lists names only; `progressive: true` renders on demand |
+| `memory` | Standard | Memory read/write instructions |
+| `selfUpdate` | Standard | Self-update capability instructions |
+| `modelAliases` | Generated | Model name-to-provider alias mappings |
+| `workspace` | Standard | Workspace directory and file layout |
+| `documentation` | Standard | Documentation access and usage instructions — disabled in `lean`/`minimal` presets |
+| `sandbox` | Standard | Sandbox mode restrictions and warnings |
+| `authorizedSenders` | Standard | Who is authorised to give the agent instructions |
+| `time` | Standard | Current date and time |
+| `workspaceFilesNotice` | Standard | Notice about workspace file availability |
+| `replyTags` | Standard | Reply formatting tag instructions |
+| `messaging` | Standard | Messaging-specific formatting rules (disabled in `minimal`) |
+| `voice` | Standard | Voice mode formatting rules (disabled in `minimal`) |
+| `groupContext` | Standard | Group chat context and mention awareness |
+| `reactions` | Standard | Reaction handling instructions (disabled in `minimal`) |
+| `reasoningFormat` | Standard | Reasoning and thinking format instructions |
+| `projectContext` | Config object | Project context files — see [Project context files](#project-context-files) |
+| `silentReplies` | Standard | When to suppress outbound replies (disabled in `minimal`) |
+| `heartbeats` | Standard | Heartbeat task list (injected during heartbeat runs) |
+| `runtime` | Runtime | Runtime and model info — `"minimal"` trims detail; disabled in `lean`/`minimal` presets |
+
+**Mode type key:**
+
+| Type | Accepted values |
+| ---- | --------------- |
+| Standard | `"default"` \| `"off"` \| `"prepend"` \| `"append"` \| `"replace"` |
+| Generated | `"default"` \| `"compact"` \| `"names"` \| `"off"` |
+| Runtime | `"default"` \| `"minimal"` \| `"off"` |
+| Config object | `ProjectContextSectionConfig` — see project context files section |
+
+## Project context files
+
+These files are read from the agent workspace directory and injected into the system prompt:
+
+| File | Default mode | Purpose |
+| ---- | ------------ | ------- |
+| `AGENTS.md` | `inline` | Workspace context and session startup instructions |
+| `SOUL.md` | `inline` | Agent personality and core values |
+| `IDENTITY.md` | `inline` (max 4 000 chars) | Agent name, creature, vibe, emoji, avatar |
+| `USER.md` | `manifest` | User profile — name, timezone, context |
+| `TOOLS.md` | `manifest` | Local environment notes — devices, SSH hosts |
+| `HEARTBEAT.md` | `runKind` | Periodic task list (injected during heartbeat runs only) |
+
+File mode values:
+
+| Mode | Effect |
+| ---- | ------ |
+| `"inline"` | Full file content injected into the prompt (bounded by `maxChars` if set) |
+| `"manifest"` | File path and size listed; content is not injected (avoids bloating the prompt for large files) |
+| `"runKind"` | Injected only during heartbeat-triggered runs, not during interactive chat |
+| `"off"` | File skipped entirely |
+
+Default per-file limit: 20 000 characters. Hard ceiling on total prompt source reads: 8 MiB.
+
+Missing optional files are silently skipped. Leave `HEARTBEAT.md` empty (or absent) to skip heartbeat API calls.
+
+To change a file's mode, use the `projectContext.files` config:
+
+```json5
+{
+  agents: {
+    defaults: {
+      systemPrompt: {
+        sections: {
+          projectContext: {
+            files: {
+              "SOUL.md": { mode: "off" },
+              "TOOLS.md": { mode: "inline", maxChars: 2000 },
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+## Prompt cache
+
+The prompt is split into a stable (cached) region and a volatile region at build time. The cache boundary controls where the split happens:
+
+```json5
+{
+  agents: {
+    defaults: {
+      systemPrompt: {
+        cache: {
+          boundary: "auto",   // "auto" (default) | "off"
+        },
+      },
+    },
+  },
+}
+```
+
+`"auto"` lets the runtime choose the optimal cache boundary for the current provider. Set `"off"` to disable prompt caching entirely (increases token cost, may help debugging).
+
+## Injecting content from a plugin
+
+Plugin authors can inject content into the system prompt at run time via the `before_prompt_build` lifecycle hook — without touching admin config. See [Hooks](/developers/hooks) for the hook API; the return value accepts `systemPrompt` (appended after the built sections) and `prependContext` (inserted before the user turn).
+
+## Related
+
+- [Hooks](/developers/hooks) — `before_prompt_build` and `context.collect` hook reference
+- [Gateway configuration](/admin/gateway/configuration) — gateway-wide settings
+- [Agent tools](/developers/agent-tools) — exposing capabilities to the agent
