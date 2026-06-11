@@ -1,0 +1,164 @@
+---
+title: "Logging"
+description: "Use the plugin logger and subsystem logger from the plugin SDK: api.logger, createSubsystemLogger, child loggers, and log levels."
+audience: developer
+doc-schema-version: 1
+---
+
+# Logging
+
+Plugins have two logging surfaces:
+
+- **`api.logger`** (`PluginLogger`) — the plugin-scoped logger injected into `register()`. Use this for all logging inside your plugin's `register` function and tool/hook handlers.
+- **`createSubsystemLogger`** — creates a named logger for standalone modules, background workers, or code that runs outside the plugin registration context.
+
+Both are imported from `openclaw/plugin-sdk`. Neither is `console.log` — bare `console.log` bypasses the gateway's log routing and should never be used in production code.
+
+## `api.logger` (inside plugins)
+
+`api.logger` is a `PluginLogger` tied to your plugin's id. It is the correct logger for all plugin handler code:
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  const { logger } = api;
+
+  api.registerTool({
+    name: "my_tool",
+    description: "...",
+    parameters: Type.Object({ query: Type.String() }),
+    async execute(_id, params) {
+      logger.info("tool called", { query: params.query });
+      try {
+        const result = await doWork(params.query);
+        logger.debug("tool succeeded", { result });
+        return { content: [{ type: "text", text: result }] };
+      } catch (err) {
+        logger.error("tool failed", { error: err });
+        throw err;
+      }
+    },
+  });
+}
+```
+
+`PluginLogger` methods: `info`, `warn`, `error`, `debug`.
+
+<Note>
+  `api.logger.debug` may not be a no-op even in production — it respects the
+  gateway's configured log level. Only call `debug` for information that would
+  be too noisy at `info`. Never `debug`-log secrets or full payloads.
+</Note>
+
+## `createSubsystemLogger` (standalone modules)
+
+For code that lives outside a plugin (a shared utility, a background worker, a standalone script) use `createSubsystemLogger`:
+
+```typescript
+import { createSubsystemLogger } from "openclaw/plugin-sdk";
+
+const log = createSubsystemLogger("my-plugin/worker");
+
+export async function runWorker(): Promise<void> {
+  log.info("worker started");
+
+  try {
+    await doWork();
+    log.info("worker finished");
+  } catch (err) {
+    log.error("worker failed", { error: err });
+  }
+}
+```
+
+The subsystem name appears in log output as a prefix (e.g. `[my-plugin/worker]`). Keep names short and slash-separated to match the convention used by core subsystems.
+
+### Available methods
+
+`SubsystemLogger` has more methods than `PluginLogger`:
+
+| Method | Level | Notes |
+| ------ | ----- | ----- |
+| `log.trace(msg, meta?)` | TRACE | Very high-frequency events; stripped in most deployments |
+| `log.debug(msg, meta?)` | DEBUG | Verbose diagnostic info |
+| `log.info(msg, meta?)` | INFO | Normal operational events |
+| `log.warn(msg, meta?)` | WARN | Unexpected but recoverable |
+| `log.error(msg, meta?)` | ERROR | Actionable failures |
+| `log.fatal(msg, meta?)` | FATAL | Gateway-critical failures |
+| `log.raw(msg)` | — | Bypasses formatting; writes the string as-is to the console |
+| `log.child(name)` | — | Returns a child logger with a suffixed name |
+
+### Child loggers
+
+Use `child()` to add context to a logger without changing the subsystem name:
+
+```typescript
+const log = createSubsystemLogger("my-plugin/cache");
+
+function processItem(id: string) {
+  const itemLog = log.child(id);   // subsystem: "my-plugin/cache/abc123"
+  itemLog.info("processing");
+  // ...
+}
+```
+
+Child loggers inherit the parent's log level and output targets.
+
+### Checking log level before expensive work
+
+`isEnabled(level, target?)` lets you skip expensive serialization when a level is suppressed:
+
+```typescript
+if (log.isEnabled("debug")) {
+  log.debug("full payload", { payload: expensiveSerialize(data) });
+}
+```
+
+`target` values: `"any"` (default), `"console"`, `"file"` — checks whether the level is active for a specific output target.
+
+## Which logger to use
+
+| Context | Use |
+| ------- | --- |
+| Inside `register()`, tool `execute()`, or a hook handler | `api.logger` |
+| A standalone module imported by the plugin | `createSubsystemLogger("my-plugin/<module>")` |
+| A background worker or service that runs between requests | `createSubsystemLogger("my-plugin/<service>")` |
+
+## What not to do
+
+```typescript
+// ❌ Bypasses gateway log routing — never do this in production code
+console.log("tool called", params);
+
+// ❌ Logs inside execute() via api — api is the registration-time api, not in scope
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTool({
+    async execute(_id, params) {
+      api.logger.info("...");   // ❌ api is captured correctly here via closure, this is fine...
+      // BUT never re-import or re-create the logger per-call:
+      const log = createSubsystemLogger("my-plugin");  // ❌ creates a new logger instance per call
+    },
+  });
+}
+
+// ✅ Capture once at registration time
+export default function register(api: OpenClawPluginApi): void {
+  const { logger } = api;   // ✅ captured once
+
+  api.registerTool({
+    async execute(_id, params) {
+      logger.info("...");   // ✅ uses the captured logger
+    },
+  });
+}
+```
+
+## Async safety
+
+`logger.info()` and other log methods are synchronous — they do not block the event loop. Do not `await` them.
+
+## Related
+
+- [Plugin SDK reference](/developers/sdk) — full exported surface
+- [Admin: Logging](/admin/gateway/logging) — gateway log level and output configuration
