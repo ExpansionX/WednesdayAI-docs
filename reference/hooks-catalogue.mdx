@@ -43,6 +43,43 @@ openclaw hooks enable session-memory
 
 ---
 
+## `session-journal`
+
+Writes a reflective LLM journal entry to the agent's `journal/` folder when an opted-in agent issues `/new` or `/reset`. Unlike most bundled hooks, this hook is enabled **per-agent** rather than globally — there is no `hooks.internal.entries` key for it.
+
+| Property | Value |
+| -------- | ----- |
+| **Events** | `command:new`, `command:reset` |
+| **Writes to** | `<workspace>/journal/YYYY-MM-DD-HHMMss-<slug>.md` |
+| **Requires** | `workspace.dir` |
+| **Emoji** | 📔 |
+
+**Enable:** add `sessionJournal.enabled: true` to the agent's entry in `openclaw.json`:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "claire",
+        "sessionJournal": {
+          "enabled": true,
+          "prompt": "Write structured patient notes..."
+        }
+      }
+    ]
+  }
+}
+```
+
+Set `sessionJournal.enabled: false` (or omit the key entirely) to disable for a specific agent. The `prompt` field is optional; the default targets patient-notes / coaching-journal style entries.
+
+**What it does:** on `/new` or `/reset`, the hook calls the LLM with the current session transcript and the configured prompt, generates a slug from the response, and writes the journal entry to `<effectiveWorkspaceDir>/journal/YYYY-MM-DD-HHMMss-<slug>.md`. When `workspaceLane` is in context, `effectiveWorkspaceDir` is the lane-local directory; otherwise it falls back to the agent's configured workspace.
+
+**Limitations:** journal entries are written only when a session explicitly resets via `/new` or `/reset`. Sessions that end via process exit, connection drop, or idle timeout do not produce an entry. The `/new` and `/reset` commands block until the LLM call completes (up to ~15 s) — disable this hook for an agent if that latency is unacceptable.
+
+---
+
 ## `bootstrap-extra-files`
 
 Injects additional files from configured glob/path patterns into the agent workspace during bootstrap. Used to include extra context roots (for example monorepo `AGENTS.md`/`TOOLS.md` files) without changing the workspace root.
