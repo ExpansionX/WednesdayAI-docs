@@ -62,7 +62,7 @@ A plugin may instead export an `OpenClawPluginDefinition` object with a `registe
 | `api.registerService(service)` | Register a start/stop background service |
 | `api.registerProvider(provider)` | Register a model provider |
 | `api.registerWebSearchProvider(provider)` | Register a web-search provider |
-| `api.registerRealtimeVoiceProvider(definition)` | Register a real-time voice provider (`RealtimeVoiceProviderDefinition`) |
+| `api.registerRealtimeVoiceProvider(definition)` | Register a real-time voice provider (`RealtimeVoiceProviderPlugin`) |
 | `api.registerWebhookTargetWithPluginRoute(path, handler)` | Register a webhook target scoped to the plugin's route namespace |
 | `api.resolvePath(input)` | Resolve a path relative to the plugin |
 
@@ -125,11 +125,11 @@ const parameters = Type.Object({
 
 These are exported from `openclaw/plugin-sdk` and are safe to depend on:
 
-- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderDefinition`, `VoiceSession`, `ProviderPlugin`, `ProviderCapabilities`, `GatewayRequestHandler`, `GatewayRequest`, `GatewayResponse`, `WebSearchProvider`, `WebSearchOptions`, `WebSearchResult`.
-- **Hook payload types** — `HookPayload`, `MessageReceivedPayload`, `MessageSentPayload`, `SessionStartPayload`, `SubagentSpawningPayload`, `BeforeFileWritePayload`.
+- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderPlugin`, `RealtimeVoiceBridgeSession`, `ProviderPlugin`, `GatewayRequestHandler`, `GatewayRequestHandlerOptions`, `RespondFn`, `WebSearchProviderPlugin`, `WebSearchProviderToolDefinition`, `WebSearchProviderContext`.
+- **Hook payload types** — `PluginHookMessageReceivedEvent`, `PluginHookSubagentSpawningEvent`, `PluginHookBeforeContextSendEvent`, `PluginHookStorageAfterAppendEvent`.
 - **Tool helpers** — `jsonResult`, `readStringParam`, `readNumberParam`, `readReactionParams`, `createActionGate`, `ToolAuthorizationError`.
 - **Schema helpers** — `stringEnum`, `optionalStringEnum`, `emptyPluginConfigSchema`.
-- **Logging** — `createSubsystemLogger`, `getChildLogger`, `FileLog`.
+- **Logging** — `createSubsystemLogger`, `getChildLogger`, `appendFileLog`, `createFileLogWriter`.
 - **Config/secrets** — `loadConfig`, `isSecretRef`, `SecretInput` / `SecretRef` types.
 - **HTTP/webhooks** — `registerPluginHttpRoute`, `registerWebhookTarget`, request-guard helpers.
 
@@ -147,10 +147,12 @@ Full definitions for types introduced in this SDK. Import all of these from `ope
 ### Plugin registration types
 
 ```typescript
-interface RealtimeVoiceProviderDefinition {
+import type { RealtimeVoiceProviderPlugin, RealtimeVoiceBridgeSession } from "openclaw/plugin-sdk"
+
+interface RealtimeVoiceProviderPlugin {
   name: string
-  connect(opts: { userId: string; channelId: string }): Promise<VoiceSession>
-  disconnect(session: VoiceSession): Promise<void>
+  connect(opts: { userId: string; channelId: string }): Promise<RealtimeVoiceBridgeSession>
+  disconnect(session: RealtimeVoiceBridgeSession): Promise<void>
 }
 ```
 
@@ -161,18 +163,19 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk"
 // Returns a Typebox schema validating as an empty object — use when your plugin has no config
 ```
 
-### FileLog
+### File log utilities
 
 ```typescript
-import { FileLog } from "openclaw/plugin-sdk"
+import { appendFileLog, createFileLogWriter } from "openclaw/plugin-sdk"
 
-const log = new FileLog(path: string, opts?: {
-  maxSizeMb?: number
-  rotate?: boolean
-})
-log.write(entry: Record<string, unknown>): void
-log.flush(): Promise<void>
-log.close(): void
+// Append a single entry (fire-and-forget):
+appendFileLog(line: Record<string, unknown>, options: { path: string }): void
+
+// Create a writer for repeated use:
+const writer = createFileLogWriter({ path: string, maxSizeMb?: number, rotate?: boolean })
+writer.write(entry: Record<string, unknown>): void
+writer.flush(): Promise<void>
+writer.close(): void
 ```
 
 ### AgentAvailability
@@ -189,42 +192,45 @@ interface AgentAvailability {
 ### Gateway types
 
 ```typescript
-type GatewayRequestHandler = (
-  req: GatewayRequest,
-  res: GatewayResponse
-) => Promise<void> | void
+import type { GatewayRequestHandlerOptions, RespondFn } from "openclaw/plugin-sdk"
 
-interface GatewayRequest {
-  method: string
-  path: string
-  headers: Record<string, string>
+type GatewayRequestHandler = (opts: GatewayRequestHandlerOptions) => Promise<void> | void
+
+interface GatewayRequestHandlerOptions {
+  req: {
+    method: string
+    path: string
+    headers: Record<string, string>
+    body: unknown
+    query: Record<string, string>
+  }
+  respond: RespondFn
+}
+
+type RespondFn = (response: {
+  status?: number
+  headers?: Record<string, string>
   body: unknown
-  query: Record<string, string>
-}
-
-interface GatewayResponse {
-  status(code: number): GatewayResponse
-  json(body: unknown): void
-  send(body: string): void
-  header(name: string, value: string): GatewayResponse
-}
+}) => void
 ```
 
 ### Web search provider types
 
 ```typescript
-interface WebSearchProvider {
+import type { WebSearchProviderPlugin, WebSearchProviderToolDefinition, WebSearchProviderContext } from "openclaw/plugin-sdk"
+
+interface WebSearchProviderPlugin {
   name: string
-  search(query: string, opts?: WebSearchOptions): Promise<WebSearchResult[]>
+  search(query: string, opts?: WebSearchProviderToolDefinition): Promise<WebSearchProviderContext[]>
 }
 
-interface WebSearchOptions {
+interface WebSearchProviderToolDefinition {
   maxResults?: number
   locale?: string
   safeSearch?: boolean
 }
 
-interface WebSearchResult {
+interface WebSearchProviderContext {
   title: string
   url: string
   snippet: string
@@ -236,12 +242,10 @@ interface WebSearchResult {
 
 ```typescript
 import type {
-  HookPayload,
-  MessageReceivedPayload,
-  MessageSentPayload,
-  SessionStartPayload,
-  SubagentSpawningPayload,
-  BeforeFileWritePayload,
+  PluginHookMessageReceivedEvent,
+  PluginHookSubagentSpawningEvent,
+  PluginHookBeforeContextSendEvent,
+  PluginHookStorageAfterAppendEvent,
 } from "openclaw/plugin-sdk"
 ```
 
@@ -249,20 +253,11 @@ import type {
 
 ```typescript
 interface ProviderPlugin {
-  name: string
-  capabilities: ProviderCapabilities
-  complete(params: CompletionParams): Promise<CompletionResult>
-  stream?(params: CompletionParams): AsyncIterable<CompletionChunk>
-  listModels?(): Promise<ModelInfo[]>
-  validateConfig?(config: unknown): Promise<void>
-}
-
-interface ProviderCapabilities {
-  streaming: boolean
-  vision: boolean
-  functionCalling: boolean
-  reasoning: boolean
-  voice: boolean
+  id: string
+  label: string
+  docsPath?: string
+  aliases?: string[]
+  envVars?: string[]
 }
 ```
 

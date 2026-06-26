@@ -128,22 +128,9 @@ The strict root object accepts these keys (everything else is rejected). Each ha
 
 ---
 
-## Network
+## `nodeHost` — Browser-proxy settings
 
-Controls the gateway's network listener addresses.
-
-```yaml
-network:
-  host: "0.0.0.0"
-  port: 3000
-nodeHost: ""
-```
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `network.host` | string | `"0.0.0.0"` | Bind address for all network listeners |
-| `network.port` | integer | `3000` | Primary HTTP port (deprecated alias: `port`) |
-| `nodeHost` | string | — | URL of this node as seen by other nodes in a multi-gateway mesh. Example: `"https://node1.example.com"` |
+`nodeHost` — object — Browser-proxy configuration for this node. Shape: `{ browserProxy?: { enabled?: boolean, allowProfiles?: string[] } }`
 
 ---
 
@@ -221,24 +208,24 @@ nodeHost: ""
 | `gateway.tls.enabled` | `false` | Yes |
 | `gateway.reload.mode` | `"hybrid"` | No |
 | `gateway.channelHealthCheckMinutes` | provider default | No |
-| `gateway.restartPolicy` | `"on-failure"` | No |
-| `gateway.restartResilience` | `3` | No |
+| `gateway.restartPolicy` | `"drain"` | No |
+| `gateway.restartResilience` | see description | No |
 
 Additional restart-policy keys:
 
 ```json5
 {
   gateway: {
-    restartPolicy: "on-failure",
-    restartResilience: 3,
+    restartPolicy: "drain",
+    restartResilience: { mode: "controlled", drainTimeoutMs: 30000, forceMarksRecovery: false },
   },
 }
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `gateway.restartPolicy` | string | `"on-failure"` | `"always" \| "on-failure" \| "never"` — controls auto-restart behaviour |
-| `gateway.restartResilience` | integer | `3` | Consecutive crash-restarts allowed before giving up (0–10) |
+| `gateway.restartPolicy` | string | `"drain"` | `"drain" \| "force" \| "cancel"` — controls auto-restart behaviour |
+| `gateway.restartResilience` | object | — | `GatewayRestartResilienceConfig`: `mode` (`"controlled" \| "immediate"`), `drainTimeoutMs` (number), `forceMarksRecovery` (boolean) |
 
 <Warning>
 Non-loopback `bind` requires auth. The gateway refuses to start with `bind: "lan"`, `"tailnet"`, or `"custom"` if no token or password is set. See [Gateway authentication](/admin/gateway/authentication).
@@ -565,11 +552,22 @@ Additional session keys:
 ```json5
 {
   session: {
-    storage: "sqlite",
+    storage: {
+      backend: "sqlite",       // "fs-jsonl" | "sqlite" | "postgres"
+      sqlitePath: "",          // path to .db file (sqlite only)
+      databaseUrl: "",         // connection string (postgres only)
+      cache: {
+        enabled: true,
+        maxEntries: 500,
+      },
+    },
     maintenance: {
-      enabled: true,
-      intervalHours: 24,
-      maxAgeDays: 90,
+      mode: "auto",              // "auto" | "manual"
+      pruneAfter: 90,            // days before pruning
+      maxEntries: 0,             // max session entries (0 = no limit)
+      rotateBytes: 0,            // rotate session file after this size
+      maxDiskBytes: 0,           // cap total disk usage
+      highWaterBytes: 0,         // trigger maintenance at this threshold
     },
   },
 }
@@ -577,10 +575,17 @@ Additional session keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `session.storage` | string | `"sqlite"` | `"memory" \| "sqlite" \| "postgres"` — backing store for session data |
-| `session.maintenance.enabled` | boolean | `true` | Enables periodic housekeeping (pruning old sessions) |
-| `session.maintenance.intervalHours` | number | `24` | How often maintenance runs |
-| `session.maintenance.maxAgeDays` | number | `90` | Sessions older than this are pruned |
+| `session.storage.backend` | string | `"sqlite"` | `"fs-jsonl" \| "sqlite" \| "postgres"` — backing store for session data |
+| `session.storage.sqlitePath` | string | — | Path to the SQLite `.db` file (sqlite only) |
+| `session.storage.databaseUrl` | string | — | Connection string (postgres only) |
+| `session.storage.cache.enabled` | boolean | `true` | Enable in-memory session cache |
+| `session.storage.cache.maxEntries` | integer | `500` | Max entries in the session cache |
+| `session.maintenance.mode` | string | `"auto"` | `"auto" \| "manual"` |
+| `session.maintenance.pruneAfter` | number | `90` | Days before pruning old sessions |
+| `session.maintenance.maxEntries` | integer | `0` | Max session entries (0 = no limit) |
+| `session.maintenance.rotateBytes` | integer | `0` | Rotate session file after this many bytes |
+| `session.maintenance.maxDiskBytes` | integer | `0` | Cap total disk usage in bytes |
+| `session.maintenance.highWaterBytes` | integer | `0` | Trigger maintenance at this threshold |
 
 ---
 
@@ -832,11 +837,11 @@ Additional auth keys:
   browser: {
     enabled: true,
     evaluateEnabled: false,
-    headless: true,
-    defaultProfile: "default",
-    ssrfPolicy: { allowPrivateNetwork: false, allowedHostnames: ["example.com"] },
+    headless: false,
+    defaultProfile: "chrome",
+    ssrfPolicy: { dangerouslyAllowPrivateNetwork: false, hostnameAllowlist: ["example.com"] },
     profiles: {
-      "work": { cdpPort: 9222, driver: "clawd" },   // driver: clawd | extension
+      "work": { cdpPort: 9222, driver: "openclaw" },   // driver: openclaw | extension
     },
   },
 }
@@ -848,9 +853,10 @@ Additional browser SSRF policy keys:
 {
   browser: {
     ssrfPolicy: {
-      allowPrivateRanges: false,
-      allowedHosts: [],
-      blockedHosts: [],
+      dangerouslyAllowPrivateNetwork: false,
+      hostnameAllowlist: [],
+      allowedCidrs: [],
+      allowRfc2544BenchmarkRange: false,
     },
   },
 }
@@ -858,9 +864,10 @@ Additional browser SSRF policy keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `browser.ssrfPolicy.allowPrivateRanges` | boolean | `false` | Allow the browser to fetch RFC-1918 private addresses |
-| `browser.ssrfPolicy.allowedHosts` | string[] | `[]` | Additional hostnames to allow |
-| `browser.ssrfPolicy.blockedHosts` | string[] | `[]` | Hostnames to explicitly block |
+| `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` | boolean | `false` | Allow the browser to fetch RFC-1918 private addresses |
+| `browser.ssrfPolicy.hostnameAllowlist` | string[] | `[]` | Hostnames to allow |
+| `browser.ssrfPolicy.allowedCidrs` | string[] | `[]` | CIDR ranges to allow |
+| `browser.ssrfPolicy.allowRfc2544BenchmarkRange` | boolean | `false` | Allow RFC-2544 benchmark address ranges |
 
 ---
 
@@ -907,10 +914,21 @@ Additional ACP streaming keys:
   update: {
     channel: "stable",                  // stable | beta | dev
     checkOnStart: true,
-    auto: { enabled: false, stableDelayHours: 24 },
+    auto: {
+      enabled: false,
+      stableDelayHours: 6,
+      stableJitterHours: 12,
+      betaCheckIntervalHours: 1,
+    },
   },
 }
 ```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `update.auto.stableDelayHours` | integer | `6` | Hours to delay applying a stable update after release |
+| `update.auto.stableJitterHours` | integer | `12` | Random jitter (hours) added to update checks |
+| `update.auto.betaCheckIntervalHours` | integer | `1` | How often (hours) the beta channel is checked |
 
 ---
 
@@ -990,8 +1008,6 @@ Additional diagnostics keys:
 ```json5
 {
   diagnostics: {
-    slowRequestMs: 5000,
-    traceLevel: "errors",
     otel: {
       headers: {},
     },
@@ -1001,8 +1017,6 @@ Additional diagnostics keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `diagnostics.slowRequestMs` | integer | `5000` | Threshold (ms) for logging slow requests |
-| `diagnostics.traceLevel` | string | `"errors"` | `"off" \| "errors" \| "all"` |
 | `diagnostics.otel.headers` | object | `{}` | HTTP headers for the OTLP exporter (e.g. for auth) |
 
 ---
