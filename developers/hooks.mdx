@@ -50,7 +50,7 @@ export default function register(api: OpenClawPluginApi): void {
 
 Lifecycle hooks fall into three categories:
 
-- **Mutating** — the handler's return value replaces or amends the run. Examples: `transform_llm_input` / `transform_llm_output` (rewrite messages/output), `before_tool_call` (rewrite params or `block`), `before_message_write` (rewrite or `block` the message), `before_prompt_build` (append system prompt / context), `before_model_resolve` (override model/provider), `message_sending` (rewrite or `cancel`), and the `context.*` / `compaction.plan` lifecycle hooks (contribute context, prune, plan compaction).
+- **Mutating** — the handler's return value replaces or amends the run. Examples: `transform_llm_input` / `transform_llm_output` (rewrite messages/output), `before_tool_call` (rewrite params or `block`), `before_message_write` (rewrite or `block` the message), `before_prompt_build` (append system prompt / context), `before_model_resolve` (override model/provider), `before_context_send` (return `{ messages? }` to replace the outgoing message list), `message_sending` (rewrite or `cancel`), and the `context.*` / `compaction.plan` lifecycle hooks (contribute context, prune, plan compaction).
 - **Observe-only** — the return value is ignored. Examples: `llm_input`, `llm_output`, `model_call_ended` (read usage/headers), `agent_end`, `session_start` / `session_end`, `gateway_start` / `gateway_stop`.
 - **Short-circuiting** — `before_tool_call` may return `{ block: true, blockReason }` to stop a tool call; `before_message_write` may return `{ block: true }` to drop a message.
 
@@ -144,14 +144,11 @@ my-hook/
 ---
 name: my-hook
 description: "Saves a marker when the session resets"
-metadata:
-  openclaw:
-    emoji: "💾"
-    events: ["command:new", "command:reset"]
+metadata: { "openclaw": { "emoji": "💾", "events": ["command:new", "command:reset"] } }
 ---
 ```
 
-Common standalone events include `command:new`, `command:reset`, `command:stop`, `command:compact`, `agent:bootstrap`, `gateway:start`, `message:received`, `message:transcribed`, and `message:preprocessed`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
+Common standalone events include `command:new`, `command:reset`, `command:stop`, `command:compact`, `agent:bootstrap`, `gateway:startup`, `message:received`, `message:transcribed`, and `message:preprocessed`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
 
 `message:transcribed` fires when an inbound audio message has been transcribed. `message:preprocessed` fires after the message has been enriched with links, images, and transcripts — immediately before routing. Both are useful for logging pipelines and external integrations that need the enriched message body without modifying the run.
 
