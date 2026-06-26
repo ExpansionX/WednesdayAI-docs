@@ -177,6 +177,18 @@ Custom commands are menu entries only — they do not auto-implement behavior. P
 
 `setMyCommands failed` at startup means outbound DNS/HTTPS to `api.telegram.org` is blocked.
 
+## Bot commands registration
+
+```yaml
+channels:
+  telegram:
+    commands:
+      register: true
+      scope: "all_private_chats"
+```
+
+`register: true` (default) tells the gateway to call `setMyCommands` at startup so the bot menu is kept in sync. `scope` maps directly to the [Bot API command scope](https://core.telegram.org/bots/api#botcommandscope) — common values: `all_private_chats`, `all_group_chats`, `all_chat_administrators`, `default`.
+
 ## Live streaming
 
 ```json5
@@ -197,6 +209,27 @@ Custom commands are menu entries only — they do not auto-implement behavior. P
 | `off` | No streaming; final reply only. |
 
 Telegram native draft streaming (`sendMessageDraft`) is available for all bots since Bot API 9.5 (March 2026). If it is unavailable or rejected, WednesdayAI falls back to `sendMessage` + `editMessageText` automatically.
+
+## Polling vs webhook mode
+
+```yaml
+channels:
+  telegram:
+    mode: "polling"   # or "webhook"
+```
+
+Polling (default) — long-polls the Telegram API. No public URL required.
+Webhook — Telegram pushes updates to your server:
+
+```yaml
+channels:
+  telegram:
+    mode: "webhook"
+    webhookUrl: "https://your-server.example.com/telegram/webhook"
+    webhookSecret: "random-secret-string"
+```
+
+<Tip>Webhook mode is recommended in production — lower latency, no keep-alive polling.</Tip>
 
 ## Webhook mode
 
@@ -269,6 +302,18 @@ Callback button clicks are delivered to the agent as text: `callback_data: <valu
 
 `own` = reactions to messages the bot sent (best-effort via sent-message cache). Reaction events still respect `dmPolicy`/`allowFrom`/`groupPolicy` — unauthorized senders are dropped.
 
+## Reaction support
+
+```yaml
+channels:
+  telegram:
+    reactions:
+      enabled: true
+      feedbackEmoji: ""
+```
+
+`enabled: true` allows the bot to set reactions on messages. `feedbackEmoji` sets a default emoji the bot uses to acknowledge messages (empty string disables automatic acknowledgement). Reaction events require Telegram Bot API 7.0 or later.
+
 ## Actions and config writes
 
 ```json5
@@ -323,6 +368,23 @@ DM and group history injection:
   },
 }
 ```
+
+## File handling
+
+```yaml
+channels:
+  telegram:
+    files:
+      maxSizeMb: 20
+      allowedMimeTypes: []
+      downloadTimeout: 30000
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `files.maxSizeMb` | integer | `20` | Telegram API file size limit |
+| `files.allowedMimeTypes` | string[] | `[]` | Allowed MIME types (empty = all) |
+| `files.downloadTimeout` | integer ms | `30000` | Download timeout |
 
 ## Network and proxy
 
@@ -389,15 +451,15 @@ Full field index for `channels.telegram.*`:
 
 - Auth: `enabled`, `botToken`, `tokenFile`, `accounts.*`
 - Access: `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`, `groups.*.topics.*`
-- Commands: `commands.native`, `commands.nativeSkills`, `customCommands`
+- Commands: `commands.native`, `commands.nativeSkills`, `commands.register`, `commands.scope`, `customCommands`
 - Streaming: `streaming`
-- Delivery: `textChunkLimit`, `chunkMode`, `linkPreview`, `mediaMaxMb`, `timeoutSeconds`, `replyToMode`, `retry.*`
+- Delivery: `textChunkLimit`, `chunkMode`, `linkPreview`, `mediaMaxMb`, `timeoutSeconds`, `replyToMode`, `retry.*`, `files.maxSizeMb`, `files.allowedMimeTypes`, `files.downloadTimeout`
 - History: `historyLimit`, `dmHistoryLimit`, `dms.<id>.historyLimit`
 - Actions: `actions.reactions`, `actions.sendMessage`, `actions.deleteMessage`, `actions.sticker`
 - Capabilities: `capabilities.inlineButtons`
-- Reactions: `reactionNotifications`, `reactionLevel`
+- Reactions: `reactionNotifications`, `reactionLevel`, `reactions.enabled`, `reactions.feedbackEmoji`
 - Network: `proxy`, `network.autoSelectFamily`, `network.dnsResultOrder`
-- Webhook: `webhookUrl`, `webhookSecret`, `webhookPath`, `webhookHost`, `webhookPort`
+- Webhook: `mode`, `webhookUrl`, `webhookSecret`, `webhookPath`, `webhookHost`, `webhookPort`
 - Misc: `configWrites`, `defaultTo`
 
 - [Reference: config](/reference/config)

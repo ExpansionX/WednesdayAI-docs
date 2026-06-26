@@ -41,6 +41,16 @@ openclaw hooks enable session-memory
 
 **What it does:** when a session resets, it locates the pre-reset transcript, extracts the last N user/assistant messages (default 15), generates a descriptive slug, writes a structured summary to the workspace memory directory, and confirms the file path. On the next session start the agent can read this file if memory search tools are configured.
 
+#### Configuring injected message counts
+
+```yaml
+sessionMemory:
+  messages:
+    maxCount: 20        # max memory entries to inject per turn (default: 10)
+    maxTokens: 4000     # cap injected memory tokens (default: 2000)
+    recencyWeight: 0.7  # 0–1, how much to weight recent vs relevant (default: 0.5)
+```
+
 ---
 
 ## `session-journal`
@@ -152,6 +162,94 @@ Runs `BOOT.md` from each configured agent's resolved workspace at gateway startu
 ```bash
 openclaw hooks enable boot-md
 ```
+
+#### File allowlist
+
+```yaml
+hooks:
+  internal:
+    bootstrapExtraFiles:
+      allowlist:
+        - "docs/**.md"
+        - "!docs/private/**"
+```
+
+Files outside the allowlist are silently ignored, even if referenced in BOOT.md. Uses gitignore-style glob patterns; negation (!) is supported.
+
+---
+
+## `message:sent`
+
+Fires after OpenClaw delivers a reply to the channel and receives delivery confirmation.
+
+| Property | Value |
+| -------- | ----- |
+| **When** | After outbound message delivery |
+| **Mutating** | No |
+
+**Payload:**
+```typescript
+{
+  messageId: string
+  channelId: string
+  userId: string
+  agentId: string
+  content: string
+  sentAt: string  // ISO-8601
+}
+```
+
+**Use cases:** Audit logging, analytics, post-send side-effects.
+
+---
+
+## `subagent_spawning`
+
+Fires when a subagent is about to spawn. Allows a hook to inspect or modify the spawn before it occurs.
+
+| Property | Value |
+| -------- | ----- |
+| **When** | Before a subagent spawn |
+| **Mutating** | Yes |
+
+#### Return shape
+
+A hook on this event may return an object to modify the spawned agent:
+
+```typescript
+{
+  systemPrompt?: string  // override the subagent's system prompt
+  model?: string         // override the model (must be in providers config)
+  maxTokens?: number     // cap the subagent's output token budget
+  tools?: string[]       // restrict available tools by name
+  skip?: boolean         // if true, cancels the subagent spawn entirely
+}
+```
+
+---
+
+## `before_file_write`
+
+Fires before OpenClaw writes any file to the filesystem within sandboxed plugin operations.
+
+| Property | Value |
+| -------- | ----- |
+| **When** | Before any plugin file write |
+| **Mutating** | Yes |
+
+**Payload:**
+```typescript
+{
+  path: string
+  content: string
+  encoding: string
+  pluginId: string
+}
+```
+
+**Return:** Return `{ content: "..." }` to rewrite content, or `{ skip: true }` to abort the write.
+
+**Use cases:** Content scanning, DLP enforcement, format normalisation.
 
 ---
 

@@ -1,0 +1,53 @@
+---
+title: "Realtime voice providers"
+description: "Implement a custom realtime voice provider plugin for WednesdayAI."
+---
+
+A realtime voice provider plugin handles audio I/O: capturing audio, transcribing speech to text, and synthesizing text to speech.
+
+## Registration
+
+```typescript
+import { createPlugin } from "openclaw/plugin-sdk"
+
+export default createPlugin({
+  name: "my-voice-provider",
+  config: { /* config schema */ },
+  setup(sdk, config) {
+    sdk.registerRealtimeVoiceProvider({
+      name: "my-voice-provider",
+
+      async connect({ userId, channelId }) {
+        return {
+          sessionId: crypto.randomUUID(),
+          async sendAudio(chunk: Uint8Array) { /* send to model */ },
+          async close() { /* tear down */ },
+          onTranscript(cb) { /* call cb with transcribed segments */ },
+          onAudio(cb) { /* call cb with synthesized chunks */ },
+        }
+      },
+
+      async disconnect(session) {
+        await session.close()
+      },
+    })
+  },
+})
+```
+
+## VoiceSession interface
+
+| Method | Description |
+|--------|-------------|
+| `sendAudio(chunk: Uint8Array)` | Send a raw PCM audio chunk (16-bit, 16kHz, mono) |
+| `onTranscript(cb)` | Register callback for transcription results |
+| `onAudio(cb)` | Register callback to receive synthesized audio |
+| `close()` | Tear down the session and release resources |
+
+## Audio format
+
+Input and output: 16-bit PCM, 16 kHz sample rate, mono. Convert other formats before passing to `sendAudio`.
+
+## Error handling
+
+Throw from `connect()` to signal that the provider cannot accept a session. The gateway falls back to text-only mode.

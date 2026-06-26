@@ -1,0 +1,60 @@
+---
+title: "Observability"
+description: "Export traces, metrics, and logs from WednesdayAI using OpenTelemetry."
+---
+
+WednesdayAI exports observability data via OpenTelemetry (OTel). Route this to Langfuse, Grafana Tempo, Jaeger, or any OTel-compatible backend.
+
+## Quick start with Langfuse
+
+<Steps>
+<Step title="Create a Langfuse project">
+Sign up at langfuse.com and create a project. Note the public key, secret key, and host URL.
+</Step>
+<Step title="Configure the OTel exporter">
+```yaml
+diagnostics:
+  otel:
+    enabled: true
+    endpoint: "https://cloud.langfuse.com/api/public/otel/v1/traces"
+    headers:
+      Authorization: "Basic <base64(public_key:secret_key)>"
+```
+</Step>
+<Step title="Verify">
+```bash
+openclaw restart && openclaw doctor --check otel
+```
+</Step>
+</Steps>
+
+## Quick start with Grafana / Tempo
+
+```yaml
+diagnostics:
+  otel:
+    enabled: true
+    endpoint: "http://your-grafana-agent:4318/v1/traces"
+    headers: {}
+```
+
+## What is traced
+
+| Span | Description |
+|------|-------------|
+| `gateway.request` | Top-level span for each incoming message |
+| `llm.complete` | LLM API call — model, token counts, latency |
+| `hook.dispatch` | Each hook invocation with name and duration |
+| `tool.call` | Agent tool calls |
+| `channel.send` | Outbound message delivery |
+
+## Prometheus metrics
+
+When `diagnostics.enabled: true`, a `/metrics` endpoint is exposed in Prometheus format.
+
+| Metric | Description |
+|--------|-------------|
+| `wednesdayai_requests_total` | Total requests by channel and status |
+| `wednesdayai_llm_tokens_total` | LLM tokens consumed by model |
+| `wednesdayai_llm_latency_ms` | LLM request latency histogram |
+| `wednesdayai_active_sessions` | Currently active sessions |
