@@ -47,6 +47,8 @@ A plugin may instead export an `OpenClawPluginDefinition` object with a `registe
 | Member | Purpose |
 | ------ | ------- |
 | `api.id`, `api.name`, `api.version` | Plugin identity |
+| `api.source` | Source/origin of this plugin (e.g. npm package name or local path) |
+| `api.description` | Optional human-readable plugin description |
 | `api.config` | The resolved `OpenClawConfig` |
 | `api.pluginConfig` | This plugin's config (`Record<string, unknown> \| undefined`) |
 | `api.logger` | `PluginLogger` (`info` / `warn` / `error` / `debug?`) |
@@ -124,7 +126,7 @@ const parameters = Type.Object({
 These are exported from `openclaw/plugin-sdk` and are safe to depend on:
 
 - **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderPlugin`, `RealtimeVoiceBridgeSession`, `ProviderPlugin`, `GatewayRequestHandler`, `GatewayRequestHandlerOptions`, `RespondFn`, `WebSearchProviderPlugin`, `WebSearchProviderToolDefinition`, `WebSearchProviderContext`.
-- **Hook payload types** — `PluginHookMessageReceivedEvent`, `PluginHookBeforeContextSendEvent`, `PluginHookStorageAfterAppendEvent`. Note: `PluginHookSubagentSpawningEvent` is **not** exported from `openclaw/plugin-sdk`; use `import type` from core types directly, or derive the type with the `Parameters<...>` pattern.
+- **Hook payload types** — `PluginHookMessageReceivedEvent`, `PluginHookBeforeContextSendEvent`, `PluginHookBeforeContextSendResult`, `PluginHookStorageAfterAppendEvent`, `PluginHookCompactionPlanEvent`, `PluginHookCompactionPlanResult`, `PluginHookContextCollectEvent`, `PluginHookContextCollectResult`, `PluginHookContextProjectEvent`, `PluginHookContextProjectResult`, `PluginHookContextPruneEvent`, `PluginHookContextPruneResult`, `PluginHookTransformLlmInputEvent`, `PluginHookTransformLlmInputResult`, `PluginHookTransformLlmOutputEvent`, `PluginHookTransformLlmOutputResult`, `PluginHookModelCallEndedEvent`, `PluginHookAgentEndEvent`, and more. The SDK exports event and result types for all 33 hook points — see the source for the complete list. Note: `PluginHookSubagentSpawningEvent` is **not** exported from `openclaw/plugin-sdk`; use `import type` from core types directly, or derive the type with the `Parameters<...>` pattern.
 - **Tool helpers** — `jsonResult`, `readStringParam`, `readNumberParam`, `readReactionParams`, `createActionGate`, `ToolAuthorizationError`.
 - **Schema helpers** — `stringEnum`, `optionalStringEnum`, `emptyPluginConfigSchema`.
 - **Logging** — `createSubsystemLogger`, `getChildLogger`, `appendFileLog`, `createFileLogWriter`.
@@ -150,8 +152,15 @@ import type { RealtimeVoiceProviderPlugin, RealtimeVoiceBridge } from "openclaw/
 interface RealtimeVoiceProviderPlugin {
   id: string
   label: string
-  isConfigured(ctx: { config?: OpenClawConfig }): boolean
-  createBridge(req: { userId: string; channelId: string }): RealtimeVoiceBridge
+  isConfigured(ctx: { cfg?: OpenClawConfig; providerConfig: RealtimeVoiceProviderConfig }): boolean
+  createBridge(req: RealtimeVoiceBridgeCreateRequest): RealtimeVoiceBridge
+  aliases?: string[]
+  defaultModel?: string
+  models?: readonly string[]
+  autoSelectOrder?: number
+  capabilities?: RealtimeVoiceProviderCapabilities
+  resolveConfig?: (ctx) => RealtimeVoiceProviderConfig
+  createBrowserSession?: (req) => Promise<RealtimeVoiceBrowserSession>
 }
 ```
 
@@ -167,8 +176,8 @@ import { emptyPluginConfigSchema } from "openclaw/plugin-sdk"
 ```typescript
 import { appendFileLog, createFileLogWriter } from "openclaw/plugin-sdk"
 
-// Append a single line (fire-and-forget):
-appendFileLog(line: string, options: { path: string }): void
+// Append a single line:
+appendFileLog(line: string, options: FileLogAppendOptions): Promise<FileLogAppendResult> | FileLogAppendResult
 
 // Create a writer for repeated use:
 const writer = createFileLogWriter({ path: string, maxSizeMb?: number, rotate?: boolean })
@@ -220,8 +229,8 @@ import type { WebSearchProviderPlugin, WebSearchProviderToolDefinition, WebSearc
 interface WebSearchProviderPlugin {
   id: string;
   label: string;
-  hint?: string;
-  envVars?: string[];
+  hint: string;
+  envVars: string[];
   autoDetectOrder?: number;
   createTool(ctx: WebSearchProviderContext): WebSearchProviderToolDefinition | null;
 }
@@ -243,7 +252,23 @@ interface WebSearchProviderToolDefinition {
 import type {
   PluginHookMessageReceivedEvent,
   PluginHookBeforeContextSendEvent,
+  PluginHookBeforeContextSendResult,
   PluginHookStorageAfterAppendEvent,
+  PluginHookCompactionPlanEvent,
+  PluginHookCompactionPlanResult,
+  PluginHookContextCollectEvent,
+  PluginHookContextCollectResult,
+  PluginHookContextProjectEvent,
+  PluginHookContextProjectResult,
+  PluginHookContextPruneEvent,
+  PluginHookContextPruneResult,
+  PluginHookTransformLlmInputEvent,
+  PluginHookTransformLlmInputResult,
+  PluginHookTransformLlmOutputEvent,
+  PluginHookTransformLlmOutputResult,
+  PluginHookModelCallEndedEvent,
+  PluginHookAgentEndEvent,
+  // ... event and result types for all 33 hook points are exported
 } from "openclaw/plugin-sdk"
 
 // PluginHookSubagentSpawningEvent is NOT exported from openclaw/plugin-sdk.
