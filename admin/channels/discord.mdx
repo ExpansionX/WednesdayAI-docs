@@ -138,24 +138,6 @@ Discord slash commands register at startup. If you change `native: false`, the g
 
 Default slash command behavior: responses are ephemeral (only visible to the invoking user). Configure per command if needed.
 
-### Slash command registration
-
-OpenClaw registers a `/wednesday` slash command automatically on startup. Use `commandScope` to control where the command is registered:
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `commandScope` | `"global" \| "guild"` | `"guild"` | Registration scope for the `/wednesday` command |
-| `guildId` | string | — | Required when `commandScope: "guild"` |
-
-```yaml
-channels:
-  discord:
-    commandScope: "guild"
-    guildId: "123456789"
-```
-
-<Warning>Global command registration can take up to 1 hour to propagate. Use `guild` scope during setup.</Warning>
-
 ## Live streaming
 
 ```json5
@@ -175,17 +157,21 @@ channels:
 ```yaml
 channels:
   discord:
-    threads:
+    threadBindings:
       enabled: true
-      autoArchiveDuration: 1440
-      createForLongReplies: false
+      idleHours: 24
+      maxAgeHours: 0
+      spawnSubagentSessions: false
+      spawnAcpSessions: false
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `threads.enabled` | boolean | `true` | Participate in threads |
-| `threads.autoArchiveDuration` | integer | `1440` | `60 \| 1440 \| 4320 \| 10080` minutes |
-| `threads.createForLongReplies` | boolean | `false` | Auto-create thread when reply exceeds 2000 chars |
+| `threadBindings.enabled` | boolean | `true` | Participate in threads |
+| `threadBindings.idleHours` | integer | `24` | Hours of inactivity before a thread is considered idle |
+| `threadBindings.maxAgeHours` | integer | `0` | Maximum thread age in hours (0 = disabled by default) |
+| `threadBindings.spawnSubagentSessions` | boolean | `false` | Spawn a subagent session per thread |
+| `threadBindings.spawnAcpSessions` | boolean | `false` | Spawn an ACP session per thread |
 
 ## Voice channels
 
@@ -199,13 +185,19 @@ Requires:
     discord: {
       voice: {
         enabled: true,
-        autoJoin: { guildId: "123...", channelId: "456..." },
+        autoJoin: [{ guildId: "123...", channelId: "456..." }],
         tts: { enabled: true },
+        daveEncryption: true,              // enable DAVE E2E voice encryption (default: true)
+        decryptionFailureTolerance: 24,    // hours before treating decryption failures as an error (default: 24)
       },
     },
   },
 }
 ```
+
+<Warning>
+If you see `DecryptionFailed(UnencryptedWhenPassthroughDisabled)` errors in logs, this is a known upstream Discord/DAVE bug triggered when clients that don't support DAVE encryption join the channel. If voice becomes unusable, set `daveEncryption: false` as a workaround. `decryptionFailureTolerance` (default 24 hours) controls how long transient failures are tolerated before being treated as a hard error.
+</Warning>
 
 Users join voice channels via `/vc join` (Discord native command only).
 
@@ -218,25 +210,6 @@ openclaw message send --channel discord --target "channel:<forumId>" --message "
 ```
 
 Or via the `message thread create` tool action in an agent.
-
-## Interaction components
-
-Controls which Discord interaction component types the bot uses in responses:
-
-```yaml
-channels:
-  discord:
-    components:
-      buttons: true
-      selectMenus: true
-      modals: false
-```
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `components.buttons` | boolean | `true` | Enable button components in responses |
-| `components.selectMenus` | boolean | `true` | Enable select menu components |
-| `components.modals` | boolean | `false` | Enable modal (form) interactions |
 
 ## Troubleshooting
 

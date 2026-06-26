@@ -130,9 +130,8 @@ If you prefer to manage signal-cli separately (not auto-spawned by the gateway):
 ```yaml
 channels:
   signal:
-    reactions:
-      enabled: true
-      treatAsMessage: false
+    actions:
+      reactions: true
 ```
 
 ### Group message handling
@@ -140,18 +139,8 @@ channels:
 ```yaml
 channels:
   signal:
-    groups:
-      enabled: true
-      requireMention: true
-      mentionName: ""
-```
-
-### Typing indicators
-
-```yaml
-channels:
-  signal:
-    typingIndicators: true
+    groupPolicy: "allowlist"    # "open" | "allowlist" | "disabled"
+    groupAllowFrom: []          # sender allowlist — E.164 phone numbers or Signal UUIDs of users permitted to trigger the bot inside allowed groups
 ```
 
 ### Delivery receipts
@@ -159,20 +148,50 @@ channels:
 ```yaml
 channels:
   signal:
-    deliveryReceipts: true
+    sendReadReceipts: true
 ```
 
 ### Safety number changes
 
-```yaml
-channels:
-  signal:
-    trustOnSafetyNumberChange: false
+<Warning>
+Safety number changes (when a contact reinstalls Signal) cause message delivery failures. These are logged as `signal.safety_number_changed` events. Manual trust confirmation is required before messages resume.
+</Warning>
+
+## Delivery settings
+
+```json5
+{
+  channels: {
+    signal: {
+      textChunkLimit: 4000,           // chars per outbound chunk
+      chunkMode: "length",            // length | newline (paragraph-aware)
+      chunkNewlinePacking: true,      // pack multiple paragraphs up to limit (when chunkMode: "newline")
+      historyLimit: 50,               // group context history injection (0 = disabled)
+      dmHistoryLimit: 0,              // DM history injection
+      reactionLevel: "minimal",       // off | ack | minimal | extensive
+      ignoreAttachments: false,       // ignore inbound attachments
+      startupTimeoutMs: 30000,        // time to wait for signal-cli to start (ms)
+      sendReadReceipts: true,         // send read receipts to senders (default: true)
+    },
+  },
+}
 ```
 
-<Warning>
-Safety number changes (when a contact reinstalls Signal) cause message delivery failures. These are logged as `signal.safety_number_changed` events. With `trustOnSafetyNumberChange: false` (default), manual trust confirmation is required.
-</Warning>
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `textChunkLimit` | integer | `4000` | Maximum characters per outbound message chunk |
+| `chunkMode` | string | `"length"` | `length` splits at character count; `newline` splits at paragraph boundaries |
+| `chunkNewlinePacking` | boolean | `true` | When `chunkMode: "newline"`, packs multiple paragraphs into a single chunk up to the limit |
+| `historyLimit` | integer | `50` | Number of prior messages injected as group context (0 = disabled) |
+| `dmHistoryLimit` | integer | `0` | Number of prior messages injected as DM context (0 = disabled) |
+| `reactionLevel` | string | `"minimal"` | `off` \| `ack` \| `minimal` \| `extensive` — controls how much the bot reacts to messages |
+| `ignoreAttachments` | boolean | `false` | When `true`, inbound attachments are ignored and not passed to the agent |
+| `startupTimeoutMs` | integer | `30000` | Milliseconds to wait for signal-cli to start before treating it as a failure |
+| `sendReadReceipts` | boolean | `true` | Send Signal read receipts to message senders |
+
+<Note>
+If `startupTimeoutMs` is exceeded, the channel will fail to start and log a timeout error. Increase this value on slow systems or when using the JVM build of signal-cli.
+</Note>
 
 ## Troubleshooting
 
@@ -194,6 +213,14 @@ Safety number changes (when a contact reinstalls Signal) cause message delivery 
 
   <Accordion title="Registration fails with captcha error">
     Complete the captcha at https://signalcaptchas.org/registration/generate.html and pass the `signalcaptcha://` URL to the register command.
+  </Accordion>
+
+  <Accordion title="Channel fails to start / timeout error in logs">
+    signal-cli is taking longer than `startupTimeoutMs` (default 30 000 ms) to become ready. This is common on slow systems or when using the JVM build. Increase the timeout:
+
+    ```json5
+    { channels: { signal: { startupTimeoutMs: 60000 } } }
+    ```
   </Accordion>
 </AccordionGroup>
 

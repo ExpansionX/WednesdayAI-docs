@@ -43,12 +43,19 @@ openclaw hooks enable session-memory
 
 #### Configuring injected message counts
 
-```yaml
-sessionMemory:
-  messages:
-    maxCount: 20        # max memory entries to inject per turn (default: 10)
-    maxTokens: 4000     # cap injected memory tokens (default: 2000)
-    recencyWeight: 0.7  # 0–1, how much to weight recent vs relevant (default: 0.5)
+```json5
+// hooks.internal.entries["session-memory"]
+{
+  hooks: {
+    internal: {
+      entries: {
+        "session-memory": {
+          messages: 25,   // max memory entries to inject (default: 15)
+        },
+      },
+    },
+  },
+}
 ```
 
 ---
@@ -163,19 +170,6 @@ Runs `BOOT.md` from each configured agent's resolved workspace at gateway startu
 openclaw hooks enable boot-md
 ```
 
-#### File allowlist
-
-```yaml
-hooks:
-  internal:
-    bootstrapExtraFiles:
-      allowlist:
-        - "docs/**.md"
-        - "!docs/private/**"
-```
-
-Files outside the allowlist are silently ignored, even if referenced in BOOT.md. Uses gitignore-style glob patterns; negation (!) is supported.
-
 ---
 
 ## `message:sent`
@@ -190,12 +184,16 @@ Fires after OpenClaw delivers a reply to the channel and receives delivery confi
 **Payload:**
 ```typescript
 {
-  messageId: string
-  channelId: string
-  userId: string
-  agentId: string
+  to: string           // recipient identifier
   content: string
-  sentAt: string  // ISO-8601
+  success: boolean     // whether delivery succeeded
+  error?: string       // present if success is false
+  channelId: string
+  accountId?: string
+  conversationId?: string
+  messageId?: string
+  isGroup?: boolean
+  groupId?: string
 }
 ```
 
@@ -214,42 +212,14 @@ Fires when a subagent is about to spawn. Allows a hook to inspect or modify the 
 
 #### Return shape
 
-A hook on this event may return an object to modify the spawned agent:
+A hook on this event must return one of:
 
 ```typescript
-{
-  systemPrompt?: string  // override the subagent's system prompt
-  model?: string         // override the model (must be in providers config)
-  maxTokens?: number     // cap the subagent's output token budget
-  tools?: string[]       // restrict available tools by name
-  skip?: boolean         // if true, cancels the subagent spawn entirely
-}
+| { status: "ok"; threadBindingReady?: boolean }
+| { status: "error"; error: string }
 ```
 
----
-
-## `before_file_write`
-
-Fires before OpenClaw writes any file to the filesystem within sandboxed plugin operations.
-
-| Property | Value |
-| -------- | ----- |
-| **When** | Before any plugin file write |
-| **Mutating** | Yes |
-
-**Payload:**
-```typescript
-{
-  path: string
-  content: string
-  encoding: string
-  pluginId: string
-}
-```
-
-**Return:** Return `{ content: "..." }` to rewrite content, or `{ skip: true }` to abort the write.
-
-**Use cases:** Content scanning, DLP enforcement, format normalisation.
+Return `{ status: "ok" }` to allow the spawn, `{ status: "ok", threadBindingReady: true }` if a thread binding is ready, or `{ status: "error", error: "reason" }` to block the spawn.
 
 ---
 

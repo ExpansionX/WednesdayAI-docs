@@ -12,7 +12,7 @@ WednesdayAI has **two distinct hook systems**. They share the word "hook" but ar
 | --- | --------------- | ---------------- |
 | Where | Inside a plugin | A `HOOK.md` + handler directory |
 | Registered via | `api.on(name, handler)` | Auto-discovery of `HOOK.md` |
-| Fires on | ~35 typed runtime events | Coarse gateway/command events |
+| Fires on | 33 typed runtime events | Coarse gateway/command events |
 | Typical use | Transform LLM input/output, observe model calls, context lifecycle | Run code on `/new`, `/reset`, gateway start |
 | Can mutate the run? | Yes (some hooks) | No — side-effect automation |
 
@@ -86,10 +86,9 @@ These are the `PluginHookName` values accepted by `api.on(...)`. Fire timing and
 | `after_tool_call` | After a tool executes | No (observe) |
 | `tool_result_persist` | Before a tool result is written to the transcript | Yes — replace the `message` |
 | `before_message_write` | Before any message is written to the JSONL transcript | Yes — `block` or replace the `message` |
-| `before_file_write` | Before any plugin file write to the filesystem | Yes — return `{ content }` to rewrite, or `{ skip: true }` to abort |
 | `session_start` | A session starts | No (observe) |
 | `session_end` | A session ends | No (observe) |
-| `subagent_spawning` | A subagent is about to spawn | Yes — `status: "ok" \| "error"`; may also return `systemPrompt`, `model`, `maxTokens`, `tools`, or `skip: true` to modify or cancel the spawn |
+| `subagent_spawning` | A subagent is about to spawn | Yes — `{ status: "ok"; threadBindingReady?: boolean }` to allow, or `{ status: "error"; error: string }` to block |
 | `subagent_delivery_target` | Resolving where a subagent reply is delivered | Yes — override `origin` |
 | `subagent_spawned` | A subagent has spawned | No (observe) |
 | `subagent_ended` | A subagent ended | No (observe) |
@@ -122,17 +121,6 @@ api.on("before_prompt_build", (event, ctx) => {
 
 Both `systemPrompt` and `prependContext` are optional — return either, both, or neither. `systemPrompt` is appended once per run after the full section build; `prependContext` is a plaintext string inserted into the context immediately before the user's message.
 
-### `before_file_write` example
-
-```typescript
-api.on("before_file_write", (payload) => {
-  if (payload.content.includes("SECRET")) {
-    return { skip: true }
-  }
-  return { content: payload.content.toUpperCase() }
-})
-```
-
 <Tip>
   The `context.*` and `compaction.plan` hooks are the context-engine surface. A plugin that
   fully owns compaction can set `ownsCompaction: true` in its plugin definition (or return
@@ -160,7 +148,7 @@ metadata: { "openclaw": { "emoji": "💾", "events": ["command:new", "command:re
 ---
 ```
 
-Common standalone events include `command:new`, `command:reset`, `command:stop`, `command:compact`, `agent:bootstrap`, `gateway:startup`, `message:received`, `message:transcribed`, `message:preprocessed`, and `message:sent`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
+Common standalone events include `command:new`, `command:reset`, `command:stop`, `agent:bootstrap`, `gateway:startup`, `message:received`, `message:transcribed`, `message:preprocessed`, and `message:sent`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
 
 `message:transcribed` fires when an inbound audio message has been transcribed. `message:preprocessed` fires after the message has been enriched with links, images, and transcripts — immediately before routing. Both are useful for logging pipelines and external integrations that need the enriched message body without modifying the run.
 

@@ -10,25 +10,41 @@ description: "Connect WednesdayAI to a self-hosted vLLM inference server."
 - A running vLLM server with its OpenAI-compatible API enabled
 - The server must be reachable from the OpenClaw gateway host
 
+## Activation
+
+vLLM auto-activates when `VLLM_API_KEY` is set in the environment. The default base URL is `http://127.0.0.1:8000/v1`.
+
+<Tip>
+Run `openclaw onboard` to configure vLLM interactively — it generates the correct `models.providers.vllm` config block for you.
+</Tip>
+
 ## Configuration
 
 ```yaml
-providers:
-  vllm:
-    enabled: true
-    baseUrl: "http://localhost:8000/v1"
-    model: "meta-llama/Llama-3.1-8B-Instruct"
-    apiKey: ""
-    timeout: 120000
+models:
+  providers:
+    vllm:
+      baseUrl: "http://127.0.0.1:8000/v1"
+      api: "openai-completions"
+      apiKey: "VLLM_API_KEY"   # env var name, not the literal key
+      models:
+        - id: "meta-llama/Llama-3.1-8B-Instruct"
+          name: "Llama 3.1 8B"
+          contextWindow: 128000
+          maxTokens: 4096
+          input: 0
+          cost: 0
 ```
 
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `enabled` | boolean | `false` | Enable this provider |
-| `baseUrl` | string | — | Base URL of the vLLM OpenAI-compatible endpoint |
-| `model` | string | — | Model ID as loaded by your vLLM server |
-| `apiKey` | string | `""` | API key if vLLM is configured with `--api-key` |
-| `timeout` | integer ms | `120000` | Request timeout — increase for large models |
+| Key | Type | Description |
+|-----|------|-------------|
+| `baseUrl` | string | Base URL of the vLLM OpenAI-compatible endpoint |
+| `api` | string | API style — `openai-completions` for vLLM |
+| `apiKey` | string | Name of the env var holding the API key |
+| `models[].id` | string | Model ID as loaded by your vLLM server |
+| `models[].contextWindow` | integer | Context window size in tokens |
+| `models[].maxTokens` | integer | Max output tokens |
+| `models[].input` / `cost` | number | Cost per token (use `0` for self-hosted) |
 
 ## Running vLLM
 
@@ -43,7 +59,7 @@ docker run --runtime nvidia --gpus all \
 ## Verify the connection
 
 ```bash
-openclaw models status --provider vllm --probe
+openclaw models status --probe-provider vllm
 ```
 
 <Note>
