@@ -7,7 +7,7 @@ audience: developer
 
 # Hooks catalogue
 
-WednesdayAI ships four bundled hooks. They are auto-discovered from `dist/hooks/bundled/` and managed via the CLI.
+WednesdayAI ships five bundled hooks. They are auto-discovered from `dist/hooks/bundled/` and managed via the CLI.
 
 ```bash
 openclaw hooks list            # show all hooks with enabled/disabled status
@@ -40,6 +40,43 @@ openclaw hooks enable session-memory
 ```
 
 **What it does:** when a session resets, it locates the pre-reset transcript, extracts the last N user/assistant messages (default 15), generates a descriptive slug, writes a structured summary to the workspace memory directory, and confirms the file path. On the next session start the agent can read this file if memory search tools are configured.
+
+---
+
+## `session-journal`
+
+Writes a reflective LLM journal entry to the agent's `journal/` folder when an opted-in agent issues `/new` or `/reset`. Unlike most bundled hooks, this hook is enabled **per-agent** rather than globally — there is no `hooks.internal.entries` key for it.
+
+| Property | Value |
+| -------- | ----- |
+| **Events** | `command:new`, `command:reset` |
+| **Writes to** | `<workspace>/journal/YYYY-MM-DD-HHMMss-<slug>.md` |
+| **Requires** | `workspace.dir` |
+| **Emoji** | 📔 |
+
+**Enable:** add `sessionJournal.enabled: true` to the agent's entry in `openclaw.json`:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "claire",
+        "sessionJournal": {
+          "enabled": true,
+          "prompt": "Write structured patient notes..."
+        }
+      }
+    ]
+  }
+}
+```
+
+Set `sessionJournal.enabled: false` (or omit the key entirely) to disable for a specific agent. The `prompt` field is optional; the default targets patient-notes / coaching-journal style entries.
+
+**What it does:** on `/new` or `/reset`, the hook calls the LLM with the current session transcript and the configured prompt, generates a slug from the response, and writes the journal entry to `<effectiveWorkspaceDir>/journal/YYYY-MM-DD-HHMMss-<slug>.md`. When `workspaceLane` is in context, `effectiveWorkspaceDir` is the lane-local directory; otherwise it falls back to the agent's configured workspace.
+
+**Limitations:** journal entries are written only when a session explicitly resets via `/new` or `/reset`. Sessions that end via process exit, connection drop, or idle timeout do not produce an entry. The `/new` and `/reset` commands block until the LLM call completes (up to ~15 s) — disable this hook for an agent if that latency is unacceptable.
 
 ---
 
