@@ -9,6 +9,8 @@ audience: admin
 
 The `openclaw` CLI is the primary interface for managing the gateway, channels, agents, models, and configuration. Install it globally via npm or pnpm - see [Getting started](/admin/getting-started).
 
+The binary is also available as `wednesdayai` — both names are equivalent.
+
 ```bash
 openclaw --version            # show installed version (-V also works)
 openclaw --help               # list all top-level commands
@@ -68,6 +70,8 @@ Key flags: `--workspace <dir>`, `--reset`, `--reset-scope <config\|config+creds+
 
 Interactive configuration wizard (models, channels, skills, gateway). Re-runs onboarding-style prompts against an existing config.
 
+Key flags: `--section <section>` — run only the specified wizard section instead of the full wizard. Valid values: `workspace | model | web | gateway | daemon | channels | skills | health`.
+
 ### `openclaw completion`
 
 Print a shell completion script for your shell.
@@ -105,6 +109,8 @@ openclaw update                  # update to latest on the current channel
 openclaw update --dry-run        # preview without applying
 openclaw update --channel beta   # stable | beta | dev
 openclaw update --tag <version>  # install a specific version
+openclaw update --no-restart     # skip gateway service restart after successful update (useful for automation)
+openclaw update --yes            # non-interactive mode, accepts downgrade prompts
 openclaw update status           # show current version, update channel, and whether an update is available
 openclaw update wizard           # step-by-step wizard to configure update settings (channel, schedule, notifications)
 ```
@@ -126,15 +132,20 @@ openclaw gateway install            # install as systemd/launchd/schtasks servic
 openclaw gateway uninstall
 openclaw gateway status             # probe the gateway RPC (default)
 openclaw gateway status --deep --json
+openclaw gateway usage-cost         # rolling usage/cost summary from session logs
 openclaw gateway health             # health snapshot via RPC
 openclaw gateway probe              # connectivity probe
 openclaw gateway discover           # discover gateways on the network
 openclaw gateway call <method> --params '<json>'   # invoke any RPC method
 ```
 
-Foreground run flags: `--port <port>`, `--bind <loopback\|tailnet\|lan\|auto\|custom>`, `--token <token>`, `--auth <token\|password>`, `--password <password>`, `--tailscale <off\|serve\|funnel>`, `--allow-unconfigured`, `--force`, `--verbose`, `--ws-log <auto\|full\|compact>`.
+Foreground run flags: `--port <port>`, `--bind <loopback\|tailnet\|lan\|auto\|custom>`, `--token <token>`, `--auth <none\|token\|password\|trusted-proxy>`, `--password <password>`, `--tailscale <off\|serve\|funnel>`, `--allow-unconfigured`, `--force`, `--verbose`, `--ws-log <auto\|full\|compact>`.
 
 RPC subcommands (`call`, `health`, `status`, `probe`, `discover`) accept `--url`, `--token`, `--password`, `--timeout`, `--expect-final`.
+
+`gateway probe` additional flags: `--ssh <user@host[:port]>` (route probe through SSH tunnel), `--ssh-identity <path>` (SSH identity file path), `--ssh-auto` (auto-derive SSH target via Bonjour discovery).
+
+`gateway usage-cost` — Fetch rolling usage/cost summary from session logs. Flags: `--days <days>` (number of days to include), `--url <url>`, `--token <token>`, `--json`.
 
 <Warning>
 When you pass `--url`, the CLI does **not** auto-apply config or environment credentials. Include `--token` or `--password` explicitly; missing credentials is an error.
@@ -238,7 +249,7 @@ Manage AI model credentials and selection. `openclaw models` with no subcommand 
 openclaw models status                   # auth overview + OAuth expiry
 openclaw models status --check           # exit 1=expired/missing, 2=expiring
 openclaw models status --probe           # probe configured provider auth (validates credentials live — does not send a completion)
-openclaw models status --probe --timeout 15000   # timeout for probe request (default: 10000 ms)
+openclaw models status --probe --probe-timeout 15000   # timeout for probe request (default: 10000 ms)
 openclaw models list --all
 openclaw models set anthropic/claude-sonnet-4-5
 openclaw models set-image openai/gpt-image-1
@@ -249,7 +260,7 @@ openclaw models auth order set --provider anthropic anthropic:work
 
 Subcommands: `list`, `status`, `set <model>`, `set-image <model>`, `aliases list\|add\|rm`, `fallbacks list\|add\|rm\|clear`, `image-fallbacks list\|add\|rm\|clear`, `scan`, `auth add\|setup-token\|paste-token`, `auth order get\|set\|clear`.
 
-`models status` key flags: `--check`, `--probe` (validates credentials live — does not send a completion), `--timeout <ms>` (probe timeout, default `10000`).
+`models status` key flags: `--check`, `--probe` (validates credentials live — does not send a completion), `--probe-timeout <ms>` (probe timeout, default `10000`).
 
 `models set` writes `agents.defaults.model.primary`; `models set-image` writes `agents.defaults.imageModel.primary`.
 
@@ -284,7 +295,7 @@ openclaw channels capabilities --channel whatsapp             # list capabilitie
 openclaw channels resolve alice bob --channel telegram [--kind auto]   # resolve names/IDs to OpenClaw user records
 ```
 
-Subcommands: `list`, `status`, `logs`, `add`, `remove`, `login`, `logout`, `capabilities --channel <name>`, `resolve <entries...> --channel <name> [--kind <auto|user|group>]`. Common flags: `--channel <name>`, `--account <id>`, `--name <label>`, `--json`. `--channel` accepts `whatsapp\|telegram\|discord\|googlechat\|slack\|mattermost\|signal\|imessage\|msteams` (plus installed channel extensions). `channels add` runs a wizard when no flags are passed; flags switch to non-interactive mode.
+Subcommands: `list`, `status`, `logs`, `add`, `remove`, `login`, `logout`, `capabilities --channel <name>`, `resolve <entries...> --channel <name> [--kind <auto|user|group>]`. Common flags: `--channel <name>`, `--account <id>`, `--name <label>`, `--json`. `--channel` accepts `whatsapp\|telegram\|discord\|googlechat\|slack\|mattermost\|signal\|imessage\|msteams\|irc` (plus installed channel extensions). `channels add` runs a wizard when no flags are passed; flags switch to non-interactive mode.
 
 ### `openclaw pairing`
 
@@ -424,7 +435,7 @@ openclaw sessions cleanup --enforce                   # enforce storage caps and
 openclaw sessions backfill-user-ids                   # one-time migration: back-fill userId in legacy records
 ```
 
-Key flags: `--json`, `--verbose`, `--store <path>`, `--active <minutes>`.
+Key flags: `--json`, `--verbose`, `--store <path>`, `--active <minutes>`, `--agent <id>` (inspect a specific agent's store), `--all-agents` (aggregate across all agents).
 
 `sessions cleanup` — Enforce session-store storage budgets and caps. Prunes sessions exceeding configured limits.
 
@@ -434,7 +445,7 @@ Key flags: `--json`, `--verbose`, `--store <path>`, `--active <minutes>`.
 | `--enforce` | Enforce storage caps and prune over-budget sessions |
 | `--all-agents` | Run cleanup across all agents (not just current) |
 | `--agent <id>` | Target a specific agent |
-| `--fix-missing` | Repair records with missing required fields |
+| `--fix-missing` | Remove store entries whose transcript files are missing (bypasses age/count retention) |
 | `--active-key <key>` | Treat sessions with this key as active (skip pruning) |
 
 `sessions backfill-user-ids` is safe on live data and idempotent — re-running it is a no-op for records already migrated.

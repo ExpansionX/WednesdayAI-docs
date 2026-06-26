@@ -117,6 +117,7 @@ The strict root object accepts these keys (everything else is rejected). Each ha
 | `update` | Update channel and auto-update policy |
 | `discovery` | mDNS and wide-area discovery |
 | `canvasHost` | Local canvas static host |
+| `nodeHost` | Node.js host configuration including browser proxy settings |
 | `web` | WhatsApp-web client tuning |
 | `logging` | Log levels, file, redaction |
 | `diagnostics` | OpenTelemetry export, cache tracing |
@@ -125,6 +126,37 @@ The strict root object accepts these keys (everything else is rejected). Each ha
 | `meta` | Bookkeeping (last-touched version/time) |
 | `wizard` | Onboarding wizard bookkeeping |
 | `env` | Inline env vars and shell import |
+| `network` | Global outbound SSRF policy (all requests, not just browser) |
+
+---
+
+## `network` - Global outbound SSRF policy
+
+`network.ssrfPolicy` applies to **all** outbound HTTP requests made by the gateway — agent tool calls, webhook deliveries, plugin fetches, and so on. `browser.ssrfPolicy` is a parallel control scoped only to browser-driven fetches; both share the same shape.
+
+```json5
+{
+  network: {
+    ssrfPolicy: {
+      dangerouslyAllowPrivateNetwork: false,  // allow RFC-1918 / loopback targets
+      hostnameAllowlist: ["example.com"],      // always-allowed hostnames
+      allowedCidrs: ["10.0.0.0/8"],           // CIDR ranges to allow
+      allowRfc2544BenchmarkRange: false,       // allow RFC-2544 benchmark ranges
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `network.ssrfPolicy.dangerouslyAllowPrivateNetwork` | boolean | `false` | Allow outbound requests to RFC-1918 private and loopback addresses |
+| `network.ssrfPolicy.hostnameAllowlist` | string[] | `[]` | Hostnames unconditionally permitted regardless of other policy |
+| `network.ssrfPolicy.allowedCidrs` | string[] | `[]` | CIDR ranges to allow |
+| `network.ssrfPolicy.allowRfc2544BenchmarkRange` | boolean | `false` | Allow RFC-2544 benchmark address ranges |
+
+<Note>
+For browser-specific SSRF controls see [`browser.ssrfPolicy`](#browser---browser-control). The two policies are evaluated independently — a request that passes `network.ssrfPolicy` but originates from the browser is also checked against `browser.ssrfPolicy`.
+</Note>
 
 ---
 
@@ -160,8 +192,11 @@ The strict root object accepts these keys (everything else is rejected). Each ha
     controlUi: {
       enabled: true,
       basePath: "/",
+      root: false,                        // serve control UI at root path
       allowedOrigins: ["https://panel.example.com"],
       allowInsecureAuth: false,
+      dangerouslyAllowHostHeaderOriginFallback: false,  // use Host header as CORS origin fallback
+      dangerouslyDisableDeviceAuth: false,              // disable device auth for control UI
     },
     tailscale: { mode: "off", resetOnExit: false },   // off | serve | funnel (restart required)
     reload: { mode: "hybrid", debounceMs: 300 },
@@ -229,6 +264,22 @@ Additional restart-policy keys:
 
 <Warning>
 Non-loopback `bind` requires auth. The gateway refuses to start with `bind: "lan"`, `"tailnet"`, or `"custom"` if no token or password is set. See [Gateway authentication](/admin/gateway/authentication).
+</Warning>
+
+### Control UI (`gateway.controlUi`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `gateway.controlUi.enabled` | boolean | `true` | Enable or disable the control UI entirely |
+| `gateway.controlUi.basePath` | string | `"/"` | URL path prefix for the control UI |
+| `gateway.controlUi.root` | boolean | `false` | Serve the control UI at the root path (`/`) rather than under `basePath` |
+| `gateway.controlUi.allowedOrigins` | string[] | `[]` | Explicit CORS origin allowlist |
+| `gateway.controlUi.allowInsecureAuth` | boolean | `false` | Allow auth over plain HTTP (not just HTTPS) |
+| `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback` | boolean | `false` | Use the `Host` header as the CORS origin when no `Origin` header is present |
+| `gateway.controlUi.dangerouslyDisableDeviceAuth` | boolean | `false` | Disable device authentication for the control UI |
+
+<Warning>
+`dangerouslyDisableDeviceAuth: true` removes the device-pairing check from the control UI. Only use this in a fully trusted, isolated environment — enabling it on a network-exposed gateway allows unauthenticated access to the admin interface.
 </Warning>
 
 ### HTTP endpoints
@@ -609,20 +660,16 @@ Additional cron keys:
 ```json5
 {
   cron: {
-    webhook: {
-      enabled: false,
-      secret: "",
-      path: "/_cron",
-    },
+    webhook: "https://example.com/cron-trigger",   // HttpUrl — plain URL
+    webhookToken: "shared-secret",
   },
 }
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `cron.webhook.enabled` | boolean | `false` | Enable incoming webhook triggers for cron jobs |
-| `cron.webhook.secret` | string | — | HMAC-SHA256 secret for verifying webhook payloads |
-| `cron.webhook.path` | string | `"/_cron"` | Path prefix for webhook endpoints |
+| `cron.webhook` | string (HttpUrl) | — | URL to receive cron trigger notifications |
+| `cron.webhookToken` | string | — | Authentication token for the cron webhook |
 
 ---
 
@@ -692,16 +739,16 @@ Additional plugins keys:
 ```json5
 {
   plugins: {
-    installs: [
-      { name: "@wednesdayai/voice-openai", version: "^1.0" },
-    ],
+    installs: {
+      "@wednesdayai/voice-openai": { version: "^1.0" },
+    },
   },
 }
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `plugins.installs` | array | `[]` | Plugin specifiers auto-installed on gateway start. Each item: `{ name, version }` |
+| `plugins.installs` | object | `{}` | Plugin specifiers auto-installed on gateway start. Keyed by plugin name: `{ "<plugin-name>": { version } }` |
 
 ---
 
@@ -725,8 +772,9 @@ Additional skills keys:
 {
   skills: {
     limits: {
-      maxSkillSize: 524288,
-      maxSkillsPerPlugin: 20,
+      maxSkillFileBytes: 524288,
+      maxCandidatesPerRoot: 100,
+      maxSkillsLoadedPerSource: 50,
     },
   },
 }
@@ -734,8 +782,9 @@ Additional skills keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `skills.limits.maxSkillSize` | integer | `524288` | Max SKILL.md file size in bytes (512 KB) |
-| `skills.limits.maxSkillsPerPlugin` | integer | `20` | Max skills per plugin |
+| `skills.limits.maxSkillFileBytes` | integer | `524288` | Max SKILL.md file size in bytes (512 KB) |
+| `skills.limits.maxCandidatesPerRoot` | integer | — | Max skill candidates per root directory |
+| `skills.limits.maxSkillsLoadedPerSource` | integer | — | Max skills loaded per source |
 
 ---
 
@@ -759,8 +808,8 @@ Additional skills keys:
 {
   secrets: {
     providers: {
-      "env": { kind: "env" },
-      "vault": { kind: "exec", command: "vault-fetch" },
+      "env": { source: "env" },
+      "vault": { source: "exec", command: "vault-fetch" },
     },
     defaults: { env: "env", file: "file", exec: "vault" },
     resolution: { maxProviderConcurrency: 4, maxRefsPerProvider: 256 },
@@ -794,9 +843,8 @@ Additional auth keys:
 {
   auth: {
     cooldowns: {
-      failedLoginDelayMs: 1000,
-      maxFailedAttempts: 5,
-      lockDurationMs: 300000,
+      billingBackoffHoursByProvider: { anthropic: 6 },
+      billingMaxHours: 24,
     },
   },
 }
@@ -804,9 +852,8 @@ Additional auth keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `auth.cooldowns.failedLoginDelayMs` | integer | `1000` | Delay (ms) after a failed login attempt |
-| `auth.cooldowns.maxFailedAttempts` | integer | `5` | Lock account after this many consecutive failures |
-| `auth.cooldowns.lockDurationMs` | integer | `300000` | Lock duration in ms (5 min default) |
+| `auth.cooldowns.billingBackoffHoursByProvider` | object | `{}` | Per-provider billing backoff hours (record keyed by provider name) |
+| `auth.cooldowns.billingMaxHours` | number | — | Maximum billing backoff hours |
 
 ---
 
@@ -841,7 +888,7 @@ Additional auth keys:
     defaultProfile: "chrome",
     ssrfPolicy: { dangerouslyAllowPrivateNetwork: false, hostnameAllowlist: ["example.com"] },
     profiles: {
-      "work": { cdpPort: 9222, driver: "openclaw" },   // driver: openclaw | extension
+      "work": { cdpPort: 9222, driver: "clawd" },   // driver: clawd | extension
     },
   },
 }
@@ -891,19 +938,33 @@ Additional ACP streaming keys:
 {
   acp: {
     stream: {
-      enabled: true,
-      chunkSize: 512,
-      flushIntervalMs: 50,
+      coalesceIdleMs: 50,
+      maxChunkChars: 2000,
+      repeatSuppression: true,
+      hiddenBoundarySeparator: "",
+      maxOutputChars: 0,
+      maxSessionUpdateChars: 0,
+      tagVisibility: "default",
     },
+    dispatch: { /* dispatch configuration */ },
+    backend: { /* backend configuration */ },
+    runtime: { /* runtime configuration */ },
   },
 }
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `acp.stream.enabled` | boolean | `true` | Enable streaming responses over ACP |
-| `acp.stream.chunkSize` | integer | `512` | Streaming chunk size in bytes |
-| `acp.stream.flushIntervalMs` | integer | `50` | How often the stream buffer flushes |
+| `acp.stream.coalesceIdleMs` | integer | `50` | Idle time before flushing a partial stream chunk (ms) |
+| `acp.stream.maxChunkChars` | integer | — | Max characters per stream chunk |
+| `acp.stream.repeatSuppression` | boolean | `true` | Suppress repeated identical chunks |
+| `acp.stream.hiddenBoundarySeparator` | string | `""` | Separator inserted at hidden chunk boundaries |
+| `acp.stream.maxOutputChars` | integer | `0` | Max total output characters (0 = unlimited) |
+| `acp.stream.maxSessionUpdateChars` | integer | `0` | Max chars per session update (0 = unlimited) |
+| `acp.stream.tagVisibility` | string/object | `"default"` | Controls tag visibility in the stream |
+| `acp.dispatch` | object | — | Dispatch sub-object (see extended config) |
+| `acp.backend` | object | — | Backend sub-object (see extended config) |
+| `acp.runtime` | object | — | Runtime sub-object (see extended config) |
 
 ---
 
@@ -976,15 +1037,35 @@ Each agent id listed must exist in `agents.list`.
     consoleStyle: "pretty",             // pretty | compact | json
     redactSensitive: "tools",           // off | tools
     redactPatterns: ["sk-.*"],
+    maxFileBytes: 10485760,             // rotate log file after 10 MB
+    maxBackups: 3,                      // number of rotated log files to keep
+    fileLogs: {                         // per-profile file logging
+      defaults: { level: "info" },
+      profiles: {
+        "verbose": { level: "debug" },
+      },
+    },
   },
 }
 ```
 
 `OPENCLAW_LOG_LEVEL=debug` overrides both `level` and `consoleLevel`.
 
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `logging.level` | string | `"info"` | Global log level: `silent \| fatal \| error \| warn \| info \| debug \| trace` |
+| `logging.file` | string | — | Path template for the log file; `YYYY-MM-DD` is substituted with the current date |
+| `logging.consoleLevel` | string | `"info"` | Log level for console (stdout) output |
+| `logging.consoleStyle` | string | `"pretty"` | Console format: `pretty \| compact \| json` |
+| `logging.redactSensitive` | string | `"tools"` | Redaction scope: `off \| tools` |
+| `logging.redactPatterns` | string[] | `[]` | Additional regex patterns whose matches are redacted from logs |
+| `logging.maxFileBytes` | integer | — | Max log file size in bytes before rotation (e.g. `10485760` = 10 MB) |
+| `logging.maxBackups` | integer | — | Number of rotated log files to retain |
+| `logging.fileLogs` | object | — | Per-profile file logging config. Contains `defaults` (base log config) and `profiles` (named overrides) sub-objects |
+
 ---
 
-## `diagnostics` - OpenTelemetry export
+## `diagnostics` - OpenTelemetry export and session capture
 
 ```json5
 {
@@ -998,26 +1079,75 @@ Each agent id listed must exist in `agents.list`.
       metrics: true,
       logs: false,
       sampleRate: 1.0,
+      tracesEndpoint: "http://otel-collector:4318/v1/traces",   // per-signal override
+      metricsEndpoint: "http://otel-collector:4318/v1/metrics",
+      logsEndpoint: "http://otel-collector:4318/v1/logs",
+      serviceName: "wednesdayai-gateway",
+      flushIntervalMs: 5000,
+      captureContent: false,            // or object with granular flags
+      headers: {},                      // auth/custom headers for OTLP exporter
+      langfuse: {
+        host: "https://cloud.langfuse.com",
+        publicKey: "pk-lf-...",
+        secretKey: "sk-lf-...",
+        filterInfraSpans: true,
+        sessionSpans: true,
+        sessionIdleTimeoutMs: 300000,
+      },
     },
+    capture: { mode: "off" },           // off | sampled | all
+    cacheTrace: false,
+    modelPayloadLog: false,             // true | false | path string
+    stuckSessionWarnMs: 60000,
+    stuckSessionAbortMs: 300000,
   },
 }
 ```
 
-Additional diagnostics keys:
-
-```json5
-{
-  diagnostics: {
-    otel: {
-      headers: {},
-    },
-  },
-}
-```
+### `diagnostics.otel` keys
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `diagnostics.otel.headers` | object | `{}` | HTTP headers for the OTLP exporter (e.g. for auth) |
+| `diagnostics.otel.enabled` | boolean | `false` | Enable OTLP export |
+| `diagnostics.otel.endpoint` | string | — | Base OTLP collector endpoint (used when per-signal endpoints are not set) |
+| `diagnostics.otel.tracesEndpoint` | string | — | Per-signal OTLP endpoint for traces; overrides `endpoint` for traces |
+| `diagnostics.otel.metricsEndpoint` | string | — | Per-signal OTLP endpoint for metrics; overrides `endpoint` for metrics |
+| `diagnostics.otel.logsEndpoint` | string | — | Per-signal OTLP endpoint for logs; overrides `endpoint` for logs |
+| `diagnostics.otel.protocol` | string | `"http/protobuf"` | `"http/protobuf" \| "grpc"` |
+| `diagnostics.otel.traces` | boolean | `true` | Export trace spans |
+| `diagnostics.otel.metrics` | boolean | `true` | Export metrics |
+| `diagnostics.otel.logs` | boolean | `false` | Export logs via OTLP |
+| `diagnostics.otel.sampleRate` | number | `1.0` | Trace sample rate (`0.0`–`1.0`) |
+| `diagnostics.otel.serviceName` | string | — | Service name tag attached to all telemetry |
+| `diagnostics.otel.flushIntervalMs` | integer | — | How often (ms) buffered telemetry is flushed to the collector |
+| `diagnostics.otel.captureContent` | boolean \| object | `false` | Capture message content in trace spans. Pass `true` to capture all, or an object with granular flags per signal type |
+| `diagnostics.otel.headers` | object | `{}` | HTTP headers sent with every OTLP request (e.g. `Authorization`) |
+| `diagnostics.otel.langfuse` | object | — | Langfuse integration — see sub-table below |
+
+**`diagnostics.otel.langfuse` sub-keys:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `langfuse.host` | string | `"https://cloud.langfuse.com"` | Langfuse instance URL |
+| `langfuse.publicKey` | string | — | Langfuse project public key |
+| `langfuse.secretKey` | string | — | Langfuse project secret key |
+| `langfuse.filterInfraSpans` | boolean | `true` | Exclude internal infrastructure spans from Langfuse traces |
+| `langfuse.sessionSpans` | boolean | `true` | Group spans by gateway session |
+| `langfuse.sessionIdleTimeoutMs` | integer | — | Idle timeout (ms) before a Langfuse session is closed |
+
+### Top-level `diagnostics` keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `diagnostics.capture` | object | — | Session capture config: `{ mode: "off" \| "sampled" \| "all", schedule?, ... }` |
+| `diagnostics.cacheTrace` | boolean | `false` | Log cache trace events for debugging prompt-cache behaviour |
+| `diagnostics.modelPayloadLog` | boolean \| string | `false` | Log raw model request/response payloads. Set to `true` (stderr) or a file path |
+| `diagnostics.stuckSessionWarnMs` | integer | — | Emit a warning if a session has not advanced for this many milliseconds |
+| `diagnostics.stuckSessionAbortMs` | integer | — | Abort a session that has been stuck longer than this many milliseconds |
+
+<Warning>
+`modelPayloadLog` writes unredacted model payloads to disk or stderr. Never enable in production — logs will contain user messages and model responses in plaintext.
+</Warning>
 
 ---
 

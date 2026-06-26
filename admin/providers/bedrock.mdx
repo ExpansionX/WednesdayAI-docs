@@ -17,23 +17,29 @@ OpenClaw reads AWS credentials from the standard credential chain — do **not**
 
 Supported sources (in resolution order):
 
+- **Bearer token:** `AWS_BEARER_TOKEN_BEDROCK` — checked first before any key-based auth
 - **IAM instance profile** — recommended for EC2/ECS/EKS; no config needed
 - **Environment variables:** `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`
+- **Named profile:** `AWS_PROFILE` — selects a named profile from `~/.aws/credentials` or `~/.aws/config`
 - **Shared credentials file:** `~/.aws/credentials`
 
 The IAM principal needs `bedrock:InvokeModel` and `bedrock:InvokeModelWithResponseStream` permissions.
 
 ## Configuration
 
-```yaml
-models:
-  bedrockDiscovery:
-    enabled: true
-    region: "us-east-1"
-    providerFilter: []      # optional: limit to specific model providers
-    refreshInterval: 3600   # seconds between model list refresh
-    defaultContextWindow: 200000
-    defaultMaxTokens: 4096
+```json5
+{
+  models: {
+    bedrockDiscovery: {
+      enabled: true,
+      region: "us-east-1",
+      providerFilter: [], // optional: limit to specific model providers
+      refreshInterval: 3600, // seconds between model list refresh
+      defaultContextWindow: 32000,
+      defaultMaxTokens: 4096,
+    },
+  },
+}
 ```
 
 | Key | Type | Default | Description |
@@ -42,8 +48,10 @@ models:
 | `region` | string | `"us-east-1"` | AWS region to query |
 | `providerFilter` | list | `[]` | Limit to specific model providers (e.g. `["anthropic"]`) |
 | `refreshInterval` | integer | `3600` | Seconds between model list refresh |
-| `defaultContextWindow` | integer | `200000` | Fallback context window size (tokens) |
+| `defaultContextWindow` | integer | `32000` | Fallback context window size (tokens) |
 | `defaultMaxTokens` | integer | `4096` | Fallback max output tokens |
+
+When `bedrockDiscovery.region` is not set, the region is resolved in this order: `AWS_REGION` env var → `AWS_DEFAULT_REGION` env var → `us-east-1`.
 
 ## Available models
 
@@ -60,16 +68,20 @@ Use `us.`-prefixed inference profile IDs for automatic cross-region failover.
 
 ## Set the default model
 
-```yaml
-model: "us.anthropic.claude-sonnet-4-6-20251001-v1:0"
-models:
-  bedrockDiscovery:
-    enabled: true
-    region: "us-east-1"
+```json5
+{
+  model: "us.anthropic.claude-sonnet-4-6-20251001-v1:0",
+  models: {
+    bedrockDiscovery: {
+      enabled: true,
+      region: "us-east-1",
+    },
+  },
+}
 ```
 
 ## Verify the connection
 
 ```bash
-openclaw models status --provider bedrock --probe
+openclaw models status --probe-provider bedrock
 ```

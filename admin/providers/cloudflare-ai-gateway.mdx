@@ -1,0 +1,96 @@
+---
+title: "Cloudflare AI Gateway"
+description: "Route WednesdayAI traffic through Cloudflare AI Gateway for caching, rate limiting, and observability."
+audience: admin
+---
+
+# Cloudflare AI Gateway
+
+Cloudflare AI Gateway is a proxy layer that sits in front of other AI providers. It adds caching, rate limiting, cost tracking, and observability — without changing the underlying model or provider.
+
+<Note>
+  Cloudflare AI Gateway does not host models itself. It proxies requests to other providers (OpenAI, Anthropic, etc.). You still need credentials for the underlying provider.
+</Note>
+
+## Prerequisites
+
+<Steps>
+  <Step title="Create a Cloudflare AI Gateway">
+    In the Cloudflare dashboard, go to **AI** → **AI Gateway** and create a new gateway. Note your **account ID** and **gateway name**.
+  </Step>
+  <Step title="Obtain an API key">
+    Create a Cloudflare API token with AI Gateway permissions. Set it on the gateway host:
+
+    ```bash
+    echo 'CLOUDFLARE_AI_GATEWAY_API_KEY=your-token-here' >> ~/.openclaw/.env
+    ```
+  </Step>
+</Steps>
+
+## Configuration
+
+The `baseUrl` must include your Cloudflare account ID and gateway name:
+
+```json5
+{
+  models: {
+    providers: {
+      "cloudflare-ai-gateway": {
+        apiKey: "CLOUDFLARE_AI_GATEWAY_API_KEY", // references the env var
+        // Replace <account> and <gateway-name> with your values:
+        baseUrl: "https://gateway.ai.cloudflare.com/v1/<account>/<gateway-name>",
+        models: [
+          // list the models you route through this gateway
+        ],
+      },
+    },
+  },
+}
+```
+
+<Warning>
+  The `baseUrl` is required and must contain your specific account ID and gateway name. Omitting it or using the wrong values will cause all requests to fail.
+</Warning>
+
+<Note>
+  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
+</Note>
+
+## Selecting a model
+
+The model reference uses the `cloudflare-ai-gateway/` prefix:
+
+```json5
+{
+  agents: {
+    defaults: {
+      model: { primary: "cloudflare-ai-gateway/<provider>/<model-id>" },
+    },
+  },
+}
+```
+
+The path after the provider prefix follows the [Cloudflare AI Gateway routing format](https://developers.cloudflare.com/ai-gateway/providers/) — typically `<upstream-provider>/<model-id>`.
+
+## What Cloudflare AI Gateway adds
+
+| Feature | Behaviour |
+| ------- | --------- |
+| Caching | Identical requests return cached responses, reducing cost and latency |
+| Rate limiting | Configurable per-gateway request limits |
+| Observability | Request logs, latency metrics, and cost estimates in the Cloudflare dashboard |
+| Fallbacks | Route to a secondary provider if the primary fails |
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="404 — gateway not found">
+    The `baseUrl` account ID or gateway name is incorrect. Double-check both values in the Cloudflare dashboard.
+  </Accordion>
+  <Accordion title="401 Unauthorized">
+    The API token is invalid or lacks AI Gateway permissions. Create a new token with the correct scope.
+  </Accordion>
+  <Accordion title="Upstream provider error">
+    Cloudflare AI Gateway forwards errors from the underlying provider. Check that your upstream provider credentials are valid and that the model ID is correct for that provider.
+  </Accordion>
+</AccordionGroup>
