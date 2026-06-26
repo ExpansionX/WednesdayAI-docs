@@ -62,6 +62,8 @@ A plugin may instead export an `OpenClawPluginDefinition` object with a `registe
 | `api.registerService(service)` | Register a start/stop background service |
 | `api.registerProvider(provider)` | Register a model provider |
 | `api.registerWebSearchProvider(provider)` | Register a web-search provider |
+| `api.registerRealtimeVoiceProvider(definition)` | Register a real-time voice provider (`RealtimeVoiceProviderDefinition`) |
+| `api.registerWebhookTargetWithPluginRoute(path, handler)` | Register a webhook target scoped to the plugin's route namespace |
 | `api.resolvePath(input)` | Resolve a path relative to the plugin |
 
 ## `api.runtime` sub-APIs
@@ -70,8 +72,10 @@ A plugin may instead export an `OpenClawPluginDefinition` object with a `registe
 
 | Sub-API | Key methods | Notes |
 | ------- | ----------- | ----- |
+| `runtime.identity` | `.name`, `.avatarUrl?`, `.description?`, `.locale?` | Agent identity / persona metadata |
+| `runtime.api` | `.source: "channel" \| "webhook" \| "rest" \| "internal"`, `.description?: string` | Metadata about the originating API request |
 | `runtime.analysis` | `run(params: AnalysisRunParams): Promise<AnalysisResult>`, `enqueue(params: AnalysisRunParams, onComplete?: (result: AnalysisResult) => void): AnalysisJob` | Plugin-owned focused LLM analysis. See [Analysis runtime](/developers/analysis-runtime). |
-| `runtime.signals` | `publish(signal)`, `subscribe(filter, handler)`, `getAvailability()`, `requestWake()` | Agent Signals bus. See [Agent signals](/developers/agent-signals). |
+| `runtime.signals` | `publish(signal)`, `subscribe(filter, handler)`, `getAvailability()`, `requestWake()`, `nudge(agentId, message)` | Agent Signals bus. See [Agent signals](/developers/agent-signals). |
 | `runtime.state` | `resolveStateDir(agentId?)` | Resolve the plugin/agent on-disk state directory |
 | `runtime.config` | `loadConfig()`, `writeConfigFile(patch)` | Read or write the gateway config at runtime |
 | `runtime.media` | `loadWebMedia(url)`, `detectMime(buf)`, `getImageMetadata(buf)`, `resizeToJpeg(buf, opts)`, `mediaKindFromMime(mime)`, `isVoiceCompatibleAudio(mime)` | Media fetch, detection, and transform utilities |
@@ -121,10 +125,11 @@ const parameters = Type.Object({
 
 These are exported from `openclaw/plugin-sdk` and are safe to depend on:
 
-- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types.
+- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderDefinition`, `VoiceSession`, `ProviderPlugin`, `ProviderCapabilities`, `GatewayRequestHandler`, `GatewayRequest`, `GatewayResponse`, `WebSearchProvider`, `WebSearchOptions`, `WebSearchResult`.
+- **Hook payload types** — `HookPayload`, `MessageReceivedPayload`, `MessageSentPayload`, `SessionStartPayload`, `SubagentSpawningPayload`, `BeforeFileWritePayload`.
 - **Tool helpers** — `jsonResult`, `readStringParam`, `readNumberParam`, `readReactionParams`, `createActionGate`, `ToolAuthorizationError`.
-- **Schema helpers** — `stringEnum`, `optionalStringEnum`.
-- **Logging** — `createSubsystemLogger`, `getChildLogger`.
+- **Schema helpers** — `stringEnum`, `optionalStringEnum`, `emptyPluginConfigSchema`.
+- **Logging** — `createSubsystemLogger`, `getChildLogger`, `FileLog`.
 - **Config/secrets** — `loadConfig`, `isSecretRef`, `SecretInput` / `SecretRef` types.
 - **HTTP/webhooks** — `registerPluginHttpRoute`, `registerWebhookTarget`, request-guard helpers.
 
@@ -134,6 +139,132 @@ These are exported from `openclaw/plugin-sdk` and are safe to depend on:
   `execute(_id, params)`, registered via `api.registerTool(...)`. Hooks are registered via
   `api.on(...)`.
 </Note>
+
+## Type reference
+
+Full definitions for types introduced in this SDK. Import all of these from `openclaw/plugin-sdk`.
+
+### Plugin registration types
+
+```typescript
+interface RealtimeVoiceProviderDefinition {
+  name: string
+  connect(opts: { userId: string; channelId: string }): Promise<VoiceSession>
+  disconnect(session: VoiceSession): Promise<void>
+}
+```
+
+### Config helpers
+
+```typescript
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk"
+// Returns a Typebox schema validating as an empty object — use when your plugin has no config
+```
+
+### FileLog
+
+```typescript
+import { FileLog } from "openclaw/plugin-sdk"
+
+const log = new FileLog(path: string, opts?: {
+  maxSizeMb?: number
+  rotate?: boolean
+})
+log.write(entry: Record<string, unknown>): void
+log.flush(): Promise<void>
+log.close(): void
+```
+
+### AgentAvailability
+
+```typescript
+interface AgentAvailability {
+  available: boolean
+  reason?: string         // shown to users when unavailable
+  nextAvailableAt?: string  // ISO-8601
+  timezone?: string
+}
+```
+
+### Gateway types
+
+```typescript
+type GatewayRequestHandler = (
+  req: GatewayRequest,
+  res: GatewayResponse
+) => Promise<void> | void
+
+interface GatewayRequest {
+  method: string
+  path: string
+  headers: Record<string, string>
+  body: unknown
+  query: Record<string, string>
+}
+
+interface GatewayResponse {
+  status(code: number): GatewayResponse
+  json(body: unknown): void
+  send(body: string): void
+  header(name: string, value: string): GatewayResponse
+}
+```
+
+### Web search provider types
+
+```typescript
+interface WebSearchProvider {
+  name: string
+  search(query: string, opts?: WebSearchOptions): Promise<WebSearchResult[]>
+}
+
+interface WebSearchOptions {
+  maxResults?: number
+  locale?: string
+  safeSearch?: boolean
+}
+
+interface WebSearchResult {
+  title: string
+  url: string
+  snippet: string
+  publishedAt?: string
+}
+```
+
+### Hook payload types
+
+```typescript
+import type {
+  HookPayload,
+  MessageReceivedPayload,
+  MessageSentPayload,
+  SessionStartPayload,
+  SubagentSpawningPayload,
+  BeforeFileWritePayload,
+} from "openclaw/plugin-sdk"
+```
+
+### Provider plugin family
+
+```typescript
+interface ProviderPlugin {
+  name: string
+  capabilities: ProviderCapabilities
+  complete(params: CompletionParams): Promise<CompletionResult>
+  stream?(params: CompletionParams): AsyncIterable<CompletionChunk>
+  listModels?(): Promise<ModelInfo[]>
+  validateConfig?(config: unknown): Promise<void>
+}
+
+interface ProviderCapabilities {
+  streaming: boolean
+  vision: boolean
+  functionCalling: boolean
+  reasoning: boolean
+  voice: boolean
+}
+```
 
 ## Manifest vs package.json key
 

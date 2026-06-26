@@ -128,6 +128,25 @@ The strict root object accepts these keys (everything else is rejected). Each ha
 
 ---
 
+## Network
+
+Controls the gateway's network listener addresses.
+
+```yaml
+network:
+  host: "0.0.0.0"
+  port: 3000
+nodeHost: ""
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `network.host` | string | `"0.0.0.0"` | Bind address for all network listeners |
+| `network.port` | integer | `3000` | Primary HTTP port (deprecated alias: `port`) |
+| `nodeHost` | string | — | URL of this node as seen by other nodes in a multi-gateway mesh. Example: `"https://node1.example.com"` |
+
+---
+
 ## `gateway` - Server settings
 
 ```json5
@@ -202,6 +221,24 @@ The strict root object accepts these keys (everything else is rejected). Each ha
 | `gateway.tls.enabled` | `false` | Yes |
 | `gateway.reload.mode` | `"hybrid"` | No |
 | `gateway.channelHealthCheckMinutes` | provider default | No |
+| `gateway.restartPolicy` | `"on-failure"` | No |
+| `gateway.restartResilience` | `3` | No |
+
+Additional restart-policy keys:
+
+```json5
+{
+  gateway: {
+    restartPolicy: "on-failure",
+    restartResilience: 3,
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `gateway.restartPolicy` | string | `"on-failure"` | `"always" \| "on-failure" \| "never"` — controls auto-restart behaviour |
+| `gateway.restartResilience` | integer | `3` | Consecutive crash-restarts allowed before giving up (0–10) |
 
 <Warning>
 Non-loopback `bind` requires auth. The gateway refuses to start with `bind: "lan"`, `"tailnet"`, or `"custom"` if no token or password is set. See [Gateway authentication](/admin/gateway/authentication).
@@ -334,6 +371,24 @@ Set either `allow` or `alsoAllow` in a scope, not both. `alsoAllow` extends the 
   },
 }
 ```
+
+Additional commands keys:
+
+```json5
+{
+  commands: {
+    aliases: {
+      gm: "greet morning",
+    },
+    disabled: [],
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `commands.aliases` | object | `{}` | Custom slash-command aliases mapping alias → real command |
+| `commands.disabled` | string[] | `[]` | Command names to disable globally |
 
 ---
 
@@ -505,6 +560,28 @@ Login: `openclaw channels login --channel whatsapp [--account work]`
 }
 ```
 
+Additional session keys:
+
+```json5
+{
+  session: {
+    storage: "sqlite",
+    maintenance: {
+      enabled: true,
+      intervalHours: 24,
+      maxAgeDays: 90,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `session.storage` | string | `"sqlite"` | `"memory" \| "sqlite" \| "postgres"` — backing store for session data |
+| `session.maintenance.enabled` | boolean | `true` | Enables periodic housekeeping (pruning old sessions) |
+| `session.maintenance.intervalHours` | number | `24` | How often maintenance runs |
+| `session.maintenance.maxAgeDays` | number | `90` | Sessions older than this are pruned |
+
 ---
 
 ## `cron` - Scheduled jobs
@@ -521,6 +598,26 @@ Login: `openclaw channels login --channel whatsapp [--account work]`
   },
 }
 ```
+
+Additional cron keys:
+
+```json5
+{
+  cron: {
+    webhook: {
+      enabled: false,
+      secret: "",
+      path: "/_cron",
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `cron.webhook.enabled` | boolean | `false` | Enable incoming webhook triggers for cron jobs |
+| `cron.webhook.secret` | string | — | HMAC-SHA256 secret for verifying webhook payloads |
+| `cron.webhook.path` | string | `"/_cron"` | Path prefix for webhook endpoints |
 
 ---
 
@@ -550,6 +647,22 @@ Treat all webhook payload content as untrusted. Keep unsafe-content bypass flags
 
 See the [Hooks catalogue](/reference/hooks-catalogue) for bundled `internal` hooks.
 
+Additional hooks keys:
+
+```json5
+{
+  hooks: {
+    presets: [],
+    transformsDir: "",
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hooks.presets` | string[] | `[]` | Preset names to load: `"safety"`, `"productivity"`, `"audit"` |
+| `hooks.transformsDir` | string | — | Path to a directory of transform scripts applied to all hook payloads |
+
 ---
 
 ## `plugins` - Extensions
@@ -569,6 +682,22 @@ See the [Hooks catalogue](/reference/hooks-catalogue) for bundled `internal` hoo
 
 Most plugin changes require a gateway restart.
 
+Additional plugins keys:
+
+```json5
+{
+  plugins: {
+    installs: [
+      { name: "@wednesdayai/voice-openai", version: "^1.0" },
+    ],
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `plugins.installs` | array | `[]` | Plugin specifiers auto-installed on gateway start. Each item: `{ name, version }` |
+
 ---
 
 ## `skills` - Skill loading
@@ -584,6 +713,24 @@ Most plugin changes require a gateway restart.
   },
 }
 ```
+
+Additional skills keys:
+
+```json5
+{
+  skills: {
+    limits: {
+      maxSkillSize: 524288,
+      maxSkillsPerPlugin: 20,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `skills.limits.maxSkillSize` | integer | `524288` | Max SKILL.md file size in bytes (512 KB) |
+| `skills.limits.maxSkillsPerPlugin` | integer | `20` | Max skills per plugin |
 
 ---
 
@@ -636,6 +783,26 @@ Sensitive values throughout the config (`gateway.auth.token`, `channels.*.botTok
 
 Auth profile mode is one of `api_key`, `oauth`, or `token`. Managed via `openclaw models auth ...`.
 
+Additional auth keys:
+
+```json5
+{
+  auth: {
+    cooldowns: {
+      failedLoginDelayMs: 1000,
+      maxFailedAttempts: 5,
+      lockDurationMs: 300000,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth.cooldowns.failedLoginDelayMs` | integer | `1000` | Delay (ms) after a failed login attempt |
+| `auth.cooldowns.maxFailedAttempts` | integer | `5` | Lock account after this many consecutive failures |
+| `auth.cooldowns.lockDurationMs` | integer | `300000` | Lock duration in ms (5 min default) |
+
 ---
 
 ## `talk` and `audio` - Voice
@@ -675,6 +842,26 @@ Auth profile mode is one of `api_key`, `oauth`, or `token`. Managed via `opencla
 }
 ```
 
+Additional browser SSRF policy keys:
+
+```json5
+{
+  browser: {
+    ssrfPolicy: {
+      allowPrivateRanges: false,
+      allowedHosts: [],
+      blockedHosts: [],
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `browser.ssrfPolicy.allowPrivateRanges` | boolean | `false` | Allow the browser to fetch RFC-1918 private addresses |
+| `browser.ssrfPolicy.allowedHosts` | string[] | `[]` | Additional hostnames to allow |
+| `browser.ssrfPolicy.blockedHosts` | string[] | `[]` | Hostnames to explicitly block |
+
 ---
 
 ## `acp` - Agent Client Protocol bridge
@@ -690,6 +877,26 @@ Auth profile mode is one of `api_key`, `oauth`, or `token`. Managed via `opencla
   },
 }
 ```
+
+Additional ACP streaming keys:
+
+```json5
+{
+  acp: {
+    stream: {
+      enabled: true,
+      chunkSize: 512,
+      flushIntervalMs: 50,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `acp.stream.enabled` | boolean | `true` | Enable streaming responses over ACP |
+| `acp.stream.chunkSize` | integer | `512` | Streaming chunk size in bytes |
+| `acp.stream.flushIntervalMs` | integer | `50` | How often the stream buffer flushes |
 
 ---
 
@@ -777,6 +984,26 @@ Each agent id listed must exist in `agents.list`.
   },
 }
 ```
+
+Additional diagnostics keys:
+
+```json5
+{
+  diagnostics: {
+    slowRequestMs: 5000,
+    traceLevel: "errors",
+    otel: {
+      headers: {},
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `diagnostics.slowRequestMs` | integer | `5000` | Threshold (ms) for logging slow requests |
+| `diagnostics.traceLevel` | string | `"errors"` | `"off" \| "errors" \| "all"` |
+| `diagnostics.otel.headers` | object | `{}` | HTTP headers for the OTLP exporter (e.g. for auth) |
 
 ---
 
