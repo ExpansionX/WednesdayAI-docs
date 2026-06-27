@@ -1,0 +1,401 @@
+---
+title: "Tool policy"
+description: "Control which tools agents can use: allow/deny lists, exec security, skill allowlisting, global vs per-agent overrides, and config hierarchy."
+audience: admin
+---
+
+# Tool policy
+
+Tool policy is the hard stop that controls what an agent can do. `deny` always wins. If `allow` is non-empty, every unlisted tool is blocked. Configuration layers from global → per-agent → exec approvals file — stricter always wins.
+
+## Profiles
+
+A profile is a predefined baseline that enables a curated tool set:
+
+```json5
+{
+  tools: {
+    profile: "messaging",   // minimal | coding | messaging | full
+  },
+}
+```
+
+| Profile | Included tools |
+|---------|----------------|
+| `minimal` | Read-only memory and identity tools only |
+| `coding` | File system, exec (deny mode), apply_patch, memory |
+| `messaging` | Message, memory, web search — no filesystem or shell |
+| `full` | All built-in tools (default when no profile is set) |
+
+Profiles are a starting point. Add specific tools with `alsoAllow`, or remove them with `deny`.
+
+## Allow and deny
+
+```json5
+{
+  tools: {
+    profile: "messaging",
+    alsoAllow: ["read"],        // extend the profile with extra tools
+    deny: ["group:automation"], // always blocked, regardless of allow/profile
+  },
+}
+```
+
+<Warning>
+`allow` and `alsoAllow` cannot coexist in the same scope — the schema rejects the combination. Use one or the other:
+- `alsoAllow` — additive: extends a `profile` without replacing it
+- `allow` — explicit: replaces the profile; only listed tools are available
+</Warning>
+
+### Explicit allowlist
+
+```json5
+{
+  tools: {
+    allow: ["read", "write", "exec", "memory_search"],
+    // no profile needed — allow is a full replacement
+  },
+}
+```
+
+When `allow` is set and non-empty, **every tool not listed is blocked**, including tools from any profile. Use `deny` on top of `allow` if you want belt-and-suspenders blocking even for listed tools.
+
+### Tool name reference
+
+Entry values are exact strings — no glob syntax:
+
+| Entry | Matches |
+|-------|---------|
+| `"exec"` | The exec tool |
+| `"read"` | The read tool |
+| `"group:runtime"` | `exec`, `bash`, `process` |
+| `"group:fs"` | `read`, `write`, `edit`, `apply_patch` |
+| `"group:automation"` | `cron`, `gateway` |
+| `"group:sessions"` | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
+| `"group:memory"` | `memory_search`, `memory_get` |
+| `"group:ui"` | `browser`, `canvas` |
+| `"group:messaging"` | `message` |
+| `"group:nodes"` | `nodes` |
+| `"group:plugins"` | All tools registered by installed plugins |
+| `"group:openclaw"` | All built-in tools (excludes provider plugins) |
+| `"*"` | All tools (required alongside `open` dmPolicy to mean "allow all") |
+
+Plugin tools use the form `<plugin-id>/<tool-name>`. List available names with `openclaw tools list`.
+
+### Per-provider overrides
+
+Restrict tool access by which AI provider is active for a given turn:
+
+```json5
+{
+  tools: {
+    profile: "full",
+    byProvider: {
+      "openai/gpt-4o": {
+        deny: ["exec", "browser"],
+      },
+      "anthropic": {
+        profile: "coding",
+      },
+    },
+  },
+}
+```
+
+Keys can be a provider name (`"anthropic"`) or a `"provider/model"` pair for model-specific rules.
+
+## Global vs per-agent
+
+### Global tool config
+
+`tools.*` applies to all agents unless overridden:
+
+```json5
+{
+  tools: {
+    profile: "messaging",
+    deny: ["group:runtime"],
+  },
+}
+```
+
+### Per-agent override
+
+`agents.list[*].tools` applies only to that agent and takes precedence over the global config:
+
+```json5
+{
+  agents: {
+    list: {
+      coding: {
+        tools: {
+          profile: "coding",
+          alsoAllow: ["browser"],
+          exec: { security: "allowlist", ask: "on-miss" },
+        },
+      },
+      readonly: {
+        tools: {
+          allow: ["read", "memory_search"],
+        },
+      },
+    },
+  },
+}
+```
+
+<Note>
+Per-agent tool config is **not** a full replacement of global — it is evaluated alongside global. The policy resolver uses the more specific scope (per-agent) when both define the same setting. `deny` from either scope wins.
+</Note>
+
+### Where per-agent config cannot appear
+
+Per-agent `tools` supports `allow`, `alsoAllow`, `deny`, `profile`, `byProvider`, and `exec.*` — but does **not** expose the `web`, `media`, `links`, `message`, `agentToAgent`, `sessions`, or `subagents` sub-objects (those are global-only).
+
+## Exec security
+
+`tools.exec` controls whether and how the agent can run shell commands.
+
+```json5
+{
+  tools: {
+    exec: {
+      security: "deny",       // deny | allowlist | full
+      ask: "on-miss",         // off | on-miss | always
+      safeBins: ["jq", "rg"],
+      safeBinTrustedDirs: ["/usr/local/bin"],
+    },
+  },
+}
+```
+
+### `security` modes
+
+| Mode | Effect |
+|------|--------|
+| `"deny"` (default) | All exec calls are blocked — the tool exists but runs nothing |
+| `"allowlist"` | Only binaries matching the exec approvals allowlist can run |
+| `"full"` | Any binary is permitted (subject to `ask`) |
+
+### `ask` modes
+
+| Mode | Effect |
+|------|--------|
+| `"on-miss"` (default) | Prompt for approval when the binary is not in the approvals allowlist |
+| `"always"` | Every exec call requires explicit approval, even allowlisted binaries |
+| `"off"` | Never prompt — execute (or block in `deny` mode) silently |
+
+### Safe bins
+
+Safe bins are binaries the agent can run **without an approval prompt** in `allowlist` or `full` mode. They must match a known-safe argument profile.
+
+```json5
+{
+  tools: {
+    exec: {
+      safeBins: ["jq", "rg", "grep"],
+      safeBinTrustedDirs: ["/bin", "/usr/bin", "/usr/local/bin"],
+      safeBinProfiles: {
+        "jq": { allowedValueFlags: ["-r", "-e", "-c"], deniedFlags: ["--rawfile"] },
+      },
+    },
+  },
+}
+```
+
+Built-in safe bins (always available without config): `jq`, `cut`, `uniq`, `head`, `tail`, `tr`, `wc`.
+
+Default trusted directories for path resolution: `/bin`, `/usr/bin` only. Binaries in `/usr/local/bin`, `/opt/homebrew/bin`, etc. require adding those dirs to `safeBinTrustedDirs`.
+
+### Additional exec keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `host` | `"sandbox" \| "gateway" \| "node"` | `"sandbox"` | Where exec runs |
+| `pathPrepend` | `string[]` | — | Prepend to PATH for exec calls |
+| `timeoutSec` | `number` | `1800` | Max exec wall time |
+| `backgroundMs` | `number` | — | Move to background after N ms |
+| `cleanupMs` | `number` | — | Force-kill background process after N ms |
+| `notifyOnExit` | `boolean` | `true` | Notify when a background process exits |
+| `notifyOnExitEmptySuccess` | `boolean` | `false` | Notify even when exit is clean with no output |
+| `applyPatch` | `object` | disabled | Controls `apply_patch` tool behaviour |
+| `approvalRunningNoticeMs` | `number` | `10000` | (per-agent only) Notify after N ms if an approval is still pending |
+
+## Exec approvals file
+
+The exec approvals file (`~/.openclaw/exec-approvals.json`) is the host-local persistent record of approved binaries. It exists independently of `openclaw.json` and is written by the runtime when a user approves an exec prompt.
+
+```json5
+// ~/.openclaw/exec-approvals.json
+{
+  version: 1,
+  defaults: {
+    security: "deny",        // "deny" | "allowlist" | "full"
+    ask: "on-miss",          // "off" | "on-miss" | "always"
+    askFallback: "deny",     // fallback when no approvals file agent entry exists
+    autoAllowSkills: false,  // automatically allow skill-initiated exec calls
+  },
+  agents: {
+    "agent:main:main": {
+      security: "allowlist",
+      allowlist: [
+        {
+          id: "abc123",
+          pattern: "/usr/local/bin/rg",   // absolute path glob, case-insensitive
+          lastUsedAt: 1700000000000,
+          lastUsedCommand: "rg --type ts 'export'",
+        },
+      ],
+    },
+  },
+}
+```
+
+### Allowlist entry format
+
+- **Glob patterns** matched against the **resolved binary path** (symlinks followed).
+- **Basename-only entries are ignored** — patterns must resolve to an absolute path or glob.
+- Per-agent: scoped under `agents.<agentId>.allowlist`.
+- Valid examples: `/usr/local/bin/rg`, `~/Projects/**/bin/*`, `/opt/homebrew/bin/*`.
+
+### Config vs approvals file — precedence
+
+The effective policy is always the **stricter** of the two sources:
+
+| Setting | Rule |
+|---------|------|
+| `security` | `minSecurity(config, approvals)` — stricter (lower) wins |
+| `ask` | `maxAsk(config, approvals)` — more cautious (higher) wins |
+
+Examples:
+- Config `security: "full"` + approvals `security: "deny"` → effective: `"deny"`
+- Config `ask: "off"` + approvals `ask: "always"` → effective: `"always"`
+
+Within the approvals file: `agents.<id>` overrides `defaults`; per-agent is more specific.
+
+<Note>
+The approvals file is owned by the **host** process. In multi-user or shared-gateway setups, each user's gateway process has its own approvals file. Config-level `tools.exec.security` is the shared baseline; the approvals file is the per-user additive record.
+</Note>
+
+## Skill allowlist
+
+### Global bundled skill filter
+
+```json5
+{
+  skills: {
+    allowBundled: ["session-memory", "session-journal"],
+    // omit = all bundled skills enabled; [] = none
+  },
+}
+```
+
+`allowBundled` controls which **bundled (built-in) skills** are active. Workspace skills loaded from `load.extraDirs` and managed skills are not affected — control those via `skills.entries.<name>.enabled`.
+
+### Per-agent skill filter
+
+```json5
+{
+  agents: {
+    list: {
+      readonly: {
+        skills: ["session-memory"],  // only this skill is available to this agent
+        // skills: []                // no skills at all
+        // omit skills              // inherits global (all skills available)
+      },
+    },
+  },
+}
+```
+
+`agents.list[*].skills` is a simple string array of skill names. It takes precedence over global config for that agent. An empty array (`[]`) disables all skills.
+
+<Note>
+Skills can only be restricted here — you cannot *add* a skill to an agent that is not already globally available. If a skill is disabled globally via `skills.entries.<name>.enabled: false`, per-agent config cannot re-enable it.
+</Note>
+
+### Per-skill config
+
+Individual skills can be toggled and configured under `skills.entries`:
+
+```json5
+{
+  skills: {
+    entries: {
+      "session-memory": { enabled: true, config: { messages: 15 } },
+      "my-plugin/my-skill": { enabled: false },
+    },
+  },
+}
+```
+
+## Config hierarchy and implications
+
+Settings cascade from most general to most specific. More specific always wins — except for `deny`, which wins everywhere.
+
+```text
+Global (tools.*)
+  └── Per-agent (agents.list[*].tools.*)
+        └── Host-local (exec-approvals.json)
+              └── Session-level (/exec directive — ephemeral, resets on session end)
+```
+
+### What happens when a key is set in one place but not another
+
+| Scenario | Result |
+|----------|--------|
+| `tools.exec.security: "full"` globally, no per-agent override | All agents can run any binary (subject to `ask`) |
+| `tools.exec.security: "full"` globally, `agents.list.work.tools.exec.security: "deny"` | `work` agent: exec blocked; all others: full access |
+| No `tools.exec.security` in config, approvals file says `"deny"` | Effective: `"deny"` (approvals stricter wins) |
+| `tools.allow: ["exec"]` globally, `agents.list.readonly.tools.allow: ["read"]` | `readonly` agent: only `read` available; others: only `exec` |
+| `tools.deny: ["browser"]` globally, per-agent does not mention `browser` | `browser` is denied for all agents — global `deny` propagates |
+| `skills.allowBundled: ["session-memory"]` globally, `agents.list.coder.skills: []` | `coder` agent: no skills; all others: only `session-memory` |
+| `skills.entries.my-skill.enabled: false`, `agents.list.x.skills: ["my-skill"]` | `my-skill` is still disabled — `enabled: false` is authoritative |
+
+### Common footguns
+
+<AccordionGroup>
+  <Accordion title="allow and alsoAllow in the same scope">
+    Using both `allow` and `alsoAllow` at the same config level is a schema validation error. If you want to extend a profile, use `alsoAllow`. If you want an explicit list, use `allow` alone.
+  </Accordion>
+  <Accordion title="Per-agent allow does not merge with global allow">
+    If global sets `tools.allow: ["exec", "read"]` and a per-agent sets `tools.allow: ["write"]`, the per-agent has only `write`. The lists do not merge — per-agent `allow` replaces the global `allow` for that agent.
+  </Accordion>
+  <Accordion title="Global deny always applies — even when per-agent allow lists the tool">
+    `tools.deny: ["exec"]` globally blocks `exec` for all agents even if `agents.list.dev.tools.allow: ["exec"]`. `deny` is evaluated after all `allow` resolution and wins.
+  </Accordion>
+  <Accordion title="exec-approvals.json can be stricter than config, but not looser">
+    If you set `tools.exec.security: "full"` in config but the approvals file for that agent says `security: "deny"`, the agent cannot run exec. The approvals file cannot grant permissions that config has not already given — it can only restrict.
+  </Accordion>
+  <Accordion title="skills: [] on an agent disables skills, but skill hooks still fire">
+    Setting `agents.list[*].skills: []` removes skills from the agent's prompt context and disables skill invocation — but plugin-registered hook handlers for skill events still run. This is expected behaviour.
+  </Accordion>
+</AccordionGroup>
+
+## Debugging effective policy
+
+```bash
+# Show the resolved tool policy for a session or agent
+openclaw sandbox explain
+openclaw sandbox explain --session agent:main:main
+openclaw sandbox explain --agent work
+openclaw sandbox explain --json
+
+# List all available tool names
+openclaw tools list
+
+# Show exec approvals for an agent
+openclaw exec-approvals list
+openclaw exec-approvals list --agent work
+
+# Full security posture audit
+openclaw security audit
+openclaw security audit --deep
+```
+
+## Related
+
+- [Security hardening](/admin/security)
+- [Sandboxing](/admin/sandboxing)
+- [Reference: config](/reference/config)
+- [Hooks catalogue](/reference/hooks-catalogue)
