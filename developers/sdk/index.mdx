@@ -125,7 +125,7 @@ const parameters = Type.Object({
 
 These are exported from `openclaw/plugin-sdk` and are safe to depend on:
 
-- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderPlugin`, `RealtimeVoiceBridgeSession`, `ProviderPlugin`, `GatewayRequestHandler`, `GatewayRequestHandlerOptions`, `RespondFn`, `WebSearchProviderPlugin`, `WebSearchProviderToolDefinition`, `WebSearchProviderContext`.
+- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderPlugin`, `RealtimeVoiceBridge` (direct return type of `createBridge()`), `RealtimeVoiceBridgeSession`, `ProviderPlugin`, `GatewayRequestHandler`, `GatewayRequestHandlerOptions`, `RespondFn`, `WebSearchProviderPlugin`, `WebSearchProviderToolDefinition`, `WebSearchProviderContext`.
 - **Hook payload types** — `PluginHookMessageReceivedEvent`, `PluginHookBeforeContextSendEvent`, `PluginHookBeforeContextSendResult`, `PluginHookStorageAfterAppendEvent`, `PluginHookCompactionPlanEvent`, `PluginHookCompactionPlanResult`, `PluginHookContextCollectEvent`, `PluginHookContextCollectResult`, `PluginHookContextProjectEvent`, `PluginHookContextProjectResult`, `PluginHookContextPruneEvent`, `PluginHookContextPruneResult`, `PluginHookTransformLlmInputEvent`, `PluginHookTransformLlmInputResult`, `PluginHookTransformLlmOutputEvent`, `PluginHookTransformLlmOutputResult`, `PluginHookModelCallEndedEvent`, `PluginHookAgentEndEvent`, and more. The SDK exports event and result types for all 33 hook points — see the source for the complete list. Note: `PluginHookSubagentSpawningEvent` is **not** exported from `openclaw/plugin-sdk`; use `import type` from core types directly, or derive the type with the `Parameters<...>` pattern.
 - **Tool helpers** — `jsonResult`, `readStringParam`, `readNumberParam`, `readReactionParams`, `createActionGate`, `ToolAuthorizationError`.
 - **Schema helpers** — `stringEnum`, `optionalStringEnum`, `emptyPluginConfigSchema`.
@@ -180,8 +180,9 @@ import { appendFileLog, createFileLogWriter } from "openclaw/plugin-sdk"
 appendFileLog(line: string, options: FileLogAppendOptions): Promise<FileLogAppendResult> | FileLogAppendResult
 
 // Create a writer for repeated use:
-const writer = createFileLogWriter({ path: string, maxSizeMb?: number, rotate?: boolean })
-writer.append(line: string): void
+const writer = createFileLogWriter({ file: string, profileId: string })
+// Note: rotation is controlled by maxFileBytes/maxBackups in the logging config, not here.
+writer.append(line: string): Promise<FileLogAppendResult> | FileLogAppendResult
 writer.diagnostics(): unknown
 ```
 
@@ -242,7 +243,7 @@ interface WebSearchProviderContext {
 interface WebSearchProviderToolDefinition {
   description: string;
   parameters: Record<string, unknown>;
-  execute(args: Record<string, unknown>, context?: unknown): Promise<Record<string, unknown>>;
+  execute(args: Record<string, unknown>, context?: { signal?: AbortSignal }): Promise<Record<string, unknown>>;
 }
 ```
 
@@ -279,13 +280,18 @@ import type {
 ### Provider plugin family
 
 ```typescript
+// Abridged — shows the most commonly used fields.
 interface ProviderPlugin {
   id: string
   label: string
   auth: ProviderAuthMethod[]   // required — authentication methods the provider supports
   docsPath?: string
   aliases?: string[]
+  hookAliases?: string[]       // hook-name aliases for this provider
   envVars?: string[]
+  models?: ModelProviderConfig // model listing / capability metadata
+  // Functional extension points (omitted here for brevity):
+  // prepareExtraParams?, createStreamFn?, wrapStreamFn?
 }
 ```
 

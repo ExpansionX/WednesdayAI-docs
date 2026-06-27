@@ -1,0 +1,115 @@
+---
+title: "Bifrost"
+description: "Route WednesdayAI through Bifrost AI — an LLM proxy with routing, caching, fallbacks, and cost tracking."
+audience: admin
+---
+
+# Bifrost
+
+[Bifrost](https://github.com/maximhq/bifrost) is an LLM proxy that routes requests to multiple backends — Anthropic, OpenAI, Bedrock, Gemini, Ollama, and more — with routing rules, prompt cache optimisation, semantic caching, fallback chains, and cost tracking.
+
+WednesdayAI communicates with Bifrost as a single provider (`bifrost`) using an OpenAI-compatible API. Bifrost handles all model-specific logic internally.
+
+<Note>
+  Bifrost is self-hosted. You must run a Bifrost instance (locally or on your own infrastructure) before configuring WednesdayAI to use it.
+</Note>
+
+## Prerequisites
+
+- A running Bifrost instance. See the [Bifrost documentation](https://github.com/maximhq/bifrost) for setup.
+- Optionally, a Bifrost virtual key for authentication.
+
+## Quick setup
+
+### 1. Start Bifrost
+
+Follow the [Bifrost setup guide](https://github.com/maximhq/bifrost) to start your instance and note its base URL.
+
+### 2. Configure WednesdayAI
+
+```bash
+openclaw auth
+# Choose: Proxy / Gateway → Bifrost
+```
+
+Enter your base URL, optional virtual key, and the model aliases you want available (e.g. `medium`, `fast`, `anthropic/claude-sonnet-4-6`).
+
+### 3. Manual config snippet
+
+```json5
+{
+  models: {
+    providers: {
+      bifrost: {
+        baseUrl: "http://localhost:8080", // your Bifrost instance URL
+        apiKey: "BIFROST_API_KEY",        // optional virtual key; omit if not used
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "bifrost/medium" }, // routing alias defined in Bifrost
+    },
+  },
+}
+```
+
+<Note>
+  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
+</Note>
+
+## Model aliases vs direct model IDs
+
+You can use either:
+
+- **Routing aliases** (`medium`, `fast`) — Bifrost maps these to real models via its routing rules.
+- **Direct model IDs** (`anthropic/claude-sonnet-4-6`) — bypasses routing and targets that model directly.
+
+Bifrost decides which backend and model to use. WednesdayAI does not influence routing.
+
+## Provider settings
+
+| Setting | Value |
+| ------- | ----- |
+| Provider ID | `bifrost` |
+| API | OpenAI-compatible |
+| Auth env var | `BIFROST_API_KEY` (optional) |
+| Default timeout | 600 seconds |
+
+## Usage dashboard
+
+When Bifrost is configured to forward response headers, WednesdayAI records both the configured alias and the actual backend provider/model per call:
+
+- `byProvider` shows actual provider spend (e.g. `anthropic: $0.42`)
+- `byConfiguredModel` shows spend by alias (e.g. `medium: $0.42`)
+
+## Caching
+
+Bifrost's prompt cache optimisation and semantic cache run on the Bifrost side. WednesdayAI does not send `cache_control` markers to Bifrost — Bifrost's `CacheOptimizer` analyses request structure autonomously.
+
+## Verification
+
+```bash
+openclaw models status --probe-provider bifrost
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Connection refused">
+    Verify your Bifrost instance is running and the `baseUrl` in your config matches its address and port.
+  </Accordion>
+  <Accordion title="Agent stalls after first turn">
+    This is an upstream provider defect, not a WednesdayAI or Bifrost bug. Some backends (observed on Cloudflare- and Parasail-hosted vLLM endpoints) emit `finish_reason=tool_calls` without the accompanying tool-call chunks.
+
+    **Fix:** Exclude the offending upstreams at the Bifrost routing layer — pin routes to compliant backends (e.g. SiliconFlow) and exclude non-compliant ones (e.g. Cloudflare).
+  </Accordion>
+  <Accordion title="401 Unauthorized">
+    If you configured a virtual key, verify `BIFROST_API_KEY` is set correctly in `~/.openclaw/.env`.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [AI providers overview](/admin/providers/index)
+- [Reference: config](/reference/config)

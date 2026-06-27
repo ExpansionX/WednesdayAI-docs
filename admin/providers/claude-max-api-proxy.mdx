@@ -1,0 +1,133 @@
+---
+title: "Claude Max API Proxy"
+description: "Use a Claude Max subscription as an OpenAI-compatible endpoint via the community claude-max-api-proxy tool."
+audience: admin
+---
+
+# Claude Max API Proxy
+
+**claude-max-api-proxy** is a community tool that exposes your Claude Max/Pro subscription as a local OpenAI-compatible API endpoint. This lets you point WednesdayAI (and other OpenAI-compatible tools) at your subscription instead of an API key.
+
+<Warning>
+  This is a **community tool**, not officially supported by Anthropic or WednesdayAI. Anthropic has previously blocked some subscription usage outside Claude Code. Review Anthropic's current terms before relying on this path in production.
+</Warning>
+
+## How it works
+
+```text
+WednesdayAI → claude-max-api-proxy → Claude Code CLI → Anthropic (via your subscription)
+ (OpenAI format)    (converts format)                    (uses your login)
+```
+
+The proxy accepts OpenAI-format requests at `http://localhost:3456/v1/chat/completions`, converts them to Claude Code CLI commands, and returns responses in OpenAI format (streaming supported).
+
+## Prerequisites
+
+- Node.js 20+
+- Claude Code CLI authenticated with a Claude Max or Pro subscription
+- `claude-max-api-proxy` npm package
+
+## Quick setup
+
+### 1. Install the proxy
+
+```bash
+npm install -g claude-max-api-proxy
+```
+
+### 2. Verify Claude CLI authentication
+
+```bash
+claude --version
+```
+
+### 3. Start the proxy server
+
+```bash
+claude-max-api
+# Runs at http://localhost:3456
+```
+
+### 4. Test it
+
+```bash
+curl http://localhost:3456/health
+curl http://localhost:3456/v1/models
+```
+
+### 5. Configure WednesdayAI
+
+Point WednesdayAI at the local proxy as a custom OpenAI-compatible endpoint:
+
+```json5
+{
+  env: {
+    OPENAI_API_KEY: "not-needed",
+    OPENAI_BASE_URL: "http://localhost:3456/v1",
+  },
+  agents: {
+    defaults: {
+      model: { primary: "openai/claude-opus-4" },
+    },
+  },
+}
+```
+
+## Available models
+
+| Model ID | Maps to |
+| -------- | ------- |
+| `claude-opus-4` | Claude Opus 4 |
+| `claude-sonnet-4` | Claude Sonnet 4 |
+| `claude-haiku-4` | Claude Haiku 4 |
+
+## Cost comparison
+
+| Approach | Cost | Best for |
+| -------- | ---- | -------- |
+| Anthropic API | Pay per token | Production, high volume |
+| Claude Max subscription + proxy | $200/month flat | Personal use, development |
+
+## Auto-start on macOS
+
+Create a LaunchAgent to run the proxy automatically:
+
+```bash
+cat > ~/Library/LaunchAgents/com.claude-max-api.plist << 'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.claude-max-api</string>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/node</string>
+    <string>/usr/local/lib/node_modules/claude-max-api-proxy/dist/server/standalone.js</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/usr/local/bin:/opt/homebrew/bin:~/.local/bin:/usr/bin:/bin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.claude-max-api.plist
+```
+
+## Links
+
+- npm: [claude-max-api-proxy](https://www.npmjs.com/package/claude-max-api-proxy)
+- GitHub: [atalovesyou/claude-max-api-proxy](https://github.com/atalovesyou/claude-max-api-proxy)
+
+## Related
+
+- [Anthropic provider](/admin/providers/anthropic)
+- [AI providers overview](/admin/providers/index)
+- [Reference: config](/reference/config)

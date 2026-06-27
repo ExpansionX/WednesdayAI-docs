@@ -709,8 +709,10 @@ Additional cron keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `cron.store` | string | — | Optional named store identifier for cron job persistence |
 | `cron.webhook` | string (HttpUrl) | — | URL to receive cron trigger notifications |
 | `cron.webhookToken` | string | — | Authentication token for the cron webhook |
+| `cron.failureAlert.cooldownMs` | number | — | Minimum milliseconds between repeated failure alerts; prevents alert storms |
 | `cron.failureDestination` | object | — | Separate routing target for failure alerts: `{ channel?, to?, accountId?, mode? }`. Distinct from `cron.failureAlert` (which controls triggering); this sets where alerts go |
 
 ---
@@ -804,7 +806,7 @@ Additional plugins keys:
 {
   skills: {
     allowBundled: ["status", "memory-search"],
-    load: { extraDirs: ["~/.openclaw/skills"], watch: true },
+    load: { extraDirs: ["~/.openclaw/skills"], watch: true, watchDebounceMs: 300 },
     install: { preferBrew: false, nodeManager: "pnpm" },   // npm | pnpm | yarn | bun
     limits: { maxSkillsInPrompt: 30, maxSkillsPromptChars: 20000 },
     entries: {
@@ -835,6 +837,7 @@ Additional skills keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
+| `skills.load.watchDebounceMs` | number | — | Debounce delay (ms) before reloading after a skills file change (requires `skills.load.watch: true`) |
 | `skills.limits.maxSkillFileBytes` | integer | `524288` | Max SKILL.md file size in bytes (512 KB) |
 | `skills.limits.maxCandidatesPerRoot` | integer | — | Max skill candidates per root directory |
 | `skills.limits.maxSkillsLoadedPerSource` | integer | — | Max skills loaded per source |
@@ -945,8 +948,17 @@ Additional auth keys:
     defaultProfile: "chrome",
     ssrfPolicy: { dangerouslyAllowPrivateNetwork: false, hostnameAllowlist: ["example.com"] },
     snapshotDefaults: { mode: "efficient" },   // controls default snapshot strategy
+    // Remote CDP / executable overrides
+    cdpUrl: "ws://127.0.0.1:9222/json/version",  // connect to a remote CDP endpoint
+    remoteCdpTimeoutMs: 10000,                    // timeout for remote CDP connection
+    remoteCdpHandshakeTimeoutMs: 5000,            // timeout for CDP handshake
+    executablePath: "/usr/bin/chromium-browser",  // override auto-detected browser binary
+    noSandbox: false,                             // disable sandbox (for containers)
+    attachOnly: false,                            // attach to existing browser, do not launch
+    cdpPortRangeStart: 9222,                      // starting port for CDP port allocation
+    extraArgs: ["--disable-gpu"],                 // extra browser launch arguments
     profiles: {
-      "work": { cdpPort: 9222, driver: "clawd" },   // driver: clawd | extension
+      "work": { cdpPort: 9222, driver: "clawd", color: "#4A90D9" },   // driver: clawd | extension; color: hex for UI distinction
     },
   },
 }
@@ -978,6 +990,20 @@ Additional browser SSRF policy keys:
 <Note>
 `browser.ssrfPolicy` supports two field aliases: `allowPrivateNetwork` (alias for `dangerouslyAllowPrivateNetwork`) and `allowedHostnames` (alias for `hostnameAllowlist`). Prefer the canonical names in new configs.
 </Note>
+
+### Additional browser keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `browser.cdpUrl` | string | — | Connect to a remote CDP endpoint instead of launching a browser (e.g. `ws://127.0.0.1:9222/json/version`) |
+| `browser.remoteCdpTimeoutMs` | number | — | Timeout (ms) for establishing a remote CDP connection |
+| `browser.remoteCdpHandshakeTimeoutMs` | number | — | Timeout (ms) for the CDP handshake after connecting |
+| `browser.executablePath` | string | — | Path to the browser executable; overrides auto-detection |
+| `browser.noSandbox` | boolean | `false` | Disable the browser sandbox (required in some containerized environments) |
+| `browser.attachOnly` | boolean | `false` | Attach to an already-running browser instead of launching a new one |
+| `browser.cdpPortRangeStart` | number | — | Starting port number for CDP port allocation |
+| `browser.extraArgs` | string[] | `[]` | Additional arguments passed to the browser on launch |
+| `browser.profiles[*].color` | string | — | Hex color (`#RRGGBB`) used to visually distinguish this profile in the UI |
 
 ---
 
@@ -1027,7 +1053,7 @@ Additional ACP streaming keys:
 | `acp.stream.tagVisibility` | `Record<string, boolean>` | — | Per-tag visibility overrides, e.g. `{ "thinking": false }` |
 | `acp.dispatch` | object | — | Dispatch sub-object (see extended config) |
 | `acp.backend` | string | — | Optional string identifier for the backend |
-| `acp.runtime` | object | — | Runtime sub-object (see extended config) |
+| `acp.runtime` | object | — | Runtime environment config: `{ ttlMinutes?: number, installCommand?: string }`. `ttlMinutes` sets the runtime TTL; `installCommand` is run to install runtime dependencies before the session starts |
 
 ---
 
@@ -1050,9 +1076,9 @@ Additional ACP streaming keys:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `update.auto.stableDelayHours` | integer | `6` | Hours to delay applying a stable update after release |
-| `update.auto.stableJitterHours` | integer | `12` | Random jitter (hours) added to update checks |
-| `update.auto.betaCheckIntervalHours` | integer | `1` | How often (hours) the beta channel is checked |
+| `update.auto.stableDelayHours` | number | `6` | Hours to delay applying a stable update after release (max `168`) |
+| `update.auto.stableJitterHours` | number | `12` | Random jitter (hours) added to update checks (max `168`) |
+| `update.auto.betaCheckIntervalHours` | number | `1` | How often (hours) the beta channel is checked (max `24`) |
 
 ---
 
@@ -1072,6 +1098,38 @@ Additional ACP streaming keys:
   },
 }
 ```
+
+---
+
+## `web` - WhatsApp Web client
+
+Controls the WhatsApp Web client's connection behaviour and reconnection strategy.
+
+```json5
+{
+  web: {
+    enabled: true,
+    heartbeatSeconds: 30,
+    reconnect: {
+      initialMs: 1000,      // initial reconnect delay
+      maxMs: 30000,         // maximum reconnect delay (ms)
+      factor: 2,            // exponential backoff multiplier
+      jitter: 0.2,          // fractional jitter applied to each delay
+      maxAttempts: 0,       // 0 = unlimited retries
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `web.enabled` | boolean | `true` | Enable or disable the WhatsApp Web client |
+| `web.heartbeatSeconds` | number | — | Interval (seconds) between keep-alive heartbeats |
+| `web.reconnect.initialMs` | number | — | Initial reconnect delay in milliseconds |
+| `web.reconnect.maxMs` | number | — | Maximum reconnect delay in milliseconds |
+| `web.reconnect.factor` | number | — | Exponential backoff multiplier applied after each failed attempt |
+| `web.reconnect.jitter` | number | — | Fractional jitter (0–1) added to each computed delay to spread reconnects |
+| `web.reconnect.maxAttempts` | number | — | Maximum reconnect attempts before giving up (`0` = unlimited) |
 
 ---
 
@@ -1105,7 +1163,7 @@ Each agent id listed must exist in `agents.list`.
     fileLogs: {                         // per-profile file logging
       defaults: { file: "/tmp/openclaw/openclaw.log", maxFileBytes: 10485760, maxBackups: 3 },
       profiles: {
-        "verbose": { file: "/tmp/openclaw/verbose.log", maxFileBytes: 5242880, compress: true },
+        "verbose": { file: "/tmp/openclaw/verbose.log", maxFileBytes: 5242880, compress: "gzip" },
       },
     },
   },
@@ -1234,6 +1292,7 @@ Each agent id listed must exist in `agents.list`.
 | `diagnostics.modelPayloadLog` | object | — | Model payload logging config: `{ enabled?: boolean, usageSummaries?: boolean, rawPayloads?: boolean, captureContent?: boolean, providers?: string[], file?: string, maxQueuedBytes?: number }` |
 | `diagnostics.stuckSessionWarnMs` | integer | — | Emit a warning if a session has not advanced for this many milliseconds |
 | `diagnostics.stuckSessionAbortMs` | integer | — | Abort a session that has been stuck longer than this many milliseconds |
+| `diagnostics.flags` | string[] | `[]` | Debug flag strings for internal diagnostic tracing (e.g. `["rpc-trace", "session-gc"]`) |
 
 <Warning>
 `modelPayloadLog.enabled: true` (or `rawPayloads: true`) writes unredacted model payloads to disk. Never enable in production — logs will contain user messages and model responses in plaintext.

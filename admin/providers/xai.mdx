@@ -1,0 +1,141 @@
+---
+title: "xAI (Grok)"
+description: "Connect WednesdayAI to xAI's Grok model family: configuration, authentication, and available models."
+audience: admin
+---
+
+# xAI (Grok)
+
+xAI provides the Grok model family through an OpenAI-compatible API. WednesdayAI integrates with xAI for text and vision inference. The default model is `grok-4`.
+
+## Prerequisites
+
+- An xAI API key from [console.x.ai](https://console.x.ai)
+
+## Quick setup
+
+### 1. Get an API key
+
+Sign in to [console.x.ai](https://console.x.ai) and create an API key. Keys start with `xai-`.
+
+Store it on the gateway host:
+
+```bash
+echo 'XAI_API_KEY=xai-...' >> ~/.openclaw/.env
+```
+
+### 2. Run onboarding
+
+```bash
+openclaw onboard --auth-choice xai-api-key
+```
+
+Or non-interactive:
+
+```bash
+openclaw onboard --non-interactive \
+  --mode local \
+  --auth-choice xai-api-key \
+  --xai-api-key "$XAI_API_KEY"
+```
+
+### 3. Configure
+
+```json5
+{
+  models: {
+    providers: {
+      xai: {
+        apiKey: "XAI_API_KEY", // references the env var
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "xai/grok-4" },
+    },
+  },
+}
+```
+
+<Note>
+  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
+</Note>
+
+## Provider settings
+
+| Setting | Value |
+| ------- | ----- |
+| Provider ID | `xai` |
+| Base URL | `https://api.x.ai/v1` |
+| API | OpenAI-compatible |
+| Auth env var | `XAI_API_KEY` |
+| Default model | `grok-4` |
+| Default context window | 256,000 tokens |
+
+## Verification
+
+```bash
+openclaw models status --probe-provider xai
+```
+
+## Available models
+
+| Model ID | Context | Notes |
+| -------- | ------- | ----- |
+| `grok-4` | 256K | Default; reasoning |
+| `grok-4-fast` | 2M | Reasoning; vision |
+| `grok-4-fast-non-reasoning` | 2M | Vision |
+| `grok-4-1-fast` | 2M | Reasoning; vision |
+| `grok-4-1-fast-non-reasoning` | 2M | Vision |
+| `grok-code-fast-1` | 256K | Reasoning; coding |
+| `grok-3` | 131K | |
+| `grok-3-latest` | 131K | |
+| `grok-3-fast` | 131K | |
+| `grok-3-mini` | 131K | Reasoning |
+| `grok-3-mini-fast` | 131K | Reasoning |
+| `grok-2` | 131K | |
+| `grok-2-vision` | 8K | Vision |
+
+Use model IDs as `xai/<model-id>` — for example, `xai/grok-4`.
+
+Run `openclaw models list --provider xai` for the full current catalog.
+
+## Web search with Grok
+
+Grok supports live web search. Configure it separately for the web search tool:
+
+```json5
+{
+  tools: {
+    web: {
+      search: {
+        grok: {
+          apiKey: "XAI_API_KEY", // falls back to XAI_API_KEY env var
+        },
+      },
+    },
+  },
+}
+```
+
+The web search tool uses `grok-4-1-fast` by default when Grok search is enabled.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="401 Unauthorized">
+    Verify your key starts with `xai-` and is copied in full. Re-run `openclaw onboard --auth-choice xai-api-key` to refresh the stored credential.
+  </Accordion>
+  <Accordion title="Tool schema errors">
+    xAI rejects certain JSON Schema keywords in tool definitions. WednesdayAI automatically sanitizes tool schemas for xAI — no configuration needed.
+  </Accordion>
+  <Accordion title="Model not found">
+    Confirm the model ID is correct and your xAI plan includes it. Run `openclaw models status` to see detected xAI models.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [AI providers overview](/admin/providers/index)
+- [Reference: config](/reference/config)

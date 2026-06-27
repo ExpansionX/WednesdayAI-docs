@@ -1,0 +1,110 @@
+---
+title: "Vercel AI Gateway"
+description: "Route WednesdayAI traffic through Vercel AI Gateway — a unified endpoint for hundreds of models."
+audience: admin
+---
+
+# Vercel AI Gateway
+
+The [Vercel AI Gateway](https://vercel.com/ai-gateway) provides a unified API to access hundreds of models through a single endpoint, with built-in observability and rate limiting.
+
+<Note>
+  Vercel AI Gateway does not host models itself. It proxies requests to underlying providers (Anthropic, OpenAI, etc.). You still need a Vercel AI Gateway API key.
+</Note>
+
+## Prerequisites
+
+- A Vercel account with AI Gateway enabled
+- An AI Gateway API key (`AI_GATEWAY_API_KEY`)
+
+## Quick setup
+
+### 1. Get an API key
+
+In the Vercel dashboard, enable AI Gateway and create an API key. Store it on the gateway host:
+
+```bash
+echo 'AI_GATEWAY_API_KEY=your-key-here' >> ~/.openclaw/.env
+```
+
+### 2. Run onboarding
+
+```bash
+openclaw onboard --auth-choice ai-gateway-api-key
+```
+
+Or non-interactive:
+
+```bash
+openclaw onboard --non-interactive \
+  --mode local \
+  --auth-choice ai-gateway-api-key \
+  --ai-gateway-api-key "$AI_GATEWAY_API_KEY"
+```
+
+### 3. Configure
+
+```json5
+{
+  models: {
+    providers: {
+      "vercel-ai-gateway": {
+        apiKey: "AI_GATEWAY_API_KEY", // references the env var
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "vercel-ai-gateway/anthropic/claude-opus-4-6" },
+    },
+  },
+}
+```
+
+<Note>
+  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
+</Note>
+
+## Provider settings
+
+| Setting | Value |
+| ------- | ----- |
+| Provider ID | `vercel-ai-gateway` |
+| API | Anthropic Messages compatible |
+| Auth env var | `AI_GATEWAY_API_KEY` |
+
+## Model ID format
+
+Model IDs follow the Vercel AI Gateway routing format: `vercel-ai-gateway/<upstream-provider>/<model-id>`.
+
+WednesdayAI accepts Claude shorthand model refs and normalises them at runtime:
+
+| Shorthand | Resolved as |
+| --------- | ----------- |
+| `vercel-ai-gateway/claude-opus-4.6` | `vercel-ai-gateway/anthropic/claude-opus-4-6` |
+| `vercel-ai-gateway/opus-4.6` | `vercel-ai-gateway/anthropic/claude-opus-4-6` |
+
+## Verification
+
+```bash
+openclaw models status --probe-provider vercel-ai-gateway
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="401 Unauthorized">
+    The API key is invalid or missing. Regenerate it in the Vercel dashboard and update `~/.openclaw/.env`.
+  </Accordion>
+  <Accordion title="Model not found">
+    Confirm the model ID path matches the Vercel AI Gateway routing format. Check the [Vercel AI Gateway docs](https://vercel.com/ai-gateway) for supported providers and model IDs.
+  </Accordion>
+  <Accordion title="Upstream provider error">
+    Vercel AI Gateway forwards errors from the underlying provider. Verify the upstream provider is enabled in your Vercel AI Gateway configuration.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [AI providers overview](/admin/providers/index)
+- [Reference: config](/reference/config)

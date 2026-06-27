@@ -18,11 +18,11 @@ Cloudflare AI Gateway is a proxy layer that sits in front of other AI providers.
   <Step title="Create a Cloudflare AI Gateway">
     In the Cloudflare dashboard, go to **AI** → **AI Gateway** and create a new gateway. Note your **account ID** and **gateway name**.
   </Step>
-  <Step title="Obtain an API key">
-    Create a Cloudflare API token with AI Gateway permissions. Set it on the gateway host:
+  <Step title="Obtain upstream provider credentials">
+    `CLOUDFLARE_AI_GATEWAY_API_KEY` (or the configured `apiKey`) is the **upstream provider's API key** — for example, your Anthropic or OpenAI key — not a Cloudflare account token. Cloudflare AI Gateway proxies requests to the underlying provider using this key.
 
     ```bash
-    echo 'CLOUDFLARE_AI_GATEWAY_API_KEY=your-token-here' >> ~/.openclaw/.env
+    echo 'CLOUDFLARE_AI_GATEWAY_API_KEY=your-upstream-provider-key' >> ~/.openclaw/.env
     ```
   </Step>
 </Steps>
@@ -51,6 +51,29 @@ The `baseUrl` must include your Cloudflare account ID and gateway name:
 <Warning>
   The `baseUrl` is required and must contain your specific account ID and gateway name. Omitting it or using the wrong values will cause all requests to fail.
 </Warning>
+
+<Note>
+  If your gateway has **authentication enabled**, pass the gateway token via the `cf-aig-authorization` header:
+
+  ```json5
+  {
+    models: {
+      providers: {
+        "cloudflare-ai-gateway": {
+          apiKey: "CLOUDFLARE_AI_GATEWAY_API_KEY",
+          baseUrl: "https://gateway.ai.cloudflare.com/v1/<account>/<gateway-name>/anthropic",
+          headers: {
+            "cf-aig-authorization": "Bearer ${CF_AIG_TOKEN}",
+          },
+          models: [],
+        },
+      },
+    },
+  }
+  ```
+
+  Set `CF_AIG_TOKEN` in `~/.openclaw/.env` to your Cloudflare AI Gateway authentication token.
+</Note>
 
 <Note>
   The `/anthropic` suffix is required — the runtime appends it but only if the `baseUrl` does not already end with it. Without it, requests will 404.
