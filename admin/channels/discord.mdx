@@ -23,6 +23,10 @@ In the Bot page, scroll to **Privileged Gateway Intents** and enable:
 - **Message Content Intent** (`MESSAGE_CONTENT`) — required for reading message content
 - **Server Members Intent** — recommended for user lookup
 
+<Note>
+The Server Members intent also requires opting in via config: `channels.discord.intents.guildMembers: true`. Without this, the gateway does not request the GuildMembers intent even when enabled in the Portal.
+</Note>
+
 Also ensure these standard (non-privileged) intents are active:
 - `GUILD_MESSAGE_REACTIONS` — required for reaction-based interactions
 
@@ -97,7 +101,7 @@ openclaw pairing approve discord <CODE>
 }
 ```
 
-Use `user:<id>` or `<@id>` format. Bare numeric IDs are ambiguous and rejected.
+Use `user:<id>` or `<@id>` format. Unquoted numeric literals are rejected by schema validation — IDs must be JSON strings. Bare quoted strings (`"987654321098765432"`) are accepted, but the `user:` prefix is preferred for clarity.
 
 ### Server (guild) policy
 
@@ -173,6 +177,17 @@ channels:
 | `threadBindings.spawnSubagentSessions` | boolean | `false` | Spawn a subagent session per thread |
 | `threadBindings.spawnAcpSessions` | boolean | `false` | Spawn an ACP session per thread |
 
+## Delivery settings
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `textChunkLimit` | integer | `2000` | Maximum characters per outbound chunk (Discord's per-message limit is 2000) |
+| `chunkMode` | string | `"length"` | `length` splits at character count; `newline` splits at paragraph boundaries |
+
+```json5
+{ channels: { discord: { textChunkLimit: 2000, chunkMode: "length" } } }
+```
+
 ## Voice channels
 
 Requires:
@@ -232,8 +247,10 @@ Or via the `message thread create` tool action in an agent.
     Discord has a 3-second timeout on interaction acknowledgment. For slow tools, increase the event queue timeout:
 
     ```json5
-    { channels: { discord: { accounts: { default: { eventQueue: { listenerTimeout: 120000 } } } } } }
+    { channels: { discord: { accounts: { default: { eventQueue: { listenerTimeout: 300000 } } } } } }
     ```
+
+    The default is already 120 000 ms — use a value higher than that, e.g., 300 000 ms (5 min).
   </Accordion>
 </AccordionGroup>
 
