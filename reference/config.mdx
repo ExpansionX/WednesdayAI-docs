@@ -351,6 +351,34 @@ Both OpenAI-compatible endpoints are **disabled by default** and grant full oper
 
 Model refs use `provider/model` format. `agents.defaults.model.primary` is set by `openclaw models set`; the image model by `openclaw models set-image`.
 
+### Model shorthand aliases
+
+The following shorthands can be used anywhere a model ref is expected and resolve to their current default:
+
+| Alias | Resolves to |
+|-------|-------------|
+| `opus` | `anthropic/claude-opus-4-6` |
+| `sonnet` | `anthropic/claude-sonnet-4-6` |
+| `gpt` | `openai/gpt-5.2` |
+| `gpt-mini` | `openai/gpt-5-mini` |
+| `gemini` | `google/gemini-3-pro-preview` |
+| `gemini-flash` | `google/gemini-3-flash-preview` |
+
+Aliases resolve at runtime; the underlying model ID may change with gateway updates. Use the full `provider/model` ref if you need to pin to a specific version.
+
+### `agents.defaults.subagents` — Subagent limits
+
+| Key | Type | Range | Description |
+|-----|------|-------|-------------|
+| `agents.defaults.subagents.maxConcurrent` | integer | — | Max subagents running concurrently per parent agent |
+| `agents.defaults.subagents.maxSpawnDepth` | integer | 1–5 | Max nesting depth for spawned subagent chains |
+| `agents.defaults.subagents.maxChildrenPerAgent` | integer | 1–20 | Max total subagents a single agent can spawn in one turn |
+| `agents.defaults.subagents.archiveAfterMinutes` | integer | — | Archive completed subagent sessions after this many minutes |
+| `agents.defaults.subagents.runTimeoutSeconds` | integer | — | Timeout for each subagent run |
+| `agents.defaults.subagents.announceTimeoutMs` | integer | — | Timeout to wait for subagent announce before proceeding |
+
+Values outside the validated ranges (1–5 for `maxSpawnDepth`, 1–20 for `maxChildrenPerAgent`) cause the gateway to reject the config on startup.
+
 ---
 
 ## `models` - Provider/model catalogue
@@ -380,6 +408,65 @@ Model refs use `provider/model` format. `agents.defaults.model.primary` is set b
 | `models.bedrockDiscovery.refreshInterval` | integer | — | Seconds between rediscovery polls |
 | `models.bedrockDiscovery.defaultContextWindow` | integer | — | Assumed context window size for discovered models lacking metadata |
 | `models.bedrockDiscovery.defaultMaxTokens` | integer | — | Assumed max output tokens for discovered models lacking metadata |
+
+### `models.providers.*` — Provider and model config
+
+Each provider entry under `models.providers` follows this shape:
+
+```json5
+{
+  models: {
+    providers: {
+      "my-provider": {
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "MY_PROVIDER_API_KEY",
+        auth: "api-key",        // api-key | aws-sdk | oauth | token
+        api: "openai-completions",
+        models: [
+          {
+            id: "my-model-id",
+            name: "My Model",
+            reasoning: false,
+            input: ["text", "image"],
+            contextWindow: 128000,
+            maxTokens: 4096,
+            cost: { input: 0.000003, output: 0.000015 },
+            compat: {
+              maxTokensField: "max_tokens",  // max_tokens | max_completion_tokens
+              thinkingFormat: "openai",       // openai | zai | qwen
+              supportsStrictMode: true,
+              supportsReasoningEffort: false,
+              requiresToolResultName: false,
+              requiresMistralToolIds: false,
+            },
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `models.providers.<id>.baseUrl` | string | Base URL for API requests |
+| `models.providers.<id>.apiKey` | string | Env var name or secret ref for the API key |
+| `models.providers.<id>.auth` | string | Auth method: `api-key` \| `aws-sdk` \| `oauth` \| `token` |
+| `models.providers.<id>.api` | string | API type: `openai-completions` \| `openai-responses` \| `anthropic-messages` \| `google-generative-ai` \| `bedrock-converse-stream` \| `ollama` \| `github-copilot` |
+| `models.providers.<id>.models[].id` | string | Provider-side model ID |
+| `models.providers.<id>.models[].name` | string | Display name |
+| `models.providers.<id>.models[].reasoning` | boolean | Whether the model supports extended reasoning |
+| `models.providers.<id>.models[].input` | string[] | Accepted input types: `"text"`, `"image"` |
+| `models.providers.<id>.models[].contextWindow` | integer | Context window in tokens |
+| `models.providers.<id>.models[].maxTokens` | integer | Max output tokens |
+| `models.providers.<id>.models[].cost.input` | number | Cost per input token in USD |
+| `models.providers.<id>.models[].cost.output` | number | Cost per output token in USD |
+| `models.providers.<id>.models[].compat.maxTokensField` | string | Field name to use for max tokens: `max_tokens` \| `max_completion_tokens` |
+| `models.providers.<id>.models[].compat.thinkingFormat` | string | Thinking tag format for reasoning models: `openai` \| `zai` \| `qwen` |
+| `models.providers.<id>.models[].compat.supportsStrictMode` | boolean | Whether the model supports strict tool-schema mode |
+| `models.providers.<id>.models[].compat.supportsReasoningEffort` | boolean | Whether the model accepts a reasoning-effort parameter |
+| `models.providers.<id>.models[].compat.requiresToolResultName` | boolean | Whether tool result messages must include a `name` field |
+| `models.providers.<id>.models[].compat.requiresMistralToolIds` | boolean | Whether the Mistral-style tool ID convention is required |
 
 ---
 
@@ -761,7 +848,29 @@ Additional hooks keys:
 | `hooks.presets` | string[] | `[]` | Preset names to load: `"safety"`, `"productivity"`, `"audit"` |
 | `hooks.transformsDir` | string | — | Path to a directory of transform scripts applied to all hook payloads |
 | `hooks.allowedAgentIds` | string[] | — | Optional allowlist of agent IDs that can receive hook deliveries |
-| `hooks.gmail` | object | — | Gmail hooks integration config (alongside `hooks.mappings` and `hooks.internal`) |
+
+### `hooks.gmail` — Gmail push notification integration
+
+Receives Gmail push notifications via Google Cloud Pub/Sub and routes them as hook events.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hooks.gmail.account` | string | — | Gmail account address to monitor |
+| `hooks.gmail.label` | string | — | Gmail label to filter (e.g. `"INBOX"`) |
+| `hooks.gmail.topic` | string | — | Google Cloud Pub/Sub topic name |
+| `hooks.gmail.subscription` | string | — | Pub/Sub subscription name |
+| `hooks.gmail.pushToken` | string | — | Secret token used to validate incoming Pub/Sub pushes |
+| `hooks.gmail.hookUrl` | string | — | Public URL that Google will push notifications to |
+| `hooks.gmail.includeBody` | boolean | `false` | Whether to include the email body in the hook payload |
+| `hooks.gmail.maxBytes` | integer | — | Maximum bytes to include from the email body |
+| `hooks.gmail.renewEveryMinutes` | integer | — | How often to renew the Pub/Sub push subscription |
+| `hooks.gmail.allowUnsafeExternalContent` | boolean | `false` | Pass raw email content to the agent (use with caution) |
+| `hooks.gmail.serve.bind` | string | — | Bind address for the local Pub/Sub push receiver |
+| `hooks.gmail.serve.port` | integer | — | Port for the local Pub/Sub push receiver |
+| `hooks.gmail.serve.path` | string | — | URL path for the local Pub/Sub push receiver |
+| `hooks.gmail.tailscale.mode` | string | `"off"` | Expose the receiver via Tailscale: `off` \| `serve` \| `funnel` |
+| `hooks.gmail.model` | string | — | Model to use for agent turns triggered by Gmail events |
+| `hooks.gmail.thinking` | string | `"off"` | Thinking level: `off` \| `minimal` \| `low` \| `medium` \| `high` |
 
 ---
 
@@ -1290,12 +1399,12 @@ Each agent id listed must exist in `agents.list`.
 | `diagnostics.capture` | object | — | Session capture config: `{ mode: "off" \| "manual" \| "always" \| "schedule", ... }` |
 | `diagnostics.cacheTrace` | object | — | Cache trace config: `{ enabled?: boolean, filePath?: string, includeMessages?: boolean, includePrompt?: boolean, includeSystem?: boolean }` |
 | `diagnostics.modelPayloadLog` | object | — | Model payload logging config: `{ enabled?: boolean, usageSummaries?: boolean, rawPayloads?: boolean, captureContent?: boolean, providers?: string[], file?: string, maxQueuedBytes?: number }` |
-| `diagnostics.stuckSessionWarnMs` | integer | — | Emit a warning if a session has not advanced for this many milliseconds |
-| `diagnostics.stuckSessionAbortMs` | integer | — | Abort a session that has been stuck longer than this many milliseconds |
+| `diagnostics.stuckSessionWarnMs` | integer | `60000` | Emit a warning if a session has not advanced for this many milliseconds |
+| `diagnostics.stuckSessionAbortMs` | integer | `300000` | Abort a session that has been stuck longer than this many milliseconds |
 | `diagnostics.flags` | string[] | `[]` | Debug flag strings for internal diagnostic tracing (e.g. `["rpc-trace", "session-gc"]`) |
 
 <Warning>
-`modelPayloadLog.enabled: true` (or `rawPayloads: true`) writes unredacted model payloads to disk. Never enable in production — logs will contain user messages and model responses in plaintext.
+`modelPayloadLog.enabled: true` writes usage summaries to disk. To capture unredacted payloads, also set `rawPayloads: true` or `captureContent: true`. Never enable raw payload capture in production — logs will contain user messages and model responses in plaintext.
 </Warning>
 
 ---
