@@ -1,58 +1,48 @@
 ---
 title: "Mistral AI"
-description: "Connect WednesdayAI to Mistral AI models via API key."
-audience: admin
+summary: "Use Mistral models and Voxtral transcription with OpenClaw"
+read_when:
+  - You want to use Mistral models in OpenClaw
+  - You need Mistral API key onboarding and model refs
 ---
 
 # Mistral AI
 
-WednesdayAI supports Mistral AI's model family, including frontier and open-weight models.
+Mistral AI provides a range of open-weight and proprietary models for text and vision, plus audio transcription via Voxtral, and memory embeddings. OpenClaw supports all three use cases with a single `MISTRAL_API_KEY`.
 
-## Prerequisites
+## Requirements
 
-Create an API key at [console.mistral.ai](https://console.mistral.ai) and set it on the gateway host:
+- A Mistral API key from [console.mistral.ai](https://console.mistral.ai)
+
+## Quickstart
 
 ```bash
-echo 'MISTRAL_API_KEY=your-key-here' >> ~/.openclaw/.env
+openclaw onboard --auth-choice mistral-api-key
+# or non-interactive
+openclaw onboard --mistral-api-key "$MISTRAL_API_KEY"
+```
+
+Then verify the default model was set:
+
+```bash
+openclaw models status
 ```
 
 ## Configuration
 
-Add the provider under `models.providers` in your config:
+### Environment variable
 
-```json5
-{
-  models: {
-    providers: {
-      mistral: {
-        apiKey: "MISTRAL_API_KEY", // references the env var
-        models: [
-          "mistral-large-latest",
-          "mistral-small-latest",
-          "codestral-latest",
-          "mistral-nemo",
-          "magistral-medium-latest",
-          "magistral-small-latest",
-          "devstral-small-2507",
-          "pixtral-large-latest",
-          "ministral-3b-latest",
-          "ministral-8b-latest",
-          "mistral-embed",
-        ],
-      },
-    },
-  },
-}
+```bash
+export MISTRAL_API_KEY="..."
 ```
 
-<Note>
-  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
-</Note>
+OpenClaw reads `MISTRAL_API_KEY` automatically and enables the `mistral` provider.
 
-## Selecting a model
+### Config snippet (LLM provider)
 
 ```json5
 {
+  env: { MISTRAL_API_KEY: "..." },
   agents: {
     defaults: {
       model: { primary: "mistral/mistral-large-latest" },
@@ -61,38 +51,102 @@ Add the provider under `models.providers` in your config:
 }
 ```
 
-| Model | Notes |
-| ----- | ----- |
-| `mistral-large-latest` | Flagship — best reasoning |
-| `mistral-small-latest` | Fast and cost-efficient |
-| `codestral-latest` | Code-specialised |
-| `mistral-nemo` | Lightweight open-weight model |
-| `magistral-medium-latest` | Magistral — strong reasoning |
-| `magistral-small-latest` | Magistral small — fast reasoning |
-| `devstral-small-2507` | Code-focused agentic model |
-| `pixtral-large-latest` | Multimodal — vision + text |
-| `ministral-3b-latest` | Ultra-lightweight edge model |
-| `ministral-8b-latest` | Edge-optimised 8B model |
-| `mistral-embed` | Text embeddings |
+### Provider settings
 
-Run `openclaw models list --provider mistral` to see the current catalog.
+| Setting                | Value                                    |
+| ---------------------- | ---------------------------------------- |
+| Provider ID            | `mistral`                                |
+| Base URL               | `https://api.mistral.ai/v1`              |
+| API                    | OpenAI-compatible (`openai-completions`) |
+| Auth env var           | `MISTRAL_API_KEY`                        |
+| Default model          | `mistral-large-latest`                   |
+| Default context window | 262,144 tokens                           |
+| Default max tokens     | 262,144                                  |
 
-<Note>
-  **Audio transcription:** `voxtral-mini-latest` supports audio input via the `tools.media.audio` config key.
+## Available models
 
-  **Vector embeddings:** `mistral-embed` produces dense text embeddings suitable for semantic search and RAG pipelines. Route it with the `mistral/mistral-embed` model ID.
-</Note>
+| Model ID                  | Name                    | Context | Notes           |
+| ------------------------- | ----------------------- | ------- | --------------- |
+| `mistral-large-latest`    | Mistral Large (latest)  | 262K    | Default; vision |
+| `mistral-large-2512`      | Mistral Large 2512      | 262K    | Vision          |
+| `mistral-large-2411`      | Mistral Large 2411      | 131K    |                 |
+| `mistral-medium-latest`   | Mistral Medium (latest) | 128K    | Vision          |
+| `mistral-medium-2508`     | Mistral Medium 2508     | 262K    | Vision          |
+| `mistral-medium-2505`     | Mistral Medium 2505     | 131K    | Vision          |
+| `mistral-small-latest`    | Mistral Small (latest)  | 128K    | Vision          |
+| `mistral-small-2506`      | Mistral Small 2506      | 128K    | Vision          |
+| `mistral-nemo`            | Mistral NeMo            | 128K    |                 |
+| `ministral-8b-latest`     | Ministral 8B            | 128K    |                 |
+| `ministral-3b-latest`     | Ministral 3B            | 128K    |                 |
+| `magistral-medium-latest` | Magistral Medium        | 128K    | Reasoning       |
+| `magistral-small`         | Magistral Small         | 128K    | Reasoning       |
+| `codestral-latest`        | Codestral (latest)      | 256K    | Coding          |
+| `devstral-medium-latest`  | Devstral Medium         | 262K    | Coding          |
+| `devstral-small-2507`     | Devstral Small 2507     | 128K    | Coding          |
+| `pixtral-large-latest`    | Pixtral Large           | 128K    | Vision          |
+| `pixtral-12b`             | Pixtral 12B             | 128K    | Vision          |
+| `open-mixtral-8x22b`      | Open Mixtral 8×22B      | 64K     |                 |
+| `open-mixtral-8x7b`       | Open Mixtral 8×7B       | 32K     |                 |
+| `open-mistral-7b`         | Open Mistral 7B         | 8K      |                 |
+
+Use model IDs as `mistral/<model-id>` (example: `mistral/mistral-large-latest`).
+
+## Audio transcription with Voxtral
+
+Mistral's Voxtral model handles audio transcription. Configure it under `tools.media`:
+
+```json5
+{
+  tools: {
+    media: {
+      audio: {
+        enabled: true,
+        models: [{ provider: "mistral", model: "voxtral-mini-latest" }],
+      },
+    },
+  },
+}
+```
+
+Transcription requests go to `/v1/audio/transcriptions`.
+
+## Memory embeddings
+
+You can use Mistral for memory search embeddings:
+
+```json5
+{
+  agents: {
+    defaults: {
+      memorySearch: {
+        provider: "mistral",
+      },
+    },
+  },
+}
+```
+
+The default embedding model is `mistral-embed`. Requests go to `/v1/embeddings`.
 
 ## Troubleshooting
 
-<AccordionGroup>
-  <Accordion title="401 Unauthorized">
-    The API key is invalid or expired. Generate a new key at [console.mistral.ai](https://console.mistral.ai) and update `~/.openclaw/.env`.
-  </Accordion>
-  <Accordion title="429 Rate limited">
-    You have exceeded your tier limits. Check your usage and quota at the Mistral console.
-  </Accordion>
-  <Accordion title="Model not found">
-    Verify the model ID is correct and that your subscription plan includes access to it.
-  </Accordion>
-</AccordionGroup>
+**401 Unauthorized**
+
+- Verify your API key is copied in full.
+- Re-run onboarding: `openclaw onboard --auth-choice mistral-api-key`.
+
+**Model not found**
+
+- Confirm the model ID matches exactly (case-sensitive).
+- Check that your Mistral plan includes the requested model.
+
+**Rate limits**
+
+Add multiple API keys for rotation: `openclaw models auth add-key --provider mistral`.
+
+## Related
+
+- [Model providers](/concepts/model-providers)
+- [Models](/concepts/models)
+- [Model failover](/concepts/model-failover)
+- [Gateway configuration](/gateway/configuration)

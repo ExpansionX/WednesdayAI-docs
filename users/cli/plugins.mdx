@@ -1,0 +1,190 @@
+---
+summary: "CLI reference for `wednesdayai plugins` / `openclaw plugins` (list, install, uninstall, enable/disable, doctor)"
+read_when:
+  - You want to install or manage in-process Gateway plugins
+  - You want to debug plugin load failures
+audience: user
+component: plugins-cli
+sources:
+  - src/cli/plugins-cli.ts
+  - src/plugins/catalog.ts
+  - src/plugins/catalog.json
+generated: 2026-07-05
+title: "plugins"
+---
+
+# `wednesdayai plugins`
+
+Manage Gateway plugins/extensions (loaded in-process).
+
+The legacy `openclaw plugins` alias remains supported. New examples use
+`wednesdayai plugins`.
+
+Related:
+
+- Plugin system: [Plugins](/tools/plugin)
+- Plugin manifest + schema: [Plugin manifest](/plugins/manifest)
+- Security hardening: [Security](/gateway/security)
+
+## Commands
+
+```bash
+wednesdayai plugins list
+wednesdayai plugins info <id>
+wednesdayai plugins enable <id>
+wednesdayai plugins disable <id>
+wednesdayai plugins uninstall <id>
+wednesdayai plugins doctor
+wednesdayai plugins update <id>
+wednesdayai plugins update --all
+```
+
+Bundled plugins ship with WednesdayAI but start disabled. Use `plugins enable` to
+activate them.
+
+Use `plugins list --verbose` or `plugins info <id>` to confirm where a plugin is
+loading from. Bundled plugins report `Origin: bundled`; installed copies under
+`~/.openclaw/extensions` report a managed install source instead.
+
+All plugins must ship a `openclaw.plugin.json` file with an inline JSON Schema
+(`configSchema`, even if empty). Missing/invalid manifests or schemas prevent
+the plugin from loading and fail config validation.
+
+## Catalog
+
+WednesdayAI maintains a plugin catalog that maps bare plugin ids to their npm
+install specs. The catalog has two layers:
+
+- **Static local** — baked into the package (`src/plugins/catalog.json`). Lists
+  bundled plugins and core plugins available for managed install.
+- **Remote** — fetched from the [WednesdayAI-plugins](https://github.com/ExpansionX/WednesdayAI-plugins)
+  repository and merged on top of the local catalog. Cached in memory for one
+  hour per gateway process; fail-open to local-only on any fetch error.
+
+The `list`, `info`, and `install` commands automatically refresh the remote
+catalog before resolving a bare plugin id against it.
+
+Remote fetching can be disabled entirely (airgap / mirror mode) or pointed at an
+alternate URL via environment variables:
+
+| Variable                  | Default                                                                              | Purpose                                                                  |
+| ------------------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------ |
+| `OPENCLAW_CATALOG_URL`    | `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-plugins/main/catalog.json` | Override remote catalog URL                                              |
+| `OPENCLAW_CATALOG_TTL_MS` | `3600000` (1 hour)                                                                   | Remote cache TTL in milliseconds (0 is rejected — falls back to default) |
+| `OPENCLAW_CATALOG_REMOTE` | unset (enabled)                                                                      | Set to `"0"` to disable all remote catalog fetching                      |
+
+### List
+
+```bash
+wednesdayai plugins list
+wednesdayai plugins list --enabled
+wednesdayai plugins list --verbose
+wednesdayai plugins list --json
+```
+
+Shows installed plugins and their load source (`Origin`). After refreshing the
+remote catalog, also shows catalog entries that are not yet installed as
+**"not installed"** with `Source: catalog`. Use `--enabled` to filter to active
+plugins only or `--json` for machine-readable output.
+
+### Info
+
+```bash
+wednesdayai plugins info <id>
+wednesdayai plugins info <id> --json
+```
+
+Shows detailed information for a plugin. For installed plugins: status, origin,
+version, tools, hooks, gateway methods, providers, CLI commands, services, and
+install record details.
+
+For catalog-only (not installed) plugins, displays the catalog entry — `kind`,
+`npmSpec`, and the install command.
+
+### Install
+
+```bash
+wednesdayai plugins install <path-or-spec>
+wednesdayai plugins install <npm-spec> --pin
+```
+
+Security note: treat plugin installs like running code. Prefer pinned versions.
+
+Npm specs are **registry-only** (package name + optional version/tag). Git/URL/file
+specs are rejected. Dependency installs run with `--ignore-scripts` for safety.
+
+If a bare install spec matches a bundled plugin id (for example `whatsapp` or
+`diffs`), WednesdayAI installs from the bundled source. If there is no bundled
+match, the spec is resolved against the remote catalog: if a catalog entry exists
+with a matching `id`, WednesdayAI installs the entry's `npmSpec` instead. An npm
+install failure falls back to the bundled source. To install an npm package
+with the same name as a catalog entry, use an explicit scoped spec (for example
+`@scope/diffs`).
+
+Plugins with runtime dependencies must run from the managed copy under the active
+state dir (`$OPENCLAW_STATE_DIR/extensions/<id>`, normally
+`~/.openclaw/extensions/<id>`). Do not repair dependency-bearing bundled plugins by
+running `npm install` inside the global WednesdayAI package directory. Re-run
+`wednesdayai plugins install <id>` instead.
+
+Dependency-free bundled plugins may run directly from the global package copy when
+they are enabled and loadable. `plugins list`, `plugins doctor`, and config
+validation should not report missing dependency errors for enabled plugins that are
+already healthy from global `node_modules`.
+
+Bundled installs are reconciled back to the bundled copy that shipped with the
+current WednesdayAI package. During that reconciliation WednesdayAI may remove the old
+per-user copy under `~/.openclaw/extensions/<id>` when it is the default copied
+directory and does not contain `node_modules`. Copies that carry installed
+dependencies are left in place. Do not add the bundled source directory to
+`plugins.load.paths`; the install record is enough.
+
+If gateway startup logs say `plugin not found` for a bundled plugin, check
+`wednesdayai plugins info <id>` before reinstalling. `Origin: bundled` with
+`Status: loaded` means the plugin is already available from the shipped copy.
+
+Supported archives: `.zip`, `.tgz`, `.tar.gz`, `.tar`.
+
+Use `--link` to avoid copying a local directory (adds to `plugins.load.paths`):
+
+```bash
+wednesdayai plugins install -l ./my-plugin
+```
+
+Use `--pin` on npm installs to save the resolved exact spec (`name@version`) in
+`plugins.installs` while keeping the default behavior unpinned.
+
+### Uninstall
+
+```bash
+wednesdayai plugins uninstall <id>
+wednesdayai plugins uninstall <id> --dry-run
+wednesdayai plugins uninstall <id> --keep-files
+```
+
+`uninstall` removes plugin records from `plugins.entries`, `plugins.installs`,
+the plugin allowlist, and linked `plugins.load.paths` entries when applicable.
+For active memory plugins, the memory slot resets to `memory-core`.
+
+By default, uninstall also removes the plugin install directory under the active
+state dir extensions root (`$OPENCLAW_STATE_DIR/extensions/<id>`). Use
+`--keep-files` to keep files on disk.
+
+`--keep-config` is supported as a deprecated alias for `--keep-files`.
+
+### Update
+
+```bash
+wednesdayai plugins update <id>
+wednesdayai plugins update --all
+wednesdayai plugins update <id> --dry-run
+```
+
+Updates only apply to plugins installed from npm (tracked in `plugins.installs`).
+Bundled plugins update with the WednesdayAI package itself; `plugins update` first
+reconciles bundled install records so stale copied-bundled records stop looking
+like missing managed installs.
+
+When a stored integrity hash exists and the fetched artifact hash changes,
+OpenClaw prints a warning and asks for confirmation before proceeding. Use
+global `--yes` to bypass prompts in CI/non-interactive runs.

@@ -1,93 +1,153 @@
 ---
-title: "LiteLLM / Bifrost"
-description: "Route WednesdayAI through a self-hosted LiteLLM or Bifrost proxy for centralised model management and cost tracking."
-audience: admin
+summary: "Run OpenClaw through LiteLLM Proxy for unified model access and cost tracking"
+read_when:
+  - You want to route OpenClaw through a LiteLLM proxy
+  - You need cost tracking, logging, or model routing through LiteLLM
 ---
 
-# LiteLLM / Bifrost
+# LiteLLM
 
-LiteLLM and Bifrost are self-hosted LLM proxies that sit between WednesdayAI and AI providers. They provide centralised key management, budget limits, usage tracking, and team access control.
+[LiteLLM](https://litellm.ai) is an open-source LLM gateway that provides a unified API to 100+ model providers. Route OpenClaw through LiteLLM to get centralized cost tracking, logging, and the flexibility to switch backends without changing your OpenClaw config.
 
-## When to use a proxy
+## Why use LiteLLM with OpenClaw?
 
-- Centralised API-key management for a team
-- Per-user or per-team cost tracking
-- Enforced model-access policies
-- You already run LiteLLM or Bifrost in your infrastructure
+- **Cost tracking** — See exactly what OpenClaw spends across all models
+- **Model routing** — Switch between Claude, GPT-4, Gemini, Bedrock without config changes
+- **Virtual keys** — Create keys with spend limits for OpenClaw
+- **Logging** — Full request/response logs for debugging
+- **Fallbacks** — Automatic failover if your primary provider is down
 
-## LiteLLM
+## Quick start
 
-[LiteLLM](https://github.com/BerriAI/litellm) exposes 100+ models behind a single OpenAI-compatible API. Configure it as a custom provider under `models.providers`:
+### Via onboarding
+
+```bash
+openclaw onboard --auth-choice litellm-api-key
+```
+
+### Manual setup
+
+1. Start LiteLLM Proxy:
+
+```bash
+pip install 'litellm[proxy]'
+litellm --model claude-opus-4-6
+```
+
+2. Point OpenClaw to LiteLLM:
+
+```bash
+export LITELLM_API_KEY="your-litellm-key"
+
+openclaw
+```
+
+That's it. OpenClaw now routes through LiteLLM.
+
+## Configuration
+
+### Environment variables
+
+```bash
+export LITELLM_API_KEY="sk-litellm-key"
+```
+
+### Config file
 
 ```json5
 {
-  agents: {
-    defaults: {
-      model: { primary: "litellm/claude-sonnet-4-6" },
-    },
-  },
   models: {
-    mode: "merge",
     providers: {
       litellm: {
         baseUrl: "http://localhost:4000",
-        apiKey: "${LITELLM_API_KEY}", // references the env var
+        apiKey: "${LITELLM_API_KEY}",
         api: "openai-completions",
-        models: [{ id: "claude-sonnet-4-6", name: "Sonnet via LiteLLM" }],
+        models: [
+          {
+            id: "claude-opus-4-6",
+            name: "Claude Opus 4.6",
+            reasoning: true,
+            input: ["text", "image"],
+            contextWindow: 200000,
+            maxTokens: 64000,
+          },
+          {
+            id: "gpt-4o",
+            name: "GPT-4o",
+            reasoning: false,
+            input: ["text", "image"],
+            contextWindow: 128000,
+            maxTokens: 8192,
+          },
+        ],
       },
     },
   },
-}
-```
-
-<Note>
-  Set `LITELLM_API_KEY` in `~/.openclaw/.env` to your LiteLLM master key. The `apiKey` field references the env var — keep the actual key out of committed config files.
-</Note>
-
-The model reference must match how the model is configured in LiteLLM.
-
-## Bifrost
-
-Bifrost is WednesdayAI's native LLM-proxy integration. When requests route through Bifrost, the gateway captures the actual provider and model from the `x-bifrost-provider` and `x-bifrost-model` response headers and records them in run metadata — useful for auditing which backend handled each request.
-
-```json5
-{
   agents: {
     defaults: {
-      model: { primary: "bifrost/anthropic/claude-sonnet-4-6" },
-    },
-  },
-  models: {
-    mode: "merge",
-    providers: {
-      bifrost: {
-        baseUrl: "http://bifrost.internal:8080",
-        apiKey: "your-bifrost-key",
-        api: "openai-completions",
-        models: [{ id: "anthropic/claude-sonnet-4-6", name: "Sonnet via Bifrost" }],
-      },
+      model: { primary: "litellm/claude-opus-4-6" },
     },
   },
 }
 ```
 
-Header capture comes from the bundled Bifrost extension. To enable it, run the interactive auth flow and select **Proxy / Gateway → Bifrost**:
+## Virtual keys
+
+Create a dedicated key for OpenClaw with spend limits:
 
 ```bash
-openclaw auth
-# choose: Proxy / Gateway → Bifrost
+curl -X POST "http://localhost:4000/key/generate" \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "key_alias": "openclaw",
+    "max_budget": 50.00,
+    "budget_duration": "monthly"
+  }'
 ```
 
-## Troubleshooting
+Use the generated key as `LITELLM_API_KEY`.
 
-<AccordionGroup>
-  <Accordion title="Connection refused">
-    The proxy is not running. Confirm LiteLLM or Bifrost is up and listening on the configured port.
-  </Accordion>
-  <Accordion title="401 from the proxy">
-    The `apiKey` does not match the proxy's master key. Update the provider's `apiKey`.
-  </Accordion>
-  <Accordion title="Model not found">
-    The model `id` must match exactly how it is configured in the proxy. Check the proxy's model list or admin UI.
-  </Accordion>
-</AccordionGroup>
+## Model routing
+
+LiteLLM can route model requests to different backends. Configure in your LiteLLM `config.yaml`:
+
+```yaml
+model_list:
+  - model_name: claude-opus-4-6
+    litellm_params:
+      model: claude-opus-4-6
+      api_key: os.environ/ANTHROPIC_API_KEY
+
+  - model_name: gpt-4o
+    litellm_params:
+      model: gpt-4o
+      api_key: os.environ/OPENAI_API_KEY
+```
+
+OpenClaw keeps requesting `claude-opus-4-6` — LiteLLM handles the routing.
+
+## Viewing usage
+
+Check LiteLLM's dashboard or API:
+
+```bash
+# Key info
+curl "http://localhost:4000/key/info" \
+  -H "Authorization: Bearer sk-litellm-key"
+
+# Spend logs
+curl "http://localhost:4000/spend/logs" \
+  -H "Authorization: Bearer $LITELLM_MASTER_KEY"
+```
+
+## Notes
+
+- LiteLLM runs on `http://localhost:4000` by default
+- OpenClaw connects via the OpenAI-compatible `/v1/chat/completions` endpoint
+- All OpenClaw features work through LiteLLM — no limitations
+
+## See also
+
+- [LiteLLM Docs](https://docs.litellm.ai)
+- [Model Providers](/concepts/model-providers)

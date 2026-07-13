@@ -1,0 +1,175 @@
+---
+summary: "CLI reference for `openclaw sessions` (list stored sessions + usage)"
+read_when:
+  - You want to list stored sessions and see recent activity
+title: "sessions"
+sources:
+  - src/cli/commands/sessions.ts
+  - src/cli/program/register.status-health-sessions.ts
+  - src/commands/sessions-claims-status.ts
+  - src/gateway/server-methods/sessions.ts
+  - src/gateway/session-utils.ts
+  - src/config/sessions/store.ts
+generated: 2026-07-06
+---
+
+# `openclaw sessions`
+
+List stored conversation sessions. The command reads the per-agent `sessions.json` store file
+and (when session metadata includes a transcript path) may read transcript content. With a database
+session backend (`session.storage.backend: "sqlite" | "postgres"`), transcript content is served from
+the configured database; with `backend: "fs-jsonl"`, transcripts are read from local JSONL files.
+See [Session Management / External session storage](/concepts/session#external-session-storage).
+
+```bash
+openclaw sessions
+openclaw sessions --agent work
+openclaw sessions --all-agents
+openclaw sessions --active 120
+openclaw sessions --json
+```
+
+Scope selection:
+
+- default: configured default agent store
+- `--agent <id>`: one configured agent store
+- `--all-agents`: aggregate all configured agent stores
+- `--store <path>`: explicit store path (cannot be combined with `--agent` or `--all-agents`)
+
+JSON examples:
+
+`openclaw sessions --all-agents --json`:
+
+```json
+{
+  "path": null,
+  "stores": [
+    { "agentId": "main", "path": "/home/user/.openclaw/agents/main/sessions/sessions.json" },
+    { "agentId": "work", "path": "/home/user/.openclaw/agents/work/sessions/sessions.json" }
+  ],
+  "allAgents": true,
+  "count": 2,
+  "activeMinutes": null,
+  "sessions": [
+    { "agentId": "main", "key": "agent:main:main", "model": "gpt-5" },
+    { "agentId": "work", "key": "agent:work:main", "model": "claude-opus-4-5" }
+  ]
+}
+```
+
+## Cleanup maintenance
+
+Run maintenance now (instead of waiting for the next write cycle):
+
+```bash
+openclaw sessions cleanup --dry-run
+openclaw sessions cleanup --agent work --dry-run
+openclaw sessions cleanup --all-agents --dry-run
+openclaw sessions cleanup --enforce
+openclaw sessions cleanup --enforce --active-key "agent:main:telegram:dm:123"
+openclaw sessions cleanup --json
+```
+
+`openclaw sessions cleanup` uses `session.maintenance` settings from config:
+
+- Scope note: `openclaw sessions cleanup` maintains session stores/transcripts only. It does not prune cron run logs (`cron/runs/<jobId>.jsonl`), which are managed by `cron.runLog.maxBytes` and `cron.runLog.keepLines` in [Cron configuration](/automation/cron-jobs#configuration) and explained in [Cron maintenance](/automation/cron-jobs#maintenance).
+
+- `--dry-run`: preview how many entries would be pruned/capped without writing.
+  - In text mode, dry-run prints a per-session action table (`Action`, `Key`, `Age`, `Model`, `Flags`) so you can see what would be kept vs removed.
+- `--enforce`: apply maintenance even when `session.maintenance.mode` is `warn`.
+- `--active-key <key>`: protect a specific active key from disk-budget eviction.
+- `--agent <id>`: run cleanup for one configured agent store.
+- `--all-agents`: run cleanup for all configured agent stores.
+- `--store <path>`: run against a specific `sessions.json` file.
+- `--json`: print a JSON summary. With `--all-agents`, output includes one summary per store.
+
+`openclaw sessions cleanup --all-agents --dry-run --json`:
+
+```json
+{
+  "allAgents": true,
+  "mode": "warn",
+  "dryRun": true,
+  "stores": [
+    {
+      "agentId": "main",
+      "storePath": "/home/user/.openclaw/agents/main/sessions/sessions.json",
+      "beforeCount": 120,
+      "afterCount": 80,
+      "pruned": 40,
+      "capped": 0
+    },
+    {
+      "agentId": "work",
+      "storePath": "/home/user/.openclaw/agents/work/sessions/sessions.json",
+      "beforeCount": 18,
+      "afterCount": 18,
+      "pruned": 0,
+      "capped": 0
+    }
+  ]
+}
+```
+
+## Claims status
+
+View session consumer claim ledger status — what work is owed, stalled, or dead-lettered:
+
+```bash
+openclaw sessions claims status
+openclaw sessions claims status --agent work
+openclaw sessions claims status --json
+```
+
+The command calls the gateway RPC `sessions.claims.status`. Text output shows:
+
+- **Consumers** table: consumer ID, lane, effect kind, enabled flag, and counts
+  by status (`pending`, `claimed`, `processing`, `dlq`, `processed`).
+- **Stalled leases** table: expired claims still in `claimed`/`processing` state.
+- **Last sweep** timestamp (when the reconciler last ran).
+- **Recent events** table: last diagnostic events from the in-memory ring buffer
+  (event type, consumer ID, reason, count, timestamp).
+
+`--json` outputs the raw RPC response:
+
+```json
+{
+  "consumers": [
+    {
+      "consumerId": "learning-core:session.end",
+      "lane": "main",
+      "effectKind": "session.end",
+      "enabled": true,
+      "agentId": "main",
+      "counts": { "pending": 3, "claimed": 0, "processing": 0, "dlq": 1, "processed": 120 }
+    }
+  ],
+  "stalledLeases": [
+    {
+      "sessionId": "abc123",
+      "consumerId": "learning-core:session.end",
+      "lane": "main",
+      "consumedMs": 45000,
+      "attemptCount": 2
+    }
+  ],
+  "lastSweepTs": 1751821200000,
+  "recentEvents": [
+    {
+      "event": "skipped_backlog",
+      "consumerId": "old-plugin:session.end",
+      "reason": "backstop release, consumer disabled",
+      "count": 3,
+      "timestamp": 1751820900000
+    }
+  ]
+}
+```
+
+Related:
+
+- Operator guide: [Session Consumer Claims](/gateway/session-consumer-claims)
+
+Related:
+
+- Session config: [Configuration reference](/gateway/configuration-reference#session)

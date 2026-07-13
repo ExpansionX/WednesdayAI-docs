@@ -1,66 +1,122 @@
 ---
 title: "OpenRouter"
-description: "Access 100+ models from a single OpenRouter API key — unified billing and automatic fallback."
-audience: admin
+summary: "Use OpenRouter's unified API to access 100+ models in OpenClaw"
+read_when:
+  - You want a single API key for many LLMs
+  - You want to run models via OpenRouter in OpenClaw
 ---
 
 # OpenRouter
 
-[OpenRouter](https://openrouter.ai) is a unified API gateway that gives WednesdayAI access to hundreds of models from Anthropic, OpenAI, Google, Mistral, Meta, and others — all from one API key.
+OpenRouter is a unified API gateway that routes requests to 100+ models from providers like Anthropic, OpenAI, Google, Meta, and more. A single API key and a single base URL gives you access to the full catalog, making it easy to experiment with different models without managing multiple credentials.
 
-## When to use it
+## Requirements
 
-- Experiment with many models without managing separate keys
-- Unified billing across providers
-- Access to models not available in your region
+- An OpenRouter API key from [openrouter.ai](https://openrouter.ai)
 
-## Authentication
-
-Create a key at [openrouter.ai/keys](https://openrouter.ai/keys), then onboard, or set it on the gateway host:
+## Quickstart
 
 ```bash
-echo 'OPENROUTER_API_KEY=sk-or-...' >> ~/.openclaw/.env
+export OPENROUTER_API_KEY="sk-or-..."
+openclaw onboard --auth-choice openrouter-api-key
 ```
 
-## Selecting a model
-
-OpenRouter model references are prefixed with `openrouter/` and keep the upstream `provider/model` path:
+Then set a default model:
 
 ```json5
 {
   agents: {
     defaults: {
-      model: { primary: "openrouter/anthropic/claude-sonnet-4-5" },
+      model: { primary: "openrouter/anthropic/claude-opus-4-6" },
     },
   },
 }
 ```
 
-| Model | Reference |
-| ----- | --------- |
-| Claude Sonnet 4.5 | `openrouter/anthropic/claude-sonnet-4-5` |
-| Claude Opus 4.6 | `openrouter/anthropic/claude-opus-4-6` |
-| Gemini 2.0 Flash | `openrouter/google/gemini-2.0-flash-001` |
-| Llama 3.3 70B | `openrouter/meta-llama/llama-3.3-70b-instruct` |
-| DeepSeek R1 | `openrouter/deepseek/deepseek-r1` |
-| Auto (smart routing) | `openrouter/openrouter/auto` |
+## Configuration
 
-<Note>
-When typing `/model` in chat with an OpenRouter reference, include the full `openrouter/` prefix — the reference is parsed by splitting on the first `/`, so the provider prefix is required for IDs that themselves contain `/`.
-</Note>
+### Environment variable
 
-Run `openclaw models status` to list models your key can access. WednesdayAI can also scan OpenRouter's free-model catalog with `openclaw models scan`.
+```bash
+export OPENROUTER_API_KEY="sk-or-..."
+```
+
+OpenClaw reads `OPENROUTER_API_KEY` automatically and enables the `openrouter` provider.
+
+### Config snippet
+
+```json5
+{
+  env: { OPENROUTER_API_KEY: "sk-or-..." },
+  agents: {
+    defaults: {
+      model: { primary: "openrouter/anthropic/claude-opus-4-6" },
+    },
+  },
+}
+```
+
+### Provider settings
+
+| Setting                | Value                                    |
+| ---------------------- | ---------------------------------------- |
+| Provider ID            | `openrouter`                             |
+| Base URL               | `https://openrouter.ai/api/v1`           |
+| API                    | OpenAI-compatible (`openai-completions`) |
+| Auth env var           | `OPENROUTER_API_KEY`                     |
+| Default model          | `auto` (OpenRouter smart routing)        |
+| Default context window | 200,000 tokens                           |
+| Default max tokens     | 8,192                                    |
+
+## Model IDs
+
+OpenRouter model references follow the pattern `openrouter/<provider>/<model>`. Examples:
+
+```
+openrouter/anthropic/claude-opus-4-6
+openrouter/openai/gpt-4o
+openrouter/meta-llama/llama-3.3-70b-instruct
+openrouter/google/gemini-2.5-pro
+openrouter/deepseek/deepseek-r1
+```
+
+You can also use `openrouter/auto` to let OpenRouter pick the best model for each request.
+
+The full model list is available at [openrouter.ai/models](https://openrouter.ai/models).
+
+## Auto routing
+
+The `openrouter/auto` model lets OpenRouter select the best available model for each request based on capability, cost, and availability. OpenClaw disables the reasoning effort parameter for `auto` because the target model is unknown at request time.
+
+```json5
+{
+  agents: {
+    defaults: {
+      model: { primary: "openrouter/auto" },
+    },
+  },
+}
+```
 
 ## Troubleshooting
 
-<AccordionGroup>
-  <Accordion title="401 Unauthorized">
-    The key is invalid. Re-run onboarding with a fresh key from [openrouter.ai/keys](https://openrouter.ai/keys).
-  </Accordion>
-  <Accordion title="Model not available">
-    Not all models are available on all tiers. Check [openrouter.ai/models](https://openrouter.ai/models) for your key's access.
-  </Accordion>
-  <Accordion title="Higher latency than a direct provider">
-    OpenRouter adds a routing hop. Use it for experimentation; connect directly for latency-sensitive production.
-  </Accordion>
-</AccordionGroup>
+**401 Unauthorized**
+
+- Verify your key starts with `sk-or-` and is copied in full.
+- Re-run onboarding: `openclaw onboard --auth-choice openrouter-api-key`.
+
+**Model not available / 404**
+
+- Check that the model ID matches OpenRouter's catalog exactly (case-sensitive).
+- Some models require special approval; check your OpenRouter account settings.
+
+**Rate limits**
+
+OpenRouter applies per-model rate limits based on your tier. If you hit limits, add multiple API keys as auth profiles for rotation: `openclaw models auth add-key --provider openrouter`.
+
+## Related
+
+- [Model providers](/concepts/model-providers)
+- [Models](/concepts/models)
+- [Model failover](/concepts/model-failover)
+- [Gateway configuration](/gateway/configuration)

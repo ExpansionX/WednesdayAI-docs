@@ -1,0 +1,148 @@
+---
+summary: "Context window + compaction: how OpenClaw keeps sessions under model limits"
+read_when:
+  - You want to understand auto-compaction and /compact
+  - You are debugging long sessions hitting context limits
+title: "Compaction"
+---
+
+# Context Window & Compaction
+
+Every model has a **context window** (max tokens it can see). Long-running chats accumulate messages and tool results; once the window is tight, OpenClaw **compacts** older history to stay within limits.
+
+## What compaction is
+
+Compaction **summarizes older conversation** into a compact summary entry and keeps recent messages intact. The summary is stored in the session history, so future requests use:
+
+- The compaction summary
+- Recent messages after the compaction point
+
+Compaction **persists** in the session’s JSONL history.
+
+## Configuration
+
+Use the `agents.defaults.compaction` object in your `openclaw.json` to control compaction behavior.
+
+### Fields
+
+| Field                                   | Type                                | Default       | Description                                                                                                                                                                                   |
+| --------------------------------------- | ----------------------------------- | ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                               | boolean                             | `true`        | Master switch. Set to `false` to skip both safeguard and direct compaction entirely.                                                                                                          |
+| `mode`                                  | `"default"` \| `"safeguard"`        | `"safeguard"` | Compaction strategy. `"safeguard"` applies stricter guardrails to preserve recent context.                                                                                                    |
+| `reserveTokens`                         | number                              | —             | Token headroom reserved for reply generation after compaction.                                                                                                                                |
+| `keepRecentTokens`                      | number                              | —             | Minimum token budget preserved from the most recent conversation window.                                                                                                                      |
+| `reserveTokensFloor`                    | number                              | —             | Minimum floor enforced for `reserveTokens` in the Pi compaction path (0 disables).                                                                                                            |
+| `maxHistoryShare`                       | number (0.1–0.9)                    | `0.5`         | Maximum fraction of the context budget allowed for retained history.                                                                                                                          |
+| `identifierPolicy`                      | `"strict"` \| `"off"` \| `"custom"` | `"strict"`    | Controls whether compaction summaries include opaque-identifier preservation instructions. `"strict"` prepends built-in guidance, `"off"` omits it, `"custom"` uses `identifierInstructions`. |
+| `identifierInstructions`                | string                              | —             | Custom preservation text used when `identifierPolicy` is `"custom"`.                                                                                                                          |
+| `memoryFlush.enabled`                   | boolean                             | `true`        | Run a silent pre-compaction memory flush turn before heavy context reduction.                                                                                                                 |
+| `memoryFlush.softThresholdTokens`       | number                              | —             | How close to the compaction threshold (in tokens) to trigger the flush.                                                                                                                       |
+| `memoryFlush.forceFlushTranscriptBytes` | number \| string                    | —             | Force flush when the transcript file reaches this size (e.g. `"2mb"`). Set to `0` to disable.                                                                                                 |
+| `memoryFlush.prompt`                    | string                              | —             | Custom user-prompt for the memory flush turn.                                                                                                                                                 |
+| `memoryFlush.systemPrompt`              | string                              | —             | System-prompt override for the memory flush turn.                                                                                                                                             |
+
+### Examples
+
+Disable compaction entirely:
+
+```json5
+{
+  agents: {
+    defaults: {
+      compaction: { enabled: false },
+    },
+  },
+}
+```
+
+Switch identifier preservation off:
+
+```json5
+{
+  agents: {
+    defaults: {
+      compaction: { identifierPolicy: "off" },
+    },
+  },
+}
+```
+
+Provide custom identifier preservation instructions:
+
+```json5
+{
+  agents: {
+    defaults: {
+      compaction: {
+        identifierPolicy: "custom",
+        identifierInstructions: "Preserve all ticket IDs (e.g. PROJ-1234) and branch names exactly as written.",
+      },
+    },
+  },
+}
+```
+
+## Auto-compaction (default on)
+
+When a session nears or exceeds the model’s context window, OpenClaw triggers auto-compaction and may retry the original request using the compacted context.
+
+You’ll see:
+
+- `🧹 Auto-compaction complete` in verbose mode
+- `/status` showing `🧹 Compactions: <count>`
+
+Before compaction, OpenClaw can run a **silent memory flush** turn to store
+durable notes to disk. See [Memory](/concepts/memory) for details and config.
+
+## Manual compaction
+
+Use `/compact` (optionally with instructions) to force a compaction pass:
+
+```
+/compact Focus on decisions and open questions
+```
+
+## Context window source
+
+Context window is model-specific. OpenClaw uses the model definition from the configured provider catalog to determine limits.
+
+## Compaction vs pruning
+
+- **Compaction**: summarises and **persists** in JSONL.
+- **Session pruning**: trims old **tool results** only, **in-memory**, per request.
+
+See [/concepts/session-pruning](/concepts/session-pruning) for pruning details.
+
+## OpenAI server-side compaction
+
+OpenClaw also supports OpenAI Responses server-side compaction hints for
+compatible direct OpenAI models. This is separate from local OpenClaw
+compaction and can run alongside it.
+
+- Local compaction: OpenClaw summarizes and persists into session JSONL.
+- Server-side compaction: OpenAI compacts context on the provider side when
+  `store` + `context_management` are enabled.
+
+See [OpenAI provider](/providers/openai) for model params and overrides.
+
+## Tips
+
+- Use `/compact` when sessions feel stale or context is bloated.
+- Large tool outputs are already truncated; pruning can further reduce tool-result buildup.
+- If you need a fresh slate, `/new` or `/reset` starts a new session id.
+
+## Troubleshooting
+
+**Compaction triggers but the session still hits context limits**
+The summary may be larger than expected, or recent messages alone already exceed the window. Check your `keepRecentTokens` and `reserveTokens` settings. If recent messages are unavoidably large (for example, huge tool outputs), combine compaction with session pruning (`contextPruning`) to trim tool results before the LLM call.
+
+**Identifier (ticket ID, branch name) lost after compaction**
+The default `identifierPolicy: "strict"` adds built-in guidance, but identifiers buried deep in tool output may not survive. Switch to `"custom"` and provide explicit `identifierInstructions` naming the identifier patterns you care about (for example `"Preserve all PROJ-* ticket IDs exactly"`). Confirm with `/compact Focus on ticket IDs and branch names`.
+
+**`enabled: false` still seems to compact**
+Config is read at gateway start. Restart the gateway after changing `compaction.enabled`. Also verify the config is under `agents.defaults.compaction`, not a top-level key.
+
+**Memory flush runs unexpectedly or too often**
+The flush fires when the transcript file reaches `memoryFlush.forceFlushTranscriptBytes`. Set it to `0` to disable size-based triggers, or increase the value. Set `memoryFlush.enabled: false` to turn off pre-compaction memory flushes entirely.
+
+_Related: [Session pruning](/concepts/session-pruning) · [Memory](/concepts/memory) · [Session management](/concepts/session) · [OpenAI provider](/providers/openai)_

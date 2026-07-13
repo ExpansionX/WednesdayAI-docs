@@ -1,0 +1,178 @@
+---
+audience: admin
+component: session-consumer-claims
+sources:
+  - src/config/sessions/storage-config.ts
+  - src/config/sessions/session-consumer-claim-reconciler.ts
+  - src/config/sessions/session-consumer-claim-prune-gate.ts
+  - src/config/sessions/session-consumer-claim-sweep.ts
+  - src/gateway/server.impl.ts
+  - src/gateway/server-methods/sessions.ts
+  - src/gateway/session-consumer-claim-sweep.ts
+  - src/config/types.base.ts
+  - src/plugins/registry.ts
+  - src/commands/sessions-claims-status.ts
+  - extensions/learning-core/openclaw.plugin.json
+generated: 2026-07-06
+---
+
+# Session Consumer Claims: Operator Guide
+
+Session consumer claims protect sessions from premature pruning when a registered
+plugin still owes work on them. This page covers configuration, monitoring, and
+operational behaviour.
+
+## Configuration
+
+Consumer-claim settings live under `session.storage.consumerClaims` in
+`openclaw.json`:
+
+```json
+{
+  "session": {
+    "storage": {
+      "consumerClaims": {
+        "progressWindowMs": 86400000,
+        "maxRetentionBackstopMs": 2592000000,
+        "sweepCadenceMs": 60000,
+        "maxAttempts": 5,
+        "leaseMs": 30000,
+        "retryBaseMs": 1000
+      }
+    }
+  }
+}
+```
+
+| Key                      | Default            | Description                                                                                                               |
+| ------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------- |
+| `progressWindowMs`       | `86400000` (24h)   | Liveness ceiling. A consumer whose claim is within this window of last progress is considered alive and pins the session. |
+| `maxRetentionBackstopMs` | `2592000000` (30d) | Last-resort age cap. After this, sessions are released for pruning even if a consumer is still pending.                   |
+| `sweepCadenceMs`         | `60000` (1min)     | Reconciler sweep interval. The sweep materializes claim rows for ended sessions.                                          |
+| `maxAttempts`            | `5`                | DLQ threshold. After this many failed attempts, a claim is dead-lettered.                                                 |
+| `leaseMs`                | `30000` (30s)      | Claim lease duration. Expired leases are reaped and claims reset to pending.                                              |
+| `retryBaseMs`            | `1000` (1s)        | Exponential backoff base for retry scheduling.                                                                            |
+
+All keys are optional; omitting the `consumerClaims` block uses the defaults above.
+
+## Backend requirements
+
+| Backend  | Claims supported | Notes                                                                                                |
+| -------- | ---------------- | ---------------------------------------------------------------------------------------------------- |
+| SQLite   | Yes              | Default backend. No extra setup.                                                                     |
+| Postgres | Yes              | Uses `FOR UPDATE SKIP LOCKED` for concurrent claim safety.                                           |
+| fs-jsonl | No (degraded)    | Claim/lease ops throw. Sessions are not obligation-protected. Use SQLite or Postgres for production. |
+
+## Operational behaviour
+
+### Reconciler sweep + lease reaper
+
+The gateway runs a single timer on `sweepCadenceMs` that performs two operations per
+tick:
+
+1. **Reconciler sweep** — for each registered consumer, queries sessions for the
+   consumer's agent updated past the consumer's watermark, derives the lane from
+   `session_key`, and materializes claim rows (idempotent on the
+   `(session_id, consumer_id, effect_kind, schema_version)` key). The watermark
+   advances to `max(updated_at)` of the candidates scanned — not only the
+   materialized ones — so idle lanes do not re-scan the same rows every tick.
+2. **Lease reaper** — resets expired leases. Claims with `attempt_count` under
+   `maxAttempts` return to `pending` for retry; claims at or over the budget
+   transition to `dlq` and emit a `dlq_terminal` diagnostic (once, at the transition).
+
+A plugin that is disabled (watermark `enabled = 0`) still has its owed work
+preserved: the sweep keeps materializing claims for it, and the prune gate pins
+those claims until either the consumer is re-enabled or the 30-day backstop
+releases them.
+
+### Prune gating
+
+Session pruning is **obligation-gated**, not purely age-based. Before deleting a
+session past the age cutoff, the prune gate checks **all** consumer watermarks —
+including disabled ones — so a disabled consumer's backlog is not silently dropped
+before the backstop fires.
+
+- **Floor (not prunable):** any consumer has a live claim, a pending/claimed claim
+  within the progress window (`progressWindowMs`, default 24h), a pending/claimed
+  claim within the retention backstop (`maxRetentionBackstopMs`, default 30d) —
+  even for a disabled consumer — or a watermark that post-dates the session's last
+  activity.
+- **Ceiling (released for prune):** all claims are `processed` or `dlq`, OR the
+  session exceeds `maxRetentionBackstopMs`. The progress window is a **soft**
+  liveness signal (consumer is lagging); the backstop is the **hard** release.
+  Past the progress window but within the backstop, a session is still pinned;
+  only past the backstop is it released (and a `backstop_released` or
+  `skipped_backlog` diagnostic is emitted).
+
+### Diagnostic events
+
+The system emits diagnostic events:
+
+- `dlq_terminal` — a claim reached `maxAttempts` and was dead-lettered by the
+  lease reaper. Emitted **once at the DLQ transition** (not at every prune sweep),
+  so a surviving DLQ claim does not produce repeated events.
+- `backstop_released` — a session exceeded the 30-day backstop and was released
+  for pruning despite a non-terminal (`pending`/`claimed`) claim. Emitted at
+  prune-gate evaluation time for enabled consumers.
+- `skipped_backlog` — same release condition as `backstop_released`, but for a
+  consumer whose watermark is **disabled**. Signals that re-enabling the consumer
+  would have resumed from this watermark, but the backstop released the session
+  first.
+
+Subscribe via `onDiagnosticEvent` or inspect via the diagnostics-otel extension
+if configured.
+
+## Operational observability
+
+### Gateway RPC: `sessions.claims.status`
+
+The gateway exposes `sessions.claims.status` as a server method. It returns:
+
+- **consumers** — per-consumer per-lane status: consumer ID, lane, effect kind,
+  enabled flag, and counts by claim status (`pending`, `claimed`, `processing`,
+  `dlq`, `processed`).
+- **stalledLeases** — claims with expired leases still in `claimed`/`processing`
+  state, grouped by session.
+- **lastSweepTs** — timestamp of the last reconciler sweep tick.
+- **recentEvents** — last N diagnostic events from the in-memory ring buffer.
+
+The RPC only surfaces claims for sessions with at least one stalled lease (it
+walks watermarks + stalled leases → `getClaimsForSession`), so sessions with
+only terminal claims are not returned.
+
+### CLI: `wednesdayai sessions claims status`
+
+```bash
+wednesdayai sessions claims status
+wednesdayai sessions claims status --agent work
+wednesdayai sessions claims status --json
+```
+
+See `docs/cli/sessions.md` for full CLI reference.
+
+### Learning-core consumer
+
+The `extensions/learning-core` plugin declares `sessionConsumers` in its
+manifest and processes the `session.end` effect via the `onSessionWorkAvailable`
+hook. It reads transcripts from the durable conversation store (not volatile
+in-memory event messages), then calls `claimSessionWork()` → `processAgentEndFromClaim()`
+→ `ackSessionWork()`.
+
+### Reconciliation
+
+The gateway sweep now reconciles watermarks against the active plugin registry on
+every tick. Watermarks belonging to unregistered consumers are **purged** (via
+`purgeConsumer`) so prune-gate is not pinned indefinitely by a removed plugin's
+cursor. The purge gate uses manifest-declared consumer IDs (not load-filtered
+active consumers) to avoid purging watermarks when a plugin transiently fails to
+load.
+
+## Known limitations
+
+- `setEnabled(false)` for registered-but-disabled consumers is a placeholder
+  until a disabled-state signal is carried in the registry.
+- `dlq_terminal` and `backstop_released` diagnostics are emitted through the
+  global event system, not the session-consumer ring buffer — they are not
+  surfaced by `sessions.claims.status`.
+- `consumerClaims.leaseMs` and `retryBaseMs` are resolved from config but not
+  yet wired through to the claim store (uses hardcoded defaults).

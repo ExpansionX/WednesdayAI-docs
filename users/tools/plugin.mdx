@@ -1,46 +1,1161 @@
 ---
-title: "Plugins and extensions"
-description: "What plugins add to WednesdayAI, which official ones are available, and how to ask your administrator to enable them."
-audience: user
-doc-schema-version: 1
+summary: "WednesdayAI plugins/extensions: discovery, config, and safety"
+read_when:
+  - Adding or modifying plugins/extensions
+  - Documenting plugin install or load rules
+title: "Plugins"
+audience: developer
+sources:
+  - src/plugin-sdk/index.ts
+  - src/plugins/types.ts
+  - src/plugins/provider-runtime-identity.ts
+  - src/logging/file-log-writer.ts
+  - src/config/types.base.ts
+generated: 2026-06-19
 ---
 
-# Plugins and extensions
+# Plugins (Extensions)
 
-Plugins extend what WednesdayAI can do. Your administrator installs and enables them on the gateway — once active, they add new capabilities automatically. You do not need to install anything yourself.
+## Quick start (new to plugins?)
 
-## What plugins add
+A plugin is just a **small code module** that extends WednesdayAI with extra
+features (commands, tools, and Gateway RPC).
 
-Plugins can extend WednesdayAI in several ways:
+Most of the time, you’ll use plugins when you want a feature that’s not built
+into core WednesdayAI yet (or you want to keep optional features out of your main
+install).
 
-- **New chat channels** — make WednesdayAI available on platforms like Microsoft Teams, Matrix, or Zalo.
-- **Voice calls** — the agent can join or handle phone calls using the Voice Call plugin.
-- **Extended memory** — alternative memory backends (for example LanceDB for long-term recall) replace the default in-memory store.
-- **New slash commands** — some plugins register their own commands you can send in chat.
-- **Extra agent tools** — plugins can give the agent additional abilities, such as querying a custom data source.
+Fast path:
 
-Which capabilities are available depends entirely on which plugins your administrator has enabled.
+1. See what’s already loaded:
 
-## Official plugins
+```bash
+openclaw plugins list
+```
 
-| Plugin | What it adds |
-| ------ | ------------ |
-| Voice Call (`@wednesdayai/voice-call`) | Inbound and outbound phone calls via Twilio. Use `/voicecall start` in chat. |
-| Microsoft Teams (`@wednesdayai/msteams`) | Makes WednesdayAI available as a Teams bot. |
-| Matrix (`@wednesdayai/matrix`) | Connects WednesdayAI to a Matrix homeserver. |
-| Zalo (`@wednesdayai/zalo`) | Connects to Zalo business accounts. |
-| Zalo Personal (`@wednesdayai/zalouser`) | Connects to personal Zalo accounts. |
-| Nostr (`@wednesdayai/nostr`) | Connects to the Nostr decentralised network. |
-| Memory (Core) | Built-in memory search. Enabled by default. |
-| Memory (LanceDB) | Long-term memory with automatic recall. Ask your admin to enable it. |
+2. Install an official plugin (example: Voice Call):
 
-## Asking your admin to enable a plugin
+```bash
+wednesdayai plugins install voice-call
+```
 
-If you want a capability that is not currently available, ask your WednesdayAI administrator to install or enable the relevant plugin. You can describe what you are trying to do rather than naming a specific plugin — they can advise which plugin (if any) supports it.
+Npm specs are **registry-only** (package name + optional version/tag). Git/URL/file
+specs are rejected.
 
-Once a plugin is enabled and the gateway is restarted, its features are available immediately without any action on your part.
+WhatsApp is published as the first dependency-bearing first-party npm plugin. `wednesdayai plugins install whatsapp` resolves the catalog entry to `@wednesdayai/whatsapp`, installs it into `~/.openclaw/extensions/whatsapp`, and installs runtime dependencies beside that managed copy. Install does not enable the plugin automatically; run `wednesdayai plugins enable whatsapp` when you are ready to activate it. Not every bundled plugin is published to npm yet.
+
+3. Restart the Gateway, then configure under `plugins.entries.<id>.config`.
+
+See [Voice Call](/plugins/voice-call) for a concrete example plugin.
+Looking for third-party listings? See [Community plugins](/plugins/community).
+
+## Available plugins (official)
+
+- Microsoft Teams is plugin-only as of 2026.1.15; install `@openclaw/msteams` if you use Teams.
+- Memory (Core) — bundled memory search plugin (enabled by default via `plugins.slots.memory`)
+- Memory (LanceDB) — bundled long-term memory plugin (auto-recall/capture; set `plugins.slots.memory = "memory-lancedb"`)
+- [Voice Call](/plugins/voice-call) — `@openclaw/voice-call`
+- [Zalo Personal](/plugins/zalouser) — `@openclaw/zalouser`
+- [Matrix](/channels/matrix) — `@openclaw/matrix`
+- [Nostr](/channels/nostr) — `@openclaw/nostr`
+- [Zalo](/channels/zalo) — `@openclaw/zalo`
+- [Microsoft Teams](/channels/msteams) — `@openclaw/msteams`
+- Google Antigravity OAuth (provider auth) — bundled as `google-antigravity-auth` (disabled by default)
+- Gemini CLI OAuth (provider auth) — bundled as `google-gemini-cli-auth` (disabled by default)
+- Qwen OAuth (provider auth) — bundled as `qwen-portal-auth` (disabled by default)
+- Copilot Proxy (provider auth) — local VS Code Copilot Proxy bridge; distinct from built-in `github-copilot` device login (bundled, disabled by default)
+
+WednesdayAI plugins are **TypeScript modules** loaded at runtime via jiti. **Config
+validation does not execute plugin code**; it uses the plugin manifest and JSON
+Schema instead. See [Plugin manifest](/plugins/manifest).
+
+Plugins can register:
+
+- Gateway RPC methods
+- Gateway HTTP handlers
+- Agent tools
+- CLI commands
+- Background services
+- Optional config validation
+- **Skills** (by listing `skills` directories in the plugin manifest)
+- **Auto-reply commands** (execute without invoking the AI agent)
+- **Provider runtime hooks** for provider-specific request shaping
+
+Plugins run **in‑process** with the Gateway, so treat them as trusted code.
+Tool authoring guide: [Plugin agent tools](/plugins/agent-tools).
+
+## Runtime and turn identity
+
+Plugins can correlate one user turn across hooks, tools, storage append events,
+model-call completion, and background analysis through typed SDK context fields.
+Use these fields instead of parsing `sessionKey`, reading `identityLinks`, or
+reconstructing turn boundaries from timestamps or message text.
+
+```ts
+import type { OpenClawPluginDefinition } from "wednesdayai/plugin-sdk";
+
+const plugin: OpenClawPluginDefinition = {
+  id: "turn-audit",
+  async activate(api) {
+    api.on("storage.afterAppend", (event, ctx) => {
+      const identity = ctx.runtimeIdentity;
+      const turn = ctx.turn;
+
+      if (!turn?.turnId) return;
+
+      const appendKey = [
+        turn.turnId,
+        turn.userEntryId ?? turn.assistantEntryId ?? event.cursor?.entryId ?? event.entry.rawSha256,
+      ].join(":");
+
+      api.logger.info("captured append", {
+        appendKey,
+        agentId: identity?.agentId,
+        canonicalIdentity: identity?.canonicalIdentity,
+        providerConversationId: identity?.providerConversationId,
+      });
+    });
+  },
+};
+
+export default plugin;
+```
+
+`ctx.runtimeIdentity` may include:
+
+- `agentId`, `agentName`, `agentWorkspacePath`, and `agentWorkspaceName`
+- `sessionId` and `sessionKey` when a real session exists for the hook
+- `channelConversationId` for the transport conversation/thread
+- `providerConversationId` for the opaque model/provider cache partition
+- `laneId` — the opaque `lane-<hash>` digest, present only for an allowed multi-lane run;
+  `undefined` for single-user and denied resolutions (see [Workspace Lanes](/concepts/workspace-lanes))
+- trusted sender fields such as `senderId`, `senderName`, `senderUsername`,
+  `senderE164`, `messageProvider`, `canonicalIdentity`, and `senderIsOwner`
+
+`ctx.turn` carries the per-turn correlation key and storage linkage. In the v1
+contract, `turn.turnId` is the same stable value as `runId` by value. Early hooks
+receive the fields known at that point; later storage hooks may add
+`userEntryId`, `assistantEntryId`, sequence numbers, or global sequence numbers
+for the append that just happened.
+
+Keep these identity boundaries clear:
+
+- `conversationId` is a legacy alias for `channelConversationId`; it is never the
+  provider/model cache identity.
+- `providerConversationId` is intentionally opaque. Persist it only as an
+  opaque correlation/cache key.
+- `sessionId` and `sessionKey` are optional on early hooks. Do not synthesize
+  fake session values when they are absent.
+- Core may use `session.identityLinks` internally, but plugins should consume
+  only the resolved identity fields or `api.runtime.identity.resolveCanonicalIdentity(...)`.
+
+For storage fan-out, do not dedupe on `turn.turnId` alone. User and assistant
+appends share one turn id, so combine it with entry or cursor identity:
+
+```ts
+const dedupeKey = `${ctx.turn?.turnId}:${event.entry.entryId ?? event.cursor?.entryId ?? event.entry.rawSha256}`;
+```
+
+Plugin tool factories and tool lifecycle hooks receive the same optional
+`runtimeIdentity` and `turn` objects alongside the existing flat compatibility
+fields. On the normal agent tool path, `before_tool_call` sees the same
+foreground run identity that was used to construct plugin tool factories.
+
+## Workspace lane context
+
+Plugins can receive optional workspace lane context when the current agent run or tool call is tied
+to an allowed workspace lane:
+
+```ts
+context.canonicalIdentity;
+context.laneId;
+context.workspaceLane;
+```
+
+These fields are additive. Existing plugins should treat them as optional and keep their current
+behavior when they are absent. Use `workspaceLane.effectiveWorkspaceDir` for lane-local user state
+and `workspaceLane.personaWorkspaceDir` only for shared persona files. See
+[Workspace Lanes](/concepts/workspace-lanes).
+
+For per-lane storage partitioning, use `ctx.runtimeIdentity.laneId` rather than the raw
+`context.laneId`. `runtimeIdentity.laneId` is `undefined` for single-user and denied resolutions
+and present only for an allowed multi-lane run — so it is safe to use directly as a partition
+discriminator without additional policy checks. The raw `context.laneId` and `context.workspaceLane`
+fields are routing helpers and should not be used for storage keying.
+
+`message_received` runs before workspace-lane resolution, so `runtimeIdentity.laneId` is absent
+there. Message hooks should treat lane fields as absent on `message_received`.
+
+## Provider Runtime Hooks
+
+Provider plugins can register model-call hooks with `api.registerProvider(...)`.
+The hook context includes the selected provider/model, run/session identifiers, an
+opaque `conversationId`, a hashed user identifier when one can be derived, and
+the current stream options.
+
+Supported provider-runtime hooks:
+
+- `prepareExtraParams(ctx)` returns a patch for the merged stream options before
+  generic params are applied to `streamFn`.
+- `wrapStreamFn(ctx)` returns a stream wrapper after the existing core provider
+  wrappers are installed.
+- Transport policy hook types are reserved in the SDK bridge for OpenClaw
+  compatibility, but they are not yet delivered to the HTTP/WebSocket transport
+  path. Provider plugins should not rely on transport-policy effects until the
+  matching transport wiring is documented.
+
+Provider hooks should pass opaque provider-safe identifiers such as
+`conversationId` or `hashedUserId` to external services. Do not send raw
+`sessionKey` values, channel ids, phone numbers, or user handles to LLM provider
+metadata unless the provider contract explicitly requires them.
+
+## Runtime helpers
+
+Plugins can access selected core helpers via `api.runtime`. For telephony TTS:
+
+```ts
+const result = await api.runtime.tts.textToSpeechTelephony({
+  text: "Hello from OpenClaw",
+  cfg: api.config,
+});
+```
+
+Notes:
+
+- Uses core `messages.tts` configuration (OpenAI or ElevenLabs).
+- Returns PCM audio buffer + sample rate. Plugins must resample/encode for providers.
+- Edge TTS is not supported for telephony.
+
+For STT/transcription, plugins can call:
+
+```ts
+const { text } = await api.runtime.stt.transcribeAudioFile({
+  filePath: "/tmp/inbound-audio.ogg",
+  cfg: api.config,
+  // Optional when MIME cannot be inferred reliably:
+  mime: "audio/ogg",
+});
+```
+
+Notes:
+
+- Uses core media-understanding audio configuration (`tools.media.audio`) and provider fallback order.
+- Returns `{ text: undefined }` when no transcription output is produced (for example skipped/unsupported input).
+
+## Discovery & precedence
+
+WednesdayAI scans, in order:
+
+1. Config paths
+
+- `plugins.load.paths` (file or directory)
+
+2. Workspace extensions
+
+- `<workspace>/.openclaw/extensions/*.ts`
+- `<workspace>/.openclaw/extensions/*/index.ts`
+
+3. Global extensions
+
+- `~/.openclaw/extensions/*.ts`
+- `~/.openclaw/extensions/*/index.ts`
+
+4. Bundled extensions (shipped with WednesdayAI, **disabled by default**)
+
+- `<wednesdayai>/extensions/*`
+
+Bundled plugins must be enabled explicitly via `plugins.entries.<id>.enabled`
+or `wednesdayai plugins enable <id>`. Installed plugins are not activated by the
+install step; enable them explicitly after install.
+
+Bundled install records are zero-copy runtime references after reconciliation.
+If a previous install copied a bundled plugin into `~/.openclaw/extensions/<id>`,
+OpenClaw can rewrite that record to `source: "bundled"` and remove the stale
+default copy when it is safe to do so. A valid bundled record still participates
+in config validation even if the plugin manifest registry cache was built before
+the bundled source was rediscovered.
+
+Hardening notes:
+
+- If `plugins.allow` is empty and non-bundled plugins are discoverable, WednesdayAI logs a startup warning with plugin ids and sources.
+- Candidate paths are safety-checked before discovery admission. WednesdayAI blocks candidates when:
+  - extension entry resolves outside plugin root (including symlink/path traversal escapes),
+  - plugin root/source path is world-writable,
+  - path ownership is suspicious for non-bundled plugins (POSIX owner is neither current uid nor root).
+- Loaded non-bundled plugins without install/load-path provenance emit a warning so you can pin trust (`plugins.allow`) or install tracking (`plugins.installs`).
+
+Each plugin must include a `openclaw.plugin.json` file in its root. If a path
+points at a file, the plugin root is the file's directory and must contain the
+manifest.
+
+If multiple plugins resolve to the same id, the first match in the order above
+wins and lower-precedence copies are ignored.
+
+### Package packs
+
+A plugin directory may include a `package.json` with `openclaw.extensions`:
+
+```json
+{
+  "name": "my-pack",
+  "openclaw": {
+    "extensions": ["./src/safety.ts", "./src/tools.ts"]
+  }
+}
+```
+
+Each entry becomes a plugin. If the pack lists multiple extensions, the plugin id
+becomes `name/<fileBase>`.
+
+If your plugin imports npm deps, install them in that directory so
+`node_modules` is available (`npm install` / `pnpm install`).
+
+Security guardrail: every `openclaw.extensions` entry must stay inside the plugin
+directory after symlink resolution. Entries that escape the package directory are
+rejected.
+
+Security note: `openclaw plugins install` installs plugin dependencies with
+`npm install --ignore-scripts` (no lifecycle scripts). Keep plugin dependency
+trees "pure JS/TS" and avoid packages that require `postinstall` builds.
+
+### Channel catalog metadata
+
+Channel plugins can advertise onboarding metadata via `openclaw.channel` and
+install hints via `openclaw.install`. This keeps the core catalog data-free.
+
+Example:
+
+```json
+{
+  "name": "@openclaw/nextcloud-talk",
+  "openclaw": {
+    "extensions": ["./index.ts"],
+    "channel": {
+      "id": "nextcloud-talk",
+      "label": "Nextcloud Talk",
+      "selectionLabel": "Nextcloud Talk (self-hosted)",
+      "docsPath": "/channels/nextcloud-talk",
+      "docsLabel": "nextcloud-talk",
+      "blurb": "Self-hosted chat via Nextcloud Talk webhook bots.",
+      "order": 65,
+      "aliases": ["nc-talk", "nc"]
+    },
+    "install": {
+      "npmSpec": "@openclaw/nextcloud-talk",
+      "localPath": "extensions/nextcloud-talk",
+      "defaultChoice": "npm"
+    }
+  }
+}
+```
+
+WednesdayAI can also merge **external channel catalogs** (for example, an MPM
+registry export). Drop a JSON file at one of:
+
+- `~/.openclaw/mpm/plugins.json`
+- `~/.openclaw/mpm/catalog.json`
+- `~/.openclaw/plugins/catalog.json`
+
+Or point `OPENCLAW_PLUGIN_CATALOG_PATHS` (or `OPENCLAW_MPM_CATALOG_PATHS`) at
+one or more JSON files (comma/semicolon/`PATH`-delimited). Each file should
+contain `{ "entries": [ { "name": "@scope/pkg", "openclaw": { "channel": {...}, "install": {...} } } ] }`.
+
+## Plugin IDs
+
+Default plugin ids:
+
+- Package packs: `package.json` `name`
+- Standalone file: file base name (`~/.../voice-call.ts` → `voice-call`)
+
+If a plugin exports `id`, OpenClaw uses it but warns when it doesn’t match the
+configured id.
+
+## Config
+
+```json5
+{
+  plugins: {
+    enabled: true,
+    allow: ["voice-call"],
+    deny: ["untrusted-plugin"],
+    load: { paths: ["~/Projects/oss/voice-call-extension"] },
+    installs: {
+      telegram: {
+        source: "bundled",
+        sourcePath: "/path/to/extensions/telegram",
+        version: "0.4.4",
+      },
+    },
+    entries: {
+      "voice-call": { enabled: true, config: { provider: "twilio" } },
+    },
+  },
+}
+```
+
+Fields:
+
+- `enabled`: master toggle (default: true)
+- `allow`: allowlist (optional)
+- `deny`: denylist (optional; deny wins)
+- `load.paths`: extra plugin files/dirs
+- `installs.<id>`: CLI-managed install metadata. `source` is one of `npm`,
+  `archive`, `path`, or `bundled`.
+- `entries.<id>`: per‑plugin toggles + config
+
+Config changes **require a gateway restart**.
+
+Validation rules:
+
+- Unknown plugin ids in `entries`, `allow`, `deny`, or `slots` emit
+  startup/config warnings. Entries are treated as stale config and ignored until
+  a matching plugin is installed or rediscovered; allow/deny/slot references
+  include install guidance.
+- A `source: "bundled"` install record is considered valid only when its
+  `sourcePath` matches the current bundled source for the same plugin id
+  (string match or realpath-equivalent path), the manifest id matches, and the
+  bundled plugin is version-compatible with the host.
+- Valid bundled install records participate in config validation even if the
+  normal discovery cache is stale. Their plugin config is validated against the
+  bundled `openclaw.plugin.json` `configSchema`, and the schema cache key
+  includes the manifest path plus file modification time.
+- Do not write `source: "bundled"` records by hand in third-party plugin docs or
+  setup scripts. Let `wednesdayai plugins install`, `wednesdayai plugins update`,
+  or bundled reconciliation create and refresh managed install metadata.
+- Valid bundled install records suppress false `plugin not found` warnings for
+  `entries`, `allow`, `deny`, and `slots.memory`, but their
+  `plugins.entries.<id>.config` object is still validated against the bundled
+  manifest's `configSchema`.
+- Unknown `channels.<id>` keys are **errors** unless a plugin manifest declares
+  the channel id.
+- Plugin config is validated using the JSON Schema embedded in
+  `openclaw.plugin.json` (`configSchema`).
+- If a plugin is disabled, its config is preserved and a **warning** is emitted.
+
+## Plugin slots (exclusive categories)
+
+Some plugin categories are **exclusive** (only one active at a time). Use
+`plugins.slots` to select which plugin owns the slot:
+
+```json5
+{
+  plugins: {
+    slots: {
+      memory: "memory-core", // or "none" to disable memory plugins
+    },
+  },
+}
+```
+
+If multiple plugins declare `kind: "memory"`, only the selected one loads. Others
+are disabled with diagnostics.
+
+## Control UI (schema + labels)
+
+The Control UI uses `config.schema` (JSON Schema + `uiHints`) to render better forms.
+
+WednesdayAI augments `uiHints` at runtime based on discovered plugins:
+
+- Adds per-plugin labels for `plugins.entries.<id>` / `.enabled` / `.config`
+- Merges optional plugin-provided config field hints under:
+  `plugins.entries.<id>.config.<field>`
+
+If you want your plugin config fields to show good labels/placeholders (and mark secrets as sensitive),
+provide `uiHints` alongside your JSON Schema in the plugin manifest.
+
+Example:
+
+```json
+{
+  "id": "my-plugin",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": { "type": "string" },
+      "region": { "type": "string" }
+    }
+  },
+  "uiHints": {
+    "apiKey": { "label": "API Key", "sensitive": true },
+    "region": { "label": "Region", "placeholder": "us-east-1" }
+  }
+}
+```
+
+## CLI
+
+```bash
+wednesdayai plugins list
+wednesdayai plugins info <id>
+wednesdayai plugins install <path>                 # copy a local file/dir into ~/.openclaw/extensions/<id>
+wednesdayai plugins install ./extensions/voice-call # relative path ok
+wednesdayai plugins install ./plugin.tgz           # install from a local tarball
+wednesdayai plugins install ./plugin.zip           # install from a local zip
+wednesdayai plugins install -l ./extensions/voice-call # link (no copy) for dev
+wednesdayai plugins install @wednesdayai/voice-call # install from npm
+wednesdayai plugins install @wednesdayai/voice-call --pin # store exact resolved name@version
+wednesdayai plugins update <id>
+wednesdayai plugins update --all
+wednesdayai plugins enable <id>
+wednesdayai plugins disable <id>
+wednesdayai plugins doctor
+```
+
+`plugins update` only works for npm installs tracked under `plugins.installs`.
+Bundled plugins track the WednesdayAI package version instead. The
+update command reconciles bundled install records first, so a copied bundled
+record can become `source: "bundled"` before npm update selection runs.
+If stored integrity metadata changes between updates, WednesdayAI warns and asks for confirmation (use global `--yes` to bypass prompts).
+
+Plugins may also register their own top-level commands (example: `wednesdayai voicecall`).
+
+### Managed installs vs bundled copies
+
+Bundled extensions live inside the installed WednesdayAI package and are discovered after explicit
+load paths, workspace extensions, and `~/.openclaw/extensions`. Treat that bundled directory as
+read-only.
+
+When a plugin has runtime dependencies, `wednesdayai plugins install <id>` copies it into the
+managed extensions root (`$OPENCLAW_STATE_DIR/extensions/<id>`, normally
+`~/.openclaw/extensions/<id>`) and installs dependencies beside that managed copy. Operators should
+repair missing dependencies by reinstalling the plugin, not by running package-manager commands in
+the global WednesdayAI package.
+
+Dependency-free bundled plugins may run directly from the global package copy when enabled. A
+healthy global bundled plugin should not produce `PLUGIN_DEPS_MISSING` diagnostics just because it
+does not have a managed install record.
+
+## Plugin API (overview)
+
+Plugins export either:
+
+- A function: `(api) => { ... }`
+- An object: `{ id, name, configSchema, register(api) { ... } }`
+
+## Durable file logs from plugins
+
+Plugins that write durable diagnostic or audit files should use the shared
+file-log writer exported by `wednesdayai/plugin-sdk` instead of calling
+`fs.appendFile` directly. The writer applies the same rotation, compression, and
+queue-budget controls as core file logs, and operators can tune it through
+`logging.fileLogs`.
+
+```ts
+import os from "node:os";
+import path from "node:path";
+import { appendFileLog } from "wednesdayai/plugin-sdk";
+
+export async function recordAuditEvent(event: unknown) {
+  const file = path.join(os.homedir(), ".openclaw", "logs", "my-plugin-audit.jsonl");
+  await appendFileLog(`${JSON.stringify(event)}\n`, {
+    profileId: "my-plugin.audit",
+    file,
+    mode: "jsonl",
+    fileMode: 0o600,
+    strict: true,
+  });
+}
+```
+
+Guidance:
+
+- Use a stable, namespaced `profileId`, such as `<plugin-id>.audit` or
+  `extensions.<plugin-id>.<log-name>`.
+- Use `mode: "jsonl"` for structured records and include one complete record per
+  line.
+- Use `strict: true` only when the caller must observe write or rotation
+  failures. Non-strict writers keep logging best-effort and drop new writes if
+  the queue exceeds `maxQueuedBytes`.
+- Fire-and-forget writes should normalize the SDK return type before attaching a
+  rejection handler:
+
+```ts
+void Promise.resolve(
+  appendFileLog(`${JSON.stringify(event)}\n`, {
+    profileId: "my-plugin.diagnostics",
+    file: path.join(os.homedir(), ".openclaw", "logs", "my-plugin-diagnostics.jsonl"),
+    mode: "jsonl",
+  }),
+).catch(() => undefined);
+```
+
+The SDK also exports `createFileLogWriter`, `describeFileLogWriters`, and the
+public `FileLog*` types. Do not import `src/logging/file-log-writer.ts` from a
+plugin; use `wednesdayai/plugin-sdk` so the plugin stays compatible with installed
+WednesdayAI builds.
+
+Operators can override plugin log limits with:
+
+```json5
+{
+  logging: {
+    fileLogs: {
+      profiles: {
+        "my-plugin.audit": {
+          maxFileBytes: 5242880,
+          maxBackups: 10,
+          compress: "gzip",
+          maxQueuedBytes: 262144,
+        },
+      },
+    },
+  },
+}
+```
+
+## Plugin hooks
+
+Plugins can register hooks at runtime. This lets a plugin bundle event-driven
+automation without a separate hook pack install.
+
+### Example
+
+```ts
+export default function register(api) {
+  api.registerHook(
+    "command:new",
+    async () => {
+      // Hook logic here.
+    },
+    {
+      name: "my-plugin.command-new",
+      description: "Runs when /new is invoked",
+    },
+  );
+}
+```
+
+Notes:
+
+- Register hooks explicitly via `api.registerHook(...)`.
+- Hook eligibility rules still apply (OS/bins/env/config requirements).
+- Plugin-managed hooks show up in `openclaw hooks list` with `plugin:<id>`.
+- You cannot enable/disable plugin-managed hooks via `openclaw hooks`; enable/disable the plugin instead.
+
+### Typed hook registration (api.on)
+
+`api.on` is the preferred way to subscribe to lifecycle hooks when you want full TypeScript type safety. It uses the same `PluginHookName` union that drives the plugin SDK's type system, so your handler receives a fully typed event and context.
+
+```ts
+import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";
+
+export default function (api: OpenClawPluginApi) {
+  api.on("message_received", async (event, ctx) => {
+    // event is PluginHookMessageReceivedEvent
+    // ctx is PluginHookMessageContext
+    api.logger.info(`[${ctx.channelId}] body: ${event.content}`);
+  });
+}
+```
+
+**Method signature:**
+
+```ts
+api.on<K extends PluginHookName>(
+  hookName: K,
+  handler: PluginHookHandlerMap[K],
+  opts?: { priority?: number },
+): void
+```
+
+**`opts.priority`** controls execution order when multiple hooks are registered for the same name. Higher numbers run first. The default is `0`. Use a higher priority when your hook must run before others (for example, a security hook that can block a tool call should use a priority of `100` while a logging hook can stay at `0`).
+
+```ts
+// High-priority hook that can block tool calls
+api.on(
+  "before_tool_call",
+  async (event, ctx) => {
+    if (event.toolName === "shell_exec" && !isAllowed(ctx.sessionKey)) {
+      return { block: true, blockReason: "not authorized" };
+    }
+  },
+  { priority: 100 },
+);
+
+// Low-priority logging hook
+api.on(
+  "after_tool_call",
+  async (event, ctx) => {
+    logAudit({ tool: event.toolName, sessionKey: ctx.sessionKey });
+  },
+  { priority: 0 },
+);
+```
+
+**`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `session:start`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
+
+Available hook names and their event/context types are defined in `PluginHookHandlerMap` in the plugin SDK types:
+
+| Hook name                  | Event type                              | Returnable result                       |
+| -------------------------- | --------------------------------------- | --------------------------------------- |
+| `before_model_resolve`     | `PluginHookBeforeModelResolveEvent`     | `{ modelOverride?, providerOverride? }` |
+| `before_prompt_build`      | `PluginHookBeforePromptBuildEvent`      | `{ systemPrompt?, prependContext? }`    |
+| `before_context_send`      | `PluginHookBeforeContextSendEvent`      | `{ messages? }`                         |
+| `before_agent_start`       | `PluginHookBeforeAgentStartEvent`       | model + prompt build result             |
+| `llm_input`                | `PluginHookLlmInputEvent`               | void                                    |
+| `llm_output`               | `PluginHookLlmOutputEvent`              | void                                    |
+| `agent_end`                | `PluginHookAgentEndEvent`               | void                                    |
+| `before_compaction`        | `PluginHookBeforeCompactionEvent`       | void                                    |
+| `after_compaction`         | `PluginHookAfterCompactionEvent`        | void                                    |
+| `before_reset`             | `PluginHookBeforeResetEvent`            | void                                    |
+| `message_received`         | `PluginHookMessageReceivedEvent`        | void                                    |
+| `message_sending`          | `PluginHookMessageSendingEvent`         | `{ content?, cancel? }`                 |
+| `message_sent`             | `PluginHookMessageSentEvent`            | void                                    |
+| `before_tool_call`         | `PluginHookBeforeToolCallEvent`         | `{ params?, block?, blockReason? }`     |
+| `after_tool_call`          | `PluginHookAfterToolCallEvent`          | void                                    |
+| `tool_result_persist`      | `PluginHookToolResultPersistEvent`      | `{ message? }`                          |
+| `before_message_write`     | `PluginHookBeforeMessageWriteEvent`     | `{ block?, message? }`                  |
+| `session_start`            | `PluginHookSessionStartEvent`           | void                                    |
+| `session_end`              | `PluginHookSessionEndEvent`             | void                                    |
+| `subagent_spawning`        | `PluginHookSubagentSpawningEvent`       | `{ status, threadBindingReady? }`       |
+| `subagent_delivery_target` | `PluginHookSubagentDeliveryTargetEvent` | `{ origin? }`                           |
+| `subagent_spawned`         | `PluginHookSubagentSpawnedEvent`        | void                                    |
+| `subagent_ended`           | `PluginHookSubagentEndedEvent`          | void                                    |
+| `gateway_start`            | `PluginHookGatewayStartEvent`           | void                                    |
+| `gateway_stop`             | `PluginHookGatewayStopEvent`            | void                                    |
+| `transform_llm_input`      | `PluginHookTransformLlmInputEvent`      | `{ messages }`                          |
+| `transform_llm_output`     | `PluginHookTransformLlmOutputEvent`     | `{ assistantTexts? }`                   |
+
+## Provider plugins (model auth)
+
+Plugins can register **model provider auth** flows so users can run OAuth or
+API-key setup inside OpenClaw (no external scripts needed).
+
+Register a provider via `api.registerProvider(...)`. Each provider exposes one
+or more auth methods (OAuth, API key, device code, etc.). These methods power:
+
+- `openclaw models auth login --provider <id> [--method <id>]`
+
+Example:
+
+```ts
+api.registerProvider({
+  id: "acme",
+  label: "AcmeAI",
+  auth: [
+    {
+      id: "oauth",
+      label: "OAuth",
+      kind: "oauth",
+      run: async (ctx) => {
+        // Run OAuth flow and return auth profiles.
+        return {
+          profiles: [
+            {
+              profileId: "acme:default",
+              credential: {
+                type: "oauth",
+                provider: "acme",
+                access: "...",
+                refresh: "...",
+                expires: Date.now() + 3600 * 1000,
+              },
+            },
+          ],
+          defaultModel: "acme/opus-1",
+        };
+      },
+    },
+  ],
+});
+```
+
+Notes:
+
+- `run` receives a `ProviderAuthContext` with `prompter`, `runtime`,
+  `openUrl`, and `oauth.createVpsAwareHandlers` helpers.
+- Return `configPatch` when you need to add default models or provider config.
+- Return `defaultModel` so `--set-default` can update agent defaults.
+
+### Register a messaging channel
+
+Plugins can register **channel plugins** that behave like built‑in channels
+(WhatsApp, Telegram, etc.). Channel config lives under `channels.<id>` and is
+validated by your channel plugin code.
+
+```ts
+const myChannel = {
+  id: "acmechat",
+  meta: {
+    id: "acmechat",
+    label: "AcmeChat",
+    selectionLabel: "AcmeChat (API)",
+    docsPath: "/channels/acmechat",
+    blurb: "demo channel plugin.",
+    aliases: ["acme"],
+  },
+  capabilities: { chatTypes: ["direct"] },
+  config: {
+    listAccountIds: (cfg) => Object.keys(cfg.channels?.acmechat?.accounts ?? {}),
+    resolveAccount: (cfg, accountId) =>
+      cfg.channels?.acmechat?.accounts?.[accountId ?? "default"] ?? {
+        accountId,
+      },
+  },
+  outbound: {
+    deliveryMode: "direct",
+    sendText: async () => ({ ok: true }),
+  },
+};
+
+export default function (api) {
+  api.registerChannel({ plugin: myChannel });
+}
+```
+
+Notes:
+
+- Put config under `channels.<id>` (not `plugins.entries`).
+- `meta.label` is used for labels in CLI/UI lists.
+- `meta.aliases` adds alternate ids for normalization and CLI inputs.
+- `meta.preferOver` lists channel ids to skip auto-enable when both are configured.
+- `meta.detailLabel` and `meta.systemImage` let UIs show richer channel labels/icons.
+
+### Channel onboarding hooks
+
+Channel plugins can define optional onboarding hooks on `plugin.onboarding`:
+
+- `configure(ctx)` is the baseline setup flow.
+- `configureInteractive(ctx)` can fully own interactive setup for both configured and unconfigured states.
+- `configureWhenConfigured(ctx)` can override behavior only for already configured channels.
+
+Hook precedence in the wizard:
+
+1. `configureInteractive` (if present)
+2. `configureWhenConfigured` (only when channel status is already configured)
+3. fallback to `configure`
+
+Context details:
+
+- `configureInteractive` and `configureWhenConfigured` receive:
+  - `configured` (`true` or `false`)
+  - `label` (user-facing channel name used by prompts)
+  - plus the shared config/runtime/prompter/options fields
+- Returning `"skip"` leaves selection and account tracking unchanged.
+- Returning `{ cfg, accountId? }` applies config updates and records account selection.
+
+### Write a new messaging channel (step‑by‑step)
+
+Use this when you want a **new chat surface** (a "messaging channel"), not a model provider.
+Model provider docs live under `/providers/*`.
+
+1. Pick an id + config shape
+
+- All channel config lives under `channels.<id>`.
+- Prefer `channels.<id>.accounts.<accountId>` for multi‑account setups.
+
+2. Define the channel metadata
+
+- `meta.label`, `meta.selectionLabel`, `meta.docsPath`, `meta.blurb` control CLI/UI lists.
+- `meta.docsPath` should point at a docs page like `/channels/<id>`.
+- `meta.preferOver` lets a plugin replace another channel (auto-enable prefers it).
+- `meta.detailLabel` and `meta.systemImage` are used by UIs for detail text/icons.
+
+3. Implement the required adapters
+
+- `config.listAccountIds` + `config.resolveAccount`
+- `capabilities` (chat types, media, threads, etc.)
+- `outbound.deliveryMode` + `outbound.sendText` (for basic send)
+
+4. Add optional adapters as needed
+
+- `setup` (wizard), `security` (DM policy), `status` (health/diagnostics)
+- `gateway` (start/stop/login), `mentions`, `threading`, `streaming`
+- `actions` (message actions), `commands` (native command behavior)
+
+5. Register the channel in your plugin
+
+- `api.registerChannel({ plugin })`
+
+Minimal config example:
+
+```json5
+{
+  channels: {
+    acmechat: {
+      accounts: {
+        default: { token: "ACME_TOKEN", enabled: true },
+      },
+    },
+  },
+}
+```
+
+Minimal channel plugin (outbound‑only):
+
+```ts
+const plugin = {
+  id: "acmechat",
+  meta: {
+    id: "acmechat",
+    label: "AcmeChat",
+    selectionLabel: "AcmeChat (API)",
+    docsPath: "/channels/acmechat",
+    blurb: "AcmeChat messaging channel.",
+    aliases: ["acme"],
+  },
+  capabilities: { chatTypes: ["direct"] },
+  config: {
+    listAccountIds: (cfg) => Object.keys(cfg.channels?.acmechat?.accounts ?? {}),
+    resolveAccount: (cfg, accountId) =>
+      cfg.channels?.acmechat?.accounts?.[accountId ?? "default"] ?? {
+        accountId,
+      },
+  },
+  outbound: {
+    deliveryMode: "direct",
+    sendText: async ({ text }) => {
+      // deliver `text` to your channel here
+      return { ok: true };
+    },
+  },
+};
+
+export default function (api) {
+  api.registerChannel({ plugin });
+}
+```
+
+Load the plugin (extensions dir or `plugins.load.paths`), restart the gateway,
+then configure `channels.<id>` in your config.
+
+### Agent tools
+
+See the dedicated guide: [Plugin agent tools](/plugins/agent-tools).
+
+### Register a gateway RPC method
+
+`api.registerGatewayMethod` registers a custom RPC endpoint on the OpenClaw gateway. The method is callable from any gateway client (CLI, Control UI, or your own scripts) and runs in-process with the gateway.
+
+**Method signature:**
+
+```ts
+api.registerGatewayMethod(method: string, handler: GatewayRequestHandler): void
+```
+
+The `handler` receives a request object and a `respond` helper:
+
+```ts
+api.registerGatewayMethod("myplugin.status", ({ params, respond }) => {
+  // params is the JSON object passed by the caller
+  const detail = params?.verbose ? { uptime: process.uptime() } : {};
+  respond(true, { ok: true, ...detail });
+});
+```
+
+`respond(success: boolean, data: unknown)` sends the reply. Call it exactly once.
+
+**Naming convention.** Use `pluginId.action` — for example `voicecall.start`, `myplugin.status`. Core gateway methods are reserved; attempting to register a name that conflicts with a core method is rejected with a diagnostic error at load time.
+
+**Calling from the CLI:**
+
+```bash
+openclaw gateway call myplugin.status
+openclaw gateway call myplugin.status --params '{"verbose": true}'
+```
+
+**Use cases:** custom health checks, plugin-specific data queries, triggering plugin-managed actions (start a call, flush a cache, reload config) without touching core gateway methods.
+
+**Full example:**
+
+```ts
+import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";
+
+export default function (api: OpenClawPluginApi) {
+  let requestCount = 0;
+
+  api.registerGatewayMethod("myplugin.stats", ({ respond }) => {
+    respond(true, { requestCount, uptime: process.uptime() });
+  });
+
+  api.registerGatewayMethod("myplugin.reset-stats", ({ respond }) => {
+    requestCount = 0;
+    respond(true, { ok: true });
+  });
+}
+```
+
+### Register CLI commands
+
+```ts
+export default function (api) {
+  api.registerCli(
+    ({ program }) => {
+      program.command("mycmd").action(() => {
+        console.log("Hello");
+      });
+    },
+    { commands: ["mycmd"] },
+  );
+}
+```
+
+### Register auto-reply commands
+
+Plugins can register custom slash commands that execute **without invoking the
+AI agent**. This is useful for toggle commands, status checks, or quick actions
+that don't need LLM processing.
+
+```ts
+export default function (api) {
+  api.registerCommand({
+    name: "mystatus",
+    description: "Show plugin status",
+    handler: (ctx) => ({
+      text: `Plugin is running! Channel: ${ctx.channel}`,
+    }),
+  });
+}
+```
+
+Command handler context:
+
+- `senderId`: The sender's ID (if available)
+- `channel`: The channel where the command was sent
+- `isAuthorizedSender`: Whether the sender is an authorized user
+- `args`: Arguments passed after the command (if `acceptsArgs: true`)
+- `commandBody`: The full command text
+- `config`: The current OpenClaw config
+
+Command options:
+
+- `name`: Command name (without the leading `/`)
+- `description`: Help text shown in command lists
+- `acceptsArgs`: Whether the command accepts arguments (default: false). If false and arguments are provided, the command won't match and the message falls through to other handlers
+- `requireAuth`: Whether to require authorized sender (default: true)
+- `handler`: Function that returns `{ text: string }` (can be async)
+
+Example with authorization and arguments:
+
+```ts
+api.registerCommand({
+  name: "setmode",
+  description: "Set plugin mode",
+  acceptsArgs: true,
+  requireAuth: true,
+  handler: async (ctx) => {
+    const mode = ctx.args?.trim() || "default";
+    await saveMode(mode);
+    return { text: `Mode set to: ${mode}` };
+  },
+});
+```
+
+Notes:
+
+- Plugin commands are processed **before** built-in commands and the AI agent
+- Commands are registered globally and work across all channels
+- Command names are case-insensitive (`/MyStatus` matches `/mystatus`)
+- Command names must start with a letter and contain only letters, numbers, hyphens, and underscores
+- Reserved command names (like `help`, `status`, `reset`, etc.) cannot be overridden by plugins
+- Duplicate command registration across plugins will fail with a diagnostic error
+
+### Register background services
+
+```ts
+export default function (api) {
+  api.registerService({
+    id: "my-service",
+    start: () => api.logger.info("ready"),
+    stop: () => api.logger.info("bye"),
+  });
+}
+```
+
+## Naming conventions
+
+- Gateway methods: `pluginId.action` (example: `voicecall.status`)
+- Tools: `snake_case` (example: `voice_call`)
+- CLI commands: kebab or camel, but avoid clashing with core commands
+
+## Skills
+
+Plugins can ship a skill in the repo (`skills/<name>/SKILL.md`).
+Enable it with `plugins.entries.<id>.enabled` (or other config gates) and ensure
+it’s present in your workspace/managed skills locations.
+
+## Distribution (npm)
+
+Recommended packaging:
+
+- Main package: `wednesdayai` (this repo; `openclaw` remains a compatibility binary and SDK alias)
+- Plugins: separate public npm packages under the `@wednesdayai` organization for new WednesdayAI packages (example: `@wednesdayai/whatsapp`). Existing inherited `@openclaw/*` packages remain compatibility installs only when the package is known to target this fork.
+
+Publishing contract:
+
+- Plugin `package.json` should include `wednesdayai.extensions` with one or more built `.js` entry files. `openclaw.extensions` remains a legacy manifest-key fallback.
+- New scoped first-party plugin packages should set `publishConfig.access` to `public` or be published with `npm publish --access public`.
+- Published plugins with runtime dependencies should ship built JavaScript entries; keep TypeScript source out of the npm runtime package.
+- `wednesdayai plugins install <npm-spec>` uses `npm pack`, extracts into `~/.openclaw/extensions/<id>/`, and records the managed install. Activation remains explicit through `plugins.entries.<id>.enabled`.
+- Config key stability: scoped packages are normalized to the **unscoped** id for `plugins.entries.*`.
+
+## Example plugin: Voice Call
+
+This repo includes a voice‑call plugin (Twilio or log fallback):
+
+- Source: `extensions/voice-call`
+- Skill: `skills/voice-call`
+- CLI: `openclaw voicecall start|status`
+- Tool: `voice_call`
+- RPC: `voicecall.start`, `voicecall.status`
+- Config (twilio): `provider: "twilio"` + `twilio.accountSid/authToken/from` (optional `statusCallbackUrl`, `twimlUrl`)
+- Config (dev): `provider: "log"` (no network)
+
+See [Voice Call](/plugins/voice-call) and `extensions/voice-call/README.md` for setup and usage.
+
+## Safety notes
+
+Plugins run in-process with the Gateway. Treat them as trusted code:
+
+- Only install plugins you trust.
+- Prefer `plugins.allow` allowlists.
+- Restart the Gateway after changes.
+
+## Testing plugins
+
+Plugins can (and should) ship tests:
+
+- In-repo plugins can keep Vitest tests under `src/**` (example: `src/plugins/voice-call.plugin.test.ts`).
+- Separately published plugins should run their own CI (lint/build/test) and validate `openclaw.extensions` points at the built entrypoint (`dist/index.js`).
+
+## Troubleshooting
+
+**Plugin is not discovered at startup**
+Check that `plugins.enabled` is `true` (default) and that the plugin directory or file is reachable. Run `openclaw plugins list` to see what was discovered. If the plugin is absent, verify the path is listed under `plugins.load.paths` or the plugin file is in `~/.openclaw/extensions/`. Non-bundled plugins without install provenance emit a startup warning — add the id to `plugins.allow` to suppress it and confirm trust.
+
+**Plugin loads but its config is rejected with an unknown-key error**
+Unknown fields inside `plugins.entries.<id>.config` are rejected by that
+plugin's JSON Schema. Ensure the config keys match the plugin manifest, and use
+`wednesdayai plugins info <id>` to confirm the resolved id before debugging the
+schema.
+
+**Gateway logs say `plugin not found` for a bundled plugin that still loads**
+Run `wednesdayai plugins info <id>` and `wednesdayai plugins list --verbose`. If the
+plugin reports `Origin: bundled` and `Status: loaded`, the warning should not be
+emitted for `plugins.entries`, `plugins.allow`, `plugins.deny`, or
+`plugins.slots.memory`. If it persists, check for a stale `plugins.installs.<id>`
+record whose `sourcePath` no longer matches the current bundled source. Avoid
+adding bundled paths to `plugins.load.paths`; run `wednesdayai plugins update <id>`
+or restart the gateway so bundled reconciliation can refresh the managed record.
+
+In source checkouts, bundled plugins may declare built entrypoints that do not exist
+until the package has been built. Discovery keeps package metadata as the primary
+contract, but for bundled source-checkout plugins only it can fall back to known
+source entrypoints inside the same extension directory. A missing built `dist/`
+entry should not by itself require installing the bundled plugin into
+`plugins.load.paths`.
+
+**Gateway method not callable after `api.registerGatewayMethod`**
+Method names must use `pluginId.action` form and must not conflict with core gateway methods. Conflicting names are rejected at load time with a diagnostic. Check gateway startup logs for `registerGatewayMethod` errors. Also confirm the plugin is enabled and the gateway restarted after the plugin change.
+
+**`api.on` hook not firing for a specific channel or trigger**
+Hook handlers receive all matching events — filtering by `channelId` or `trigger` is the handler's responsibility. Add a `console.log` at the top of the handler to confirm it fires at all. Then gate on `ctx.channelId` or `ctx.trigger` as needed. For `before_tool_call` blocks, ensure `priority` is high enough that your handler runs before others that might short-circuit.
 
 ## Related
 
-- [Available tools](/users/tools/index)
-- [Administrators: plugin configuration](/admin/gateway/configuration)
+- [Plugin manifest](/plugins/manifest)
+- [Plugin agent tools](/plugins/agent-tools)
+- [Hooks](/automation/hooks)
+- [Voice Call plugin](/plugins/voice-call)
+- [Community plugins](/plugins/community)

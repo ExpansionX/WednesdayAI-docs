@@ -1,0 +1,130 @@
+---
+summary: "Stable, beta, dev, and future LTS channels: semantics, switching, and promotion checks"
+read_when:
+  - You want to choose or switch a WednesdayAI release channel
+  - You administer installs that need predictable update risk
+  - You are tagging, publishing, or promoting prereleases
+title: "Release channels"
+---
+
+# Release channels
+
+Last updated: 2026-06-16
+
+WednesdayAI uses release channels so users can choose how much change they
+accept and maintainers can promote builds only after the right checks have run.
+
+## Choose a channel
+
+| Channel  | Use when                                                                    | npm dist-tag                                                                | Support expectation                                 |
+| -------- | --------------------------------------------------------------------------- | --------------------------------------------------------------------------- | --------------------------------------------------- |
+| `stable` | You run WednesdayAI for everyday use and want the lowest breakage risk.     | `latest`                                                                    | Supported general-use release.                      |
+| `beta`   | You can tolerate preview risk and want to validate the next stable release. | `beta`                                                                      | Supported for preview adopters.                     |
+| `dev`    | You contribute to WednesdayAI or need a fix that has not reached beta.      | `dev` (`wednesdayai@dev`) when published; otherwise `main` source checkout. | Best effort for active contributors.                |
+| `LTS`    | Future maintenance branch for an older major release.                       | Future `lts-<major>` tag.                                                   | Not public until an ADR defines duration and scope. |
+
+Most users should stay on `stable`. Administrators who manage shared or remote
+Gateways should test `beta` on one non-critical install before promoting it to
+their main deployment. `dev` is for contributors and short-lived verification,
+not unattended production Gateways.
+
+We publish or tag a build to `beta`, validate it, then promote the vetted build
+to `latest` without changing the version number. npm dist-tags are the source
+of truth for global installs.
+
+## Switching channels
+
+Git checkout:
+
+```bash
+wednesdayai update --channel stable
+wednesdayai update --channel beta
+wednesdayai update --channel dev
+```
+
+- `stable` and `beta` check out the latest matching tag.
+- `dev` switches to `main` and rebases the source checkout.
+- `openclaw update ...` remains a compatibility alias.
+
+npm/pnpm global install:
+
+```bash
+wednesdayai update --channel stable
+wednesdayai update --channel beta
+wednesdayai update --channel dev
+```
+
+`stable` and `beta` update via npm dist-tags (`latest`, `beta`). `dev`
+switches the install to a git checkout so local development builds can be
+rebased and reinstalled from source. If a beta tag points at an older candidate
+than `latest`, WednesdayAI falls back to the stable `latest` package rather than
+downgrading.
+
+When you explicitly switch channels with `--channel`, WednesdayAI also aligns
+the install method:
+
+- `dev` ensures a git checkout (default `~/openclaw`, override with `OPENCLAW_GIT_DIR`),
+  updates it, and installs the global CLI from that checkout.
+- `stable`/`beta` installs from npm using the matching dist-tag.
+
+Tip: if you want stable + dev in parallel, keep two clones and point your gateway at the stable one.
+
+## Promotion checks
+
+Release-channel promotion is tied to deterministic gates in CI:
+
+| Promotion                         | Required evidence                                                                                                                             |
+| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main` to `dev`                   | Fast CI, workflow sanity, package checks where relevant, and focused runtime-risk tests for changed paths.                                    |
+| `dev` or prerelease tag to `beta` | Full CI, deterministic security checks, install smoke, runtime-risk gates, and docs-surface source checks.                                    |
+| `beta` to `stable`                | Full CI, release package check, install smoke, docs freshness, runtime-risk gates, and beta soak evidence or an explicit maintainer override. |
+| `stable` to `LTS`                 | Future policy. Do not promise LTS coverage until the LTS ADR is accepted.                                                                     |
+
+The deterministic gates are described in the CI pipeline runbook (repo-only,
+under `dev-docs/build/`). Some security and docs checks are advisory while the
+repository is private, but real findings must be tracked before promotion.
+
+## Plugins and channels
+
+When you switch channels with `wednesdayai update`, WednesdayAI also syncs plugin sources:
+
+- `dev` prefers bundled plugins from the git checkout.
+- `stable` and `beta` restore npm-installed plugin packages.
+
+## Tagging best practices
+
+- Tag releases you want git checkouts to land on.
+- Use SemVer tags for WednesdayAI package releases.
+- Use prerelease suffixes such as `-beta.N` for beta candidates.
+- Keep tags immutable: never move or reuse a tag.
+- npm dist-tags remain the source of truth for npm installs:
+  - `latest` → stable
+  - `beta` → candidate build
+  - `dev` → main snapshot (optional)
+  - `lts-<major>` → future LTS line only after policy is accepted
+
+## macOS app availability
+
+Beta and dev builds may **not** include a macOS app release. That’s OK:
+
+- The git tag and npm dist-tag can still be published.
+- Call out “no macOS build for this beta” in release notes or changelog.
+
+## Rollback
+
+If a channel breaks your install, pin the last known-good version:
+
+```bash
+npm install -g wednesdayai@<version>
+```
+
+Then restart and verify:
+
+```bash
+wednesdayai doctor
+wednesdayai gateway restart
+wednesdayai health
+```
+
+Use [Updating](/install/updating) for full rollback steps, including source
+checkout pinning.

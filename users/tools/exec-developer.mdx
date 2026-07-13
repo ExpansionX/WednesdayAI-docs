@@ -1,0 +1,270 @@
+---
+audience: developer
+component: exec-tools
+sources:
+  - src/config/types.tools.ts
+  - src/infra/exec-approvals.ts
+  - src/config/types.approvals.ts
+  - src/config/types.agents.ts
+  - src/config/types.agent-defaults.ts
+generated: 2026-06-28
+---
+
+# Exec Tool — Developer Reference
+
+Type definitions, policy precedence, and implementation details for the exec tool and its approval system.
+
+## Source files
+
+| File                                 | What it defines                                                      |
+| ------------------------------------ | -------------------------------------------------------------------- |
+| `src/config/types.tools.ts`          | `ExecToolConfig`, `AgentToolsConfig`, `FsToolsConfig`, `ToolsConfig` |
+| `src/infra/exec-approvals.ts`        | `ExecSecurity`, `ExecAsk`, `ExecApprovalsFile`, approval runtime     |
+| `src/config/types.approvals.ts`      | `ApprovalsConfig`, `ExecApprovalForwardingConfig`                    |
+| `src/config/types.agents.ts`         | `AgentConfig.tools`                                                  |
+| `src/config/types.agent-defaults.ts` | `elevatedDefault`                                                    |
+
+## ExecToolConfig
+
+```typescript
+// src/config/types.tools.ts
+export type ExecToolConfig = {
+  host?: "sandbox" | "gateway" | "node"; // default: "sandbox"
+  security?: "deny" | "allowlist" | "full"; // default: "deny"
+  ask?: "off" | "on-miss" | "always"; // default: "on-miss"
+  node?: string;
+  pathPrepend?: string[];
+  safeBins?: string[];
+  safeBinTrustedDirs?: string[];
+  safeBinProfiles?: Record<string, SafeBinProfileFixture>;
+  backgroundMs?: number;
+  timeoutSec?: number;
+  approvalRunningNoticeMs?: number; // agent-level only
+  cleanupMs?: number;
+  notifyOnExit?: boolean;
+  notifyOnExitEmptySuccess?: boolean; // default: false
+  applyPatch?: {
+    enabled?: boolean; // default: false
+    workspaceOnly?: boolean; // default: true
+    allowModels?: string[];
+  };
+};
+```
+
+`approvalRunningNoticeMs` is only accepted on agent-level exec config (`AgentToolExecSchema`), not the global `ToolExecSchema`.
+
+## AgentToolsConfig
+
+```typescript
+// src/config/types.tools.ts
+export type AgentToolsConfig = {
+  profile?: ToolProfileId;
+  allow?: string[];
+  alsoAllow?: string[];
+  deny?: string[];
+  byProvider?: Record<string, ToolPolicyConfig>;
+  elevated?: {
+    enabled?: boolean; // default: true
+    allowFrom?: AgentElevatedAllowFromConfig;
+  };
+  exec?: ExecToolConfig;
+  fs?: FsToolsConfig;
+  loopDetection?: ToolLoopDetectionConfig;
+  sandbox?: {
+    tools?: {
+      allow?: string[];
+      deny?: string[];
+    };
+  };
+};
+```
+
+## FsToolsConfig
+
+```typescript
+export type FsToolsConfig = {
+  workspaceOnly?: boolean; // default: false — restrict read/write/edit/apply_patch to workspace
+};
+```
+
+## ExecApprovalsFile schema
+
+```typescript
+// src/infra/exec-approvals.ts
+
+export type ExecSecurity = "deny" | "allowlist" | "full";
+export type ExecAsk = "off" | "on-miss" | "always";
+
+export type ExecApprovalsDefaults = {
+  security?: ExecSecurity;
+  ask?: ExecAsk;
+  askFallback?: ExecSecurity;
+  autoAllowSkills?: boolean;
+};
+
+export type ExecAllowlistEntry = {
+  id?: string;
+  pattern: string;
+  lastUsedAt?: number;
+  lastUsedCommand?: string;
+  lastResolvedPath?: string;
+};
+
+export type ExecApprovalsAgent = ExecApprovalsDefaults & {
+  allowlist?: ExecAllowlistEntry[];
+};
+
+export type ExecApprovalsFile = {
+  version: 1;
+  socket?: { path?: string; token?: string };
+  defaults?: ExecApprovalsDefaults;
+  agents?: Record<string, ExecApprovalsAgent>;
+};
+```
+
+Defaults at runtime:
+
+```typescript
+const DEFAULT_SECURITY: ExecSecurity = "deny";
+const DEFAULT_ASK: ExecAsk = "on-miss";
+const DEFAULT_ASK_FALLBACK: ExecSecurity = "deny";
+const DEFAULT_AUTO_ALLOW_SKILLS = false;
+const DEFAULT_SOCKET = "~/.openclaw/exec-approvals.sock";
+const DEFAULT_FILE = "~/.openclaw/exec-approvals.json";
+export const DEFAULT_EXEC_APPROVAL_TIMEOUT_MS = 120_000;
+```
+
+## ApprovalsConfig (approval forwarding)
+
+```typescript
+// src/config/types.approvals.ts
+
+export type ExecApprovalForwardingMode = "session" | "targets" | "both";
+
+export type ExecApprovalForwardTarget = {
+  channel: string;
+  to: string;
+  accountId?: string;
+  threadId?: string | number;
+};
+
+export type ExecApprovalForwardingConfig = {
+  enabled?: boolean; // default: false
+  mode?: ExecApprovalForwardingMode; // default: "session"
+  agentFilter?: string[];
+  sessionFilter?: string[];
+  targets?: ExecApprovalForwardTarget[];
+};
+
+export type ApprovalsConfig = {
+  exec?: ExecApprovalForwardingConfig;
+};
+```
+
+## Global vs agent-level precedence
+
+Effective exec policy is the **stricter** of config (`tools.exec.*` / `agents.list[].tools.exec.*`) and `exec-approvals.json`. Omitted approvals fields fall back to the config value.
+
+Global (`tools.exec`) sets the floor. Agent-level (`agents.list[].tools.exec`) overrides. `exec-approvals.json` overrides per-agent at runtime (hot-reloaded, not requiring gateway restart).
+
+Config schema uses two separate shapes:
+
+- `ToolExecSchema` — global, no `approvalRunningNoticeMs`
+- `AgentToolExecSchema` — extends base with `approvalRunningNoticeMs`
+
+## Tool policy filtering order
+
+Tool availability is determined in this order (each level can only further restrict):
+
+1. Tool profile (`tools.profile` or `agents.list[].tools.profile`)
+2. Provider tool profile (`tools.byProvider[provider].profile`)
+3. Global tool policy (`tools.allow` / `tools.deny`)
+4. Provider tool policy (`tools.byProvider[provider].allow/deny`)
+5. Agent-specific tool policy (`agents.list[].tools.allow/deny`)
+6. Agent provider policy (`agents.list[].tools.byProvider[provider].allow/deny`)
+7. Sandbox tool policy (`tools.sandbox.tools` or `agents.list[].tools.sandbox.tools`)
+8. Subagent tool policy (`tools.subagents.tools`)
+
+`deny` always wins. A non-empty `allow` makes everything not listed implicitly blocked. Tool policy is the hard stop — `/exec` cannot override a denied `exec` tool.
+
+If `agents.list[].tools.sandbox.tools` is set, it replaces `tools.sandbox.tools` for that agent.
+
+## Tool groups
+
+Tool policies support `group:*` shorthands:
+
+| Group              | Expands to                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `bash`, `process`                                                                |
+| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                   |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
+| `group:memory`     | `memory_search`, `memory_get`                                                            |
+| `group:ui`         | `browser`, `canvas`                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                        |
+| `group:messaging`  | `message`                                                                                |
+| `group:nodes`      | `nodes`                                                                                  |
+| `group:openclaw`   | all built-in tools (excludes provider plugins)                                           |
+
+## Safe bin implementation
+
+`SafeBinProfileFixture` defines the argv policy for a safe bin:
+
+```typescript
+// src/infra/exec-safe-bin-policy-profiles.ts
+export type SafeBinProfileFixture = {
+  minPositional?: number;
+  maxPositional?: number;
+  allowedValueFlags?: readonly string[];
+  deniedFlags?: readonly string[];
+};
+```
+
+Validation is deterministic from argv shape only (no filesystem existence checks). Safe bins force argv tokens to be treated as literal text (no globbing, no `$VAR` expansion). Long options are fail-closed: unknown flags and ambiguous abbreviations are rejected.
+
+Default denied flags per bin:
+
+- `grep`: `--dereference-recursive`, `--directories`, `--exclude-from`, `--file`, `--recursive`, `-R`, `-d`, `-f`, `-r`
+- `jq`: `--argfile`, `--from-file`, `--library-path`, `--rawfile`, `--slurpfile`, `-L`, `-f`
+- `sort`: `--compress-program`, `--files0-from`, `--output`, `--random-source`, `--temporary-directory`, `-T`, `-o`
+- `wc`: `--files0-from`
+
+Shell chaining (`&&`, `||`, `;`) is allowed only when every top-level segment satisfies the allowlist (including safe bins). Redirections are unsupported in allowlist mode. Command substitution (`$()` / backticks) is rejected during allowlist parsing.
+
+Safe bins must resolve from trusted directories (defaults: `/bin`, `/usr/bin`). `PATH` entries are never auto-trusted. Add package-manager paths via `tools.exec.safeBinTrustedDirs`.
+
+`safeBinProfiles` — per-agent profile keys override global keys.
+
+## apply_patch subtool
+
+`apply_patch` is a subtool of `exec` for structured multi-file edits (OpenAI models only):
+
+```json5
+{
+  tools: {
+    exec: {
+      applyPatch: { enabled: true, workspaceOnly: true, allowModels: ["gpt-5.2"] },
+    },
+  },
+}
+```
+
+Tool policy: `allow: ["exec"]` implicitly allows `apply_patch`. `workspaceOnly` defaults to `true` (workspace-contained). Config lives under `tools.exec.applyPatch`.
+
+## Shell environment notes
+
+- `OPENCLAW_SHELL=exec` is set in the spawned command environment (including PTY and sandbox) so shell/profile rules can detect exec-tool context.
+- On non-Windows: uses `SHELL`; if `SHELL` is `fish`, prefers `bash`/`sh` from `PATH`, then falls back to `fish`.
+- On Windows: prefers PowerShell 7 (`pwsh`), falls back to PowerShell 5.1.
+- Host execution (`gateway`/`node`) rejects `env.PATH` and loader overrides (`LD_*`/`DYLD_*`).
+- Script preflight checks inspect only files inside the effective `workdir` boundary; paths resolving outside `workdir` skip preflight.
+
+## elevatedDefault
+
+```typescript
+// src/config/types.agent-defaults.ts
+elevatedDefault?: "off" | "on" | "ask" | "full";
+```
+
+Sets the default elevated level when no `/elevated` directive is present for a session. `"full"` skips exec approvals entirely.
+
+Related: [Exec Tool (user)](/tools/exec-user) · [Exec Tool (admin)](/tools/exec-admin) · [Sandboxing (developer)](/gateway/sandboxing-developer)

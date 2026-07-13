@@ -1,0 +1,249 @@
+---
+summary: "Outbound delivery queue: write-ahead log, crash recovery, and reliability log entries"
+read_when:
+  - Seeing "delivery queue write failed" or "delivery queue ackDelivery/failDelivery update failed" in logs
+  - Diagnosing silent message loss or stuck queue entries
+  - Extending or modifying src/infra/outbound/
+  - Interpreting recoverPendingDeliveries statistics or writing recovery monitors
+audience: admin, developer
+sources:
+  - src/infra/outbound/deliver.ts
+  - src/infra/outbound/delivery-queue.ts
+  - src/infra/outbound/delivery-error.ts
+generated: 2026-06-29
+title: "Outbound Delivery Queue"
+---
+
+# Outbound Delivery Queue
+
+The gateway uses a **write-ahead delivery queue** to survive crashes during outbound message
+sends. Before any message is dispatched to a channel, the gateway records a queue entry on
+disk. If the gateway restarts mid-send, `recoverPendingDeliveries` replays the entry on the
+next boot.
+
+This page covers what operators see when the queue subsystem encounters errors, how to
+interpret those log entries, and how to troubleshoot stuck or missing entries.
+
+## How it works
+
+1. **Enqueue (write-ahead):** Before sending, `deliver.ts` calls `enqueueDelivery` to write a
+   `.json` entry under `~/.openclaw/delivery-queue/<id>.json`. If this write fails, delivery
+   still proceeds (best-effort), but a `warn` log is emitted — the entry is not durable and
+   will not be retried on crash.
+2. **Send:** The message is dispatched to the target channel.
+3. **Acknowledge or fail:**
+   - On success: `ackDelivery` removes the queue entry (cleanup).
+   - On failure: `failDelivery` increments `retryCount` and sets `lastError`. Entries that
+     exceed `MAX_RETRIES` are moved to a `failed/` subdirectory on the next recovery scan.
+4. **Recovery:** At gateway startup, `recoverPendingDeliveries` reads all entries in the
+   queue dir and re-attempts delivery for any entry that has not yet been acked or exceeded
+   the retry limit.
+
+## Operator-visible log entries
+
+The following `warn`-level entries are emitted by the delivery queue subsystem. All appear in
+the gateway file log and the Control UI Logs tab. They are non-fatal — the gateway continues
+operating.
+
+### `delivery queue write failed; proceeding without write-ahead entry`
+
+| Field  | Value                                             |
+| ------ | ------------------------------------------------- |
+| Level  | `warn`                                            |
+| Source | `deliver.ts` — `enqueueDelivery` catch            |
+| Fields | `err.code: "queue_write_failed"`, `channel`, `to` |
+
+**What it means:** The gateway could not write the queue entry before sending. The send will
+still be attempted, but if the gateway crashes before the send completes, this message will
+not be retried on restart.
+
+**When it occurs:** Disk full, permission error on `~/.openclaw/delivery-queue/`, or the
+queue directory does not exist.
+
+**Triage:**
+
+```bash
+df -h ~/.openclaw/delivery-queue/     # check disk space
+ls -la ~/.openclaw/delivery-queue/    # check directory exists and is writable
+wednesdayai logs --follow | grep "queue write failed"
+```
+
+### `delivery queue ackDelivery cleanup failed`
+
+| Field  | Value                                                            |
+| ------ | ---------------------------------------------------------------- |
+| Level  | `warn`                                                           |
+| Source | `deliver.ts` — `ackDelivery` catch (success path and abort path) |
+| Fields | `err.code: "queue_update_failed"`, `queueId`                     |
+
+**What it means:** The gateway could not remove the queue entry after completing delivery.
+There are two distinct cases depending on the path that triggered this log:
+
+- **Success path** (`ackDelivery` after the send succeeded): the channel-side send already
+  completed. The stale entry will be re-attempted at the next recovery scan and a **duplicate
+  may be dispatched**.
+- **Abort path** (`ackDelivery` after an abort signal fires): the send was abandoned before
+  completing. The stale entry will be re-attempted at the next recovery scan; this is a
+  **retry of an unsent message**, not a duplicate.
+
+**When it occurs:** Disk full, or the `.json` file was already deleted by a competing
+process (uncommon).
+
+**Triage:**
+
+```bash
+ls ~/.openclaw/delivery-queue/            # check for lingering .json files
+wednesdayai logs --follow | grep "ackDelivery cleanup failed"
+```
+
+### `delivery queue failDelivery update failed`
+
+| Field  | Value                                                                      |
+| ------ | -------------------------------------------------------------------------- |
+| Level  | `warn`                                                                     |
+| Source | `deliver.ts` — `failDelivery` catch (partial-failure and send-error paths) |
+| Fields | `err.code: "queue_update_failed"`, `queueId`                               |
+
+**What it means:** After a failed send, the gateway could not increment `retryCount` on the
+queue entry. The entry stays at its current retry count.
+
+- **Non-bestEffort send-error path:** the next recovery scan re-attempts delivery, and if the
+  send fails again the retryCount still cannot advance — the entry may be retried indefinitely
+  until the filesystem issue is resolved.
+- **bestEffort partial-failure path:** recovery re-attempts with `bestEffort: true`; per-payload
+  errors are swallowed and delivery is counted as complete, so the entry is acked on the first
+  recovery scan and not retried indefinitely.
+
+**When it occurs:** Same as ackDelivery failure — disk full or filesystem permission issue.
+
+**Triage:**
+
+```bash
+df -h ~/.openclaw/delivery-queue/
+cat ~/.openclaw/delivery-queue/$QUEUE_ID.json   # inspect retryCount and lastError
+wednesdayai logs --follow | grep "failDelivery update failed"
+```
+
+## Troubleshooting
+
+### Messages are dropped silently (no retry)
+
+If you see `"delivery queue write failed"`, the queue entry was never written. The send was
+still attempted (SC1: delivery proceeds regardless of queue write failure), but since no entry
+exists, the message cannot be retried if the process crashed before the send completed. Check
+disk space and permissions on the queue directory. If the send succeeded, no further action is
+needed — the message was delivered without crash-recovery coverage.
+
+### Entry stuck at retryCount below MAX_RETRIES
+
+If `failDelivery update failed` fires repeatedly, `retryCount` stops advancing. The entry
+stays in the queue indefinitely. Fix the underlying filesystem problem, then restart the
+gateway — `recoverPendingDeliveries` will resume retry-count progression.
+
+### Entry in `failed/` subdirectory
+
+An entry in `~/.openclaw/delivery-queue/failed/` exceeded the retry limit and was moved
+there by `recoverPendingDeliveries`. It will not be retried automatically. Inspect the
+entry's `lastError` field to determine the root cause, resolve it, then either re-queue
+the delivery manually or accept the drop.
+
+### Duplicate message after ack failure (success path only)
+
+If `ackDelivery cleanup failed` fires on the **success path** and the gateway restarts before
+manual cleanup, the next recovery scan will re-attempt a delivery that already succeeded. This
+can result in a duplicate message on the channel. The duplicate is channel-specific: some
+channels (iMessage, WhatsApp) silently de-duplicate; others (Slack, Discord) do not.
+
+If the `ackDelivery cleanup failed` log fired on the **abort path** (the abort signal fired
+before the send completed), recovery will re-attempt an unsent message — not a duplicate.
+
+Clean up stale entries manually:
+
+```bash
+ls ~/.openclaw/delivery-queue/
+rm ~/.openclaw/delivery-queue/$STALE_ID.json   # only if you confirm the send succeeded
+```
+
+---
+
+## For developers
+
+_This section is for contributors modifying `src/infra/outbound/`._
+
+### DeliveryError
+
+`src/infra/outbound/delivery-error.ts` exports a typed error class for all queue-layer
+faults. Use it instead of `new Error(...)` when throwing from delivery subsystem code.
+
+```ts
+import { DeliveryError, isDeliveryError } from "./delivery-error.js";
+
+// Wrap an unknown error into a typed delivery error:
+const typed = DeliveryError.from(err, "queue_update_failed", queueId);
+
+// isDeliveryError narrows to DeliveryError (pattern-match without string inspection):
+if (isDeliveryError(err)) {
+  console.log(err.code, err.queueId);
+}
+```
+
+**`DeliveryErrorCode` values:**
+
+| Code                    | When to use                                                                    |
+| ----------------------- | ------------------------------------------------------------------------------ |
+| `"queue_write_failed"`  | `enqueueDelivery` failed (write-ahead could not be written)                    |
+| `"queue_update_failed"` | `ackDelivery` or `failDelivery` failed (entry exists but could not be updated) |
+| `"delivery_failed"`     | The send itself failed (default when wrapping an unknown error)                |
+
+`DeliveryError.from(err)` is **idempotent**: if `err` is already a `DeliveryError`, it is
+returned unchanged (prevents double-wrapping). The caller's `code`/`queueId` are NOT applied
+in the idempotent case — this is intentional (preserves the original classification).
+
+### failDelivery concurrency
+
+`failDelivery` is safe to call concurrently on the same queue entry. Concurrent calls are
+serialised per entry via an in-process `Map<filePath, Promise<void>>` chain
+(`serializeByKey` in `delivery-queue.ts`). Each call enqueues behind the prior one so
+`retryCount` increments are never lost.
+
+This serialisation is **in-process only** — it does not protect against two separate gateway
+processes sharing the same `stateDir`. Do not run two gateways with the same `~/.openclaw/`
+without separate `stateDir` configuration.
+
+### Recovery statistics (`RecoverySummary`)
+
+`recoverPendingDeliveries` returns a `RecoverySummary` object. Each counter has distinct
+semantics:
+
+| Field               | Meaning                                                                                                                                                                                                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `recovered`         | Entries successfully re-delivered and acked — removed from the queue.                                                                                                                                                                                                          |
+| `failed`            | **Transient** failures — delivery attempted but threw a non-permanent error; `retryCount` was incremented; entry remains in the queue and will retry next boot.                                                                                                                |
+| `permanentlyFailed` | **Permanent** failures — entry matched `isPermanentDeliveryError` (e.g. chat not found, user blocked) and was moved to `failed/`; will NOT be retried.                                                                                                                         |
+| `skippedMaxRetries` | Entries moved to `failed/` because `retryCount >= MAX_RETRIES`. Includes (a) entries already at the limit when the scan began (never attempted this run) and (b) entries that crossed the limit during this run's delivery attempt (were attempted, then flushed immediately). |
+| `deferredBackoff`   | Entries still inside their backoff window; no attempt was made; will be retried on the next recovery scan.                                                                                                                                                                     |
+
+`failed` and `permanentlyFailed` are **distinct counters**. An entry counted in `failed`
+remains in the active queue and will be retried. An entry counted in `permanentlyFailed`
+has been moved to `failed/` and is done. Monitoring scripts that previously treated `failed`
+as "total non-recovered" should use `failed + permanentlyFailed + skippedMaxRetries` for
+that aggregate.
+
+### Extending the catch surface
+
+Every `failDelivery`/`ackDelivery` call site in `deliver.ts` uses a non-throwing catch:
+
+```ts
+await ackDelivery(queueId).catch((err) => {
+  log.warn("delivery queue ackDelivery cleanup failed", {
+    err: DeliveryError.from(err, "queue_update_failed", queueId),
+    queueId,
+  });
+});
+```
+
+Do NOT convert these to throwing catches — a queue-state failure must not mask the delivery
+outcome (decisions ledger DA4). If you add new call sites, follow the same non-throwing
+pattern and add a test in `deliver.test.ts` using `queueMocks.<fn>.mockRejectedValueOnce`.
+
+_Related: [Gateway logging](/gateway/logging) · [Gateway troubleshooting](/gateway/troubleshooting)_

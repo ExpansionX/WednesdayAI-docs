@@ -1,0 +1,165 @@
+---
+title: "Session History Hygiene — Clean Replay and Turn Provenance"
+summary: "How WednesdayAI strips channel-framing metadata from stored messages, tags turns with trigger sources, and filters automated turns from recall and analytics"
+read_when:
+  - You want to understand what the model sees in past turns vs what is stored
+  - You are configuring or debugging session recall for automated/heartbeat sessions
+  - You are querying ctx_session_entries and need to filter automated turns
+  - You are investigating why a heartbeat turn does not appear in recall
+audience: developer
+component: ctx-storage
+sources:
+  - src/config/sessions/ctx-schema.ts
+  - src/config/sessions/ctx-sqlite-worker.ts
+  - src/config/sessions/ctx-postgres.ts
+  - src/config/sessions/storage-normalize.ts
+  - src/config/sessions/db-session-hydration.ts
+  - src/config/zod-schema.agent-defaults.ts
+generated: 2026-06-25
+---
+
+# Session History Hygiene — Clean Replay and Turn Provenance
+
+WednesdayAI separates what is **stored** from what the model **sees in context**. Channel connectors inject metadata (sender id, conversation label, group context) into each user message as a JSON framing block so the agent knows who sent it. Storing and replaying that framing verbatim wastes tokens, inflates the context window, and can confuse models that see "[Conversation info …]" blocks in every prior turn. Session history hygiene addresses this at the storage layer.
+
+## What changes
+
+### Clean message column (SC1)
+
+When a user turn is written to `ctx_session_entries`, the storage layer splits it into two representations:
+
+| Column / field      | Contains                                                                                                                                                     |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `message`           | The stripped, clean message — channel framing blocks (`Conversation info (untrusted metadata): …`) removed from both string content and array content blocks |
+| `raw_entry.message` | The original, framing-intact message exactly as the connector produced it                                                                                    |
+
+On context replay (hydration), WednesdayAI feeds the model the **clean** `message` column by default. The raw framing is available for diagnostics and replay in framed mode (see [Replay mode](#replay-mode-sc6) below).
+
+This applies to both plain-string content (`string` role messages) and structured array content (content-block arrays that include a text block containing the framing header).
+
+### Turn provenance columns (SC3)
+
+Every row written to `ctx_session_entries` gains four new columns that record where the turn came from:
+
+| Column           | Type    | Meaning                                                                           |
+| ---------------- | ------- | --------------------------------------------------------------------------------- |
+| `trigger_source` | TEXT    | Who triggered this turn: `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, `'acp'` |
+| `is_automated`   | BOOLEAN | `1` when the turn was not initiated by a human (`trigger_source != 'user'`)       |
+| `sender_display` | TEXT    | Human-readable sender name (from channel connector, best-effort)                  |
+| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake)           |
+
+`trigger_source` is derived from the session key format (`storage-normalize.ts:deriveTriggerSource`):
+
+| Pattern                                  | Example key                      | `trigger_source` |
+| ---------------------------------------- | -------------------------------- | ---------------- |
+| Key suffix `:heartbeat`                  | `telegram:direct:abc:heartbeat`  | `'heartbeat'`    |
+| Key prefix `cron:`                       | `cron:my-daily-job`              | `'cron'`         |
+| Key segment `:subagent:` (UUID-suffixed) | `agent:main:subagent:f47ac10b-…` | `'subagent'`     |
+| Key segment `:acp:` (UUID-suffixed)      | `agent:main:acp:f47ac10b-…`      | `'acp'`          |
+| All other keys                           | `telegram:direct:abc123`         | `'user'`         |
+
+A partial index `idx_ctx_session_entries_trigger_source` on `ctx_session_entries(trigger_source) WHERE trigger_source IS NOT NULL` supports efficient filtering by provenance.
+
+### Automated turns filtered from recall and analytics (SC2)
+
+Two production queries that drive context replay and analytics now exclude automated turns:
+
+| Query / operation                                               | Filter applied                                            |
+| --------------------------------------------------------------- | --------------------------------------------------------- |
+| `SELECT_CTX_LAST_USER_ENTRY_SQL` (last user turn for analytics) | `AND (trigger_source = 'user' OR trigger_source IS NULL)` |
+| `SELECT_CTX_BY_KEY_SQL` (`readByKey`, session recall)           | `AND (trigger_source = 'user' OR trigger_source IS NULL)` |
+
+This means:
+
+- **Session recall** (`readByKey`) on a heartbeat session key returns empty — heartbeat turns are not folded back into conversation context.
+- **Analytics** (last user turn, turn counts) count only human-initiated turns. A heartbeat that fires while no user has messaged does not increment `turn_idx` or create a phantom `ctx_turns` row.
+
+`IS NULL` in the filter preserves backward compatibility: rows written before this schema version have `trigger_source = NULL` and are treated as user turns (same as `'user'`).
+
+### Raw entry preserved (SC4)
+
+The `raw_entry` (and `raw_line`) column always stores the full original framing-intact entry exactly as produced by the connector. Stripping happens only on the `message` column. Diagnostics, audit trails, and framed replay read `raw_entry.message` directly.
+
+### SQLite and Postgres parity (SC5)
+
+The schema additions and filter changes are identical on both backends. Migration `ALTER TABLE … ADD COLUMN IF NOT EXISTS` runs at startup on existing databases — no manual migration step is required.
+
+## Replay mode (SC6)
+
+`agents.defaults.ctx.replayMode` controls which representation the model receives on context hydration:
+
+| Value      | Default | Behavior                                                                          |
+| ---------- | ------- | --------------------------------------------------------------------------------- |
+| `"clean"`  | ✓       | Model sees the stripped `message` column — no framing, fewer wasted tokens        |
+| `"framed"` |         | Model sees `raw_entry.message` — original framing intact (backward compatibility) |
+
+Set in `openclaw.json`:
+
+```json5
+{
+  agents: {
+    defaults: {
+      ctx: {
+        replayMode: "clean", // default; set "framed" to restore legacy behavior
+      },
+    },
+  },
+}
+```
+
+`"framed"` is available for installations where downstream tooling or custom persona prompts depend on the channel framing block being present in history. New installations should use the default `"clean"`.
+
+## Example queries
+
+### Filter to user-only turns
+
+```sql
+-- SQLite: last real user message in a session (heartbeat rows excluded)
+SELECT *
+FROM ctx_session_entries
+WHERE session_id = ?
+  AND role = 'user'
+  AND entry_type = 'message'
+  AND (trigger_source = 'user' OR trigger_source IS NULL)
+ORDER BY seq DESC
+LIMIT 1;
+
+-- Postgres
+SELECT *
+FROM ctx_session_entries
+WHERE session_id = $1
+  AND role = 'user'
+  AND entry_type = 'message'
+  AND (trigger_source = 'user' OR trigger_source IS NULL)
+ORDER BY seq DESC
+LIMIT 1;
+```
+
+### Count automated turns in a session
+
+```sql
+-- SQLite: how many heartbeat turns has this session accumulated?
+SELECT COUNT(*) AS heartbeat_count
+FROM ctx_session_entries
+WHERE session_id = ?
+  AND trigger_source = 'heartbeat';
+```
+
+### Identify sessions with recent automated activity
+
+```sql
+-- SQLite: sessions with heartbeat or cron turns in the last 24 hours
+SELECT DISTINCT session_id, trigger_source, MAX(created_at) AS last_automated
+FROM ctx_session_entries
+WHERE is_automated = 1
+  AND created_at >= datetime('now', '-1 day')
+GROUP BY session_id, trigger_source;
+```
+
+## Backward compatibility
+
+- Rows written before this schema version have `trigger_source = NULL`, `is_automated = NULL`, `sender_display = NULL`, `sender_id_raw = NULL`. The production recall and analytics queries treat `NULL` trigger_source as `'user'` via `IS NULL` coalescing.
+- The `message` column for legacy rows may contain framing if it was written before the strip logic existed. `replayMode: "framed"` is the safe choice for sessions spanning the migration boundary if framing consistency matters for a persona.
+- `ctx_turns.turn_idx` is a 1-based count of user turns. `getUserTurnCount` (the counter used when writing a new `ctx_turns` row) applies the same `trigger_source = 'user' OR IS NULL` filter so automated turns do not inflate `turn_idx` or create phantom rows.
+
+_Related: [Session Analytics](/concepts/session-analytics) · [Heartbeat](/gateway/heartbeat) · [Gateway Configuration](/gateway/configuration) · [Session Management](/concepts/session)_

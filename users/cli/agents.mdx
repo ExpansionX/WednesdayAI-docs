@@ -1,0 +1,168 @@
+---
+summary: "CLI reference for `openclaw agents` (list/add/delete/bindings/bind/unbind/set identity)"
+read_when:
+  - You want multiple isolated agents (workspaces + routing + auth)
+title: "agents"
+audience: user
+component: agents-cli
+sources:
+  - src/config/types.agents.ts
+  - src/agents/agent-scope.ts
+generated: 2026-06-22
+---
+
+# `openclaw agents`
+
+Manage isolated agents (workspaces + auth + routing).
+
+Related:
+
+- Multi-agent routing: [Multi-Agent Routing](/concepts/multi-agent)
+- Agent workspace: [Agent workspace](/concepts/agent-workspace)
+
+## Examples
+
+```bash
+openclaw agents list
+openclaw agents add work --workspace ~/.openclaw/workspace-work
+openclaw agents bindings
+openclaw agents bind --agent work --bind telegram:ops
+openclaw agents unbind --agent work --bind telegram:ops
+openclaw agents set-identity --workspace ~/.openclaw/workspace --from-identity
+openclaw agents set-identity --agent main --avatar avatars/openclaw.png
+openclaw agents delete work
+```
+
+## Routing bindings
+
+Use routing bindings to pin inbound channel traffic to a specific agent.
+
+List bindings:
+
+```bash
+openclaw agents bindings
+openclaw agents bindings --agent work
+openclaw agents bindings --json
+```
+
+Add bindings:
+
+```bash
+openclaw agents bind --agent work --bind telegram:ops --bind discord:guild-a
+```
+
+If you omit `accountId` (`--bind <channel>`), OpenClaw resolves it from channel defaults and plugin setup hooks when available.
+
+### Binding scope behavior
+
+- A binding without `accountId` matches the channel default account only.
+- `accountId: "*"` is the channel-wide fallback (all accounts) and is less specific than an explicit account binding.
+- If the same agent already has a matching channel binding without `accountId`, and you later bind with an explicit or resolved `accountId`, OpenClaw upgrades that existing binding in place instead of adding a duplicate.
+
+Example:
+
+```bash
+# initial channel-only binding
+openclaw agents bind --agent work --bind telegram
+
+# later upgrade to account-scoped binding
+openclaw agents bind --agent work --bind telegram:ops
+```
+
+After the upgrade, routing for that binding is scoped to `telegram:ops`. If you also want default-account routing, add it explicitly (for example `--bind telegram:default`).
+
+Remove bindings:
+
+```bash
+openclaw agents unbind --agent work --bind telegram:ops
+openclaw agents unbind --agent work --all
+```
+
+## Identity files
+
+Each agent workspace can include an `IDENTITY.md` at the workspace root:
+
+- Example path: `~/.openclaw/workspace/IDENTITY.md`
+- `set-identity --from-identity` reads from the workspace root (or an explicit `--identity-file`)
+
+Avatar paths resolve relative to the workspace root.
+
+## Set identity
+
+`set-identity` writes fields into `agents.list[].identity`:
+
+- `name`
+- `theme`
+- `emoji`
+- `avatar` (workspace-relative path, http(s) URL, or data URI)
+
+Load from `IDENTITY.md`:
+
+```bash
+openclaw agents set-identity --workspace ~/.openclaw/workspace --from-identity
+```
+
+Override fields explicitly:
+
+```bash
+openclaw agents set-identity --agent main --name "OpenClaw" --emoji "🦞" --avatar avatars/openclaw.png
+```
+
+Config sample:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "main",
+        identity: {
+          name: "OpenClaw",
+          theme: "space lobster",
+          emoji: "🦞",
+          avatar: "avatars/openclaw.png",
+        },
+      },
+    ],
+  },
+}
+```
+
+## Session Journal
+
+Agents can write a reflective LLM journal entry each time a session resets via `/new` or `/reset`.
+Opt in per agent with `sessionJournal.enabled: true`.
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "claire",
+        sessionJournal: {
+          enabled: true,
+          // optional — include {transcript} where session text should be injected
+          prompt: "Write structured patient notes in SOAP format.\n\nSession transcript:\n{transcript}",
+        },
+      },
+    ],
+  },
+}
+```
+
+| Field     | Type      | Default  | Description                                                                                                                           |
+| --------- | --------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `boolean` | `false`  | Enable journal generation for this agent                                                                                              |
+| `prompt`  | `string`  | built-in | LLM prompt. Include `{transcript}` where the session text should be injected; if absent, the transcript is appended after the prompt. |
+
+Journal files are written to `<effectiveWorkspaceDir>/journal/YYYY-MM-DD-HHMMss-<slug>.md`. In multi-user
+mode (workspace lanes), each lane gets its own `journal/` folder — journals are isolated per
+user, not shared with other lanes on the same agent.
+
+The bundled `session-journal` hook must be enabled for this config to take effect:
+
+```bash
+wednesdayai hooks enable session-journal
+```
+
+See [Hooks: session-journal](/automation/hooks#session-journal) for full details.
