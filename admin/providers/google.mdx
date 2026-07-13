@@ -1,75 +1,59 @@
 ---
-title: "Google"
-description: "Connect WednesdayAI to Gemini via an AI Studio API key or a Vertex AI service account."
-audience: admin
+title: "Google (Gemini)"
+summary: "Use Google Gemini models via API key or Google Gemini CLI OAuth in OpenClaw"
+read_when:
+  - You want to use Google Gemini models in OpenClaw
+  - You need GEMINI_API_KEY setup or Google OAuth guidance
 ---
 
-# Google
+# Google (Gemini)
 
-WednesdayAI supports Google's Gemini family. Authenticate with an AI Studio API key (easiest) or Vertex AI (for GCP-native deployments).
+Google provides the Gemini model family for text, vision, and reasoning. OpenClaw supports two authentication paths: a `GEMINI_API_KEY` for direct API access, and the Google Gemini CLI OAuth flow for users who prefer browser-based sign-in.
 
-## AI Studio API key
+## Requirements
 
-Create a key at [aistudio.google.com](https://aistudio.google.com) and onboard:
+- A Gemini API key from [aistudio.google.com](https://aistudio.google.com/app/apikey), **or**
+- A Google account with access to Gemini (for OAuth via `google-gemini-cli`)
+
+## Quickstart
+
+### API key
 
 ```bash
 openclaw onboard --auth-choice gemini-api-key
+# or non-interactive
+openclaw onboard --gemini-api-key "$GEMINI_API_KEY"
 ```
 
-Or set the key on the gateway host:
-
-```bash
-echo 'GEMINI_API_KEY=AIza...' >> ~/.openclaw/.env
-```
-
-Rotation variables (`GEMINI_API_KEYS`, `GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`) are honoured, and the bare `GOOGLE_API_KEY` is included as a fallback.
-
-<Note>
-`GOOGLE_API_KEY` fallback support may vary by version — verify it is still recognised in your deployment by checking the core release notes.
-</Note>
-
-## Gemini CLI (OAuth)
-
-WednesdayAI supports OAuth authentication via the [Gemini CLI](https://github.com/google-gemini/gemini-cli). This is an active primary auth path — no API key required:
+### Google Gemini CLI OAuth
 
 ```bash
 openclaw onboard --auth-choice google-gemini-cli
-# or
-openclaw models auth login --provider google-gemini-cli
 ```
 
-This opens a browser for the OAuth flow and stores the token in the auth profile store. The Gemini CLI must be installed first (`npm install -g @google/gemini-cli`).
+This opens a browser-based OAuth flow. Keep the terminal open until it completes.
 
-<Note>
-  Some users have reported Google account restrictions when using third-party clients. Review Google's terms of service and consider using a non-critical account.
-</Note>
-
-## Vertex AI
-
-For production GCP deployments, use Application Default Credentials (ADC) via the `google-vertex` provider.
-
-**Preferred — user ADC:**
+After either method, verify the setup:
 
 ```bash
-gcloud auth application-default login
+openclaw models status
 ```
 
-**Alternative — service account:**
+## Configuration
+
+### Environment variable
 
 ```bash
-export GOOGLE_APPLICATION_CREDENTIALS=/path/to/service-account.json
+export GEMINI_API_KEY="AIza..."
 ```
 
-The service account needs the **Vertex AI User** (`roles/aiplatform.user`) role.
+OpenClaw reads `GEMINI_API_KEY` automatically and enables the `google` provider.
 
-<Note>
-  `GOOGLE_CLOUD_PROJECT` is optional — it defaults to the project in your service account credentials or your active `gcloud` configuration.
-</Note>
-
-## Selecting a model
+### Config snippet
 
 ```json5
 {
+  env: { GEMINI_API_KEY: "AIza..." },
   agents: {
     defaults: {
       model: { primary: "google/gemini-3-pro-preview" },
@@ -78,34 +62,91 @@ The service account needs the **Vertex AI User** (`roles/aiplatform.user`) role.
 }
 ```
 
-Use the `google/` prefix for AI Studio and `google-vertex/` for Vertex. Run `openclaw models list --all` for the catalog and `openclaw models status` for what your auth can reach.
+### Provider settings
 
-<Note>
-WednesdayAI also bundles `google-antigravity` as an unofficial OAuth provider. Some users have reported Google account restrictions when using third-party clients — review Google's terms and use a non-critical account if you enable it.
-</Note>
+| Setting                    | Value                                              |
+| -------------------------- | -------------------------------------------------- |
+| Provider ID                | `google`                                           |
+| Base URL                   | `https://generativelanguage.googleapis.com/v1beta` |
+| API                        | `google-generative-ai`                             |
+| Auth env var               | `GEMINI_API_KEY`                                   |
+| Default model (onboarding) | `gemini-3-pro-preview`                             |
 
-## Environment variables
+## Available models
 
-| Variable | Description |
-|----------|-------------|
-| `GEMINI_API_KEY` | Primary AI Studio API key |
-| `GEMINI_API_KEYS` | Comma-separated key list for rotation |
-| `GEMINI_API_KEY_1`, `GEMINI_API_KEY_2`, … | Individual numbered rotation keys |
-| `OPENCLAW_LIVE_GEMINI_KEY` | Single-key live override — takes priority over all other Gemini keys and bypasses rotation entirely; applies to both `google` and `google-vertex` providers |
-| `GOOGLE_API_KEY` | Fallback if no `GEMINI_*` key is set |
-| `GOOGLE_APPLICATION_CREDENTIALS` | Path to Vertex AI service-account JSON |
-| `GOOGLE_CLOUD_PROJECT` | GCP project ID for Vertex AI (optional — defaults to project in credentials or `gcloud` config) |
+The `google` provider includes all current Gemini models. Key models:
+
+| Model ID                 | Name                   | Context | Notes                      |
+| ------------------------ | ---------------------- | ------- | -------------------------- |
+| `gemini-3-pro-preview`   | Gemini 3 Pro Preview   | 1M      | Default; reasoning; vision |
+| `gemini-3-flash-preview` | Gemini 3 Flash Preview | 1M      | Reasoning; vision          |
+| `gemini-2.5-pro`         | Gemini 2.5 Pro         | 1M      | Reasoning; vision          |
+| `gemini-2.5-flash`       | Gemini 2.5 Flash       | 1M      | Reasoning; vision          |
+| `gemini-2.5-flash-lite`  | Gemini 2.5 Flash Lite  | 1M      | Reasoning; vision          |
+| `gemini-2.0-flash`       | Gemini 2.0 Flash       | 1M      | Vision                     |
+| `gemini-2.0-flash-lite`  | Gemini 2.0 Flash Lite  | 1M      | Vision                     |
+| `gemini-1.5-pro`         | Gemini 1.5 Pro         | 1M      | Vision                     |
+| `gemini-1.5-flash`       | Gemini 1.5 Flash       | 1M      | Vision                     |
+| `gemini-1.5-flash-8b`    | Gemini 1.5 Flash 8B    | 1M      | Vision                     |
+
+Use model IDs as `google/<model-id>` (example: `google/gemini-2.5-pro`).
+
+## Vertex AI
+
+For enterprise Vertex AI access, use the `google-vertex` provider. This uses Application Default Credentials (ADC) via `gcloud`:
+
+```bash
+gcloud auth application-default login
+```
+
+OpenClaw resolves Vertex credentials via the ADC chain — no `GEMINI_API_KEY` is needed. The base URL is `https://{location}-aiplatform.googleapis.com` and uses the `google-vertex` API backend.
+
+### google-vertex config snippet
+
+```json5
+{
+  models: {
+    providers: {
+      "google-vertex": {
+        // models populated by pi-ai built-in catalog
+        // auth resolved from gcloud ADC
+      },
+    },
+  },
+  agents: {
+    defaults: {
+      model: { primary: "google-vertex/gemini-2.5-pro" },
+    },
+  },
+}
+```
+
+Available `google-vertex` models mirror most `google` models: `gemini-2.5-pro`, `gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-3-pro-preview`, `gemini-3-flash-preview`, `gemini-2.0-flash`, `gemini-2.0-flash-lite`, `gemini-1.5-pro`, `gemini-1.5-flash`, `gemini-1.5-flash-8b`, `gemini-3.1-pro-preview`.
 
 ## Troubleshooting
 
-<AccordionGroup>
-  <Accordion title="API key rejected">
-    Ensure the key was created in AI Studio and that the Generative Language API is enabled for the project.
-  </Accordion>
-  <Accordion title="Vertex AI permission denied">
-    The service account is missing the **Vertex AI User** role. Add it in IAM and Admin.
-  </Accordion>
-  <Accordion title="Model not found">
-    Not all Gemini models are available in all regions. On Vertex, try a different region or check the Vertex AI model availability table.
-  </Accordion>
-</AccordionGroup>
+**401 Unauthorized / API key not valid**
+
+- Verify your API key starts with `AIza` and is copied in full.
+- Re-run onboarding: `openclaw onboard --auth-choice gemini-api-key`.
+- Ensure the Generative Language API is enabled in your Google Cloud project.
+
+**OAuth token refresh failed**
+
+- Re-run `openclaw onboard --auth-choice google-gemini-cli` to refresh the OAuth token.
+
+**Model ID not found**
+
+- Use `openclaw models list` to see available model IDs.
+- OpenClaw normalizes some model IDs: `gemini-3-pro` → `gemini-3-pro-preview`, `gemini-3-flash` → `gemini-3-flash-preview`.
+
+**Vertex AI: no credentials**
+
+- Run `gcloud auth application-default login` to authenticate, or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
+
+## Related
+
+- [Model providers](/concepts/model-providers)
+- [Models](/concepts/models)
+- [Model failover](/concepts/model-failover)
+- [Gateway configuration](/gateway/configuration)

@@ -1,223 +1,381 @@
 ---
+summary: "WhatsApp channel support, access controls, delivery behavior, and operations"
+read_when:
+  - Working on WhatsApp/web channel behavior or inbox routing
 title: "WhatsApp"
-description: "Connect WhatsApp to WednesdayAI: install the plugin, QR pairing, access policies, multi-account, and troubleshooting."
-audience: admin
-doc-schema-version: 1
 ---
 
 # WhatsApp
 
-WednesdayAI connects to WhatsApp via the WhatsApp Web protocol (Baileys). The gateway links a WhatsApp number to the gateway process, which then sends and receives on that number's behalf. The `whatsapp` bundled extension owns platform dependencies, login, session inspection, outbound delivery, polls, and reactions.
-
-<Warning>
-WhatsApp requires the gateway to run on **Node.js** (not Bun). Bun is flagged as incompatible for stable WhatsApp operation. Run `openclaw doctor` to verify runtime compatibility.
-</Warning>
-
-## Prerequisites
-
-- A WhatsApp-capable phone number (a dedicated number is recommended — see [Deployment patterns](#deployment-patterns))
-- Node.js 24+ on the gateway host
-- The phone holding the linked number online during linking
-
-## Installation
-
-The WhatsApp plugin ships bundled but requires its runtime dependency (`@whiskeysockets/baileys`) to be installed separately:
-
-```bash
-openclaw plugins install whatsapp
-```
-
-After install, restart the gateway. If deps are missing, `openclaw plugins list` shows `deps missing` for the `whatsapp` plugin and the gateway emits a `PLUGIN_DEPS_MISSING` warning at boot.
+Status: production-ready via WhatsApp Web (Baileys). The `whatsapp` bundled extension owns
+platform dependencies, login, session inspection, outbound delivery, polls, and reactions.
+`@whiskeysockets/baileys` is resolved lazily at channel-activation time — the gateway boots and
+the extension registers its config/status/onboarding surface even when the runtime dependency is
+not installed (see [Installation](#installation) below).
 
 <Note>
-If the automated install fails, navigate to `~/.openclaw/extensions/whatsapp` and run `npm install --omit=dev` manually.
+If you see `deps missing` for the `whatsapp` plugin in `wednesdayai plugins list`, reinstall the
+managed copy:
+
+```sh
+wednesdayai plugins install whatsapp
+```
+
+The install copies WhatsApp into `~/.openclaw/extensions/whatsapp` and installs its runtime
+dependencies there. Do not run `npm install` inside the global WednesdayAI package directory.
+The gateway will emit a `PLUGIN_DEPS_MISSING` warning at boot until the managed copy has its
+dependencies.
 </Note>
+
+<CardGroup cols={3}>
+  <Card title="Pairing" icon="link" href="/channels/pairing">
+    Default DM policy is pairing for unknown senders.
+  </Card>
+  <Card title="Channel troubleshooting" icon="wrench" href="/channels/troubleshooting">
+    Cross-channel diagnostics and repair playbooks.
+  </Card>
+  <Card title="Gateway configuration" icon="settings" href="/gateway/configuration">
+    Full channel config patterns and examples.
+  </Card>
+</CardGroup>
 
 ## Quick setup
 
 <Steps>
-  <Step title="Configure access policy">
-    ```json5
-    // ~/.openclaw/openclaw.json
-    {
-      channels: {
-        whatsapp: {
-          enabled: true,
-          dmPolicy: "pairing",           // pairing | allowlist | open | disabled
-          allowFrom: ["+15555550123"],   // E.164 numbers allowed to message the bot
-          groupPolicy: "allowlist",
-          groupAllowFrom: ["+15555550123"],
-        },
-      },
-    }
-    ```
+  <Step title="Configure WhatsApp access policy">
+
+```json5
+{
+  channels: {
+    whatsapp: {
+      dmPolicy: "pairing",
+      allowFrom: ["+15551234567"],
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["+15551234567"],
+    },
+  },
+}
+```
+
   </Step>
-  <Step title="Link the WhatsApp number">
-    ```bash
-    openclaw channels login --channel whatsapp
-    ```
 
-    Scan the QR with the WhatsApp app on the phone holding the number. The QR expires after about 2 minutes — re-run if it times out.
+  <Step title="Link WhatsApp (QR)">
 
-    For a named account: `openclaw channels login --channel whatsapp --account work`.
+```bash
+openclaw channels login --channel whatsapp
+```
 
-    If the gateway is already running for this account, use the gateway's login flow — a direct CLI login against the same auth directory will refuse to start while the gateway owns the socket lock.
+    For a specific account:
+
+```bash
+openclaw channels login --channel whatsapp --account work
+```
+
   </Step>
-  <Step title="Start the gateway and approve pairing">
-    ```bash
-    openclaw gateway run
-    openclaw pairing list whatsapp
-    openclaw pairing approve whatsapp <CODE>
-    ```
 
-    Pairing codes expire after 1 hour. Pending requests are capped at 3 per channel.
+  <Step title="Start the gateway">
+
+```bash
+openclaw gateway run
+```
+
   </Step>
-  <Step title="Verify">
-    ```bash
-    openclaw channels status --channel whatsapp
-    openclaw status --deep
-    ```
+
+  <Step title="Approve first pairing request (if using pairing mode)">
+
+```bash
+openclaw pairing list whatsapp
+openclaw pairing approve whatsapp <CODE>
+```
+
+    Pairing requests expire after 1 hour. Pending requests are capped at 3 per channel.
+
   </Step>
 </Steps>
+
+<Note>
+WednesdayAI recommends running WhatsApp on a separate number when possible. (The channel metadata and onboarding flow are optimized for that setup, but personal-number setups are also supported.)
+</Note>
 
 ## Deployment patterns
 
 <AccordionGroup>
   <Accordion title="Dedicated number (recommended)">
-    A separate WhatsApp number for WednesdayAI gives cleaner routing, clearer `allowFrom` lists, and avoids self-chat confusion:
+    This is the cleanest operational mode:
+
+    - separate WhatsApp identity for OpenClaw
+    - clearer DM allowlists and routing boundaries
+    - lower chance of self-chat confusion
+
+    Minimal policy pattern:
 
     ```json5
     {
       channels: {
         whatsapp: {
           dmPolicy: "allowlist",
-          allowFrom: ["+15555550123"],
+          allowFrom: ["+15551234567"],
         },
       },
     }
     ```
+
   </Accordion>
 
-  <Accordion title="Personal number">
-    Supported but adds operational complexity. The onboarding wizard sets a self-chat-friendly baseline when you choose personal-number mode:
+  <Accordion title="Personal-number fallback">
+    Onboarding supports personal-number mode and writes a self-chat-friendly baseline:
 
-    ```json5
-    {
-      channels: {
-        whatsapp: {
-          dmPolicy: "allowlist",
-          allowFrom: ["+15555550123"],  // your own number
-          selfChatMode: true,
-        },
-      },
-    }
-    ```
+    - `dmPolicy: "allowlist"`
+    - `allowFrom` includes your personal number
+    - `selfChatMode: true`
 
-    With `selfChatMode: true` (or when the linked self number is in `allowFrom`), self-chat read receipts are skipped and self-mention triggers are suppressed. If `messages.responsePrefix` is unset, self-chat replies default to `[WednesdayAI]`.
+    In runtime, self-chat protections key off the linked self number and `allowFrom`.
+
+    `channels.whatsapp.selfChatMode` enables same-phone setup where the bot uses your personal WhatsApp number. When enabled, self-chat safeguards activate (skip read receipts, ignore mention-JID auto-trigger, default response prefix).
+
+  </Accordion>
+
+  <Accordion title="WhatsApp Web-only transport scope">
+    The messaging platform transport is WhatsApp Web-based (`Baileys`) in current WednesdayAI channel architecture.
+
+    There is no separate Twilio WhatsApp messaging channel in the built-in chat-channel registry.
+
   </Accordion>
 </AccordionGroup>
 
-## Access control
+## Installation
 
-### DM policy
+Install the WhatsApp plugin with one command:
 
-| `dmPolicy` | Effect |
-| ---------- | ------ |
-| `"pairing"` | New senders get a one-time pairing code; ignored until approved (default) |
-| `"allowlist"` | Only numbers in `allowFrom` can initiate DMs |
-| `"open"` | Any sender allowed (requires `allowFrom: ["*"]`) |
-| `"disabled"` | Bot ignores all DMs |
+```sh
+wednesdayai plugins install whatsapp
+```
 
-`allowFrom` accepts E.164-style numbers. Approved pairings are persisted in the allow-store and merged with configured `allowFrom` at runtime. If no `allowFrom` is configured, the linked self number is allowed by default.
+WhatsApp is the first dependency-bearing first-party npm plugin. The catalog resolves `whatsapp` to `@wednesdayai/whatsapp`, installs it into `~/.openclaw/extensions/whatsapp`, and installs Baileys plus QR-code runtime dependencies beside that managed copy.
 
-Per-account override: `channels.whatsapp.accounts.<id>.dmPolicy` and `accounts.<id>.allowFrom` take precedence over channel-level defaults for that account.
+After install, enable it and restart the gateway. WhatsApp configuration (phone number, account settings) can be set before or after installation — it validates regardless of install state.
 
-### Group policy
+The global bundled WhatsApp copy is still used for catalog metadata and onboarding labels. Runtime
+loads should use the managed copy under `~/.openclaw/extensions/whatsapp` because WhatsApp depends
+on Baileys and QR-code packages that are installed beside that managed copy.
 
-```json5
-{
-  channels: {
-    whatsapp: {
-      groupPolicy: "allowlist",       // open | allowlist | disabled
-      groupAllowFrom: ["+15555550123"],
-      groups: {
-        "120363000000000000@g.us": { requireMention: false },
+## Runtime model
+
+- The `whatsapp` extension owns account config resolution, auth/session inspection, QR login helpers, outbound send/poll/reaction behavior, and extension runtime dependencies.
+- Gateway still owns the active listener and monitor loop while inbound monitoring is being extracted.
+- During this stage, stateful auth operations in the extension proxy through the host runtime so QR login, monitor sockets, queued credential saves, and logout clearing share one auth-state owner.
+- Outbound sends require an active WhatsApp listener for the target account.
+- Direct QR relink refuses to open a second socket while the gateway listener owns the account. Use the gateway login flow, which stops the channel before starting QR relink.
+- Logout stops gateway listeners that share the same canonical auth directory before clearing credentials, so relink checks do not see stale active-listener ownership.
+- WhatsApp socket startup also takes a non-reentrant auth-directory lock, so a separate CLI, gateway process, or second in-process startup cannot open another Baileys socket on the same account credentials.
+- Status and broadcast chats are ignored (`@status`, `@broadcast`).
+- Direct chats use DM session rules (`session.dmScope`; default `main` collapses DMs to the agent main session).
+- Group sessions are isolated (`agent:<agentId>:whatsapp:group:<jid>`).
+
+## Access control and activation
+
+<Tabs>
+  <Tab title="DM policy">
+    `channels.whatsapp.dmPolicy` controls direct chat access:
+
+    - `pairing` (default)
+    - `allowlist`
+    - `open` (requires `allowFrom` to include `"*"`)
+    - `disabled`
+
+    `allowFrom` accepts E.164-style numbers (normalized internally).
+
+    Multi-account override: `channels.whatsapp.accounts.<id>.dmPolicy` (and `allowFrom`) take precedence over channel-level defaults for that account.
+
+    Runtime behavior details:
+
+    - pairings are persisted in channel allow-store and merged with configured `allowFrom`
+    - if no allowlist is configured, the linked self number is allowed by default
+    - outbound `fromMe` DMs are never auto-paired
+
+  </Tab>
+
+  <Tab title="Group policy + allowlists">
+    Group access has two layers:
+
+    1. **Group membership allowlist** (`channels.whatsapp.groups`)
+       - if `groups` is omitted, all groups are eligible
+       - if `groups` is present, it acts as a group allowlist (`"*"` allowed)
+
+    2. **Group sender policy** (`channels.whatsapp.groupPolicy` + `groupAllowFrom`)
+       - `open`: sender allowlist bypassed
+       - `allowlist`: sender must match `groupAllowFrom` (or `*`)
+       - `disabled`: block all group inbound
+
+    Sender allowlist fallback:
+
+    - if `groupAllowFrom` is unset, runtime falls back to `allowFrom` when available
+    - sender allowlists are evaluated before mention/reply activation
+
+    Note: if no `channels.whatsapp` block exists at all, runtime group-policy fallback is `allowlist` (with a warning log), even if `channels.defaults.groupPolicy` is set.
+
+  </Tab>
+
+  <Tab title="Mentions + /activation">
+    Group replies require mention by default.
+
+    Mention detection includes:
+
+    - explicit WhatsApp mentions of the bot identity
+    - configured mention regex patterns (`agents.list[].groupChat.mentionPatterns`, fallback `messages.groupChat.mentionPatterns`)
+    - implicit reply-to-bot detection (reply sender matches bot identity)
+
+    Security note:
+
+    - quote/reply only satisfies mention gating; it does **not** grant sender authorization
+    - with `groupPolicy: "allowlist"`, non-allowlisted senders are still blocked even if they reply to an allowlisted user's message
+
+    Session-level activation command:
+
+    - `/activation mention`
+    - `/activation always`
+
+    `activation` updates session state (not global config). It is owner-gated.
+
+  </Tab>
+</Tabs>
+
+## Personal-number and self-chat behavior
+
+When the linked self number is also present in `allowFrom`, WhatsApp self-chat safeguards activate:
+
+- skip read receipts for self-chat turns
+- ignore mention-JID auto-trigger behavior that would otherwise ping yourself
+- if `messages.responsePrefix` is unset, self-chat replies default to `[{identity.name}]` or `[openclaw]`
+
+## Message normalization and context
+
+<AccordionGroup>
+  <Accordion title="Inbound envelope + reply context">
+    Incoming WhatsApp messages are wrapped in the shared inbound envelope.
+
+    If a quoted reply exists, context is appended in this form:
+
+    ```text
+    [Replying to <sender> id:<stanzaId>]
+    <quoted body or media placeholder>
+    [/Replying]
+    ```
+
+    Reply metadata fields are also populated when available (`ReplyToId`, `ReplyToBody`, `ReplyToSender`, sender JID/E.164).
+
+    `channels.whatsapp.messagePrefix` adds a prefix to inbound messages before agent processing (e.g. for context tagging).
+
+  </Accordion>
+
+  <Accordion title="Media placeholders and location/contact extraction">
+    Media-only inbound messages are normalized with placeholders such as:
+
+    - `<media:image>`
+    - `<media:video>`
+    - `<media:audio>`
+    - `<media:document>`
+    - `<media:sticker>`
+
+    Location and contact payloads are normalized into textual context before routing.
+
+  </Accordion>
+
+  <Accordion title="Pending group history injection">
+    For groups, unprocessed messages can be buffered and injected as context when the bot is finally triggered.
+
+    - default limit: `50`
+    - config: `channels.whatsapp.historyLimit`
+    - fallback: `messages.groupChat.historyLimit`
+    - `0` disables
+
+    Injection markers:
+
+    - `[Chat messages since your last reply - for context]`
+    - `[Current message - respond to this]`
+
+  </Accordion>
+
+  <Accordion title="Read receipts">
+    Read receipts are enabled by default for accepted inbound WhatsApp messages.
+
+    Disable globally:
+
+    ```json5
+    {
+      channels: {
+        whatsapp: {
+          sendReadReceipts: false,
+        },
       },
-    },
-  },
-}
-```
+    }
+    ```
 
-Access has two layers:
+    Per-account override:
 
-1. **Group membership** — if `groups` is present, it acts as an allowlist; omit it to allow all groups. `"*"` allows all.
-2. **Sender policy** — `groupPolicy` + `groupAllowFrom`. If `groupAllowFrom` is unset, the runtime falls back to `allowFrom`.
+    ```json5
+    {
+      channels: {
+        whatsapp: {
+          accounts: {
+            work: {
+              sendReadReceipts: false,
+            },
+          },
+        },
+      },
+    }
+    ```
 
-<Warning>
-If no `channels.whatsapp` config block exists, the runtime group-policy fallback is `"allowlist"` (with a warning log), even if `channels.defaults.groupPolicy` is set.
-</Warning>
+    Self-chat turns skip read receipts even when globally enabled.
 
-### Mention gating
+  </Accordion>
+</AccordionGroup>
 
-Group messages require a mention by default. To allow responses without a mention:
+## Delivery, chunking, and media
 
-```json5
-{ channels: { whatsapp: { groups: { "*": { requireMention: false } } } } }
-```
+<AccordionGroup>
+  <Accordion title="Text chunking">
+    - default chunk limit: `channels.whatsapp.textChunkLimit = 4000`
+    - `channels.whatsapp.chunkMode = "length" | "newline"`
+    - `newline` mode prefers paragraph/block boundaries and packs as many complete paragraphs as fit into each message up to `textChunkLimit`, falling back to length-based splitting only when a single block exceeds the limit. Fenced code blocks and tables are kept intact.
+    - `channels.whatsapp.chunkNewlinePacking` (default `true`): set to `false` to restore one message per paragraph (the pre-packing behaviour).
+  </Accordion>
 
-Mention detection includes explicit WhatsApp mentions, configured `mentionPatterns`, and reply-to-bot detection. Per-session activation: `/activation mention` or `/activation always` (owner-gated).
+  <Accordion title="Message debouncing">
+    `channels.whatsapp.debounceMs` batches rapid consecutive messages from the same sender before agent processing. Default behavior depends on configuration; set to `0` to disable.
 
-**Security note:** a quote/reply satisfies mention gating but does **not** grant sender authorization. Non-allowlisted senders are still blocked with `groupPolicy: "allowlist"` even if they reply to an allowlisted user.
+    ```json5
+    {
+      channels: {
+        whatsapp: {
+          debounceMs: 3000,  // wait 3s for follow-up messages before processing
+        },
+      },
+    }
+    ```
 
-## Message handling
+  </Accordion>
 
-### Group history injection
+  <Accordion title="Outbound media behavior">
+    - supports image, video, audio (PTT voice-note), and document payloads
+    - `audio/ogg` is rewritten to `audio/ogg; codecs=opus` for voice-note compatibility
+    - animated GIF playback is supported via `gifPlayback: true` on video sends
+    - captions are applied to the first media item when sending multi-media reply payloads
+    - media source can be HTTP(S), `file://`, or local paths
+  </Accordion>
 
-When the bot is triggered in a group after a gap, unprocessed messages are injected as context:
-
-```json5
-{
-  channels: {
-    whatsapp: {
-      historyLimit: 50,  // default; set 0 to disable
-    },
-  },
-}
-```
-
-Injected history is wrapped in `[Chat messages since your last reply - for context]` / `[Current message - respond to this]` markers.
-
-### Inbound media
-
-Media-only messages are normalized to placeholders: `<media:image>`, `<media:video>`, `<media:audio>`, `<media:document>`, `<media:sticker>`. Location and contact payloads are converted to text before routing.
-
-## Delivery settings
-
-```json5
-{
-  channels: {
-    whatsapp: {
-      textChunkLimit: 4000,
-      chunkMode: "length",            // length | newline (paragraph-aware)
-      chunkNewlinePacking: true,      // when chunkMode: "newline", pack multiple paragraphs into one message up to the limit (default: true)
-      mediaMaxMb: 50,                 // inbound media save cap
-      sendReadReceipts: true,
-    },
-  },
-}
-```
-
-Per-account override for `sendReadReceipts`:
-
-```json5
-{ channels: { whatsapp: { accounts: { work: { sendReadReceipts: false } } } } }
-```
-
-Self-chat turns skip read receipts even when globally enabled.
+  <Accordion title="Media size limits and fallback behavior">
+    - inbound media save cap: `channels.whatsapp.mediaMaxMb` (default `50`)
+    - outbound media cap for auto-replies: `agents.defaults.mediaMaxMb` (default `5MB`)
+    - images are auto-optimized (resize/quality sweep) to fit limits
+    - on media send failure, first-item fallback sends text warning instead of dropping the response silently
+  </Accordion>
+</AccordionGroup>
 
 ## Acknowledgment reactions
 
-React to inbound messages before the reply is sent:
+WhatsApp supports immediate ack reactions on inbound receipt via `channels.whatsapp.ackReaction`.
 
 ```json5
 {
@@ -225,138 +383,149 @@ React to inbound messages before the reply is sent:
     whatsapp: {
       ackReaction: {
         emoji: "👀",
-        direct: true,               // boolean: react to DMs
-        group: "mentions",          // always | mentions | never
+        direct: true,
+        group: "mentions", // always | mentions | never
       },
     },
   },
 }
 ```
 
-Failures are logged but do not block reply delivery. `group: "mentions"` reacts only on mention-triggered turns; session activation `always` bypasses this check.
+Behavior notes:
 
-## Actions and config writes
+- sent immediately after inbound is accepted (pre-reply)
+- failures are logged but do not block normal reply delivery
+- group mode `mentions` reacts on mention-triggered turns; group activation `always` acts as bypass for this check
+- WhatsApp uses `channels.whatsapp.ackReaction` (legacy `messages.ackReaction` is not used here)
 
-Gate outbound actions per channel:
+## Multi-account and credentials
 
-```json5
-{
-  channels: {
-    whatsapp: {
-      actions: {
-        reactions: true,   // allow the agent to send reaction emojis
-        polls: true,       // allow the agent to create polls
-        sendMessage: true, // allow the agent to send messages (default: true)
-      },
-      configWrites: true,  // allow channel-initiated config writes (default: true)
-    },
-  },
-}
-```
+<AccordionGroup>
+  <Accordion title="Account selection and defaults">
+    - account ids come from `channels.whatsapp.accounts`
+    - default account selection: `default` if present, otherwise first configured account id (sorted)
+    - account ids are normalized internally for lookup
+  </Accordion>
 
-## Multi-account setup
+  <Accordion title="Credential paths and legacy compatibility">
+    - current auth path: `~/.openclaw/credentials/whatsapp/<accountId>/creds.json`
+    - backup file: `creds.json.bak`
+    - legacy default auth in `~/.openclaw/credentials/` is still recognized/migrated for default-account flows
+    - during the current extraction stage, the extension auth-store uses a host-runtime proxy so QR login, monitor sockets, credential save queues, and logout clearing share one process-local state map
+    - active WhatsApp sockets create `.socket-owner.lock` next to the credentials to prevent cross-process gateway/CLI collisions; stale locks from dead processes are removed automatically by PID checks
+    - compatibility SDK auth exports share the same process-scoped queues/clear markers; new extension code should prefer the channel runtime bridge while the monitor remains host-owned
+  </Accordion>
 
-```json5
-{
-  channels: {
-    whatsapp: {
-      dmPolicy: "allowlist",
-      accounts: {
-        personal: { authDir: "~/.openclaw/credentials/whatsapp/personal" },
-        work:     { authDir: "~/.openclaw/credentials/whatsapp/work" },
-      },
-    },
-  },
-}
-```
+  <Accordion title="Logout behavior">
+    `openclaw channels logout --channel whatsapp [--account <id>]` clears WhatsApp auth state for that account.
 
-```bash
-openclaw channels login --channel whatsapp --account personal
-openclaw channels login --channel whatsapp --account work
-```
+    Logout closes active QR sockets and stops gateway listeners that share the selected account's canonical auth directory, refuses to clear credentials if another socket owner holds the lock, drains queued credential writes, then deletes Baileys auth JSON files from the configured auth directory. Symlinked auth directories are refused rather than followed; symlinked Baileys auth fragments inside a real auth directory are unlinked without touching their targets. In legacy shared auth directories, unrelated JSON state is preserved and only known Baileys fragments are removed; `oauth.json` is preserved.
 
-Default account selection: `default` if present, otherwise the first configured account id (sorted). Per-account `dmPolicy`, `allowFrom`, `sendReadReceipts`, and other overrides are supported.
-
-## Credentials and storage
-
-WhatsApp credentials live at `~/.openclaw/credentials/whatsapp/<accountId>/creds.json`. A recent `mtime` indicates an active session; a stale or missing file means the account is logged out.
-
-Active sockets create a `.socket-owner.lock` next to credentials to prevent cross-process collisions. Stale locks from dead processes are removed automatically via PID checks.
-
-To log out an account:
-
-```bash
-openclaw channels logout --channel whatsapp
-openclaw channels logout --channel whatsapp --account work
-```
-
-Logout closes active QR sockets, stops gateway listeners for the account, drains queued credential writes, then removes Baileys auth files. `oauth.json` and unrelated state are preserved.
+  </Accordion>
+</AccordionGroup>
 
 ## Disabling without removing config
 
+Set `channels.whatsapp.enabled: false` to disable the WhatsApp channel while preserving the rest of your config:
+
 ```json5
-{ channels: { whatsapp: { enabled: false } } }
+{
+  channels: {
+    whatsapp: {
+      enabled: false,
+    },
+  },
+}
 ```
 
-Restart the gateway to apply: `systemctl --user restart openclaw-gateway`.
+Restart the gateway for the change to take effect.
+
+## Tools, actions, and config writes
+
+- Agent tool support includes WhatsApp reaction action (`react`).
+- Outbound text, media, polls, and reactions are implemented in the WhatsApp extension.
+- Action gates:
+  - `channels.whatsapp.actions.reactions`
+  - `channels.whatsapp.actions.sendMessage`
+  - `channels.whatsapp.actions.polls`
+- Channel-initiated config writes are enabled by default (disable via `channels.whatsapp.configWrites=false`).
 
 ## Troubleshooting
 
 <AccordionGroup>
-  <Accordion title="Not linked / QR code not working">
+  <Accordion title="Not linked (QR required)">
+    Symptom: channel status reports not linked.
+
+    Fix:
+
     ```bash
-    openclaw channels logout --channel whatsapp
     openclaw channels login --channel whatsapp
+    openclaw channels status
     ```
 
-    The phone must be online. The QR expires after about 2 minutes. If the gateway is running for this account, stop it first — a direct CLI login is refused while the gateway owns the socket lock.
   </Accordion>
+
   <Accordion title="Linked but disconnected / reconnect loop">
-    Repeated disconnects or reconnect attempts after a successful link:
+    Symptom: linked account with repeated disconnects or reconnect attempts.
+
+    Fix:
 
     ```bash
     openclaw doctor
     openclaw logs --follow
     ```
 
-    If the account shows a reconnect loop, re-link: `openclaw channels logout --channel whatsapp && openclaw channels login --channel whatsapp`.
+    If needed, re-link with `channels login`.
+
+    If the gateway is already running for the account, use the gateway login flow when available. A direct CLI login against the same auth directory will refuse to start while another openclaw process owns the socket lock.
+
   </Accordion>
-  <Accordion title="Status codes 409–515 in logs">
-    A conflicting WhatsApp Web session is open in a browser. Close all other WhatsApp Web browser sessions, then relink. Status 515 auto-retries once after pairing — this is normal.
+
+  <Accordion title="No active listener when sending">
+    Outbound sends fail fast when no active gateway listener exists for the target account.
+
+    Make sure gateway is running and the account is linked.
+
   </Accordion>
-  <Accordion title="Group messages not routing to the agent">
+
+  <Accordion title="Group messages unexpectedly ignored">
     Check in this order:
 
-    1. `groupPolicy` allows the group
-    2. `groupAllowFrom` includes the sender (or falls back to `allowFrom`)
-    3. `groups` allowlist includes the group JID (or is omitted to allow all)
-    4. Mention gating: `requireMention: false`, or the message mentions the bot
-    5. No duplicate keys in `openclaw.json` (`openclaw doctor`) — later entries override earlier ones silently
-  </Accordion>
-  <Accordion title="No active listener when sending">
-    Outbound sends fail when no active gateway listener exists for the target account:
+    - `groupPolicy`
+    - `groupAllowFrom` / `allowFrom`
+    - `groups` allowlist entries
+    - mention gating (`requireMention` + mention patterns)
+    - duplicate keys in `openclaw.json` (JSON5): later entries override earlier ones, so keep a single `groupPolicy` per scope
 
-    ```bash
-    openclaw gateway status
-    openclaw channels status --channel whatsapp
-    ```
   </Accordion>
-  <Accordion title="deps missing / PLUGIN_DEPS_MISSING warning">
-    Run `openclaw plugins install whatsapp` to reinstall the plugin and its dependencies. If that fails, navigate to `~/.openclaw/extensions/whatsapp` and run `npm install --omit=dev` manually.
+
+  <Accordion title="Bun runtime warning">
+    WhatsApp gateway runtime should use Node. Bun is flagged as incompatible for stable WhatsApp/Telegram gateway operation.
   </Accordion>
 </AccordionGroup>
 
-## Configuration reference
+## Configuration reference pointers
 
-Full field reference for all WhatsApp config options (access, delivery, multi-account, operations, session):
+Primary reference:
 
-- [Reference: config](/reference/config)
-- [Channel setup](/admin/channels/index)
+- [Configuration reference - WhatsApp](/gateway/configuration-reference#whatsapp)
 
-High-signal fields: `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`, `textChunkLimit`, `chunkMode`, `mediaMaxMb`, `sendReadReceipts`, `ackReaction`, `historyLimit`, `actions`, `configWrites`, `accounts.<id>.*`
+High-signal WhatsApp fields:
+
+- access: `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`
+- delivery: `textChunkLimit`, `chunkMode`, `chunkNewlinePacking`, `mediaMaxMb`, `sendReadReceipts`, `ackReaction`
+- delivery target: `defaultTo`
+- message behavior: `debounceMs`, `messagePrefix`, `selfChatMode`
+- multi-account: `accounts.<id>.enabled`, `accounts.<id>.authDir`, account-level overrides
+- operations: `configWrites`, `debounceMs`, `web.enabled`, `web.heartbeatSeconds`, `web.reconnect.*`
+- session behavior: `session.dmScope`, `historyLimit`, `dmHistoryLimit`, `dms.<id>.historyLimit`
+- streaming: `blockStreaming`, `blockStreamingCoalesce`
+- formatting: `markdown`, `responsePrefix`
+- heartbeat: `heartbeat`
 
 ## Related
 
-- [Channel setup](/admin/channels/index)
-- [Channel troubleshooting](/admin/troubleshooting)
-- [Doctor](/admin/doctor)
+- [Pairing](/channels/pairing)
+- [Channel routing](/channels/channel-routing)
+- [Multi-agent routing](/concepts/multi-agent)
+- [Troubleshooting](/channels/troubleshooting)

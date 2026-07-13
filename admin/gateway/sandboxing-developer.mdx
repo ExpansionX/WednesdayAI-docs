@@ -1,0 +1,229 @@
+---
+audience: developer
+component: sandboxing
+sources:
+  - src/config/types.agents-shared.ts
+  - src/config/types.tools.ts
+  - src/config/types.agents.ts
+generated: 2026-06-28
+---
+
+# Sandboxing — Developer Reference
+
+Type definitions, policy filtering order, and implementation details for the WednesdayAI sandbox system.
+
+## Source files
+
+| File                                     | What it defines                                            |
+| ---------------------------------------- | ---------------------------------------------------------- |
+| `src/config/types.agents-shared.ts`      | `AgentSandboxConfig`                                       |
+| `src/config/types.tools.ts`              | `AgentToolsConfig`, `ToolsConfig` (sandbox.tools sections) |
+| `src/config/types.agents.ts`             | `AgentConfig.sandbox`, `AgentConfig.tools`                 |
+| `src/config/zod-schema.agent-runtime.ts` | `AgentSandboxSchema`, `ToolExecSchema` (Zod validation)    |
+
+## AgentSandboxConfig
+
+```typescript
+// src/config/types.agents-shared.ts
+export type AgentSandboxConfig = {
+  mode?: "off" | "non-main" | "all";
+  workspaceAccess?: "none" | "ro" | "rw";
+  /**
+   * - "spawned": only allow session tools to target sessions spawned from this session (default)
+   * - "all": allow session tools to target any session
+   */
+  sessionToolsVisibility?: "spawned" | "all";
+  /** "session" (default) | "agent" | "shared" */
+  scope?: "session" | "agent" | "shared";
+  /** Legacy alias for scope ("session" when true, "shared" when false). */
+  perSession?: boolean;
+  workspaceRoot?: string;
+  /**
+   * When true and a multi-lane is resolved: scope sandbox tool filesystem
+   * access to the lane's effective workspace dir (per-lane content fencing).
+   * Additive. Single-user runs are unaffected. Requires workspaceAccess: "rw"
+   * for complete isolation.
+   */
+  fenceToLane?: boolean;
+  docker?: SandboxDockerSettings;
+  browser?: SandboxBrowserSettings;
+  prune?: SandboxPruneSettings;
+};
+```
+
+Zod schema (`AgentSandboxSchema` in `src/config/zod-schema.agent-runtime.ts`) uses `.strict()` + `.superRefine()` for cross-field validation (e.g. `fenceToLane` + `workspaceAccess` warning).
+
+## AgentConfig placement
+
+```typescript
+// src/config/types.agents.ts
+export type AgentConfig = {
+  id: string;
+  // ...
+  sandbox?: AgentSandboxConfig; // per-agent sandbox overrides
+  tools?: AgentToolsConfig; // per-agent tool policy
+};
+```
+
+Agent-level `sandbox` overrides `agents.defaults.sandbox` field-by-field. Docker/browser/prune sub-objects are ignored when `scope` resolves to `"shared"`.
+
+## Tool policy filtering order
+
+Full 8-level pipeline (each level can only further restrict):
+
+1. Tool profile (`tools.profile` or `agents.list[].tools.profile`)
+2. Provider tool profile (`tools.byProvider[provider].profile` or per-agent)
+3. Global tool policy (`tools.allow` / `tools.deny`)
+4. Provider tool policy (`tools.byProvider[provider].allow/deny`)
+5. Agent-specific tool policy (`agents.list[].tools.allow/deny`)
+6. Agent provider policy (`agents.list[].tools.byProvider[provider].allow/deny`)
+7. Sandbox tool policy (`tools.sandbox.tools` or `agents.list[].tools.sandbox.tools`)
+8. Subagent tool policy (`tools.subagents.tools`)
+
+`deny` wins at every level. Non-empty `allow` makes everything not listed implicitly blocked. `agents.list[].tools.sandbox.tools` replaces (not merges with) `tools.sandbox.tools` for that agent.
+
+Provider tool keys accept either `provider` (e.g. `google-antigravity`) or `provider/model` (e.g. `openai/gpt-5.2`).
+
+## Tool groups
+
+Available `group:*` shorthands (expand in tool policies at all levels):
+
+| Group              | Members                                                                                  |
+| ------------------ | ---------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `bash`, `process`                                                                |
+| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                   |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
+| `group:memory`     | `memory_search`, `memory_get`                                                            |
+| `group:ui`         | `browser`, `canvas`                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                        |
+| `group:messaging`  | `message`                                                                                |
+| `group:nodes`      | `nodes`                                                                                  |
+| `group:openclaw`   | all built-in tools (excludes provider plugins)                                           |
+
+## AgentToolsConfig sandbox section
+
+```typescript
+// src/config/types.tools.ts
+export type AgentToolsConfig = {
+  // ...
+  sandbox?: {
+    tools?: {
+      allow?: string[];
+      deny?: string[];
+    };
+  };
+};
+```
+
+This is the "sandbox tool policy" (level 7 above). It applies only when the session is sandboxed. `agents.list[].tools.sandbox.tools` replaces `tools.sandbox.tools` for that agent.
+
+## fenceToLane implementation details
+
+`fenceToLane: true` is applied only when:
+
+1. Workspace lanes are enabled on the agent.
+2. The lane is resolved (not denied or absent).
+3. The policy decision is `"allowed"`.
+
+Effect: sandbox tool filesystem access is scoped to the lane's effective workspace directory. Bootstrap resolution (e.g. `AGENTS.md` selection) remains lane-aware and can still select lane-local files with persona fallback.
+
+Cross-field constraint: when `fenceToLane: true` and `workspaceAccess` is not `"rw"`, a warning is logged at session setup. With `"none"` or `"ro"`, scope-keyed directory seeding is used and two sessions sharing the same scope key can cross-read each other's seeded files.
+
+## sessionToolsVisibility
+
+Controls which sessions are targetable by session tools (`sessions_list`, `sessions_send`, etc.):
+
+- `"spawned"` (default) — only sessions spawned from this session.
+- `"all"` — any session.
+
+Applies per-agent at the sandbox config level.
+
+## Elevated mode interaction
+
+`tools.elevated` is an exec-only escape hatch. Elevated runs `exec` on the host, bypassing the sandbox. It does not grant additional tools and does not override `tools.deny`.
+
+`tools.elevated.enabled` — global baseline (default: `true`).
+`agents.list[].tools.elevated.enabled` — can only further restrict (both global + agent must allow).
+`tools.elevated.allowFrom` — per-provider sender allowlists.
+
+Mitigation patterns for developers building multi-agent setups:
+
+```json
+{
+  "tools": { "elevated": { "enabled": false } },
+  "agents": {
+    "list": [
+      {
+        "id": "restricted",
+        "tools": {
+          "deny": ["exec"],
+          "elevated": { "enabled": false }
+        }
+      }
+    ]
+  }
+}
+```
+
+## Bind mount blocking
+
+The sandbox blocks these bind sources at config-load time:
+
+- `docker.sock` (any path)
+- `/etc`, `/proc`, `/sys`, `/dev`
+- Parent mounts that would expose the above
+
+`network: "host"` is blocked. `network: "container:<id>"` requires `dangerouslyAllowContainerNamespaceJoin: true`.
+
+## Sandbox config precedence (all fields)
+
+```
+agents.list[].sandbox.mode             > agents.defaults.sandbox.mode
+agents.list[].sandbox.scope            > agents.defaults.sandbox.scope
+agents.list[].sandbox.workspaceRoot    > agents.defaults.sandbox.workspaceRoot
+agents.list[].sandbox.workspaceAccess  > agents.defaults.sandbox.workspaceAccess
+agents.list[].sandbox.fenceToLane      > agents.defaults.sandbox.fenceToLane
+agents.list[].sandbox.docker.*         > agents.defaults.sandbox.docker.*    (ignored for scope=shared)
+agents.list[].sandbox.browser.*        > agents.defaults.sandbox.browser.*   (ignored for scope=shared)
+agents.list[].sandbox.prune.*          > agents.defaults.sandbox.prune.*     (ignored for scope=shared)
+```
+
+## Sandbox tool policy config shape
+
+```json
+{
+  "tools": {
+    "sandbox": {
+      "tools": {
+        "allow": ["group:runtime", "group:fs"],
+        "deny": ["browser"]
+      }
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "restricted",
+        "tools": {
+          "sandbox": {
+            "tools": {
+              "allow": ["read"],
+              "deny": ["exec", "write", "edit"]
+            }
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+## Debug tooling
+
+```bash
+openclaw sandbox explain --json
+```
+
+Returns structured JSON with: `mode`, `scope`, `workspaceAccess`, `fenceToLane`, `sessionToolsVisibility`, `isCurrentlySandboxed`, `sandboxToolPolicy` (allow/deny/source), `elevatedGates`, `fixItKeys`.
+
+Related: [Sandboxing (user)](/gateway/sandboxing-user) · [Sandboxing (admin)](/gateway/sandboxing-admin) · [Exec Tool (developer)](/tools/exec-developer)

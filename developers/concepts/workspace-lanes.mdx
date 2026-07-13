@@ -1,0 +1,303 @@
+---
+summary: "Workspace lanes for multi-user agent personas"
+read_when:
+  - You want one agent persona to serve more than one user
+  - You need to understand persona files versus user-lane files
+  - You are writing hooks or plugins that inspect workspace lane context
+title: "Workspace Lanes"
+audience: user, admin, developer
+component: multi-user-workspace-agents
+sources:
+  - src/config/types.agents.ts
+  - src/config/zod-schema.agent-runtime.ts
+  - src/agents/workspace-lanes.ts
+  - src/agents/workspace.ts
+  - src/agents/bootstrap-files.ts
+  - src/hooks/internal-hooks.ts
+  - src/plugins/types.ts
+  - src/plugin-sdk/index.ts
+  - src/config/types.sandbox.ts
+  - src/agents/sandbox/context.ts
+generated: 2026-06-26
+---
+
+# Workspace Lanes
+
+Workspace lanes are an opt-in substrate for agents that may serve multiple people. They let one
+agent persona keep shared persona files in the configured agent workspace while giving each user a
+separate lane workspace for user-specific files and generated state.
+
+Current scope: this release adds the core resolver, config schema, first-use seeding, lane-aware
+bootstrap loading, hook/plugin context, reply-path adoption, reset/session-memory lane routing,
+lane-local remote media staging, and a real two-user route proof. Do not treat workspace lanes as
+complete hosted multi-tenant isolation yet.
+
+## For Users
+
+Most local users do not need workspace lanes. If you are the only person talking to your assistant,
+leave `workspaceLanes` unset and WednesdayAI keeps the existing single-workspace behavior.
+
+Workspace lanes matter when the same persona may answer more than one person. Without a lane model,
+files such as `USER.md`, `MEMORY.md`, generated notes, and downloaded artifacts can become shared
+context. With lanes enabled and adopted by a runtime path, WednesdayAI can keep the persona stable
+while separating user-specific context by lane.
+
+The default lane model is hybrid:
+
+| File or state                         | Default location                        |
+| ------------------------------------- | --------------------------------------- |
+| `AGENTS.md`                           | shared persona workspace                |
+| `SOUL.md`                             | shared persona workspace                |
+| `IDENTITY.md`                         | shared persona workspace                |
+| `TOOLS.md`                            | shared persona workspace                |
+| `HEARTBEAT.md`                        | shared persona workspace                |
+| `USER.md`                             | lane workspace                          |
+| `BOOTSTRAP.md`                        | lane workspace when copied on creation  |
+| `MEMORY.md` and `memory.md`           | lane workspace                          |
+| Generated files, downloads, artifacts | lane workspace on adopted runtime paths |
+| Workspace-local skills                | shared persona workspace by default     |
+
+`workspaceLanes.create: "manual"` never creates the lane directory on the reply path. Operators must
+provision the resolved lane directory first; otherwise WednesdayAI denies the lane for that turn and
+does not run the reply in the shared persona workspace.
+
+`workspaceLanes.skills` defaults to `"shared"`. `"lane"` switches skill discovery, skill snapshots,
+and skill environment loading to the effective lane workspace. `"both"` is accepted as
+configuration for forward compatibility, but currently behaves like `"shared"` until precedence and
+conflict handling are specified and tested.
+
+Session isolation is separate. If multiple people can DM the bot, also configure
+`session.dmScope: "per-channel-peer"` or `per-account-channel-peer`. Session keys control
+conversation history. Workspace lanes control workspace files and bootstrap context.
+
+## For Administrators
+
+Enable lanes only on personas that are intended to serve more than one user:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "support",
+        workspaceLanes: {
+          enabled: true,
+        },
+      },
+    ],
+  },
+}
+```
+
+Most deployments should also set an explicit persona workspace:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "support",
+        workspace: "~/.openclaw/workspaces/support",
+        workspaceLanes: {
+          enabled: true,
+          strategy: "hybrid",
+          laneKey: "canonical-identity",
+          rootTemplate: "~/.openclaw/agents/{agentId}/lanes/{laneId}/workspace",
+          create: "on-first-message",
+        },
+      },
+    ],
+  },
+}
+```
+
+`enabled: true` is per agent. There is no global default lane setting in this slice.
+
+### Lane keys
+
+`laneKey` controls which actor fields choose a lane:
+
+| Value                  | Behavior                                                                                       |
+| ---------------------- | ---------------------------------------------------------------------------------------------- |
+| `canonical-identity`   | Uses `session.identityLinks` when available, then falls back to account/channel/peer identity. |
+| `account-channel-peer` | Uses account id, channel, and sender or conversation identity.                                 |
+| `channel-peer`         | Uses channel and sender or conversation identity.                                              |
+
+Lane ids are deterministic digests, not raw sender ids. Missing actor fields deny the lane instead
+of falling back to an anonymous shared lane.
+
+### Root templates
+
+`rootTemplate` accepts only `{agentId}` and `{laneId}` placeholders. `{laneId}` is required so two
+users cannot collapse into the same workspace. Templates with traversal segments, blank values,
+unsupported placeholders, or malformed braces are denied.
+
+Keep lane roots under controlled WednesdayAI state unless you have an operator-managed storage
+plan. Avoid broad roots such as the home directory. When a resolved lane path already exists, it
+must be a directory; regular files, symlinks, and other non-directory entries are denied.
+
+### Creation and seed files
+
+`create: "on-first-message"` creates the effective lane workspace when first resolved, unless a
+non-directory entry already exists at that path. `create: "manual"` requires the lane directory to
+exist before the turn starts; a missing path or non-directory entry denies the lane. Default seed
+files are:
+
+- `USER.md`
+- `BOOTSTRAP.md`
+
+Seed copies are copied from the persona workspace only when the lane file is missing. Existing lane
+files are not overwritten. Symlink and hardlink aliases that escape the persona workspace are
+skipped, and dangling symlinks in the lane are treated as existing rather than followed.
+
+### Supported strategies
+
+The config schema accepts reserved strategy names for forward compatibility, but runtime support in
+this slice is `hybrid` only. Other values are denied by policy until a later task implements them.
+
+### Sandbox lane fencing
+
+When [sandboxing](/gateway/sandboxing) is enabled, set `fenceToLane: true` in the agent's sandbox
+config to bind the sandbox tool filesystem to the user's effective lane workspace instead of the
+shared persona root. Without this flag, a sandboxed multi-lane agent can still traverse up to the
+persona root and reach sibling lane directories via the workspace mount.
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "support",
+        workspaceLanes: { enabled: true },
+        sandbox: {
+          mode: "all",
+          workspaceAccess: "rw",
+          fenceToLane: true,
+        },
+      },
+    ],
+  },
+}
+```
+
+`workspaceAccess: "rw"` is required for complete lane isolation. With `"none"` or `"ro"`, the
+sandbox uses a scope-keyed workspace directory seeded from the lane directory — two sessions that
+share the same scope key across lanes can read each other's seeded files. WednesdayAI logs a
+warning at session setup when `fenceToLane: true` and `workspaceAccess` is not `"rw"`.
+
+The fence only restricts tool filesystem access. Bootstrap resolution still happens before sandbox
+entry, but it is not persona-only: lane-aware bootstrap loading can still select lane-local files
+such as `AGENTS.md`, with persona fallback where applicable. The fence takes effect only when
+workspace lanes are enabled, the lane is resolved, and the policy decision is `"allowed"` — it has
+no effect in single-user (`mode: "single"`) or denied configurations.
+
+### Migration notes
+
+Existing per-agent workspaces keep working when `workspaceLanes` is unset. To migrate an existing
+persona, keep the current `workspace` path as the persona workspace, enable lanes on that agent, and
+let first-use seeding copy `USER.md` and `BOOTSTRAP.md` into each lane. Review any existing
+`MEMORY.md`, `memory/`, downloads, and generated files before enabling lanes; move user-specific
+content into the correct lane rather than leaving it in the shared persona root.
+
+Feishu-style dynamic agents remain on the legacy-compatible per-agent workspace path unless their
+resolved agent config enables `workspaceLanes`. Do not use lanes to replace dynamic-agent selection;
+use lanes only to separate user-specific files inside a persona that may be shared by multiple users.
+
+## For Developers
+
+Workspace lane data is additive. Existing hooks and plugins continue to run without lane fields.
+
+### Bootstrap hooks
+
+`agent:bootstrap` hook context can include:
+
+```ts
+workspaceLane?: WorkspaceLaneResolution;
+```
+
+When present, `workspaceDir` is the effective workspace for the current bootstrap pass and
+`workspaceLane.personaWorkspaceDir` points at the shared persona workspace. Denied lane resolutions
+are not exposed to bootstrap hooks.
+
+### Plugin runtime context
+
+Plugin agent-hook and tool context can include:
+
+```ts
+canonicalIdentity?: string;
+laneId?: string;
+workspaceLane?: WorkspaceLaneResolution;
+```
+
+Treat these fields as optional. A plugin should keep its current behavior when `workspaceLane` is
+undefined.
+
+The `message_received` plugin hook still runs before workspace-lane resolution, so it does not
+receive `workspaceLane` in this slice. Message-hook types keep the optional fields for future
+lane-aware message surfaces and compatibility, but plugins must not rely on them for
+`message_received`.
+
+### Reading workspace files
+
+Lane-aware bootstrap loading reads shared files from `personaWorkspaceDir` and lane-local files from
+`effectiveWorkspaceDir`. This applies to embedded runs and CLI-provider runs that receive an
+allowed `workspaceLane`. Custom project context paths use POSIX-style `/` separators for source-plan
+matching; backslashes are treated as literal filename characters. Root-level variants such as
+`./AGENTS.md` are matched by basename, while nested paths such as `notes/AGENTS.md` stay lane-local
+unless that full path or a parent directory is explicitly listed in `sharedFiles`.
+
+### Sandbox context and lane fencing
+
+`resolveSandboxContext` accepts an optional `workspaceLane` parameter. When a sandbox config has
+`fenceToLane: true`, passing the resolved `WorkspaceLaneResolution` causes the sandbox workspace to
+be bound to `workspaceLane.effectiveWorkspaceDir` instead of the agent workspace root. Embedded
+compact sessions (`compactEmbeddedPiSessionDirect`) thread the lane through to sandbox setup
+automatically when `workspaceLane` is included in the compact params.
+
+Plugin and hook authors do not need to wire this themselves — the runtime handles it. It is
+documented here for authors building custom compact flows or sandbox integrations that call
+`resolveSandboxContext` directly.
+
+### Correlating by lane
+
+`providerConversationId` is the opaque provider/cache **session** identity derived from
+`agentId + (sessionKey || sessionId)`. It is NOT lane-specific: in a multi-user group agent with
+workspace lanes, several lane users can share one `providerConversationId`. To partition correctly
+per lane, consumers (e.g. brain/background/cache systems) should dedupe on the composite key:
+
+```text
+providerConversationId + (laneId ?? canonicalIdentity ?? hashedUserId ?? sessionKey) + turnId + (entryId ?? cursor.entryId ?? rawSha256)
+```
+
+`laneId` is the opaque `lane-<hash>` digest, present only for an allowed multi-lane turn and
+`undefined` for single-user and denied resolutions. Never correlate on raw `identityLinks` or a
+lane hash preimage — they are intentionally stripped from runtime metadata.
+
+### Do not overclaim isolation
+
+Workspace lanes provide product-context isolation for mostly trusted users. They are not hostile
+multi-tenant sandboxing, an auth system, organization model, billing boundary, quota system, or
+cloud-storage mapper. Hosted frameworks should carry lane metadata into their own storage,
+authorization, audit, and runtime policies.
+
+## Per-lane usage accounting
+
+The `model_call_ended` hook's context (`ctx`) carries a `laneId` field (available since the
+lane-correlation SDK surface, Slice 1) with the opaque `lane-<hash>` identifier for every turn
+in an allowed multi-lane session. Operators can use this field to partition token counts by lane
+for billing, auditing, or per-user cost attribution:
+
+```typescript
+// Example: log token usage per lane in a model_call_ended hook
+// laneId lives on the hook CONTEXT (second arg), not the event itself.
+export default async function (event, ctx) {
+  const laneId = ctx.laneId ?? ctx.runtimeIdentity?.laneId; // "lane-<sha256-24>" or undefined
+  if (laneId) {
+    metricsClient.record("tokens.used", event.usage?.total, { lane: laneId });
+  }
+}
+```
+
+`laneId` is `undefined` for single-user agents or denied resolutions — these fall through to
+existing non-lane accounting. `providerConversationId` is NOT per-lane (it is provider/cache
+session identity shared by all lanes of a session); use `laneId` for per-lane attribution.

@@ -1,0 +1,81 @@
+---
+summary: "CLI reference for `wednesdayai agent nudge` (cheap-check → wake the main persona)"
+read_when:
+  - You want a script to wake an agent's main persona with a payload
+  - Wiring an external watcher (inbox, CI, calendar) into a nudge
+title: "agent nudge"
+---
+
+# `wednesdayai agent nudge`
+
+`wednesdayai agent nudge` (alias `openclaw agent nudge`) hands a payload to an agent's **main
+persona** and wakes it to decide what to do. It is the script-callable surface of the
+[nudge contract](/gateway/heartbeat#nudge-wake-the-main-persona): a cheap check lives in your
+script; the expensive persona turn runs only when you call this command.
+
+The persona behaves **silent-unless-it-decides** — it receives the payload as non-user context and
+sends a user-facing message only when warranted, otherwise acknowledges with no delivery (the
+existing heartbeat relay semantics). The nudge honours every existing safety gate (active-hours,
+main/cron/subagent/session lane busy checks, `skipWhenBusy`, duplicate suppression); a busy target
+session defers rather than bypassing the checks.
+
+Related:
+
+- Nudge contract + wake-gate: [Heartbeat](/gateway/heartbeat#nudge-wake-the-main-persona)
+- Plugin-SDK nudge: [Agent Signals](/plugins/agent-signals#nudge)
+- Heartbeat vs cron guidance: [Cron vs Heartbeat](/automation/cron-vs-heartbeat)
+
+## Usage
+
+```text
+openclaw agent nudge [text] [flags]
+```
+
+## Flags
+
+- `--text <text>`: nudge text (required; also accepted as a positional argument).
+- `--data <json>`: structured payload as a JSON object (parsed; invalid JSON or a non-object errors).
+- `--agent <id>`: target agent id (defaults to the default agent's main session).
+- `--session <key>`: target session key (overrides `--agent`).
+- `--reason <reason>`: nudge reason (defaults to `nudge`).
+- `--json`: print the raw result (`{ ok, sessionKey, signalId }`) as JSON.
+
+Exit code is `0` when the nudge is queued and non-zero when it is rejected (empty text, invalid
+`--data`, or a busy/full target), so scripts can branch on the outcome.
+
+The Gateway method behind this command (`agent.nudge`) validates the same contract for CLI,
+Web UI, and automation clients:
+
+- `text` is required and must be non-empty.
+- `data`, when present, must be a JSON object.
+- `agentId`, `sessionKey`, `source`, and `dedupeKey` must be non-empty strings when present.
+- `ttlMs`, when present, must be an integer greater than or equal to 1.
+- `priority`, when present, must be one of `low`, `normal`, `high`, or `urgent`.
+- Unknown fields are rejected instead of being ignored.
+
+## Examples
+
+Nudge the default agent with plain text:
+
+```bash
+openclaw agent nudge "New deploy finished — anything to follow up?"
+```
+
+Nudge a specific agent with a structured payload and a reason:
+
+```bash
+openclaw agent nudge \
+  --agent ops \
+  --text "3 new high-priority tickets" \
+  --data '{"count":3,"queue":"sev1"}' \
+  --reason inbox
+```
+
+Wire an external watcher (the cheap check is your script; the nudge is conditional):
+
+```bash
+count=$(curl -sf https://example.test/api/unread | jq '.count')
+if [ "$count" -gt 0 ]; then
+  openclaw agent nudge --agent ops --text "$count unread items" --data "{\"count\":$count}"
+fi
+```

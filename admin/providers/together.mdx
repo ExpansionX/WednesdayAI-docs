@@ -1,88 +1,66 @@
 ---
-title: "Together AI"
-description: "Connect WednesdayAI to Together AI for scalable open-model inference."
-audience: admin
+summary: "Together AI setup (auth + model selection)"
+read_when:
+  - You want to use Together AI with OpenClaw
+  - You need the API key env var or CLI auth choice
 ---
 
 # Together AI
 
-Together AI provides scalable inference for open-weight models via an OpenAI-compatible API. It hosts a broad catalog of Llama, Qwen, Mistral, and other community models.
+The [Together AI](https://together.ai) provides access to leading open-source models including Llama, DeepSeek, Kimi, and more through a unified API.
 
-## Prerequisites
+- Provider: `together`
+- Auth: `TOGETHER_API_KEY`
+- API: OpenAI-compatible
 
-Create an API key at [api.together.ai](https://api.together.ai) and set it on the gateway host:
+## Quick start
+
+1. Set the API key (recommended: store it for the Gateway):
 
 ```bash
-echo 'TOGETHER_API_KEY=your-key-here' >> ~/.openclaw/.env
+openclaw onboard --auth-choice together-api-key
 ```
 
-## Configuration
-
-Together AI's endpoint is OpenAI-compatible. Set the base URL and API key:
-
-```json5
-{
-  models: {
-    providers: {
-      together: {
-        apiKey: "TOGETHER_API_KEY", // references the env var
-        models: [
-          "zai-org/GLM-4.7",
-          "meta-llama/Llama-4-Scout-17B-16E-Instruct",
-          "meta-llama/Llama-4-Maverick-17B-128E-Instruct-Turbo",
-          "deepseek-ai/DeepSeek-V3.1",
-          "deepseek-ai/DeepSeek-R1",
-          "moonshotai/Kimi-K2-Instruct-0905",
-        ],
-      },
-    },
-  },
-}
-```
-
-<Note>
-  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
-</Note>
-
-<Note>
-  Together AI's API base URL is `https://api.together.xyz/v1`. This is set automatically for the `together` provider — no `baseUrl` override is needed.
-</Note>
-
-## Selecting a model
+2. Set a default model:
 
 ```json5
 {
   agents: {
     defaults: {
-      model: { primary: "together/zai-org/GLM-4.7" },
+      model: { primary: "together/moonshotai/Kimi-K2.5" },
     },
   },
 }
 ```
 
-| Model | Notes |
-| ----- | ----- |
-| `zai-org/GLM-4.7` | GLM-4.7 — current post-onboard default |
-| `meta-llama/Llama-4-Scout-17B-16E-Instruct` | Llama 4 Scout 17B — efficient mixture-of-experts |
-| `meta-llama/Llama-4-Maverick-17B-128E-Instruct-Turbo` | Llama 4 Maverick 17B — large MoE, Turbo variant |
-| `deepseek-ai/DeepSeek-V3.1` | DeepSeek V3.1 — strong general-purpose |
-| `deepseek-ai/DeepSeek-R1` | DeepSeek R1 — extended reasoning |
-| `moonshotai/Kimi-K2-Instruct-0905` | Kimi K2 Instruct — September 2025 snapshot |
+## Non-interactive example
 
-<Note>
-  Together AI hosts hundreds of open models. The runtime discovers available models automatically when a key is configured. Run `openclaw models list --provider together` for the full current catalog.
-</Note>
+```bash
+openclaw onboard --non-interactive \
+  --mode local \
+  --auth-choice together-api-key \
+  --together-api-key "$TOGETHER_API_KEY"
+```
 
-## Troubleshooting
+This will set `together/moonshotai/Kimi-K2.5` as the default model.
 
-<AccordionGroup>
-  <Accordion title="401 Unauthorized">
-    The API key is invalid or revoked. Generate a new one at [api.together.ai](https://api.together.ai) and update `~/.openclaw/.env`.
-  </Accordion>
-  <Accordion title="Model not found">
-    Together AI model IDs are case-sensitive and include the vendor prefix. Check the full ID in the Together AI model catalog.
-  </Accordion>
-  <Accordion title="429 Rate limited">
-    You have exceeded request limits. Check your plan and usage at the Together AI console.
-  </Accordion>
-</AccordionGroup>
+## Environment note
+
+If the Gateway runs as a daemon (launchd/systemd), make sure `TOGETHER_API_KEY`
+is available to that process (for example, in `~/.openclaw/.env` or via
+`env.shellEnv`).
+
+## Available models
+
+| Model ID                                            | Name                                   | Context | Notes             |
+| --------------------------------------------------- | -------------------------------------- | ------- | ----------------- |
+| `zai-org/GLM-4.7`                                   | GLM 4.7 Fp8                            | 202K    | Default           |
+| `moonshotai/Kimi-K2.5`                              | Kimi K2.5                              | 262K    | Reasoning, vision |
+| `meta-llama/Llama-3.3-70B-Instruct-Turbo`           | Llama 3.3 70B Instruct Turbo           | 131K    |                   |
+| `meta-llama/Llama-4-Scout-17B-16E-Instruct`         | Llama 4 Scout 17B 16E Instruct         | 10M     | Vision            |
+| `meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8` | Llama 4 Maverick 17B 128E Instruct FP8 | 20M     | Vision            |
+| `deepseek-ai/DeepSeek-V3.1`                         | DeepSeek V3.1                          | 131K    |                   |
+| `deepseek-ai/DeepSeek-R1`                           | DeepSeek R1                            | 131K    | Reasoning         |
+| `moonshotai/Kimi-K2-Instruct-0905`                  | Kimi K2-Instruct 0905                  | 262K    |                   |
+
+All models are OpenAI API compatible. Use model IDs as `together/<model-id>` in OpenClaw (example: `together/moonshotai/Kimi-K2.5`).

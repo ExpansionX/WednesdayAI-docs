@@ -1,131 +1,47 @@
 ---
-title: "Channel setup"
-description: "Connect WednesdayAI to messaging platforms: WhatsApp, Telegram, iMessage, Signal, Slack, Discord, Teams, Matrix, and more."
-audience: admin
+summary: "Messaging platforms OpenClaw can connect to"
+read_when:
+  - You want to choose a chat channel for OpenClaw
+  - You need a quick overview of supported messaging platforms
+title: "Chat Channels"
 ---
 
-# Channel setup
+# Chat Channels
 
-WednesdayAI connects to messaging platforms through channels. Each channel handles incoming messages, outgoing replies, and account pairing. Several channels are built in; others ship as plugins you install separately.
+OpenClaw can talk to you on any chat app you already use. Each channel connects via the Gateway.
+Text is supported everywhere; media and reactions vary by channel.
 
-## Available channels
+## Supported channels
 
-<CardGroup cols={2}>
-  <Card title="WhatsApp" href="/admin/channels/whatsapp" icon="message-circle">
-    Personal and business WhatsApp via the linked-device protocol
-  </Card>
-  <Card title="Telegram" href="/admin/channels/telegram" icon="send">
-    Telegram bot — full Bot API support
-  </Card>
-  <Card title="iMessage" href="/admin/channels/imessage" icon="apple">
-    iMessage via BlueBubbles (recommended) or legacy imsg
-  </Card>
-  <Card title="Signal" href="/admin/channels/signal" icon="shield">
-    Signal via signal-cli
-  </Card>
-  <Card title="Slack" href="/admin/channels/slack" icon="hash">
-    Slack app — Socket Mode or HTTP Events API
-  </Card>
-  <Card title="Discord" href="/admin/channels/discord" icon="gamepad-2">
-    Discord bot via the Bot API and Gateway
-  </Card>
-  <Card title="Microsoft Teams" href="/admin/channels/msteams" icon="grid">
-    Teams via Bot Framework (plugin)
-  </Card>
-  <Card title="Matrix" href="/admin/channels/matrix" icon="grid-2x2">
-    Matrix/Element, with E2EE support (plugin)
-  </Card>
-</CardGroup>
+- [BlueBubbles](/channels/bluebubbles) — **Recommended for iMessage**; uses the BlueBubbles macOS server REST API with full feature support (edit, unsend, effects, reactions, group management — edit currently broken on macOS 26 Tahoe).
+- [Discord](/channels/discord) — Discord Bot API + Gateway; supports servers, channels, and DMs.
+- [Feishu](/channels/feishu) — Feishu/Lark bot via WebSocket (plugin, installed separately).
+- [Google Chat](/channels/googlechat) — Google Chat API app via HTTP webhook.
+- [iMessage (legacy)](/channels/imessage) — Legacy macOS integration via imsg CLI (deprecated, use BlueBubbles for new setups).
+- [IRC](/channels/irc) — Classic IRC servers; channels + DMs with pairing/allowlist controls.
+- [LINE](/channels/line) — LINE Messaging API bot (plugin, installed separately).
+- [Matrix](/channels/matrix) — Matrix protocol (plugin, installed separately).
+- [Mattermost](/channels/mattermost) — Bot API + WebSocket; channels, groups, DMs (plugin, installed separately).
+- [Microsoft Teams](/channels/msteams) — Bot Framework; enterprise support (plugin, installed separately).
+- [Nextcloud Talk](/channels/nextcloud-talk) — Self-hosted chat via Nextcloud Talk (plugin, installed separately).
+- [Nostr](/channels/nostr) — Decentralized DMs via NIP-04 (plugin, installed separately).
+- [Signal](/channels/signal) — signal-cli; privacy-focused.
+- [Synology Chat](/channels/synology-chat) — Synology NAS Chat via outgoing+incoming webhooks (plugin, installed separately).
+- [Slack](/channels/slack) — Bolt SDK; workspace apps.
+- [Telegram](/channels/telegram) — Bot API via grammY; fast setup, groups, forum topics, and multi-bot polling/webhook fleets from one gateway.
+- [Tlon](/channels/tlon) — Urbit-based messenger (plugin, installed separately).
+- [Twitch](/channels/twitch) — Twitch chat via IRC connection (plugin, installed separately).
+- [WebChat](/web/webchat) — Gateway WebChat UI over WebSocket.
+- [WhatsApp](/channels/whatsapp) — Most popular; uses Baileys and requires QR pairing.
+- [Zalo](/channels/zalo) — Zalo Bot API; Vietnam's popular messenger (plugin, installed separately).
+- [Zalo Personal](/channels/zalouser) — Zalo personal account via QR login (plugin, installed separately).
 
-<Note>
-WednesdayAI supports around twenty channels in total. Beyond those above, plugins exist for Feishu/Lark, Google Chat, IRC, LINE, Mattermost, Nextcloud Talk, Nostr, Synology Chat, Tlon, Twitch, Zalo, and Zalo Personal. The built-in Web chat needs no setup.
-</Note>
+## Notes
 
-## General setup flow
-
-Every channel follows the same pattern:
-
-1. **Install the plugin** (only for non-bundled channels — Teams, Matrix, and others)
-2. **Authenticate** — login wizard, bot token, or QR
-3. **Configure access policies** — who can talk to the bot
-4. **Pair** the channel to your agent
-5. **Test** with a message
-
-```bash
-openclaw channels list                        # see installed channels
-openclaw channels login --channel <name>      # authenticate
-openclaw channels status --channel <name>     # check connectivity
-```
-
-## Access policies
-
-After connecting a channel, configure who can interact with the agent. The DM policy is set **per channel** under `channels.<channel>.dmPolicy`:
-
-```json5
-{
-  channels: {
-    whatsapp: {
-      enabled: true,
-      dmPolicy: "allowlist",       // pairing | allowlist | open | disabled
-      allowFrom: ["+15555550123"],
-    },
-    telegram: {
-      enabled: true,
-      botToken: "<YOUR_TOKEN>",
-      dmPolicy: "pairing",
-    },
-  },
-}
-```
-
-| Policy | Effect |
-| ------ | ------ |
-| `pairing` (default) | New senders get a one-time pairing code; ignored until approved |
-| `allowlist` | Only `allowFrom` entries can initiate — requires at least one entry |
-| `open` | All senders accepted — requires `allowFrom: ["*"]` |
-| `disabled` | DMs not accepted on this channel |
-
-<Note>
-`channels.defaults` only accepts `groupPolicy` and `heartbeat`. Setting `dmPolicy` there will make the gateway refuse to start — configure it on each channel.
-</Note>
-
-See [Security hardening](/admin/security) for the implications of each policy.
-
-## Pairing
-
-Most channels require pairing a specific account to the agent. New senders under `dmPolicy: "pairing"` receive a code; approve it:
-
-```bash
-openclaw pairing list <channel>
-openclaw pairing approve <channel> <CODE>
-```
-
-Pairing codes are 8 characters, expire after 1 hour, and are capped at 3 pending per channel. On subsequent startups the gateway reconnects automatically using stored credentials.
-
-## Relinking
-
-If a channel disconnects or credentials expire:
-
-```bash
-openclaw channels logout --channel <name>
-openclaw channels login --channel <name>
-```
-
-## Channel logs
-
-```bash
-openclaw channels logs --channel <name> --follow
-```
-
-## Per-channel guides
-
-<CardGroup cols={3}>
-  <Card title="WhatsApp" href="/admin/channels/whatsapp" />
-  <Card title="Telegram" href="/admin/channels/telegram" />
-  <Card title="Discord" href="/admin/channels/discord" />
-  <Card title="Slack" href="/admin/channels/slack" />
-  <Card title="Signal" href="/admin/channels/signal" />
-  <Card title="iMessage" href="/admin/channels/imessage" />
-  <Card title="Microsoft Teams" href="/admin/channels/msteams" />
-  <Card title="Matrix" href="/admin/channels/matrix" />
-</CardGroup>
+- Channels can run simultaneously; configure multiple and OpenClaw will route per chat.
+- Fastest setup is usually **Telegram** (simple bot token). WhatsApp requires QR pairing and
+  stores more state on disk.
+- Group behavior varies by channel; see [Groups](/channels/groups).
+- DM pairing and allowlists are enforced for safety; see [Security](/gateway/security).
+- Troubleshooting: [Channel troubleshooting](/channels/troubleshooting).
+- Model providers are documented separately; see [Model Providers](/providers/models).

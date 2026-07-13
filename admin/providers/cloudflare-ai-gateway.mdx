@@ -1,123 +1,71 @@
 ---
 title: "Cloudflare AI Gateway"
-description: "Route WednesdayAI traffic through Cloudflare AI Gateway for caching, rate limiting, and observability."
-audience: admin
+summary: "Cloudflare AI Gateway setup (auth + model selection)"
+read_when:
+  - You want to use Cloudflare AI Gateway with OpenClaw
+  - You need the account ID, gateway ID, or API key env var
 ---
 
 # Cloudflare AI Gateway
 
-Cloudflare AI Gateway is a proxy layer that sits in front of other AI providers. It adds caching, rate limiting, cost tracking, and observability — without changing the underlying model or provider.
+Cloudflare AI Gateway sits in front of provider APIs and lets you add analytics, caching, and controls. For Anthropic, OpenClaw uses the Anthropic Messages API through your Gateway endpoint.
 
-<Note>
-  Cloudflare AI Gateway does not host models itself. It proxies requests to other providers (OpenAI, Anthropic, etc.). You still need credentials for the underlying provider.
-</Note>
+- Provider: `cloudflare-ai-gateway`
+- Base URL: `https://gateway.ai.cloudflare.com/v1/<account_id>/<gateway_id>/anthropic`
+- Default model: `cloudflare-ai-gateway/claude-sonnet-4-5`
+- API key: `CLOUDFLARE_AI_GATEWAY_API_KEY` (your provider API key for requests through the Gateway)
 
-## Prerequisites
+For Anthropic models, use your Anthropic API key.
 
-<Steps>
-  <Step title="Create a Cloudflare AI Gateway">
-    In the Cloudflare dashboard, go to **AI** → **AI Gateway** and create a new gateway. Note your **account ID** and **gateway name**.
-  </Step>
-  <Step title="Obtain upstream provider credentials">
-    `CLOUDFLARE_AI_GATEWAY_API_KEY` (or the configured `apiKey`) is the **upstream provider's API key** — for example, your Anthropic or OpenAI key — not a Cloudflare account token. Cloudflare AI Gateway proxies requests to the underlying provider using this key.
+## Quick start
 
-    ```bash
-    echo 'CLOUDFLARE_AI_GATEWAY_API_KEY=your-upstream-provider-key' >> ~/.openclaw/.env
-    ```
-  </Step>
-</Steps>
+1. Set the provider API key and Gateway details:
 
-## Configuration
+```bash
+openclaw onboard --auth-choice cloudflare-ai-gateway-api-key
+```
 
-The `baseUrl` must include your Cloudflare account ID and gateway name:
+2. Set a default model:
+
+```json5
+{
+  agents: {
+    defaults: {
+      model: { primary: "cloudflare-ai-gateway/claude-sonnet-4-5" },
+    },
+  },
+}
+```
+
+## Non-interactive example
+
+```bash
+openclaw onboard --non-interactive \
+  --mode local \
+  --auth-choice cloudflare-ai-gateway-api-key \
+  --cloudflare-ai-gateway-account-id "your-account-id" \
+  --cloudflare-ai-gateway-gateway-id "your-gateway-id" \
+  --cloudflare-ai-gateway-api-key "$CLOUDFLARE_AI_GATEWAY_API_KEY"
+```
+
+## Authenticated gateways
+
+If you enabled Gateway authentication in Cloudflare, add the `cf-aig-authorization` header (this is in addition to your provider API key).
 
 ```json5
 {
   models: {
     providers: {
       "cloudflare-ai-gateway": {
-        apiKey: "CLOUDFLARE_AI_GATEWAY_API_KEY", // references the env var
-        // Replace <account> and <gateway-name> with your values:
-        baseUrl: "https://gateway.ai.cloudflare.com/v1/<account>/<gateway-name>/anthropic",
-        models: [
-          // list the models you route through this gateway
-        ],
-      },
-    },
-  },
-}
-```
-
-<Warning>
-  The `baseUrl` is required and must contain your specific account ID and gateway name. Omitting it or using the wrong values will cause all requests to fail.
-</Warning>
-
-<Note>
-  If your gateway has **authentication enabled**, pass the gateway token via the `cf-aig-authorization` header:
-
-  ```json5
-  {
-    models: {
-      providers: {
-        "cloudflare-ai-gateway": {
-          apiKey: "CLOUDFLARE_AI_GATEWAY_API_KEY",
-          baseUrl: "https://gateway.ai.cloudflare.com/v1/<account>/<gateway-name>/anthropic",
-          headers: {
-            "cf-aig-authorization": "Bearer ${CF_AIG_TOKEN}",
-          },
-          models: [],
+        headers: {
+          "cf-aig-authorization": "Bearer <cloudflare-ai-gateway-token>",
         },
       },
     },
-  }
-  ```
-
-  Set `CF_AIG_TOKEN` in `~/.openclaw/.env` to your Cloudflare AI Gateway authentication token.
-</Note>
-
-<Note>
-  The runtime automatically appends the `/anthropic` suffix if your `baseUrl` does not already end with it. Include it explicitly in the URL to make routing intent clear.
-</Note>
-
-<Note>
-  `apiKey` is the name of the environment variable, not the key value itself. Keep secrets in `.env`, not in committed config files.
-</Note>
-
-## Selecting a model
-
-The model reference uses the `cloudflare-ai-gateway/` prefix:
-
-```json5
-{
-  agents: {
-    defaults: {
-      model: { primary: "cloudflare-ai-gateway/<provider>/<model-id>" },
-    },
   },
 }
 ```
 
-The path after the provider prefix follows the [Cloudflare AI Gateway routing format](https://developers.cloudflare.com/ai-gateway/providers/) — typically `<upstream-provider>/<model-id>`.
+## Environment note
 
-## What Cloudflare AI Gateway adds
-
-| Feature | Behaviour |
-| ------- | --------- |
-| Caching | Identical requests return cached responses, reducing cost and latency |
-| Rate limiting | Configurable per-gateway request limits |
-| Observability | Request logs, latency metrics, and cost estimates in the Cloudflare dashboard |
-| Fallbacks | Route to a secondary provider if the primary fails |
-
-## Troubleshooting
-
-<AccordionGroup>
-  <Accordion title="404 — gateway not found">
-    The `baseUrl` account ID or gateway name is incorrect. Double-check both values in the Cloudflare dashboard.
-  </Accordion>
-  <Accordion title="401 Unauthorized">
-    The API token is invalid or lacks AI Gateway permissions. Create a new token with the correct scope.
-  </Accordion>
-  <Accordion title="Upstream provider error">
-    Cloudflare AI Gateway forwards errors from the underlying provider. Check that your upstream provider credentials are valid and that the model ID is correct for that provider.
-  </Accordion>
-</AccordionGroup>
+If the Gateway runs as a daemon (launchd/systemd), make sure `CLOUDFLARE_AI_GATEWAY_API_KEY` is available to that process (for example, in `~/.openclaw/.env` or via `env.shellEnv`).

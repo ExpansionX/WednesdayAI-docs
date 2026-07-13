@@ -1,0 +1,154 @@
+---
+audience: user
+component: sandboxing
+sources:
+  - src/config/types.agents-shared.ts
+  - src/config/types.tools.ts
+generated: 2026-06-28
+---
+
+# Sandboxing — User Guide
+
+WednesdayAI can run your agent's tools inside Docker containers to reduce blast radius. If something goes wrong, sandbox limits what the agent can access. This is optional — if sandboxing is off, tools run directly on the host.
+
+## What gets sandboxed
+
+When enabled, these tools run inside the container:
+
+- `exec`, `read`, `write`, `edit`, `apply_patch`, `process`
+- Sandboxed browser (if configured)
+
+Not sandboxed:
+
+- The Gateway process itself
+- Elevated exec (`tools.elevated`) — that always runs on the host
+
+## Modes
+
+`agents.defaults.sandbox.mode`:
+
+| Mode         | Effect                                               |
+| ------------ | ---------------------------------------------------- |
+| `"off"`      | No sandboxing (default)                              |
+| `"non-main"` | Sandbox only non-main sessions (group/channel chats) |
+| `"all"`      | Sandbox every session                                |
+
+Tip: `"non-main"` is a common choice — your personal chat runs on the host while group chats are isolated.
+
+## What the sandbox can see (workspace access)
+
+`agents.defaults.sandbox.workspaceAccess`:
+
+| Value              | Effect                                            |
+| ------------------ | ------------------------------------------------- |
+| `"none"` (default) | Agent sees an isolated sandbox directory only     |
+| `"ro"`             | Agent can read your workspace but not write to it |
+| `"rw"`             | Agent can read and write your workspace           |
+
+## Enable sandboxing (minimal setup)
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main",
+        "scope": "session",
+        "workspaceAccess": "none"
+      }
+    }
+  }
+}
+```
+
+Before enabling, build the sandbox image once:
+
+```bash
+scripts/sandbox-setup.sh
+```
+
+## Per-agent sandbox
+
+Different agents can have different sandbox settings:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "sandbox": { "mode": "off" }
+      },
+      {
+        "id": "family",
+        "sandbox": { "mode": "all", "scope": "agent" },
+        "tools": {
+          "allow": ["read"],
+          "deny": ["exec", "write", "edit", "apply_patch", "process", "browser"]
+        }
+      }
+    ]
+  }
+}
+```
+
+## Tool restrictions alongside sandboxing
+
+Sandboxing controls **where** tools run. Tool policy controls **which** tools are available:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "public",
+        "sandbox": { "mode": "all" },
+        "tools": {
+          "deny": ["exec", "write", "edit"]
+        }
+      }
+    ]
+  }
+}
+```
+
+A tool denied by policy is blocked even inside a sandbox.
+
+## Common "why is this blocked?" fixes
+
+**"I'm sandboxed but I thought this was my main session"**
+
+If your mode is `"non-main"`, group and channel chats are always treated as non-main and get sandboxed. To disable sandboxing for a specific agent, set `agents.list[].sandbox.mode: "off"` for that agent.
+
+**"A tool I need is blocked"**
+
+Use `openclaw sandbox explain` to see what's blocking it:
+
+```bash
+openclaw sandbox explain
+openclaw sandbox explain --agent work
+```
+
+This shows effective sandbox mode, tool policy, and the config key to change.
+
+## Workspace lane fencing
+
+If you use workspace lanes, add `fenceToLane: true` to restrict the sandbox filesystem to your lane's workspace (instead of allowing access up to the shared root):
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "all",
+        "workspaceAccess": "rw",
+        "fenceToLane": true
+      }
+    }
+  }
+}
+```
+
+Requires `workspaceAccess: "rw"`.
+
+Related: [Exec Tool](/tools/exec) · [Sandbox vs Tool Policy vs Elevated](/gateway/sandbox-vs-tool-policy-vs-elevated)

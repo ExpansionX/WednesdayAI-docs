@@ -1,0 +1,291 @@
+---
+audience: admin
+component: exec-tools
+sources:
+  - src/config/types.tools.ts
+  - src/infra/exec-approvals.ts
+  - src/config/types.approvals.ts
+  - src/config/types.agent-defaults.ts
+generated: 2026-06-28
+---
+
+# Exec Tool — Administrator Guide
+
+Exec approvals are the guardrail for letting a sandboxed agent run commands on a real host (`gateway` or `node`). Commands are allowed only when policy + allowlist + optional user approval all agree. Approvals are **in addition** to tool policy and elevated gating (unless elevated is set to `full`, which skips approvals). Effective policy is the **stricter** of `tools.exec.*` and `exec-approvals.json`; omitted approvals fields fall back to `tools.exec` values.
+
+## Where it applies
+
+- **gateway host** → enforced by the `openclaw` gateway process
+- **node host** → enforced by the node runner (macOS companion app or headless node host)
+
+Trust model:
+
+- Gateway-authenticated callers are trusted operators for that gateway.
+- Paired nodes extend that trusted operator capability to the node host.
+- Exec approvals reduce accidental execution risk; they are not a per-user auth boundary.
+
+macOS split:
+
+- The **node host service** forwards `system.run` to the **macOS app** over local IPC.
+- The **macOS app** enforces approvals + executes the command in UI context.
+
+## exec-approvals.json
+
+Approvals live in a local JSON file on the execution host:
+
+**Location:** `~/.openclaw/exec-approvals.json`
+
+Full schema:
+
+```json
+{
+  "version": 1,
+  "socket": {
+    "path": "~/.openclaw/exec-approvals.sock",
+    "token": "base64url-token"
+  },
+  "defaults": {
+    "security": "deny",
+    "ask": "on-miss",
+    "askFallback": "deny",
+    "autoAllowSkills": false
+  },
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "on-miss",
+      "askFallback": "deny",
+      "autoAllowSkills": true,
+      "allowlist": [
+        {
+          "id": "B0C8C0B3-2C2D-4F8A-9A3C-5A4B3C2D1E0F",
+          "pattern": "~/Projects/**/bin/rg",
+          "lastUsedAt": 1737150000000,
+          "lastUsedCommand": "rg -n TODO",
+          "lastResolvedPath": "/Users/user/Projects/.../bin/rg"
+        }
+      ]
+    }
+  }
+}
+```
+
+**Runtime hot-reload:** the gateway watches this file and applies changes without restart.
+
+## Policy knobs
+
+### `security`
+
+- **`deny`** (default) — block all host exec requests.
+- **`allowlist`** — allow only commands matching the allowlist.
+- **`full`** — allow everything (equivalent to elevated; use only for trusted operator setups).
+
+### `ask`
+
+- **`off`** — never prompt.
+- **`on-miss`** (default) — prompt only when allowlist does not match.
+- **`always`** — prompt on every command.
+
+### `askFallback`
+
+When a prompt is required but no UI is reachable:
+
+- **`deny`** (default) — block.
+- **`allowlist`** — allow only if allowlist matches.
+- **`full`** — allow.
+
+### `autoAllowSkills`
+
+When enabled, executables referenced by known skills are treated as allowlisted on nodes. This uses `skills.bins` over the Gateway RPC. Intended for trusted operator environments where Gateway and node are in the same trust boundary. Keep `false` for strict explicit trust.
+
+## Global vs per-agent config
+
+Settings can be applied globally (in `openclaw.json`) or per-agent (in `exec-approvals.json` under `agents.<agentId>`). Per-agent overrides replace the default for that agent. Agent-level `exec-approvals.json` entries replace defaults; global `tools.exec.*` config provides the baseline.
+
+**In `openclaw.json`:**
+
+```json
+{
+  "tools": {
+    "exec": {
+      "security": "allowlist",
+      "ask": "on-miss",
+      "host": "sandbox"
+    }
+  },
+  "agents": {
+    "list": [
+      {
+        "id": "trusted",
+        "tools": {
+          "exec": {
+            "security": "full",
+            "ask": "off"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+**In `exec-approvals.json`** (runtime override, hot-reloaded):
+
+```json
+{
+  "version": 1,
+  "defaults": { "security": "deny", "ask": "on-miss" },
+  "agents": {
+    "trusted": { "security": "full", "ask": "off" }
+  }
+}
+```
+
+## Allowlists
+
+Allowlists are **per agent**. Patterns are case-insensitive glob matches against the **resolved binary path** (basename-only entries are ignored).
+
+Examples:
+
+- `~/Projects/**/bin/peekaboo`
+- `~/.local/bin/*`
+- `/opt/homebrew/bin/rg`
+
+Each entry tracks: stable UUID, last used timestamp, last used command, last resolved path. The Control UI shows this metadata to keep the list tidy.
+
+Legacy `agents.default` entries are migrated to `agents.main` on load.
+
+## Approval forwarding to chat channels
+
+Forward exec approval prompts to any chat channel, approved via `/approve`:
+
+```json
+{
+  "approvals": {
+    "exec": {
+      "enabled": true,
+      "mode": "session",
+      "agentFilter": ["main"],
+      "sessionFilter": ["discord"],
+      "targets": [
+        { "channel": "slack", "to": "U12345678" },
+        { "channel": "telegram", "to": "123456789" }
+      ]
+    }
+  }
+}
+```
+
+`mode`:
+
+- `"session"` — deliver to the originating chat session.
+- `"targets"` — deliver to explicit targets.
+- `"both"` — both.
+
+Reply in chat:
+
+```
+/approve <id> allow-once
+/approve <id> allow-always
+/approve <id> deny
+```
+
+## Security posture recommendations
+
+| Use case                             | Recommended posture                                                          |
+| ------------------------------------ | ---------------------------------------------------------------------------- |
+| Personal assistant, trusted operator | `security: "full"`, `ask: "off"` (or keep `ask: "on-miss"` for a safety net) |
+| Shared/family agents                 | `security: "allowlist"`, explicit allowlist patterns per agent               |
+| Public-facing agents                 | `security: "deny"` or deny `exec` via tool policy                            |
+| Mixed fleet                          | Per-agent overrides in `exec-approvals.json`                                 |
+
+- Prefer **allowlists** over `security: "full"` when possible.
+- Per-agent allowlists prevent one agent's approvals from leaking into others.
+- `ask` keeps you in the loop while still allowing fast approvals.
+- `/exec security=full` is a session-level convenience for authorized operators; it does not persist to config.
+- To hard-block host exec, set `security: "deny"` or deny the `exec` tool via tool policy (`tools.deny: ["exec"]`).
+
+## Safe bins configuration
+
+`tools.exec.safeBins` — stdin-only binaries allowed without allowlist entries. Add your own narrow stream filters here. Custom entries require an explicit profile in `tools.exec.safeBinProfiles`.
+
+`tools.exec.safeBinTrustedDirs` — additional trusted directories for safe-bin path checks. System defaults are `/bin` and `/usr/bin`. Add package-manager paths (e.g. `/opt/homebrew/bin`) explicitly.
+
+Do **not** add interpreter/runtime binaries (`python3`, `node`, `bash`) to `safeBins`. Use explicit allowlist entries for those.
+
+`openclaw security audit` warns when interpreter/runtime bins appear in `safeBins` without explicit profiles.
+`openclaw doctor --fix` can scaffold missing `safeBinProfiles` entries.
+
+## PATH handling
+
+- **`host=gateway`**: merges your login-shell `PATH` into the exec environment. `env.PATH` overrides are rejected.
+  - macOS minimal PATH: `/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`
+  - Linux minimal PATH: `/usr/local/bin`, `/usr/bin`, `/bin`
+- **`host=sandbox`**: runs `sh -lc` inside the container; `tools.exec.pathPrepend` applies after profile sourcing.
+- **`host=node`**: `env.PATH` overrides are rejected. Configure the node host service environment (systemd/launchd) for additional PATH entries.
+
+`tools.exec.pathPrepend` prepends directories to PATH for gateway + sandbox exec.
+
+## macOS IPC flow
+
+```
+Gateway -> Node Service (WS)
+                 |  IPC (UDS + token + HMAC + TTL)
+                 v
+             Mac App (UI + approvals + system.run)
+```
+
+Security:
+
+- Unix socket mode `0600`, token stored in `exec-approvals.json`.
+- Same-UID peer check.
+- Challenge/response (nonce + HMAC token + request hash) + short TTL.
+
+## Approval flow
+
+When a prompt is required, the gateway broadcasts `exec.approval.requested` to operator clients. The Control UI and macOS app resolve it via `exec.approval.resolve`, then the gateway forwards the approved request to the node host.
+
+When approvals are required, the exec tool returns immediately with an approval id. System events (`Exec finished` / `Exec denied`) arrive after the node reports the result. If no decision arrives before the timeout (default 120 s), the request is treated as a timeout denial.
+
+## Elevated default
+
+`agents.defaults.elevatedDefault` controls the default elevated level when no `/elevated` directive is present:
+
+- `"off"` — elevated is off by default.
+- `"on"` — elevated is on by default (host exec when sandboxed).
+- `"ask"` — ask per command.
+- `"full"` — elevated + skip approvals.
+
+## All exec config keys
+
+| Key                                   | Default                                          | Description                                            |
+| ------------------------------------- | ------------------------------------------------ | ------------------------------------------------------ |
+| `tools.exec.host`                     | `sandbox`                                        | Where exec runs                                        |
+| `tools.exec.security`                 | `deny` (`allowlist` for gateway/node when unset) | Enforcement mode                                       |
+| `tools.exec.ask`                      | `on-miss`                                        | Approval prompt mode                                   |
+| `tools.exec.node`                     | unset                                            | Default node binding for `host=node`                   |
+| `tools.exec.pathPrepend`              | `[]`                                             | Dirs prepended to PATH (gateway + sandbox)             |
+| `tools.exec.safeBins`                 | `["jq","cut","uniq","head","tail","tr","wc"]`    | Stdin-only auto-trusted binaries                       |
+| `tools.exec.safeBinTrustedDirs`       | `/bin`, `/usr/bin`                               | Trusted dirs for safe-bin path checks                  |
+| `tools.exec.safeBinProfiles`          | `{}`                                             | Custom argv policy per safe bin                        |
+| `tools.exec.backgroundMs`             | 10000                                            | ms before auto-background                              |
+| `tools.exec.timeoutSec`               | 1800                                             | Seconds before auto-kill                               |
+| `tools.exec.approvalRunningNoticeMs`  | 10000                                            | ms notice for long-running approval-gated exec (0=off) |
+| `tools.exec.cleanupMs`                | —                                                | ms to keep finished sessions in memory                 |
+| `tools.exec.notifyOnExit`             | `true`                                           | Emit system event when backgrounded exec exits         |
+| `tools.exec.notifyOnExitEmptySuccess` | `false`                                          | Also emit success notifications with no output         |
+| `tools.exec.applyPatch.enabled`       | `false`                                          | Enable apply_patch subtool (OpenAI models only)        |
+| `tools.exec.applyPatch.workspaceOnly` | `true`                                           | Restrict apply_patch to workspace dir                  |
+| `tools.exec.applyPatch.allowModels`   | `[]`                                             | Model ids that can use apply_patch                     |
+| `agents.list[].tools.exec.*`          | (inherits)                                       | Per-agent exec overrides                               |
+| `agents.defaults.elevatedDefault`     | `"off"`                                          | Default elevated level without `/elevated` directive   |
+
+## Control UI
+
+**Control UI → Nodes → Exec approvals** — edit defaults, per-agent overrides, and allowlists. Pick a scope (Defaults or an agent), tweak policy, add/remove allowlist patterns, then **Save**. Shows last-used metadata per pattern.
+
+Target selector: **Gateway** (local approvals) or a **Node**. If a node does not advertise exec approvals yet, edit its local `~/.openclaw/exec-approvals.json` directly.
+
+CLI: `openclaw approvals` (see [Approvals CLI](/cli/approvals)).
+
+Related: [Exec Tool (user)](/tools/exec) · [Elevated Mode](/tools/elevated) · [Sandboxing (admin)](/gateway/sandboxing-admin)

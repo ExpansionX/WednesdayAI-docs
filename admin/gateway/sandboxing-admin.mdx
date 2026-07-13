@@ -1,0 +1,287 @@
+---
+audience: admin
+component: sandboxing
+sources:
+  - src/config/types.agents-shared.ts
+  - src/config/types.tools.ts
+  - src/config/types.agents.ts
+generated: 2026-06-28
+---
+
+# Sandboxing — Administrator Guide
+
+WednesdayAI runs agent tools inside Docker containers when sandboxing is enabled. The Gateway stays on the host; tool execution is isolated. This is not a perfect security boundary, but it materially limits filesystem and process access when the model does something unexpected.
+
+## What gets sandboxed
+
+- Tool execution: `exec`, `read`, `write`, `edit`, `apply_patch`, `process`, and more.
+- Optional sandboxed browser (`agents.defaults.sandbox.browser`).
+
+Not sandboxed:
+
+- The Gateway process itself.
+- Elevated exec (`tools.elevated`) — always runs on the host and bypasses sandboxing.
+- If sandboxing is off, `tools.elevated` is a no-op (exec already runs on host).
+
+## Sandbox mode
+
+`agents.defaults.sandbox.mode`:
+
+- `"off"` — no sandboxing.
+- `"non-main"` — sandbox only non-main sessions. Group/channel sessions use their own keys, so they count as non-main and are sandboxed.
+- `"all"` — every session is sandboxed.
+
+Note: `"non-main"` is based on `session.mainKey` (default `"main"`), not agent id.
+
+## Scope
+
+`agents.defaults.sandbox.scope` — how many containers are created:
+
+- `"session"` (default) — one container per session.
+- `"agent"` — one container per agent.
+- `"shared"` — one container shared by all sandboxed sessions.
+
+Under `scope: "shared"`, per-agent bind mounts are ignored (only global binds apply).
+
+## Workspace access
+
+`agents.defaults.sandbox.workspaceAccess`:
+
+- `"none"` (default) — sandbox workspace under `~/.openclaw/sandboxes`. Eligible skills are mirrored into sandbox workspace.
+- `"ro"` — mounts the agent workspace read-only at `/agent` (disables `write`/`edit`/`apply_patch`).
+- `"rw"` — mounts the agent workspace read/write at `/workspace`. Skills are readable from `/workspace/skills`.
+
+Inbound media is copied into the active sandbox workspace (`media/inbound/*`).
+
+## Workspace lane fencing
+
+For multi-lane deployments, `fenceToLane: true` binds the sandbox filesystem to the lane's effective workspace directory instead of the shared persona root.
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "all",
+        "workspaceAccess": "rw",
+        "fenceToLane": true
+      }
+    }
+  }
+}
+```
+
+`workspaceAccess: "rw"` is required for complete isolation. Without it, scope-keyed directory seeding can allow cross-session reads. A warning is logged at session setup when `fenceToLane: true` and `workspaceAccess` is not `"rw"`.
+
+`fenceToLane` only applies when workspace lanes are enabled, the lane is resolved, and the policy decision is `"allowed"`. No effect in single-user setups. Restricts tool filesystem access only; bootstrap resolution remains lane-aware.
+
+## Custom bind mounts
+
+`agents.defaults.sandbox.docker.binds` mounts additional host directories into the container. Format: `host:container:mode` (e.g., `"/home/user/source:/source:rw"`).
+
+Global and per-agent binds are **merged** (not replaced). Under `scope: "shared"`, per-agent binds are ignored.
+
+`agents.defaults.sandbox.browser.binds` applies only to the sandboxed browser container:
+
+- When set (including `[]`), replaces `sandbox.docker.binds` for the browser container.
+- When omitted, falls back to `sandbox.docker.binds`.
+
+Security notes:
+
+- Binds pierce the sandbox filesystem: whatever you mount is visible with the mode you set.
+- Default mode is read-write if omitted; prefer `:ro` for source and secrets.
+- WednesdayAI blocks dangerous bind sources: `docker.sock`, `/etc`, `/proc`, `/sys`, `/dev`, and mounts that would expose them.
+- Sensitive mounts (SSH keys, service credentials) should be `:ro` unless absolutely required.
+
+Example:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "docker": {
+          "binds": ["/home/user/source:/source:ro", "/var/data/myapp:/data:ro"]
+        }
+      }
+    },
+    "list": [
+      {
+        "id": "build",
+        "sandbox": {
+          "docker": { "binds": ["/mnt/cache:/cache:rw"] }
+        }
+      }
+    ]
+  }
+}
+```
+
+## Docker images and setup
+
+Default image: `openclaw-sandbox:bookworm-slim`
+
+Build once:
+
+```bash
+scripts/sandbox-setup.sh
+```
+
+For a more functional image with `curl`, `jq`, `nodejs`, `python3`, `git`:
+
+```bash
+scripts/sandbox-common-setup.sh
+```
+
+Then set: `agents.defaults.sandbox.docker.image: "openclaw-sandbox-common:bookworm-slim"`
+
+Sandboxed browser image:
+
+```bash
+scripts/sandbox-browser-setup.sh
+```
+
+**Network defaults:** sandbox containers have no network by default. Override with `agents.defaults.sandbox.docker.network`.
+
+Security defaults:
+
+- `network: "host"` is blocked.
+- `network: "container:<id>"` is blocked by default (namespace join bypass risk). Break-glass: `agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin: true`.
+
+Docker installs: see [Docker](/install/docker). For Docker gateway deployments, `docker-setup.sh` can bootstrap sandbox config. Set `OPENCLAW_SANDBOX=1` to enable that path.
+
+## setupCommand (one-time container setup)
+
+`setupCommand` runs once after the sandbox container is created (not on every run). Executes inside the container via `sh -lc`.
+
+- Global: `agents.defaults.sandbox.docker.setupCommand`
+- Per-agent: `agents.list[].sandbox.docker.setupCommand`
+
+Common pitfalls:
+
+- Default `docker.network` is `"none"` — package installs will fail without network.
+- `readOnlyRoot: true` prevents writes — set `readOnlyRoot: false` or bake a custom image.
+- `user` must be root for package installs (omit `user` or set `user: "0:0"`).
+- Sandbox exec does **not** inherit host `process.env`. Use `agents.defaults.sandbox.docker.env` or a custom image for skill API keys.
+
+## Sandboxed browser
+
+Optional sandboxed browser:
+
+- By default, the sandbox browser auto-starts when needed. Configure via `agents.defaults.sandbox.browser.autoStart` and `browser.autoStartTimeoutMs`.
+- Uses a dedicated Docker network (`openclaw-sandbox-browser`) instead of the global `bridge` network. Configure with `browser.network`.
+- `browser.cdpSourceRange` restricts container-edge CDP ingress with a CIDR allowlist.
+- noVNC observer access is password-protected by default; WednesdayAI emits a short-lived token URL.
+- `browser.allowHostControl` lets sandboxed sessions target the host browser explicitly.
+- `allowedControlUrls`, `allowedControlHosts`, `allowedControlPorts` gate `target: "custom"`.
+
+## Multi-agent configuration
+
+Per-agent overrides let each agent have a different sandbox profile:
+
+**Sandbox config precedence:**
+
+```
+agents.list[].sandbox.mode > agents.defaults.sandbox.mode
+agents.list[].sandbox.scope > agents.defaults.sandbox.scope
+agents.list[].sandbox.workspaceRoot > agents.defaults.sandbox.workspaceRoot
+agents.list[].sandbox.workspaceAccess > agents.defaults.sandbox.workspaceAccess
+agents.list[].sandbox.docker.* > agents.defaults.sandbox.docker.*
+agents.list[].sandbox.browser.* > agents.defaults.sandbox.browser.*
+agents.list[].sandbox.prune.* > agents.defaults.sandbox.prune.*
+```
+
+Note: `agents.list[].sandbox.{docker,browser,prune}.*` is ignored when sandbox scope is `"shared"`.
+
+Example — different profiles per agent:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": { "mode": "non-main", "scope": "session" }
+    },
+    "list": [
+      { "id": "main", "sandbox": { "mode": "off" } },
+      {
+        "id": "public",
+        "sandbox": { "mode": "all", "scope": "agent" },
+        "tools": { "allow": ["read"], "deny": ["exec", "write", "edit", "apply_patch"] }
+      }
+    ]
+  }
+}
+```
+
+## Tool policy + sandbox interaction
+
+Tool allow/deny policy applies before sandbox rules. If a tool is denied globally or per-agent, sandboxing does not restore it.
+
+`tools.elevated` is an explicit escape hatch that runs `exec` on the host. To hard-disable exec, use tool policy deny (`tools.deny: ["exec"]`).
+
+Sandbox tool policy (only applied when sandboxed):
+
+```json
+{
+  "tools": {
+    "sandbox": {
+      "tools": {
+        "allow": ["group:runtime", "group:fs", "group:sessions", "group:memory"]
+      }
+    }
+  }
+}
+```
+
+Per-agent override: `agents.list[].tools.sandbox.tools` replaces `tools.sandbox.tools` for that agent.
+
+## Security posture recommendations
+
+| Context                        | Recommended setup                                             |
+| ------------------------------ | ------------------------------------------------------------- |
+| Personal assistant             | `mode: "off"` or `"non-main"` with `workspaceAccess: "rw"`    |
+| Family/shared agents           | `mode: "all"`, explicit `tools.deny` list                     |
+| Public-facing agents           | `mode: "all"`, `workspaceAccess: "none"`, deny `exec`/`write` |
+| Multi-tenant / workspace lanes | `mode: "all"`, `workspaceAccess: "rw"`, `fenceToLane: true`   |
+
+Disable elevated globally if you only want sandboxed execution: `tools.elevated.enabled: false`.
+Disable elevated per agent for sensitive profiles: `agents.list[].tools.elevated.enabled: false`.
+
+## Auth and credentials
+
+Auth is per-agent. Each agent reads from its own `agentDir`:
+
+```
+~/.openclaw/agents/<agentId>/agent/auth-profiles.json
+```
+
+Credentials are **not** shared between agents. To share creds, copy `auth-profiles.json` into the other agent's `agentDir`.
+
+## Debugging
+
+```bash
+openclaw sandbox explain
+openclaw sandbox explain --session agent:main:main
+openclaw sandbox explain --agent work
+openclaw sandbox explain --json
+```
+
+Output shows: effective mode/scope/workspace access, whether the session is sandboxed, effective tool allow/deny, elevated gates, and fix-it config key paths.
+
+## Minimal enable example
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "sandbox": {
+        "mode": "non-main",
+        "scope": "session",
+        "workspaceAccess": "none"
+      }
+    }
+  }
+}
+```
+
+Related: [Sandboxing (user)](/gateway/sandboxing-user) · [Sandboxing (developer)](/gateway/sandboxing-developer) · [Sandbox vs Tool Policy vs Elevated](/gateway/sandbox-vs-tool-policy-vs-elevated) · [Security](/gateway/security)

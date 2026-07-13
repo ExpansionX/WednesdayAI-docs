@@ -1,0 +1,145 @@
+---
+summary: "Automatic reflective journal entries written after each agent session reset"
+read_when:
+  - You want a written record of what was covered in each agent conversation
+  - You are deploying an agent for coaching, therapy-adjacent, or customer service workflows
+  - You need to understand disk/LLM cost implications of enabling session journal
+title: "Session Journal"
+audience: user, admin
+component: session-journal
+sources:
+  - src/hooks/bundled/session-journal/handler.ts
+  - src/hooks/llm-journal-generator.ts
+  - src/config/types.agents.ts
+  - src/agents/agent-scope.ts
+generated: 2026-06-22
+---
+
+# Session Journal
+
+When an agent session resets via `/new` or `/reset`, WednesdayAI can write a reflective journal entry
+capturing what was discussed — useful for ongoing conversational workflows where a written record matters.
+
+Journal entries are Markdown files written to the agent's workspace. In multi-user mode they are
+isolated per user lane, so each user's journal is private.
+
+## Who it is for
+
+Session journal is designed for agents that hold ongoing conversations across sessions:
+coaching, patient-facing assistants, customer support, educational tutors, or any
+scenario where the operator needs a durable record of each interaction.
+
+## Enabling session journal
+
+Two steps are required:
+
+**Step 1 — Enable the hook:**
+
+```bash
+wednesdayai hooks enable session-journal
+```
+
+**Step 2 — Opt the agent in via `openclaw.json`:**
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "claire",
+        sessionJournal: {
+          enabled: true,
+        },
+      },
+    ],
+  },
+}
+```
+
+Both steps are required. The hook must be enabled at the gateway level, and the agent must opt in
+individually — other agents on the same gateway are not affected.
+
+## Configuration
+
+| Field     | Type      | Default  | Description                                                                                                                                                            |
+| --------- | --------- | -------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `boolean` | `false`  | Must be `true` to activate journal generation                                                                                                                          |
+| `prompt`  | `string`  | built-in | LLM prompt used to write the journal entry. Include `{transcript}` where the session text should be injected; if omitted, the transcript is appended after the prompt. |
+
+### Custom prompt example
+
+Include `{transcript}` in your prompt where the session content should be inserted:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "claire",
+        sessionJournal: {
+          enabled: true,
+          prompt: "Write structured patient notes in SOAP format.\n\nSession transcript:\n{transcript}",
+        },
+      },
+    ],
+  },
+}
+```
+
+## What the output looks like
+
+Journal files are written to `<workspaceDir>/journal/` with the name
+`YYYY-MM-DD-HHMMss-<slug>.md`, where the slug is derived from the first heading in the
+LLM-generated text. Example:
+
+```text
+~/.openclaw/workspace/journal/2026-06-22-143045-vendor-onboarding-session.md
+```
+
+Each file contains a header block (agent ID, session key, date/time) followed by the
+LLM-generated journal body.
+
+When workspace lanes are active (multi-user mode), each lane gets its own `journal/` folder
+inside the lane's workspace directory — journals are isolated per user and not shared.
+
+## Limitations
+
+Journal entries are written only when a session **explicitly resets** via `/new` or `/reset`.
+Sessions that end without a reset command (process exit, connection drop, idle timeout) do **not**
+produce a journal entry.
+
+The `/new` and `/reset` commands are held until journal generation completes. With a remote provider
+and a long transcript, this can take up to ~15 seconds. If latency is a concern, disable the journal
+for that agent or use a faster provider.
+
+---
+
+## Operator notes
+
+### Disk usage
+
+One Markdown file is written per session reset per opted-in agent. File sizes depend on session
+length and the LLM's output verbosity — typically 1–10 KB per entry. Operators should plan for
+routine cleanup or archiving of `journal/` directories in long-running deployments.
+
+### LLM call cost
+
+Journal generation makes one completion call per session reset. This call uses the configured
+provider and model for that agent. If the session has no transcript content (empty session),
+no LLM call is made — a header-only stub is written instead.
+
+### Failure behavior
+
+If the LLM call fails (network error, provider error, timeout), the hook writes a header-only stub
+so the reset event is still recorded. No exception propagates to the user's session reset flow.
+
+### Disabling
+
+To disable journal generation for a specific agent, set `sessionJournal.enabled: false` (or
+remove the `sessionJournal` block). To disable the hook entirely across all agents:
+
+```bash
+wednesdayai hooks disable session-journal
+```
+
+See [Hooks: session-journal](/automation/hooks#session-journal) for full technical details.

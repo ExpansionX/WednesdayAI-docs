@@ -1,0 +1,164 @@
+---
+audience: user
+component: exec-tools
+sources:
+  - src/config/types.tools.ts
+  - src/infra/exec-approvals.ts
+  - src/config/types.approvals.ts
+generated: 2026-06-28
+---
+
+# Exec Tool — User Guide
+
+Run shell commands from your agent session. Supports foreground and background execution.
+
+## Parameters
+
+- `command` (required)
+- `workdir` (defaults to cwd)
+- `env` (key/value overrides)
+- `yieldMs` (default 10000): auto-background after this delay
+- `background` (bool): background immediately
+- `timeout` (seconds, default 1800): kill on expiry
+- `pty` (bool): run in a pseudo-terminal (use for TTY-only CLIs, coding agents, terminal UIs)
+- `host` (`sandbox | gateway | node`): where to execute
+- `security` (`deny | allowlist | full`): enforcement mode for `gateway`/`node`
+- `ask` (`off | on-miss | always`): approval prompts for `gateway`/`node`
+- `node` (string): node id/name for `host=node`
+- `elevated` (bool): request elevated host execution when sandboxed
+
+## When exec asks for approval
+
+When exec runs on the gateway or a node host, it goes through the approval gate. Depending on your policy:
+
+- **deny** — host exec is blocked entirely.
+- **allowlist** — approved only if the command matches an allowlisted path.
+- **on-miss** — you get a prompt when no allowlist entry matches.
+- **always** — you get a prompt for every command.
+
+When a prompt fires, you see the command, cwd, agent id, and resolved binary path. You can:
+
+- **Allow once** — run now
+- **Always allow** — add to allowlist and run
+- **Deny** — block this command
+
+If no UI is available to respond, the request falls back (usually to deny).
+
+## Giving an agent full exec permission
+
+To skip approval prompts entirely for an agent, set `security: "full"` and `ask: "off"`:
+
+```json
+{
+  "agents": {
+    "defaults": {
+      "tools": {
+        "exec": {
+          "security": "full",
+          "ask": "off"
+        }
+      }
+    }
+  }
+}
+```
+
+Or just for a specific agent:
+
+```json
+{
+  "agents": {
+    "list": [
+      {
+        "id": "main",
+        "tools": {
+          "exec": {
+            "security": "full",
+            "ask": "off"
+          }
+        }
+      }
+    ]
+  }
+}
+```
+
+## Trusting specific commands
+
+Two ways to allow commands without full trust:
+
+### Safe bins (narrow stdin filters)
+
+Add small stream-filter utilities to `tools.exec.safeBins`. These run without allowlist entries but only accept stdin — no file arguments.
+
+```json
+{ "tools": { "exec": { "safeBins": ["jq", "my-filter"] } } }
+```
+
+Default safe bins: `jq`, `cut`, `uniq`, `head`, `tail`, `tr`, `wc`.
+
+Do **not** add interpreter/runtime binaries (`python3`, `node`, `bash`) to `safeBins` — use explicit allowlist entries for those.
+
+### Allowlist (exec-approvals.json)
+
+Add patterns to `~/.openclaw/exec-approvals.json` under your agent's `allowlist`. Patterns are case-insensitive globs matching the resolved binary path:
+
+```json
+{
+  "version": 1,
+  "agents": {
+    "main": {
+      "security": "allowlist",
+      "ask": "on-miss",
+      "allowlist": [{ "pattern": "/opt/homebrew/bin/rg" }, { "pattern": "~/.local/bin/*" }]
+    }
+  }
+}
+```
+
+Or use the **Control UI → Nodes → Exec approvals** card to add patterns interactively.
+
+## Per-session overrides (/exec)
+
+Change exec behavior for your current session without touching config:
+
+```
+/exec host=gateway security=allowlist ask=on-miss node=mac-1
+```
+
+Send `/exec` with no arguments to see current session values. Session overrides reset when the session ends; they don't persist to config.
+
+## System events
+
+Exec lifecycle appears as system messages in your session:
+
+- `Exec running` — emitted if the command runs longer than `approvalRunningNoticeMs` (default 10 s)
+- `Exec finished` — command completed
+- `Exec denied` — blocked by policy or explicit denial
+
+## Quick config reference
+
+| Key                          | Default             | What it does                     |
+| ---------------------------- | ------------------- | -------------------------------- |
+| `tools.exec.host`            | `sandbox`           | Where exec runs                  |
+| `tools.exec.security`        | `deny`              | `deny` / `allowlist` / `full`    |
+| `tools.exec.ask`             | `on-miss`           | When to prompt                   |
+| `tools.exec.safeBins`        | (list above)        | Stdin-only auto-trusted binaries |
+| `agents.list[].tools.exec.*` | (inherits defaults) | Per-agent overrides              |
+
+## Examples
+
+Foreground:
+
+```json
+{ "tool": "exec", "command": "ls -la" }
+```
+
+Background + poll:
+
+```json
+{"tool":"exec","command":"npm run build","yieldMs":1000}
+{"tool":"process","action":"poll","sessionId":"<id>"}
+```
+
+Related: [Exec Approvals (admin)](/tools/exec-approvals) · [Sandboxing](/gateway/sandboxing)

@@ -1,66 +1,92 @@
 ---
+summary: "Use OpenAI via API keys or Codex subscription in OpenClaw"
+read_when:
+  - You want to use OpenAI models in OpenClaw
+  - You want Codex subscription auth instead of API keys
 title: "OpenAI"
-description: "Connect WednesdayAI to GPT and Codex models via API key or Codex subscription OAuth."
-audience: admin
 ---
 
 # OpenAI
 
-WednesdayAI supports OpenAI's GPT and Codex model families. Authenticate with an API key, or with OAuth for Codex subscribers.
+OpenAI provides developer APIs for GPT models. Codex supports **ChatGPT sign-in** for subscription
+access or **API key** sign-in for usage-based access. Codex cloud requires ChatGPT sign-in.
+OpenAI explicitly supports subscription OAuth usage in external tools/workflows like OpenClaw.
 
-## API key
+## Option A: OpenAI API key (OpenAI Platform)
 
-Create a key at [platform.openai.com](https://platform.openai.com) and onboard:
+**Best for:** direct API access and usage-based billing.
+Get your API key from the OpenAI dashboard.
+
+### CLI setup
 
 ```bash
 openclaw onboard --auth-choice openai-api-key
+# or non-interactive
+openclaw onboard --openai-api-key "$OPENAI_API_KEY"
 ```
 
-Or set the key on the gateway host:
-
-```bash
-echo 'OPENAI_API_KEY=sk-proj-...' >> ~/.openclaw/.env
-```
-
-Rotation variables (`OPENAI_API_KEYS`, `OPENAI_API_KEY_1`, `OPENAI_API_KEY_2`, and the single-override `OPENCLAW_LIVE_OPENAI_KEY`) are also honoured — see [Authentication](/admin/gateway/authentication).
-
-## Codex subscription (OAuth)
-
-OpenAI Codex OAuth is explicitly supported for external tools like WednesdayAI:
-
-```bash
-openclaw onboard --auth-choice openai-codex
-# or
-openclaw models auth login --provider openai-codex
-```
-
-This opens a browser for the OAuth flow and stores the token in the auth profile store.
-
-## Selecting a model
+### Config snippet
 
 ```json5
 {
-  agents: {
-    defaults: {
-      model: { primary: "openai/gpt-5.2" },
-    },
-  },
+  env: { OPENAI_API_KEY: "sk-..." },
+  agents: { defaults: { model: { primary: "openai/gpt-5.2" } } },
 }
 ```
 
-The Codex subscription provider uses the `openai-codex/` prefix, e.g. `openai-codex/gpt-5.3-codex`. Run `openclaw models list --all` to see the full catalog, or `openclaw models status` for what your auth can reach.
+## Option B: OpenAI Code (Codex) subscription
 
-## Transport
+**Best for:** using ChatGPT/Codex subscription access instead of an API key.
+Codex cloud requires ChatGPT sign-in, while the Codex CLI supports ChatGPT or API key sign-in.
 
-The default transport is `auto` (WebSocket-first, with SSE fallback). Override per model:
+### CLI setup (Codex OAuth)
+
+```bash
+# Run Codex OAuth in the wizard
+openclaw onboard --auth-choice openai-codex
+
+# Or run OAuth directly
+openclaw models auth login --provider openai-codex
+```
+
+### Config snippet (Codex subscription)
+
+```json5
+{
+  agents: { defaults: { model: { primary: "openai-codex/gpt-5.3-codex" } } },
+}
+```
+
+### Transport default
+
+OpenClaw uses `pi-ai` for model streaming. For both `openai/*` and
+`openai-codex/*`, default transport is `"auto"` (WebSocket-first, then SSE
+fallback).
+
+You can set `agents.defaults.models.<provider/model>.params.transport`:
+
+- `"sse"`: force SSE
+- `"websocket"`: force WebSocket
+- `"auto"`: try WebSocket, then fall back to SSE
+
+For `openai/*` (Responses API), OpenClaw also enables WebSocket warm-up by
+default (`openaiWsWarmup: true`) when WebSocket transport is used.
+
+Related OpenAI docs:
+
+- [Realtime API with WebSocket](https://platform.openai.com/docs/guides/realtime-websocket)
+- [Streaming API responses (SSE)](https://platform.openai.com/docs/guides/streaming-responses)
 
 ```json5
 {
   agents: {
     defaults: {
+      model: { primary: "openai-codex/gpt-5.3-codex" },
       models: {
-        "openai/gpt-5.2": {
-          params: { transport: "sse" }, // "sse" | "websocket" | "auto"
+        "openai-codex/gpt-5.3-codex": {
+          params: {
+            transport: "auto",
+          },
         },
       },
     },
@@ -68,45 +94,122 @@ The default transport is `auto` (WebSocket-first, with SSE fallback). Override p
 }
 ```
 
-The OpenAI Responses WebSocket warm-up defaults to on via `params.openaiWsWarmup`. Override it explicitly per model:
+### OpenAI WebSocket warm-up
 
-```json5
-{ openaiWsWarmup: true }  // enable (default)
-{ openaiWsWarmup: false } // disable
-```
+OpenAI docs describe warm-up as optional. OpenClaw enables it by default for
+`openai/*` to reduce first-turn latency when using WebSocket transport.
 
-## Responses API compaction
-
-WednesdayAI auto-enables OpenAI Responses API server-side compaction to manage long-running context windows. When context usage reaches the threshold, the server compacts prior turns before sending the next request.
+### Disable warm-up
 
 ```json5
 {
-  models: {
-    providers: {
-      openai: {
-        responsesServerCompaction: true, // default: true
-        responsesCompactThreshold: 0.7,  // default: 0.7 (70% context fill)
+  agents: {
+    defaults: {
+      models: {
+        "openai/gpt-5.2": {
+          params: {
+            openaiWsWarmup: false,
+          },
+        },
       },
     },
   },
 }
 ```
 
-Set `responsesServerCompaction: false` to disable, or adjust `responsesCompactThreshold` (0–1) to control when compaction triggers.
+### Enable warm-up explicitly
 
-## Troubleshooting
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "openai/gpt-5.2": {
+          params: {
+            openaiWsWarmup: true,
+          },
+        },
+      },
+    },
+  },
+}
+```
 
-<AccordionGroup>
-  <Accordion title="401 Unauthorized">
-    The API key is invalid or revoked. Generate a new one and re-run onboarding, or update `~/.openclaw/.env`.
-  </Accordion>
-  <Accordion title="429 Rate limited">
-    You hit your tier limits. Add rotation keys via `OPENAI_API_KEYS` or upgrade your plan.
-  </Accordion>
-  <Accordion title="Codex OAuth session expired">
-    Re-run `openclaw models auth login --provider openai-codex`.
-  </Accordion>
-  <Accordion title="Model not available on this key">
-    Some models require specific access tiers. Check your access at [platform.openai.com/limits](https://platform.openai.com/limits).
-  </Accordion>
-</AccordionGroup>
+### OpenAI Responses server-side compaction
+
+For direct OpenAI Responses models (`openai/*` using `api: "openai-responses"` with
+`baseUrl` on `api.openai.com`), OpenClaw now auto-enables OpenAI server-side
+compaction payload hints:
+
+- Forces `store: true` (unless model compat sets `supportsStore: false`)
+- Injects `context_management: [{ type: "compaction", compact_threshold: ... }]`
+
+By default, `compact_threshold` is `70%` of model `contextWindow` (or `80000`
+when unavailable).
+
+### Enable server-side compaction explicitly
+
+Use this when you want to force `context_management` injection on compatible
+Responses models (for example Azure OpenAI Responses):
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "azure-openai-responses/gpt-5.2": {
+          params: {
+            responsesServerCompaction: true,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+### Enable with a custom threshold
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "openai/gpt-5.2": {
+          params: {
+            responsesServerCompaction: true,
+            responsesCompactThreshold: 120000,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+### Disable server-side compaction
+
+```json5
+{
+  agents: {
+    defaults: {
+      models: {
+        "openai/gpt-5.2": {
+          params: {
+            responsesServerCompaction: false,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+`responsesServerCompaction` only controls `context_management` injection.
+Direct OpenAI Responses models still force `store: true` unless compat sets
+`supportsStore: false`.
+
+## Notes
+
+- Model refs always use `provider/model` (see [/concepts/models](/concepts/models)).
+- Auth details + reuse rules are in [/concepts/oauth](/concepts/oauth).

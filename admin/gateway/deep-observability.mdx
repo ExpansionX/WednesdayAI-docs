@@ -1,0 +1,182 @@
+---
+summary: "Operate WednesdayAI runtime metrics, diagnostic capture, and release performance sweeps"
+audience: admin
+sources:
+  - src/config/types.base.ts
+  - src/config/zod-schema.ts
+  - src/config/schema.help.ts
+  - src/infra/diagnostic-capture.ts
+  - src/gateway/server-methods/diagnostics.ts
+  - src/gateway/method-scopes.ts
+  - scripts/release-performance-sweep.ts
+  - docs/diagnostics/deep-observability-stack-handoff.md
+  - docs/diagnostics/deep-observability-dashboards-reports.md
+generated: 2026-06-18
+read_when:
+  - Enabling runtime metrics for the gateway process
+  - Capturing CPU, heap, or diagnostic report data on demand
+  - Running a performance sweep before or after a release
+title: "Deep Observability"
+---
+
+# Deep Observability
+
+Deep observability gives operators low-overhead runtime metrics plus gated diagnostic capture for short investigations. Use it to monitor the gateway over time, diagnose memory or processor pressure, and compare release builds without leaving expensive capture on by accident.
+
+This page covers the WednesdayAI app-side controls. For the shared Grafana, Prometheus, Loki, Tempo, Pyroscope, OTel, and Langfuse stack work, see [Deep Observability Stack Handoff](/diagnostics/deep-observability-stack-handoff).
+
+## Configuration
+
+Edit `~/.openclaw/openclaw.json`, then restart the gateway.
+
+Linux:
+
+```bash
+systemctl --user restart openclaw-gateway
+```
+
+macOS:
+
+```bash
+wednesdayai gateway restart --deep
+```
+
+### Enable cheap runtime metrics
+
+`diagnostics.otel.runtime.enabled` defaults to `false`. Enable it only when `diagnostics.otel.enabled` and the OTLP metrics path are configured.
+
+```json5
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "http://127.0.0.1:4318",
+      metrics: true,
+      runtime: {
+        enabled: true,
+        intervalMs: 15000,
+        collectProc: true,
+      },
+    },
+  },
+}
+```
+
+Runtime metrics include event loop utilization and delay, GC duration, process memory, CPU time, uptime, V8 heap and heap-space metrics, resource usage, file descriptor count, and Linux `/proc/self/io` counters when available.
+
+### Enable diagnostic capture
+
+`diagnostics.capture.enabled` defaults to `false`, and `diagnostics.capture.mode` defaults to `off`. Capture methods reject requests while capture is disabled or off.
+
+Use `manual` for operator-triggered captures:
+
+```json5
+{
+  diagnostics: {
+    capture: {
+      enabled: true,
+      mode: "manual",
+      maxDurationMs: 30000,
+      outputDir: "~/.openclaw/diagnostics/captures",
+    },
+  },
+}
+```
+
+Use `always` only during a burn-in or active investigation. In this app-side slice it is a capture policy marker and permission gate; it does not start continuous Pyroscope or eBPF profiling until the monitoring-stack scheduler is wired. Switch back to `manual` or `off` after the window.
+
+```json5
+{
+  diagnostics: {
+    capture: {
+      enabled: true,
+      mode: "always",
+      maxDurationMs: 30000,
+      outputDir: "~/.openclaw/diagnostics/captures",
+    },
+  },
+}
+```
+
+Use `schedule` to document a planned profiling or capture window. The app stores the schedule value, but real Pyroscope SDK or eBPF scheduling is owned by the monitoring stack follow-up, not this app-side gate.
+
+```json5
+{
+  diagnostics: {
+    capture: {
+      enabled: true,
+      mode: "schedule",
+      schedule: "0 3 * * *",
+      maxDurationMs: 30000,
+      outputDir: "~/.openclaw/diagnostics/captures",
+    },
+  },
+}
+```
+
+## Capture methods and permissions
+
+The gateway exposes these diagnostics methods:
+
+| Method                         | Required operator scope | Result                                                                          |
+| ------------------------------ | ----------------------- | ------------------------------------------------------------------------------- |
+| `diagnostics.runtime.snapshot` | `operator.read`         | Current process memory, CPU, resource usage, uptime, platform, and PID.         |
+| `diagnostics.capture.cpu`      | `operator.admin`        | Bounded CPU usage delta over the requested duration.                            |
+| `diagnostics.capture.heap`     | `operator.admin`        | V8 heap snapshot written under the configured capture directory.                |
+| `diagnostics.capture.report`   | `operator.admin`        | Redacted Node diagnostic report written under the configured capture directory. |
+| `diagnostics.profiling.start`  | `operator.admin`        | Placeholder profiling start result for the future stack adapter.                |
+| `diagnostics.profiling.stop`   | `operator.admin`        | Placeholder profiling stop result for the future stack adapter.                 |
+
+Heap snapshots are written with `0600` permissions, and their parent directory is created with `0700` permissions. Diagnostic reports include an allow-listed subset of Node report data; environment variables, command line, stacks, module paths, shared object paths, prompt text, credentials, and config are omitted.
+
+## Release performance sweep
+
+Run a dry sweep when you want the output shape without contacting the gateway:
+
+```bash
+pnpm release:performance-sweep -- --output-dir /tmp/wednesdayai-sweep
+```
+
+Run a live sweep against the gateway after the diagnostics methods are available:
+
+```bash
+pnpm release:performance-sweep -- --live --capture --output-dir /tmp/wednesdayai-sweep
+```
+
+The live sweep calls `diagnostics.runtime.snapshot` and, with `--capture`, calls `diagnostics.capture.cpu` and `diagnostics.capture.report`. It writes `release-performance-sweep.json` and `release-performance-sweep.md` when `--output-dir` is set.
+
+## Operating model
+
+- Keep runtime metrics on when the OTel metrics pipeline is healthy.
+- Keep diagnostic capture `off` or `manual` during stable operation.
+- Use `always` only during initial characterization, launch week, or a regression hunt.
+- Use scheduled profiling in the monitoring stack for release windows once the Pyroscope or eBPF integration exists.
+- Keep raw prompts, credentials, chat IDs, session keys, and user IDs out of metric labels.
+
+## Troubleshooting
+
+### Runtime metrics do not appear
+
+Check that:
+
+- `diagnostics.otel.enabled` is true.
+- `diagnostics.otel.metrics` is not false.
+- `diagnostics.otel.runtime.enabled` is true.
+- The OTel collector endpoint accepts OTLP metrics.
+- The `diagnostics-otel` extension is the copy actually loaded by the gateway.
+
+### Capture request returns disabled
+
+Check that `diagnostics.capture.enabled` is true and `diagnostics.capture.mode` is not `off`, then restart the gateway.
+
+### Live release sweep cannot reach diagnostics methods
+
+Check gateway auth and method availability. The sweep requires `diagnostics.runtime.snapshot`; `--capture` also requires `diagnostics.capture.cpu` and `diagnostics.capture.report`.
+
+## Related
+
+- [OTel and Langfuse Diagnostics](/diagnostics/otel-langfuse)
+- [Deep Observability Stack Handoff](/diagnostics/deep-observability-stack-handoff)
+- [Deep Observability Dashboards and Reports](/diagnostics/deep-observability-dashboards-reports)
+- [Gateway Logging](/gateway/logging)

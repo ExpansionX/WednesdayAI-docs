@@ -1,0 +1,111 @@
+# Network egress policy
+
+WednesdayAI blocks outbound requests to private and internal network addresses by default. This page explains the security design, the override options, and how to configure access to LAN services such as a self-hosted LLM.
+
+## Why deny-by-default
+
+Unrestricted outbound HTTP from a gateway creates SSRF (Server-Side Request Forgery) risk. An attacker who can control a URL passed to the cron webhook, agent web fetch, media download, or skills-install path could direct the gateway to:
+
+- Read cloud instance metadata (`169.254.169.254`, `fd00:ec2::254`).
+- Probe or exfiltrate data from services on the LAN that are not intended to be externally reachable.
+- Hit loopback services (`127.0.0.0/8`, `::1`) that assume they are not accessible from untrusted input.
+
+Deny-by-default means these attacks fail closed: a misconfigured or malicious URL that resolves to a private address is blocked before any request is sent.
+
+## What is blocked
+
+The following address ranges are blocked unless explicitly allowed:
+
+- Loopback: `127.0.0.0/8`, `::1`
+- Private (RFC 1918): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`
+- Link-local: `169.254.0.0/16`, `fe80::/10`
+- Unique local (IPv6): `fc00::/7`
+- Documentation / test ranges: `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`
+
+DNS is resolved and the resolved addresses are checked — a hostname that points to a private IP is blocked even if the hostname itself looks public.
+
+## What is not blocked
+
+The LLM inference path (Ollama, llama.cpp, LM Studio, bifrost, and the pi-ai SDK) is **not** SSRF-guarded and is unaffected by this policy. You can point the model endpoint at `http://localhost:11434` or any LAN address without any config change. The policy only covers HTTP requests made by the gateway itself — cron webhooks, agent web fetch, media downloads, memory remote HTTP, and skills install. (ADR 0008, Decision 3.)
+
+## Override options
+
+### 1. `allowedCidrs`: preferred narrow override
+
+Allow specific subnets while keeping all other private space blocked:
+
+```yaml
+network:
+  ssrfPolicy:
+    allowedCidrs:
+      - "192.168.1.0/24" # LAN subnet hosting your local services
+      - "10.0.0.100/32" # single host
+```
+
+This is the recommended approach. Only the listed ranges are permitted; everything else stays blocked.
+
+### 2. `allowedHostnames` and `hostnameAllowlist`: hostname-based override
+
+Allow specific hostnames regardless of their resolved address:
+
+```yaml
+network:
+  ssrfPolicy:
+    allowedHostnames:
+      - "llm.internal.example.com"
+    hostnameAllowlist: # legacy alias
+      - "webhook.corp.internal"
+```
+
+Both DNS phases are checked — the hostname must be in the allowlist before any resolution attempt resolves to a private address.
+
+### 3. `dangerouslyAllowPrivateNetwork`: blunt full override
+
+Disable private-network blocking entirely:
+
+```yaml
+network:
+  ssrfPolicy:
+    dangerouslyAllowPrivateNetwork: true
+```
+
+**Risk:** All SSRF protection for non-inference paths is removed. An attacker who can supply a URL to any guarded path can reach any address on the LAN or the host's loopback interface.
+
+This flag is surfaced by `openclaw security audit` and logged as a warning at gateway startup. Prefer `allowedCidrs` instead.
+
+`allowPrivateNetwork: true` is a legacy alias for the same setting.
+
+### 4. `allowRfc2544BenchmarkRange`
+
+Additionally allows `198.18.0.0/15` (RFC 2544 benchmark range). This range is not in the standard private IANA blocks but is sometimes used for internal load testing or benchmarking infrastructure:
+
+```yaml
+network:
+  ssrfPolicy:
+    allowRfc2544BenchmarkRange: true
+```
+
+## Monitoring
+
+- **Blocked request:** a `WARN` log line is emitted naming the target address and the exact config key to set to allow it.
+- **Permitted private request:** an `INFO` log line is emitted once per request (not per redirect hop) when a private address is reached via an explicit allow rule.
+- **Blunt flag active:** `openclaw security audit` reports `network.ssrfPolicy.dangerouslyAllowPrivateNetwork=true` and the gateway logs a startup warning.
+
+## Worked example: LAN LLM via cron webhook
+
+You run Ollama on `192.168.1.50:11434` and want a cron job to call its API directly:
+
+```yaml
+network:
+  ssrfPolicy:
+    allowedCidrs:
+      - "192.168.1.0/24"
+```
+
+The cron webhook can now reach any host on `192.168.1.0/24`. All other private ranges remain blocked.
+
+## Browser policy
+
+The browser (Playwright) has its own `browser.ssrfPolicy` that defaults to `dangerouslyAllowPrivateNetwork: true` (trusted-network mode) because browser automation commonly navigates to local dev servers. The global `network.ssrfPolicy` applies to gateway-initiated HTTP (cron, web fetch, media, memory, skills) only; browser navigation is governed by `browser.ssrfPolicy`.
+
+See [Browser configuration](/gateway/configuration-reference#browser) for browser-specific overrides.

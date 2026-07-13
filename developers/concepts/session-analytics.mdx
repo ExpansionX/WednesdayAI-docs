@@ -1,0 +1,237 @@
+---
+title: "Session Analytics — Economics, Turns, and FTS"
+summary: "Pre-extracted analytics columns, turn aggregates, full-text search, and tool-call index in the ctx session storage schema"
+read_when:
+  - You want to query per-turn token spend or model usage without scanning JSON blobs
+  - You are building a plugin or operator dashboard that reads session analytics data
+  - You want to understand the ctx_turns, ctx_tool_calls, or FTS tables
+  - You are running a large deployment and want to understand startup backfill behaviour
+  - You want to filter automated (heartbeat/cron) turns out of analytics queries
+audience: developer
+component: ctx-storage
+sources:
+  - src/config/sessions/ctx-schema.ts
+  - src/config/sessions/ctx-sqlite-worker.ts
+  - src/config/sessions/ctx-postgres.ts
+  - src/config/sessions/ctx-entry-codec.ts
+  - src/config/sessions/storage-types.ts
+  - src/config/sessions/storage-normalize.ts
+generated: 2026-06-25
+---
+
+# Session Analytics — Economics, Turns, and FTS
+
+The ctx storage layer (both SQLite and Postgres backends) ships four analytics surfaces alongside the core `ctx_session_entries` table:
+
+| Surface          | Table / Column                                                                                                           | What it stores                                                                                        |
+| ---------------- | ------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| Economics        | `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `model`, `provider` on `ctx_session_entries` | Per-entry token spend and model identity, extracted at write time from `usage_raw` / `model_raw` JSON |
+| Turn aggregates  | `ctx_turns`                                                                                                              | One row per user-initiated turn: summed token costs, tool-call count, latency, entry range            |
+| Tool-call index  | `ctx_tool_calls`                                                                                                         | One row per tool call block within a message: tool name, call index, tool_use_id                      |
+| Full-text search | `ctx_fts` (SQLite FTS5) / `content_text_tsv` (Postgres tsvector)                                                         | Searchable content text of each session entry                                                         |
+
+## Provenance columns
+
+`ctx_session_entries` records four turn-provenance columns that identify who or what triggered each entry. These are populated at write time by `normalizeSessionEntryForStorage()` and are used to filter automated turns from recall and analytics queries.
+
+| Column           | Type    | Meaning                                                                                       |
+| ---------------- | ------- | --------------------------------------------------------------------------------------------- |
+| `trigger_source` | TEXT    | `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, or `'acp'` — derived from session key format |
+| `is_automated`   | BOOLEAN | `1` when `trigger_source != 'user'`; `NULL` for legacy rows                                   |
+| `sender_display` | TEXT    | Human-readable sender name from the channel connector (best-effort)                           |
+| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake)                       |
+
+Derivation rules (see `storage-normalize.ts:deriveTriggerSource`): `:heartbeat` key suffix → `'heartbeat'`; `cron:` key prefix → `'cron'`; `:subagent:` segment (UUID-appended) → `'subagent'`; `:acp:` segment (UUID-appended) → `'acp'`; all other keys → `'user'`.
+
+A partial index `idx_ctx_session_entries_trigger_source` covers `trigger_source IS NOT NULL` rows for efficient provenance filtering.
+
+**Important:** the production recall query (`readByKey`) and the last-user-turn analytics query both apply `AND (trigger_source = 'user' OR trigger_source IS NULL)` — automated turns (heartbeat, cron, subagent, acp) are excluded automatically. Rows written before this schema version have `trigger_source = NULL` and are treated as user turns via the `IS NULL` coalescing. See [Session History Hygiene](/concepts/session-history-hygiene) for full details.
+
+### Example provenance query
+
+```sql
+-- SQLite: count heartbeat turns per session in the last 7 days
+SELECT session_id, COUNT(*) AS heartbeat_count
+FROM ctx_session_entries
+WHERE trigger_source = 'heartbeat'
+  AND created_at >= datetime('now', '-7 days')
+GROUP BY session_id
+ORDER BY heartbeat_count DESC;
+```
+
+## Economics columns
+
+`ctx_session_entries` gains six pre-extracted columns populated at append time by `sanitizeAppendEntry()`:
+
+| Column               | Type             | Source                                            |
+| -------------------- | ---------------- | ------------------------------------------------- |
+| `input_tokens`       | INTEGER / BIGINT | `usage_raw.input_tokens` (via `normalizeUsage()`) |
+| `output_tokens`      | INTEGER / BIGINT | `usage_raw.output_tokens`                         |
+| `cache_read_tokens`  | INTEGER / BIGINT | `usage_raw.cache_read_input_tokens`               |
+| `cache_write_tokens` | INTEGER / BIGINT | `usage_raw.cache_creation_input_tokens`           |
+| `model`              | TEXT             | `model_raw.modelId ?? model_raw.model`            |
+| `provider`           | TEXT             | `model_raw.provider`                              |
+
+All six columns are `NULL` when the entry has no associated model call (e.g. user messages, tool results). A partial index `ctx_session_entries_economics_idx` covers rows where `input_tokens IS NOT NULL` for efficient analytics queries.
+
+### Backfill
+
+For pre-existing databases (entries written before this schema version), WednesdayAI runs `backfillTokenCounts()` once at startup as a background fire-and-forget operation. It paginates through all rows where `usage_raw IS NOT NULL AND input_tokens IS NULL` (or equivalent for `model_raw`) in 1 000-row batches. For a DB with 500 k entries, this adds ~10–30 s of background CPU at startup; the gateway serves requests normally while the backfill runs.
+
+Sentinel values prevent infinite re-scanning:
+
+- `input_tokens = 0` (not NULL) when `usage_raw` is present but its format is unrecognised.
+- `model = ''` (empty string, not NULL) when `model_raw` is present but yields no extractable model name.
+
+This means `WHERE input_tokens IS NULL` reliably identifies un-backfilled rows on subsequent startups.
+
+### Example queries
+
+```sql
+-- SQLite: total token spend per model this week
+SELECT model, provider,
+       SUM(input_tokens) AS in_tok,
+       SUM(output_tokens) AS out_tok,
+       SUM(cache_write_tokens) AS cache_write
+FROM ctx_session_entries
+WHERE input_tokens IS NOT NULL
+  AND created_at >= datetime('now', '-7 days')
+GROUP BY model, provider
+ORDER BY in_tok DESC;
+
+-- Postgres: same query
+SELECT model, provider,
+       SUM(input_tokens) AS in_tok,
+       SUM(output_tokens) AS out_tok,
+       SUM(cache_write_tokens) AS cache_write
+FROM ctx_session_entries
+WHERE input_tokens IS NOT NULL
+  AND created_at >= NOW() - INTERVAL '7 days'
+GROUP BY model, provider
+ORDER BY in_tok DESC;
+```
+
+## ctx_turns — turn-level aggregates
+
+`ctx_turns` stores one row per completed user-initiated turn within a session.
+
+| Column                | Type    | Meaning                                                                                 |
+| --------------------- | ------- | --------------------------------------------------------------------------------------- |
+| `session_id`          | TEXT    | Session identifier                                                                      |
+| `turn_idx`            | INTEGER | 1-based ordinal of the user message that opened this turn (over all session history)    |
+| `user_seq`            | INTEGER | `seq` of the user message entry that opened the turn                                    |
+| `end_seq`             | INTEGER | `seq` of the last assistant entry in the turn                                           |
+| `user_text`           | TEXT    | Cleaned text of the opening user message                                                |
+| `total_input_tokens`  | INTEGER | Sum of `input_tokens` across all assistant entries in the turn                          |
+| `total_output_tokens` | INTEGER | Sum of `output_tokens`                                                                  |
+| `tool_call_count`     | INTEGER | Count of assistant messages within the turn that contained at least one tool-call block |
+| `latency_ms`          | INTEGER | Wall-clock milliseconds from the user message timestamp to when `upsertTurn` ran        |
+
+`PRIMARY KEY (session_id, turn_idx)`. The upsert uses `ON CONFLICT … DO UPDATE` so calling `upsertTurn(sessionId)` repeatedly is idempotent.
+
+**`turn_idx` semantics:** `turn_idx` is the 1-based count of human-initiated `role='user' AND entry_type='message'` entries over all session history. Automated turns (heartbeat, cron, subagent, acp) are **excluded from the count** — `getUserTurnCount()` applies the same `trigger_source = 'user' OR IS NULL` filter so automated `upsertTurn` calls do not inflate `turn_idx` or create phantom rows. On sessions that predate the ctx-storage-phase3 schema, earlier turns have no `ctx_turns` row (ADR 0019: forward-only population, no backfill). Queries across mixed-era sessions must account for gaps.
+
+### Example queries
+
+```sql
+-- SQLite: average tokens per turn for the last 30 days
+SELECT AVG(total_input_tokens + total_output_tokens) AS avg_tok_per_turn
+FROM ctx_turns
+WHERE session_id IN (
+  SELECT DISTINCT session_id FROM ctx_session_entries
+  WHERE created_at >= datetime('now', '-30 days')
+);
+
+-- Postgres: tool-heavy turns (sessions that made > 5 tool calls in one turn)
+SELECT session_id, turn_idx, tool_call_count, total_input_tokens
+FROM ctx_turns
+WHERE tool_call_count > 5
+ORDER BY total_input_tokens DESC
+LIMIT 20;
+```
+
+## ctx_tool_calls — tool-call covering table
+
+`ctx_tool_calls` indexes every tool-call block in every assistant `message` entry.
+
+| Column        | Meaning                                                                                                                                |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
+| `session_id`  | Session identifier                                                                                                                     |
+| `seq`         | Entry sequence number within the session                                                                                               |
+| `call_idx`    | Position of the tool-call block within the full `contentBlocks` array (0-based; may be sparse if text blocks precede tool-call blocks) |
+| `tool_name`   | Tool name as specified in the block                                                                                                    |
+| `tool_use_id` | Anthropic `tool_use_id` (nullable for non-Anthropic providers)                                                                         |
+
+`PRIMARY KEY (session_id, seq, call_idx)`. Covering index `ctx_tool_calls_tool_name_idx ON (tool_name, session_id)` supports bare tool-name queries.
+
+Tool-call blocks are recognised by `type` value: `toolCall` (primary), `toolUse` (alternative), `functionCall` (OpenAI), or `tool_use` (raw Anthropic API — stored verbatim by `primary-write-interceptor`).
+
+### Example queries
+
+```sql
+-- SQLite: count bash tool calls this month
+SELECT COUNT(*) FROM ctx_tool_calls
+WHERE tool_name = 'bash'
+  AND session_id IN (
+    SELECT DISTINCT session_id FROM ctx_session_entries
+    WHERE created_at >= datetime('now', '-30 days')
+  );
+
+-- Postgres: most-used tools across all sessions
+SELECT tool_name, COUNT(*) AS call_count
+FROM ctx_tool_calls
+GROUP BY tool_name
+ORDER BY call_count DESC
+LIMIT 10;
+```
+
+## Full-text search
+
+### SQLite — FTS5
+
+WednesdayAI uses a [FTS5 external-content virtual table](https://www.sqlite.org/fts5.html) backed by `ctx_session_entries`. The `ctx_fts` table indexes `content_text` (the plain-text content extracted from each entry).
+
+**Guardrail (ADR 0020):** all FTS queries **must** include a `session_id` equality filter. A global `ctx_fts MATCH ?` without scoping to a session returns results across all sessions and will produce stale entries for sessions that have been pruned (the FTS shadow table lags behind `pruneSessionsBefore` on very large prunes). Scope all reads:
+
+```sql
+-- Correct: session_id-scoped FTS query
+SELECT e.*
+FROM ctx_fts
+JOIN ctx_session_entries e ON e.rowid = ctx_fts.rowid
+WHERE ctx_fts MATCH 'error'
+  AND ctx_fts.session_id = ?
+ORDER BY e.seq DESC
+LIMIT 20;
+
+-- UNSAFE: do not use without session_id scoping
+SELECT * FROM ctx_fts WHERE ctx_fts MATCH 'error'; -- may return stale rows
+```
+
+FTS5 availability depends on the Node.js SQLite build. On builds without FTS5, init logs a warning and continues without FTS — all other storage features work normally.
+
+### Postgres — tsvector
+
+Postgres uses a generated `content_text_tsv tsvector` column (GIN index `content_text_tsv_gin_idx`) on `ctx_session_entries`, plus a `content_blocks` JSONB GIN index.
+
+```sql
+-- Postgres: full-text search within a session
+SELECT *
+FROM ctx_session_entries
+WHERE session_id = $1
+  AND content_text_tsv @@ to_tsquery('english', 'error & connection')
+ORDER BY seq DESC
+LIMIT 20;
+```
+
+## Storage size implications
+
+For operators with large deployments:
+
+- `ctx_turns`: small — O(turns per session), typically kilobytes per session.
+- `ctx_tool_calls`: O(tool calls) — for agentic sessions with many tool calls, size is proportional to `ctx_session_entries` but much smaller (one row per tool call block vs. one row per entry).
+- `ctx_fts` (SQLite FTS5 shadow table): proportional to `content_text` length across all entries. Typically 5–20% of the main `ctx_session_entries` table size.
+- Economics columns: 6 integer/text columns added to the existing wide `ctx_session_entries` rows — minimal overhead.
+
+`pruneSessionsBefore` deletes rows from `ctx_tool_calls` and `ctx_turns` for sessions whose entries are pruned, so these tables do not grow unboundedly.
+
+_Related: [Session Pruning](/concepts/session-pruning) · [Session History Hygiene](/concepts/session-history-hygiene) · [Gateway Configuration](/gateway/configuration) · [Context](/concepts/context)_

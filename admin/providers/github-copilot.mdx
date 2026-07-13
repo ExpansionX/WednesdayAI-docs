@@ -1,69 +1,89 @@
 ---
+summary: "Sign in to GitHub Copilot from OpenClaw using the device flow"
+read_when:
+  - You want to use GitHub Copilot as a model provider
+  - You need the `openclaw models auth login-github-copilot` flow
 title: "GitHub Copilot"
-description: "Use GitHub Copilot models as an AI provider in WednesdayAI."
 ---
 
-GitHub Copilot can be used as an AI provider through the OpenClaw gateway, routing requests through your organisation's Copilot subscription.
+# GitHub Copilot
 
-## Prerequisites
+## What is GitHub Copilot?
 
-- A GitHub account with an active GitHub Copilot subscription (Individual, Business, or Enterprise)
-- The `openclaw` CLI version 1.3.0 or later
+GitHub Copilot is GitHub's AI coding assistant. It provides access to Copilot
+models for your GitHub account and plan. OpenClaw can use Copilot as a model
+provider in two different ways.
 
-## Authentication
+## Two ways to use Copilot in OpenClaw
 
-Use the interactive device-flow login:
+### 1) Built-in GitHub Copilot provider (`github-copilot`)
+
+Use the native device-login flow to obtain a GitHub token, then exchange it for
+Copilot API tokens when OpenClaw runs. This is the **default** and simplest path
+because it does not require VS Code.
+
+### 2) Copilot Proxy plugin (`copilot-proxy`)
+
+Use the **Copilot Proxy** VS Code extension as a local bridge. OpenClaw talks to
+the proxy’s `/v1` endpoint and uses the model list you configure there. Choose
+this when you already run Copilot Proxy in VS Code or need to route through it.
+You must enable the plugin and keep the VS Code extension running.
+
+Use GitHub Copilot as a model provider (`github-copilot`). The login command runs
+the GitHub device flow, saves an auth profile, and updates your config to use that
+profile.
+
+## CLI setup
 
 ```bash
 openclaw models auth login-github-copilot
 ```
 
-This displays a device code and URL for you to visit. On completion, the token is stored in your config automatically.
+You'll be prompted to visit a URL and enter a one-time code. Keep the terminal
+open until it completes.
 
-Alternatively, supply the token via environment variable. OpenClaw checks the following in priority order:
-
-| Variable | Notes |
-|----------|-------|
-| `COPILOT_GITHUB_TOKEN` | Explicit Copilot token — highest priority |
-| `GH_TOKEN` | GitHub CLI token — Copilot activates automatically if this is already exported |
-| `GITHUB_TOKEN` | Generic GitHub token — lowest-priority fallback |
-
-<Warning>
-GitHub Copilot tokens expire. Run `openclaw models auth login-github-copilot` again if you see authentication errors.
-</Warning>
-
-## Configuration
-
-```yaml
-# No config file entry needed — Copilot is activated via env var:
-# COPILOT_GITHUB_TOKEN=<your-token>
-# Or run: openclaw models auth login-github-copilot
-```
-
-<Note>
-The API endpoint (`https://api.individual.githubcopilot.com`) is also dynamically derived from the Copilot token exchange — do not change this unless using a proxy.
-</Note>
-
-## Available models
-
-Models vary by subscription tier:
-
-| Model ID | Notes |
-|----------|-------|
-| `gpt-4o` | Default for Business/Enterprise |
-| `gpt-4.1` | |
-| `gpt-4.1-mini` | |
-| `gpt-4.1-nano` | |
-| `o3-mini` | Reasoning model |
-| `o1` | Reasoning model |
-| `o1-mini` | Reasoning model |
-| `claude-sonnet-4-6` | Available on Enterprise |
-| `claude-sonnet-4-5` | Available on Enterprise |
-
-Run `openclaw models status --provider copilot` to see the current list for your subscription.
-
-## Verify the connection
+### Optional flags
 
 ```bash
-openclaw models status --probe-provider github-copilot
+openclaw models auth login-github-copilot --profile-id github-copilot:work
+openclaw models auth login-github-copilot --yes
 ```
+
+## Set a default model
+
+```bash
+openclaw models set github-copilot/gpt-4o
+```
+
+### Config snippet
+
+```json5
+{
+  agents: { defaults: { model: { primary: "github-copilot/gpt-4o" } } },
+}
+```
+
+## Token env var fallback chain
+
+When no auth profile is stored, OpenClaw reads a GitHub token from environment variables in this order:
+
+1. `COPILOT_GITHUB_TOKEN` — preferred; set this to keep Copilot auth separate from other GitHub tools.
+2. `GH_TOKEN` — used by the GitHub CLI (`gh`); OpenClaw picks it up automatically.
+3. `GITHUB_TOKEN` — standard CI/GitHub Actions token; used as a last resort.
+
+The first non-empty variable wins. Example:
+
+```bash
+export COPILOT_GITHUB_TOKEN="ghp_..."
+openclaw models set github-copilot/gpt-4o
+```
+
+If none of these are set and no auth profile exists, the Copilot provider is disabled. Run the device-login flow to store a profile permanently.
+
+## Notes
+
+- Requires an interactive TTY for the device-login flow; run it directly in a terminal.
+- Copilot model availability depends on your plan; if a model is rejected, try
+  another ID (for example `github-copilot/gpt-4.1`).
+- The login stores a GitHub token in the auth profile store and exchanges it for a
+  Copilot API token when OpenClaw runs.
