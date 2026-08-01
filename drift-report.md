@@ -1,17 +1,514 @@
-# Docs drift report HEAD
+# Docs drift report v0.4.10
 
-- 5 persona page(s) likely missing/stale
-- 0 covered, 2 unmapped
+- 45 persona page(s) likely missing/stale
+- 0 covered, 459 unmapped
 
 ## Likely missing/stale persona pages
 
+- `admin/channels/bluebubbles.mdx` (core changed: `docs/channels/bluebubbles.md`)
 - `admin/channels/discord.mdx` (core changed: `docs/channels/discord.md`)
+- `admin/channels/google-chat.mdx` (core changed: `docs/channels/google-chat.md`)
+- `admin/channels/imessage.mdx` (core changed: `docs/channels/imessage.md`)
+- `admin/channels/irc.mdx` (core changed: `docs/channels/irc.md`)
+- `admin/channels/line.mdx` (core changed: `docs/channels/line.md`)
+- `admin/channels/mattermost.mdx` (core changed: `docs/channels/mattermost.md`)
+- `admin/channels/pairing.mdx` (core changed: `docs/channels/pairing.md`)
+- `admin/channels/signal.mdx` (core changed: `docs/channels/signal.md`)
+- `admin/channels/slack.mdx` (core changed: `docs/channels/slack.md`)
+- `admin/channels/synology-chat.mdx` (core changed: `docs/channels/synology-chat.md`)
 - `admin/channels/telegram.mdx` (core changed: `docs/channels/telegram.md`)
 - `admin/channels/whatsapp.mdx` (core changed: `docs/channels/whatsapp.md`)
+- `admin/channels/zalouser.mdx` (core changed: `docs/channels/zalouser.md`)
 - `admin/gateway/configuration-reference.mdx` (core changed: `docs/gateway/configuration-reference.md`)
+- `admin/gateway/configuration.mdx` (core changed: `docs/gateway/configuration.md`)
+- `admin/gateway/outbound-delivery.mdx` (core changed: `docs/gateway/outbound-delivery.md`)
+- `admin/gateway/sandboxing-admin.mdx` (core changed: `docs/gateway/sandboxing-admin.md`)
+- `admin/gateway/sandboxing-developer.mdx` (core changed: `docs/gateway/sandboxing-developer.md`)
+- `admin/gateway/sandboxing-user.mdx` (core changed: `docs/gateway/sandboxing-user.md`)
+- `admin/gateway/session-consumer-claims.mdx` (core changed: `docs/gateway/session-consumer-claims.md`)
+- `admin/install/bun.mdx` (core changed: `docs/install/bun.md`)
+- `admin/install/development-channels.mdx` (core changed: `docs/install/development-channels.md`)
+- `admin/install/docker.mdx` (core changed: `docs/install/docker.md`)
+- `admin/install/gcp.mdx` (core changed: `docs/install/gcp.md`)
+- `admin/install/hetzner.mdx` (core changed: `docs/install/hetzner.md`)
+- `admin/install/index.mdx` (core changed: `docs/install/index.md`)
+- `developers/plugins/analysis-runtime-admin.mdx` (core changed: `docs/plugins/analysis-runtime-admin.md`)
+- `developers/plugins/analysis-runtime.mdx` (core changed: `docs/plugins/analysis-runtime.md`)
+- `developers/plugins/backbone.mdx` (core changed: `docs/plugins/backbone.md`)
+- `developers/plugins/learning-core.mdx` (core changed: `docs/plugins/learning-core.md`)
+- `developers/plugins/manifest.mdx` (core changed: `docs/plugins/manifest.md`)
+- `developers/plugins/open-prose.mdx` (core changed: `docs/plugins/open-prose.md`)
+- `developers/plugins/phone-control.mdx` (core changed: `docs/plugins/phone-control.md`)
+- `developers/plugins/session-consumer-claims.mdx` (core changed: `docs/plugins/session-consumer-claims.md`)
+- `developers/plugins/thread-ownership.mdx` (core changed: `docs/plugins/thread-ownership.md`)
 - `users/tools/browser.mdx` (core changed: `docs/tools/browser.md`)
+- `users/tools/exec-admin.mdx` (core changed: `docs/tools/exec-admin.md`)
+- `users/tools/exec-approvals.mdx` (core changed: `docs/tools/exec-approvals.md`)
+- `users/tools/exec-developer.mdx` (core changed: `docs/tools/exec-developer.md`)
+- `users/tools/exec-user.mdx` (core changed: `docs/tools/exec-user.md`)
+- `users/tools/exec.mdx` (core changed: `docs/tools/exec.md`)
+- `users/tools/loop-detection.mdx` (core changed: `docs/tools/loop-detection.md`)
+- `users/tools/plugin.mdx` (core changed: `docs/tools/plugin.md`)
+- `users/tools/subagents.mdx` (core changed: `docs/tools/subagents.md`)
 
 ## Unmapped core docs (no persona rule)
 
+- `CHANGELOG.md`
+- `docs/adr/0001-append-only-ctx-session-identity.md`
+- `docs/adr/0002-correct-runtime-bridge-before-channel-extraction.md`
+- `docs/adr/0003-centralised-learning-event-log.md`
+- `docs/adr/0003-extracted-channels-own-their-metadata.md`
+- `docs/adr/0004-versioning-and-release-automation.md`
+- `docs/brave-search.md`
+- `docs/ci.md`
+- `docs/cli/plugins.md`
+- `docs/cli/sessions.md`
 - `docs/concepts/agent.md`
 - `docs/concepts/multi-agent.md`
+- `docs/concepts/session-tool.md`
+- `docs/concepts/session.md`
+- `docs/docs.json`
+- `docs/help/environment.md`
+- `docs/log/2026-05-26-performance-otel.md`
+- `docs/logs/2026-05-31-whatsapp-boundary-remediation.md`
+- `docs/plans/.wai-topic`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/decisions-ledger.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-1-core-export.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-1/001-raise-stuck-threshold.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-1/002-add-refresh-run-progress.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-2-message-handlers.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-2/003-messages-import-throttle-map.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-2/004-messages-start-call.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-2/005-messages-update-throttled-call.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-3-tool-handlers.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-3/006-tools-import.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-3/007-tools-start-call.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-3/008-tools-end-call.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/phase-3/009-final-verification.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/plan.md`
+- `docs/plans/2026-06-03-p0-run-progress-heartbeat/reviews/breakdown-round-1.md`
+- `docs/plans/action-v5-node24-sweep/decisions-ledger.md`
+- `docs/plans/action-v5-node24-sweep/phase-1/001-verify-pins.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/002-bump-checkout.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/003-bump-setup-node.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/004-bump-cache.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/005-bump-artifacts.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/006-bump-setup-python.md`
+- `docs/plans/action-v5-node24-sweep/phase-2/007-bump-release-please.md`
+- `docs/plans/action-v5-node24-sweep/phase-3/008-remove-bridge.md`
+- `docs/plans/action-v5-node24-sweep/phase-3/009-final-verification.md`
+- `docs/plans/action-v5-node24-sweep/plan.md`
+- `docs/plans/action-v5-node24-sweep/reviews/breakdown-round1.md`
+- `docs/plans/action-v5-node24-sweep/reviews/breakdown-round2.md`
+- `docs/plans/agent-nudge/.precheck.passed`
+- `docs/plans/agent-nudge/decisions-ledger.md`
+- `docs/plans/agent-nudge/phase-1/001-nudge-core.md`
+- `docs/plans/agent-nudge/phase-1/002-gateway-agent-nudge.md`
+- `docs/plans/agent-nudge/phase-1/003-cli-agent-nudge.md`
+- `docs/plans/agent-nudge/phase-1/004-sdk-signals-nudge.md`
+- `docs/plans/agent-nudge/phase-2/005-wake-gate-module.md`
+- `docs/plans/agent-nudge/phase-2/006-heartbeat-wakegate-config.md`
+- `docs/plans/agent-nudge/phase-2/007-heartbeat-runner-gate-integration.md`
+- `docs/plans/agent-nudge/phase-3/008-cron-wakegate-payload-type.md`
+- `docs/plans/agent-nudge/phase-3/009-cron-assert-main-wakegate.md`
+- `docs/plans/agent-nudge/phase-3/010-cron-runner-fires-gate-nudge.md`
+- `docs/plans/agent-nudge/phase-3/011-cron-store-loader-unknown-kind-skip.md`
+- `docs/plans/agent-nudge/phase-4/012-heartbeat-label-help-backfill.md`
+- `docs/plans/agent-nudge/phase-4/013-cron-failure-label-help-backfill.md`
+- `docs/plans/agent-nudge/phase-4/014-config-schema-surfacing-meta-test.md`
+- `docs/plans/agent-nudge/phase-5/015-cron-payload-patch-wakegate-guards.md`
+- `docs/plans/agent-nudge/phase-5/016-cron-form-failure-destination-fallbacks.md`
+- `docs/plans/agent-nudge/phase-5/017-cron-form-wakegate-payload-kind.md`
+- `docs/plans/agent-nudge/phase-5/018-heartbeat-editable-verify-and-nudge-affordance.md`
+- `docs/plans/agent-nudge/phase-6/019-feature-docs.md`
+- `docs/plans/agent-nudge/phase-6/020-dev-log-changelog-pointer.md`
+- `docs/plans/agent-nudge/plan.md`
+- `docs/plans/agent-nudge/reviews/008.approved`
+- `docs/plans/agent-nudge/reviews/adversarial-review-round-1.md`
+- `docs/plans/agent-nudge/reviews/adversarial-review-round-2.md`
+- `docs/plans/agent-nudge/reviews/breakdown-round-1.md`
+- `docs/plans/agent-nudge/reviews/code-review-round-3.md`
+- `docs/plans/agent-nudge/reviews/code-review-round-4.md`
+- `docs/plans/agent-signals-background/decisions-ledger.md`
+- `docs/plans/agent-signals-background/phase-1-substrate.md`
+- `docs/plans/agent-signals-background/phase-1/001-types-background-fields.md`
+- `docs/plans/agent-signals-background/phase-1/002-supported-modes-target-stored-fields.md`
+- `docs/plans/agent-signals-background/phase-1/003-background-run-handler-seam.md`
+- `docs/plans/agent-signals-background/phase-1/004-signal-scheduler.md`
+- `docs/plans/agent-signals-background/phase-1/005-dispatch-background-signal.md`
+- `docs/plans/agent-signals-background/phase-1/006-request-wake-generalize.md`
+- `docs/plans/agent-signals-background/phase-1/007-awareness-record.md`
+- `docs/plans/agent-signals-background/phase-1/008-scheduler-wire-notbefore-requiresidle.md`
+- `docs/plans/agent-signals-background/phase-1/009-cleanup-and-reserved-set-tests.md`
+- `docs/plans/agent-signals-background/phase-2-handler.md`
+- `docs/plans/agent-signals-background/phase-2/010-background-run-handler.md`
+- `docs/plans/agent-signals-background/phase-2/011-register-handler-in-heartbeat-runner.md`
+- `docs/plans/agent-signals-background/phase-2/012-signals-tool.md`
+- `docs/plans/agent-signals-background/phase-3-docs.md`
+- `docs/plans/agent-signals-background/phase-3/013-update-docs.md`
+- `docs/plans/agent-signals-background/phase-3/014-dev-log-changelog.md`
+- `docs/plans/agent-signals-background/plan.md`
+- `docs/plans/agent-signals-background/reviews/breakdown-round1.md`
+- `docs/plans/agent-signals-background/reviews/breakdown-round2.md`
+- `docs/plans/agent-signals-notify/decisions-ledger.md`
+- `docs/plans/agent-signals-notify/phase-1/001-widen-notify-types.md`
+- `docs/plans/agent-signals-notify/phase-1/002-notify-publish-validation.md`
+- `docs/plans/agent-signals-notify/phase-1/003-notify-delivery-handler-seam.md`
+- `docs/plans/agent-signals-notify/phase-1/004-dispatch-notify-signal.md`
+- `docs/plans/agent-signals-notify/phase-1/005-generalize-request-wake.md`
+- `docs/plans/agent-signals-notify/phase-2/006-create-notify-delivery.md`
+- `docs/plans/agent-signals-notify/phase-2/007-register-notify-delivery.md`
+- `docs/plans/agent-signals-notify/phase-3/008-export-delivery-target-type.md`
+- `docs/plans/agent-signals-notify/phase-3/009-docs-notify-mode.md`
+- `docs/plans/agent-signals-notify/phase-3/010-devlog-changelog.md`
+- `docs/plans/agent-signals-notify/plan.md`
+- `docs/plans/agent-signals-notify/reviews/breakdown-1.md`
+- `docs/plans/agent-signals-notify/reviews/breakdown-2.md`
+- `docs/plans/channel-plugin-catalog/decisions-ledger.md`
+- `docs/plans/channel-plugin-catalog/phase-0/000-publish-whatsapp-to-npm.md`
+- `docs/plans/channel-plugin-catalog/phase-1/001-sdk-reexport-typebox-type.md`
+- `docs/plans/channel-plugin-catalog/phase-1/002-whatsapp-use-sdk-type-drop-dep.md`
+- `docs/plans/channel-plugin-catalog/phase-2/003-catalog-data-and-loadcatalog-seam.md`
+- `docs/plans/channel-plugin-catalog/phase-2/004-exclude-whatsapp-from-bundled-tarball.md`
+- `docs/plans/channel-plugin-catalog/phase-3/005-operator-status-mapping.md`
+- `docs/plans/channel-plugin-catalog/phase-3/006-plugins-list-catalog-and-install-resolution.md`
+- `docs/plans/channel-plugin-catalog/phase-4/007-adr-docs-changelog.md`
+- `docs/plans/channel-plugin-catalog/phase-4/008-full-verification-install-proof.md`
+- `docs/plans/channel-plugin-catalog/plan.md`
+- `docs/plans/channel-plugin-catalog/reviews/002.approved`
+- `docs/plans/channel-plugin-catalog/reviews/004.approved`
+- `docs/plans/channel-plugin-catalog/reviews/breakdown-round-1.md`
+- `docs/plans/context-engine-plugin-sdk/.precheck.passed`
+- `docs/plans/context-engine-plugin-sdk/decisions-ledger.md`
+- `docs/plans/context-engine-plugin-sdk/phase-1/001-add-timestamp-ms-column.md`
+- `docs/plans/context-engine-plugin-sdk/phase-2/002-sqlite-write-timestamp-ms.md`
+- `docs/plans/context-engine-plugin-sdk/phase-2/003-postgres-write-timestamp-ms.md`
+- `docs/plans/context-engine-plugin-sdk/phase-3/004-readbykey-timewindow-interface-sqlite.md`
+- `docs/plans/context-engine-plugin-sdk/phase-3/005-readbykey-timewindow-postgres.md`
+- `docs/plans/context-engine-plugin-sdk/phase-4/006-conversation-read-query-facade.md`
+- `docs/plans/context-engine-plugin-sdk/phase-5/007-plugin-sdk-export-read-query.md`
+- `docs/plans/context-engine-plugin-sdk/phase-6/008-hook-event-storage-field.md`
+- `docs/plans/context-engine-plugin-sdk/phase-6/009-populate-hook-storage.md`
+- `docs/plans/context-engine-plugin-sdk/phase-7/010-cross-channel-reachability-test.md`
+- `docs/plans/context-engine-plugin-sdk/phase-7/011-backend-parity-test.md`
+- `docs/plans/context-engine-plugin-sdk/phase-7/012-verification-sweep.md`
+- `docs/plans/context-engine-plugin-sdk/phase-7/013-bookkeeping-master-row.md`
+- `docs/plans/context-engine-plugin-sdk/plan.md`
+- `docs/plans/context-engine-plugin-sdk/reviews/001.approved`
+- `docs/plans/context-engine-plugin-sdk/reviews/breakdown-review.md`
+- `docs/plans/context-engine-plugin-sdk/reviews/code-review-round-1.md`
+- `docs/plans/context-engine-plugin-sdk/reviews/code-review-round-2.md`
+- `docs/plans/context-engine-plugin-sdk/reviews/code-review-round-3.md`
+- `docs/plans/delivery-reliability/.precheck.passed`
+- `docs/plans/design-system-integration/decisions-ledger.md`
+- `docs/plans/design-system-integration/phase-1/001-accent-2-subtle-and-avatar-light-bg.md`
+- `docs/plans/design-system-integration/phase-1/002-wai-brand-palette-tokens.md`
+- `docs/plans/design-system-integration/phase-2/003-panelleft-icon-and-nav-swap.md`
+- `docs/plans/design-system-integration/phase-3/004-docs-changelog-pr.md`
+- `docs/plans/design-system-integration/plan.md`
+- `docs/plans/docs-coverage-lifecycle/decisions-ledger.md`
+- `docs/plans/docs-coverage-lifecycle/phase-1-validator.md`
+- `docs/plans/docs-coverage-lifecycle/phase-1/001-docs-surface-check-validator.md`
+- `docs/plans/docs-coverage-lifecycle/phase-2-manifest.md`
+- `docs/plans/docs-coverage-lifecycle/phase-2/002-seed-docs-surface-manifest.md`
+- `docs/plans/docs-coverage-lifecycle/phase-3-wiring.md`
+- `docs/plans/docs-coverage-lifecycle/phase-3/003-core-ci-docs-surface.md`
+- `docs/plans/docs-coverage-lifecycle/phase-3/004-document-lifecycle-claudemd.md`
+- `docs/plans/docs-coverage-lifecycle/phase-3/005-cross-repo-handoff-artifacts.md`
+- `docs/plans/docs-coverage-lifecycle/plan.md`
+- `docs/plans/docs-coverage-lifecycle/reviews/adversarial-review-round-1.md`
+- `docs/plans/docs-coverage-lifecycle/reviews/breakdown-1.md`
+- `docs/plans/docs-coverage-lifecycle/reviews/code-review-round-2.md`
+- `docs/plans/docs-coverage-lifecycle/reviews/code-review-round-3.md`
+- `docs/plans/extension-sdk-boundary-fix/decisions-ledger.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-1-sdk-surface.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-1/001-add-sdk-exports.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2-extension-repointing.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/002-learning-core-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/003-llm-task-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/004-lobster-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/005-nextcloud-talk-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/006-twitch-imports.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/007-boundary-guard-test.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/008-build-install-verify.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/009-open-prose-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-2/010-acpx-test-fixtures-import.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-3-remaining-fixes.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-3/011-typebox-standalone-extensions.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-3/012-typebox-feishu-schemas.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-3/013-zod-dep-declarations.md`
+- `docs/plans/extension-sdk-boundary-fix/phase-3/014-test-file-import-fixes.md`
+- `docs/plans/extension-sdk-boundary-fix/plan.md`
+- `docs/plans/extension-sdk-boundary-fix/reviews/008-verification.md`
+- `docs/plans/extension-sdk-boundary-fix/reviews/008.approved`
+- `docs/plans/extension-sdk-boundary-fix/reviews/breakdown-1.md`
+- `docs/plans/extension-sdk-boundary-fix/reviews/breakdown-2.md`
+- `docs/plans/extension-sdk-boundary-fix/reviews/breakdown-3.md`
+- `docs/plans/learning-core-web-inbox/decisions-ledger.md`
+- `docs/plans/learning-core-web-inbox/phase-1/001-learning-log-engine.md`
+- `docs/plans/learning-core-web-inbox/phase-1/002-fold-newest-wins-reader.md`
+- `docs/plans/learning-core-web-inbox/phase-1/003-threshold-compaction.md`
+- `docs/plans/learning-core-web-inbox/phase-1/004-resolution-sidecar.md`
+- `docs/plans/learning-core-web-inbox/phase-1/006-wire-index-central-log.md`
+- `docs/plans/learning-core-web-inbox/phase-1/007-behaviour-preservation-suite.md`
+- `docs/plans/learning-core-web-inbox/phase-1/008-store-log-pure-helpers.md`
+- `docs/plans/learning-core-web-inbox/phase-1/009-wire-store-to-log.md`
+- `docs/plans/learning-core-web-inbox/phase-2/020-learning-read-methods.md`
+- `docs/plans/learning-core-web-inbox/phase-2/021-learning-decide-proposal.md`
+- `docs/plans/learning-core-web-inbox/phase-2/022-learning-scope-label-decoration.md`
+- `docs/plans/learning-core-web-inbox/phase-2/023-register-learning-gateway-methods.md`
+- `docs/plans/learning-core-web-inbox/phase-2/024-classify-learning-method-scopes.md`
+- `docs/plans/learning-core-web-inbox/phase-3/040-register-learning-tab.md`
+- `docs/plans/learning-core-web-inbox/phase-3/041-learning-inbox-controller.md`
+- `docs/plans/learning-core-web-inbox/phase-3/042-proposals-subview.md`
+- `docs/plans/learning-core-web-inbox/phase-3/043-lessons-subview.md`
+- `docs/plans/learning-core-web-inbox/phase-3/044-overview-badge.md`
+- `docs/plans/learning-core-web-inbox/plan.md`
+- `docs/plans/learning-core-web-inbox/reviews/006.approved`
+- `docs/plans/learning-core-web-inbox/reviews/009.approved`
+- `docs/plans/learning-core-web-inbox/reviews/breakdown-1.md`
+- `docs/plans/learning-core-web-inbox/reviews/breakdown-2.md`
+- `docs/plans/learning-core-web-inbox/spec.md`
+- `docs/plans/node24-provisioning-floor/.precheck.passed`
+- `docs/plans/node24-provisioning-floor/decisions-ledger.md`
+- `docs/plans/node24-provisioning-floor/phase-1/001-verify-digests.md`
+- `docs/plans/node24-provisioning-floor/phase-2/002-install-sh.md`
+- `docs/plans/node24-provisioning-floor/phase-2/003-install-ps1.md`
+- `docs/plans/node24-provisioning-floor/phase-3/004-docker-bookworm-full.md`
+- `docs/plans/node24-provisioning-floor/phase-3/005-docker-bookworm-slim.md`
+- `docs/plans/node24-provisioning-floor/phase-4/006-final-verification.md`
+- `docs/plans/node24-provisioning-floor/plan.md`
+- `docs/plans/node24-provisioning-floor/reviews/breakdown-round1.md`
+- `docs/plans/npm-publishing/.precheck.passed`
+- `docs/plans/npm-publishing/decisions-ledger.md`
+- `docs/plans/npm-publishing/phase-1-update-identity.md`
+- `docs/plans/npm-publishing/phase-1/001-update-check-package-identity.md`
+- `docs/plans/npm-publishing/phase-2-package-surfaces.md`
+- `docs/plans/npm-publishing/phase-2/002-release-package-validation-helpers.md`
+- `docs/plans/npm-publishing/phase-2/003-whatsapp-built-package-entry.md`
+- `docs/plans/npm-publishing/phase-2/004-release-check-whatsapp-package.md`
+- `docs/plans/npm-publishing/phase-3-stable-release.md`
+- `docs/plans/npm-publishing/phase-3/005-stable-npm-publish-workflow.md`
+- `docs/plans/npm-publishing/phase-4-plugin-proof-and-dev.md`
+- `docs/plans/npm-publishing/phase-4/006-whatsapp-bare-id-catalog-npm.md`
+- `docs/plans/npm-publishing/phase-4/007-whatsapp-managed-install-update.md`
+- `docs/plans/npm-publishing/phase-4/008-whatsapp-managed-loader-registration.md`
+- `docs/plans/npm-publishing/phase-4/009-docs-npm-core-whatsapp.md`
+- `docs/plans/npm-publishing/phase-4/010-dev-dist-tag-publish.md`
+- `docs/plans/npm-publishing/plan.md`
+- `docs/plans/npm-publishing/reviews/breakdown-round-1.md`
+- `docs/plans/npm-publishing/reviews/code-review-round-1.md`
+- `docs/plans/npm-publishing/reviews/code-review-round-2.md`
+- `docs/plans/npm-publishing/reviews/code-review-round-3.md`
+- `docs/plans/overrides-to-workspace-yaml/decisions-ledger.md`
+- `docs/plans/overrides-to-workspace-yaml/phase-1-migrate.md`
+- `docs/plans/overrides-to-workspace-yaml/phase-1/001-augment-workspace-yaml.md`
+- `docs/plans/overrides-to-workspace-yaml/phase-1/002-remove-pnpm-block-from-package-json.md`
+- `docs/plans/overrides-to-workspace-yaml/phase-2-durability-guard.md`
+- `docs/plans/overrides-to-workspace-yaml/phase-2/003-boundary-test-pnpm-config-location.md`
+- `docs/plans/overrides-to-workspace-yaml/plan.md`
+- `docs/plans/overrides-to-workspace-yaml/reviews/002.approved`
+- `docs/plans/overrides-to-workspace-yaml/reviews/breakdown-1.md`
+- `docs/plans/overrides-to-workspace-yaml/reviews/breakdown-2.md`
+- `docs/plans/oxfmt-generated-files-gate/.precheck.passed`
+- `docs/plans/oxfmt-generated-files-gate/decisions-ledger.md`
+- `docs/plans/oxfmt-generated-files-gate/phase-1-regression-guard.md`
+- `docs/plans/oxfmt-generated-files-gate/phase-1/001-oxfmt-ignore-guard-test.md`
+- `docs/plans/oxfmt-generated-files-gate/plan.md`
+- `docs/plans/oxfmt-generated-files-gate/reviews/001-breakdown-review.md`
+- `docs/plans/platform-budgets-gates/.precheck.passed`
+- `docs/plans/prompt-cache-key-tools/.precheck.passed`
+- `docs/plans/realtime-voice-phase2/.precheck.passed`
+- `docs/plans/remove-legacy-session-store-adapter/decisions-ledger.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-1/001-remove-gateway-activation.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-2/002-remove-host-method.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-2/003-remove-sdk-type-reexport.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-2/004-excise-store-seam.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-2/005-remove-storage-config-helper.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-3/006-rewrite-e2e-baseline.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-3/007-delete-adapter-files.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-4/008-remove-config-keys.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-5/009-remove-docs.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-5/010-verification-tests.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-5/011-final-check-gate.md`
+- `docs/plans/remove-legacy-session-store-adapter/phase-5/012-devlog-migration-note.md`
+- `docs/plans/remove-legacy-session-store-adapter/plan.md`
+- `docs/plans/remove-legacy-session-store-adapter/reviews/002.approved`
+- `docs/plans/remove-legacy-session-store-adapter/reviews/003.approved`
+- `docs/plans/remove-legacy-session-store-adapter/reviews/008.approved`
+- `docs/plans/security-dep-remediation/decisions-ledger.md`
+- `docs/plans/security-dep-remediation/phase-1-boundary-guards.md`
+- `docs/plans/security-dep-remediation/phase-1/001-lark-boundary-test.md`
+- `docs/plans/security-dep-remediation/phase-1/002-dead-dep-boundary-test.md`
+- `docs/plans/security-dep-remediation/phase-2-dead-dep-removal.md`
+- `docs/plans/security-dep-remediation/phase-2/003-remove-dead-channel-sdks.md`
+- `docs/plans/security-dep-remediation/phase-3-cve-bumps.md`
+- `docs/plans/security-dep-remediation/phase-3/004-bump-direct-cve-deps.md`
+- `docs/plans/security-dep-remediation/phase-3/005-bump-stale-override-pins.md`
+- `docs/plans/security-dep-remediation/phase-3/006-add-new-cve-overrides.md`
+- `docs/plans/security-dep-remediation/phase-3/007-bump-vitest-stack.md`
+- `docs/plans/security-dep-remediation/phase-4-verify-document.md`
+- `docs/plans/security-dep-remediation/phase-4/008-verification-gate.md`
+- `docs/plans/security-dep-remediation/phase-4/009-pr-documentation.md`
+- `docs/plans/security-dep-remediation/plan.md`
+- `docs/plans/security-dep-remediation/reviews/003.approved`
+- `docs/plans/security-dep-remediation/reviews/breakdown-1.md`
+- `docs/plans/security-dep-remediation/reviews/breakdown-2.md`
+- `docs/plans/sender-identity-hooks/.precheck.passed`
+- `docs/plans/sessions-live-run-status/.precheck.passed`
+- `docs/plans/sessions-live-run-status/decisions-ledger.md`
+- `docs/plans/sessions-live-run-status/phase-1-server-data-path.md`
+- `docs/plans/sessions-live-run-status/phase-1/001-snapshot-active-runs.md`
+- `docs/plans/sessions-live-run-status/phase-1/002-protocol-runs-schema.md`
+- `docs/plans/sessions-live-run-status/phase-1/003-sessions-runs-handler.md`
+- `docs/plans/sessions-live-run-status/phase-2-ui-data-plumbing.md`
+- `docs/plans/sessions-live-run-status/phase-2/004-ui-run-types.md`
+- `docs/plans/sessions-live-run-status/phase-2/005-ui-load-session-runs.md`
+- `docs/plans/sessions-live-run-status/phase-2/006-ui-run-polling.md`
+- `docs/plans/sessions-live-run-status/phase-3-ui-surface.md`
+- `docs/plans/sessions-live-run-status/phase-3/007-format-elapsed.md`
+- `docs/plans/sessions-live-run-status/phase-3/008-runs-panel-view.md`
+- `docs/plans/sessions-live-run-status/phase-3/009-live-tick-a11y.md`
+- `docs/plans/sessions-live-run-status/phase-3/010-runs-panel-styles.md`
+- `docs/plans/sessions-live-run-status/phase-3/011-reachability-test.md`
+- `docs/plans/sessions-live-run-status/plan.md`
+- `docs/plans/sessions-live-run-status/reviews/adversarial-review-round-1.md`
+- `docs/plans/sessions-live-run-status/reviews/breakdown-round-1.md`
+- `docs/plans/sessions-live-run-status/reviews/breakdown-round-2.md`
+- `docs/plans/unmerged-pr-salvage-audit/decisions-ledger.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-118.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-119.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-120.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-121.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-122.md`
+- `docs/plans/unmerged-pr-salvage-audit/findings/pr-123.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1-investigate.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/001-investigate-pr-118-ctx-storage.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/002-investigate-pr-119-premature-termination.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/003-investigate-pr-120-brand-docs.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/004-investigate-pr-121-disable-steer-loop.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/005-investigate-pr-122-agent-signals-devlog.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-1/006-investigate-pr-123-merged-pending-run.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-2-synthesize.md`
+- `docs/plans/unmerged-pr-salvage-audit/phase-2/007-synthesize-and-assemble-report.md`
+- `docs/plans/unmerged-pr-salvage-audit/plan.md`
+- `docs/plans/unmerged-pr-salvage-audit/reviews/adversarial-review-round-1.md`
+- `docs/plans/unmerged-pr-salvage-audit/reviews/adversarial-review-round-2.md`
+- `docs/plans/webui-brand-chat-ergonomics/decisions-ledger.md`
+- `docs/plans/webui-brand-chat-ergonomics/phase-1/001-topbar-mark-swap.md`
+- `docs/plans/webui-brand-chat-ergonomics/phase-1/002-sessions-displayname-priority.md`
+- `docs/plans/webui-brand-chat-ergonomics/phase-2/003-onboarding-bricks-hero.md`
+- `docs/plans/webui-brand-chat-ergonomics/phase-3/004-docs-changelog-pr.md`
+- `docs/plans/webui-brand-chat-ergonomics/plan.md`
+- `docs/plans/webui-brand-chat-ergonomics/reviews/breakdown-round1.md`
+- `docs/plans/webui-brand-refresh/decisions-ledger.md`
+- `docs/plans/webui-brand-refresh/phase-1-colour-identity.md`
+- `docs/plans/webui-brand-refresh/phase-1/001-web-colour-tokens.md`
+- `docs/plans/webui-brand-refresh/phase-1/002-cli-palette-values.md`
+- `docs/plans/webui-brand-refresh/phase-2-typography.md`
+- `docs/plans/webui-brand-refresh/phase-2/003-vendor-font-files.md`
+- `docs/plans/webui-brand-refresh/phase-2/004-fonts-css.md`
+- `docs/plans/webui-brand-refresh/phase-2/005-import-fonts-css.md`
+- `docs/plans/webui-brand-refresh/phase-2/006-font-tokens.md`
+- `docs/plans/webui-brand-refresh/phase-3-identity-chrome.md`
+- `docs/plans/webui-brand-refresh/phase-3/007-favicon-svg.md`
+- `docs/plans/webui-brand-refresh/phase-3/008-favicon-raster-script.md`
+- `docs/plans/webui-brand-refresh/phase-3/009-topbar-brand-block.md`
+- `docs/plans/webui-brand-refresh/phase-3/010-index-html-title.md`
+- `docs/plans/webui-brand-refresh/phase-4-csp.md`
+- `docs/plans/webui-brand-refresh/phase-4/011-drop-google-fonts-csp.md`
+- `docs/plans/webui-brand-refresh/phase-5-hardening.md`
+- `docs/plans/webui-brand-refresh/phase-5/012-routing-browser-test.md`
+- `docs/plans/webui-brand-refresh/phase-5/013-nav-help-browser-test.md`
+- `docs/plans/webui-brand-refresh/phase-5/014-docs-drawer-browser-test.md`
+- `docs/plans/webui-brand-refresh/phase-5/015-lazy-view-browser-test.md`
+- `docs/plans/webui-brand-refresh/phase-5/016-mobile-nav-browser-test.md`
+- `docs/plans/webui-brand-refresh/phase-5/017-perf-snapshot.md`
+- `docs/plans/webui-brand-refresh/plan.md`
+- `docs/plans/webui-brand-refresh/reviews/breakdown-1.md`
+- `docs/plans/webui-brand-refresh/reviews/breakdown-2.md`
+- `docs/plans/webui-brand-refresh/reviews/breakdown-3.md`
+- `docs/plans/whatsapp-baileys-lazy-load/decisions-ledger.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-A/001-create-baileys-facade.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/002-convert-media.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/003-convert-session.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/004-convert-extract-monitor-atomic.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/005-convert-login.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/006-convert-login-qr.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-B/007-convert-channel.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-C/008-add-deps-missing-diagnostic.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-C/009-classify-load-error.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-D/010-static-import-guard.md`
+- `docs/plans/whatsapp-baileys-lazy-load/phase-D/011-devlog-changelog.md`
+- `docs/plans/whatsapp-baileys-lazy-load/plan.md`
+- `docs/plans/whatsapp-baileys-lazy-load/reviews/breakdown-round-1.md`
+- `docs/plans/whatsapp-baileys-lazy-load/reviews/breakdown-round-2.md`
+- `docs/plans/whatsapp-boundary-remediation/decisions-ledger.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-A-guard-rail.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-A/001-guard-rail-boundary-test.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-B-move-onboarding.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-B/002-move-onboarding-adapter-to-extension.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-B/002a-extend-sdk-barrel-whatsapp-onboarding-symbols.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-B/003-remove-onboarding-from-core-builtin-list.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-B/004-remove-sdk-whatsapp-onboarding-reexport.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-C-agent-tools.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-C/005-move-agent-login-tool-to-extension.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-C/006-delete-core-agent-tools-whatsapp-login.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-D-monitor-export.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-D/007-route-monitor-web-channel-via-gateway-port.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-E-barrel-and-deps.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-E/008-route-deps-ts-sendmessage-via-registry.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-E/009-retype-deliver-ts-sendwhatsapp-dep.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-E/010-delete-channels-web-barrel.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-F-heartbeat-reexport.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-F/011-drop-heartbeat-reexport-and-repoint-extension.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-F/011-drop-heartbeat-sdk-reexport.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-F/012-repoint-channel-ts-heartbeat-import.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-G-closeout.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-G/013-unskip-boundary-guard-rail.md`
+- `docs/plans/whatsapp-boundary-remediation/phase-G/014-docs-devlog-changelog.md`
+- `docs/plans/whatsapp-boundary-remediation/plan.md`
+- `docs/plans/whatsapp-boundary-remediation/reviews/002.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/003.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/004.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/005.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/007.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/010.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/011.approved`
+- `docs/plans/whatsapp-boundary-remediation/reviews/breakdown-round-1.md`
+- `docs/platforms/linux.md`
+- `docs/start/hubs.md`
+- `docs/superpowers/plans/2026-05-25-webui-operations-console-first.md`
+- `docs/superpowers/plans/2026-05-26-session-run-recovery.md`
+- `docs/superpowers/plans/2026-05-27-ctx-session-identity-model.md`
+- `docs/superpowers/plans/2026-05-27-wednesdayai-docs-pipeline-plan-a.md`
+- `docs/superpowers/plans/2026-05-31-whatsapp-boundary-remediation.md`
+- `docs/superpowers/plans/2026-06-02-security-dependency-remediation.md`
+- `docs/superpowers/plans/2026-06-04-agent-run-lifecycle-master-plan.md`
+- `docs/superpowers/plans/2026-06-04-extension-sdk-boundary-audit.md`
+- `docs/superpowers/plans/2026-06-29-cron-run-now-ux.md`
+- `docs/superpowers/specs/2026-05-23-docs-overhaul-design.md`
+- `docs/superpowers/specs/2026-05-25-webui-interface-split-design.md`
+- `docs/superpowers/specs/2026-05-30-whatsapp-boundary-remediation-design.md`
+- `docs/superpowers/specs/2026-06-04-extension-sdk-boundary-fix-spec.md`
+- `docs/superpowers/specs/2026-06-07-action-v5-node24-sweep.md`
+- `docs/superpowers/specs/2026-06-07-node24-provisioning-floor.md`
+- `docs/superpowers/specs/2026-06-08-branch-worktree-cleanup.md`
+- `docs/superpowers/specs/2026-06-08-subagent-delegation.md`
+- `docs/superpowers/specs/2026-06-09-remove-legacy-session-store-adapter.md`
+- `docs/superpowers/specs/2026-06-09-unmerged-pr-salvage-audit.md`
+- `docs/superpowers/specs/2026-06-10-context-engine-storage-query-sdk.md`
+- `docs/superpowers/specs/2026-06-12-heartbeat-active-skip.md`
+- `docs/superpowers/specs/2026-06-12-inflight-progress-heartbeat.md`
+- `docs/superpowers/specs/2026-06-22-realtime-voice-phase2.md`
+- `docs/superpowers/specs/2026-06-28-cognitive-substrate-program-design.md`
+- `docs/superpowers/specs/2026-06-28-core-roadmap.md`
+- `docs/superpowers/specs/2026-06-28-core-stability-debt.md`
+- `docs/superpowers/specs/2026-06-28-distribution-rail.md`
+- `docs/superpowers/specs/2026-06-28-experience-polish.md`
+- `docs/superpowers/specs/2026-06-28-kernel-contract-conformance.md`
+- `docs/superpowers/specs/2026-06-28-lean-core-reduction.md`
+- `docs/superpowers/specs/2026-06-28-platform-budgets-gates.md`
+- `docs/superpowers/specs/2026-06-28-plugin-overhaul.md`
+- `docs/superpowers/specs/2026-07-23-cognitive-substrate-0b.md`
+- `docs/zh-CN/install/bun.md`
