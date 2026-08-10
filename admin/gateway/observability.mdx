@@ -42,11 +42,32 @@ diagnostics:
 
 | Span | Description |
 |------|-------------|
-| `gateway.request` | Top-level span for each incoming message |
-| `llm.complete` | LLM API call — model, token counts, latency |
-| `hook.dispatch` | Each hook invocation with name and duration |
-| `tool.call` | Agent tool calls |
-| `channel.send` | Outbound message delivery |
+| `openclaw.run` / `openclaw.model.call` | Agent turn and LLM calls (Langfuse nested tree) |
+| `openclaw.task.*` | Gateway task-pipeline lifecycle (`started`, `completed`, `failed`, …) |
+| `openclaw.task.recovery_exhausted` | Boot recovery moved a stuck run to `dlq` (error status) |
+| `openclaw.dream.*` | Dream Cycle lifecycle (`cycle_started`, `pass_completed`, …) |
+| `tool.call` / channel delivery | Agent tools and outbound sends |
+
+Full attribute tables and Langfuse setup live in the core docs page
+[OTel & Langfuse Diagnostics](https://docs.wednesdayai.dev/diagnostics/otel-langfuse)
+(or the core repo path `docs/diagnostics/otel-langfuse.md`).
+
+## Task recovery (operator)
+
+On gateway boot, recoverable task runs are classified. Runs that hit the default retry budget
+(`maxAttempts: 5`) or stay in `retrying` longer than **25 minutes** (`maxAttempts * maxMs`)
+are moved to `dlq` and emit `task.recovery_exhausted`. This stops orphaned runs from looping
+forever across restarts.
+
+Inspect with:
+
+```bash
+wednesdayai task status --json
+```
+
+Look for `status: "dlq"` and reasons `retry exhausted` or `stalled beyond age threshold`.
+Re-enqueue work only if it is still needed. Details: core docs
+[Task operations](https://docs.wednesdayai.dev/gateway/tasks#shutdown-and-recovery).
 
 ## Prometheus metrics
 
