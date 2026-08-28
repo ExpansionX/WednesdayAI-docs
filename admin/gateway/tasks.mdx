@@ -1,0 +1,150 @@
+<!--
+docs.json registration needed (not added per task constraints):
+Administrators tab → "Gateway configuration" group → add "admin/gateway/tasks" after "admin/gateway/heartbeat".
+-->
+
+---
+title: "Task pipeline"
+sidebarTitle: "Tasks"
+description: "Configure the Gateway task pipeline that runs cron, heartbeat, retention, and plugin background passes — every tasks.* key with its default, effect, and restart requirement."
+audience: admin
+---
+
+# Task pipeline
+
+The task pipeline is the Gateway's background work queue. It runs the built-in `cron-run`, `heartbeat-tick`, and `task-runlog-retention` passes plus any passes registered by plugins, with durable run records, unit budgets, preemption, and crash recovery. Scheduled jobs, heartbeats, and plugin background work all land here.
+
+All configuration lives under `tasks` in `openclaw.json`. The pipeline is enabled by default and requires a SQLite or Postgres session store — with the dev-only JSONL store it stays disabled (JSONL refuses the transactional claims the pipeline depends on).
+
+<Note>
+Changing any `tasks.*` key requires a Gateway restart — none of them hot-apply. In the default `hybrid` reload mode the Gateway restarts itself when it detects the config change; with `gateway.reload: "hot"` you must restart manually (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+</Note>
+
+## Quick start
+
+No configuration is required — the defaults run the pipeline with one dispatch slot, a 24-hour budget window, and no idle detection. Verify it is running:
+
+```bash
+wednesdayai task status
+```
+
+Expected output: recent runs for `cron-run`, `heartbeat-tick`, and `task-runlog-retention` with status `completed`, plus a budget snapshot.
+
+## Config reference
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `tasks.enabled` | `true` | Enables the pipeline. `false` disables cron pipeline claims, heartbeat ticks, retention, and plugin passes. |
+| `tasks.dispatchConcurrency` | `1` (1–16) | How many passes run at once. Concurrency is shared across all pass topics (round-robin slots), not per pass. |
+| `tasks.preemptionCeiling` | `3` (1–100) | Abort/requeue tolerance per run. At the ceiling the run defers for 1 hour; at twice the ceiling it terminates as `preempted_ceiling`. |
+| `tasks.budget.windowHours` | `24` (1–168) | Rolling window for unit budgets at run, lane, and global scope. |
+| `tasks.budget.ceilingHorizon` | `"monthly"` | Only legal value. The horizon for the hard global ceiling. |
+| `tasks.budget.perRun.units` | unset | Max metered runs per single run id within the window. |
+| `tasks.budget.perRun.costUsd` | unset | Parsed but **not enforced** — do not rely on it. |
+| `tasks.budget.perLane.units` | unset | Max metered runs per lane (`lane:<passId>`) within the window. |
+| `tasks.budget.perLane.costUsd` | unset | Parsed but **not enforced**. |
+| `tasks.budget.global.units` | unset | Max metered runs globally within the window. |
+| `tasks.budget.global.costUsd` | unset | Parsed but **not enforced**. |
+| `tasks.budget.global.ceiling.units` | unset | Hard monthly ceiling in units. Exceeding it defers runs for 1 hour at a time until the next month. |
+| `tasks.budget.global.ceiling.costUsd` | unset | Parsed but **not enforced**. |
+| `tasks.restartLoop.maxRestarts` | `5` (1–100) | With `windowMinutes`, the restart-loop detector threshold. Inside a loop, `llm`-cost passes (heartbeat, cron agent turns) are deferred. |
+| `tasks.restartLoop.windowMinutes` | `10` (1–1440) | Window for the restart-loop detector. |
+| `tasks.idle.enabled` | `false` | Enables the idle monitor, which fires `agent_idle` hooks after inactivity. |
+| `tasks.idle.thresholdMinutes` | `30` (1–10080) | Minutes of agent inactivity before `agent_idle` fires. |
+| `tasks.idle.pollSeconds` | `60` (5–3600) | How often the idle monitor polls run activity. |
+| `tasks.schedule.windows` | `[]` | Time windows that gate the idle monitor: `"HH:MM-HH:MM"` ranges or croner expressions. |
+
+Every value outside its documented range is rejected at config load (Zod validation); programmatic values are clamped to the same ranges.
+
+## Budget ceilings
+
+Budgets meter **units** (one unit per claimed run) at admission time, and **attempts count** — a retried or deferred-then-retried run keeps metering toward its caps. Checks evaluate run → lane → global, then the monthly ceiling; the first failure defers the run (deferral never consumes retry attempts).
+
+A denial is silent by design: the run shows up as `deferred` in `wednesdayai task status` and retries later.
+
+Cap background work for an always-on gateway:
+
+```json5
+{
+  tasks: {
+    budget: {
+      windowHours: 24,
+      perLane: { units: 500 }, // per pass lane, per day
+      global: {
+        units: 5000, // all passes, per day
+        ceiling: { units: 100_000 }, // hard monthly ceiling
+      },
+    },
+  },
+}
+```
+
+<Warning>
+The `costUsd` fields are accepted but not enforced anywhere in the governor. Use `units` ceilings for spend control; a unit is one claimed run, so size ceilings accordingly.
+</Warning>
+
+## Idle detection and schedule windows
+
+The idle monitor watches agent run activity and fires `agent_idle` hooks (for plugins such as dream cycles) after a configurable quiet period. It is off by default.
+
+Enable it with a 2-hour threshold and 5-minute polling:
+
+```json5
+{
+  tasks: {
+    idle: {
+      enabled: true,
+      thresholdMinutes: 120,
+      pollSeconds: 300,
+    },
+    schedule: {
+      // only inside these windows (local time) or when a croner expr matches
+      windows: ["22:00-06:00", "0 4 * * *"],
+    },
+  },
+}
+```
+
+`schedule.windows` gates the idle monitor only — cron jobs and heartbeats run on their own schedules. If idle triggers or windows are configured but the session store lacks a runs store, the Gateway emits an `idle_monitor_disabled` diagnostic rather than silently skipping.
+
+## Concurrency and preemption
+
+`dispatchConcurrency` is a global slot count, not per pass: with the default `1`, passes run one at a time in priority order, and each dispatch tick claims at most one work item per slot. A slow pass delays other passes' next run.
+
+`preemptionCeiling` bounds requeue churn for repeatedly aborted runs (Gateway stops, lease loss). The default `3` means: after 3 preemptions a run cools down for an hour; after 6 it terminates as `preempted_ceiling` (never DLQ — preemption is not failure).
+
+## Inspecting and operating runs
+
+```bash
+wednesdayai task status                       # recent runs + budget snapshot
+wednesdayai task status --task cron-run --json
+wednesdayai task budget reset --scope global  # re-open the budget window
+wednesdayai task run --dry-run <taskId>       # execute with no side effects or budget entries
+wednesdayai task rollback <runId>             # invoke a pass's rollback handler
+```
+
+Run statuses: `pending`, `running`, `retrying`, `completed`, `failed`, `dlq`, `preempted`, `deferred`, `preempted_ceiling`, `rolled_back`, `cancelled`.
+
+## Troubleshooting
+
+### Nothing dispatches
+
+- Check `tasks.enabled` is not `false` and the session store is SQLite or Postgres (`pipeline_disabled` diagnostic names the exact reason).
+- Check the dispatch tick (1 s) in Gateway logs for `dispatch tick failed` errors.
+- With `dispatchConcurrency: 1`, one long-running pass blocks the queue — raise concurrency or shorten the pass timeout.
+
+### Runs sit in `deferred`
+
+- Budget denial: compare `budget_denials` in `wednesdayai task status` against your caps; `wednesdayai task budget reset --scope global` re-opens the window.
+- Restart-loop deferral: frequent Gateway restarts (default: >5 in 10 min) defer `llm`-cost passes until the loop breaks.
+
+### Runs land in `dlq`
+
+- The run exhausted its retry policy (`retry exhausted`) or stalled retrying beyond `maxAttempts × maxMs` — 25 minutes under the default policy (`stalled beyond age threshold`).
+- Inspect with `wednesdayai task status --task <id> --json`, then fix the cause and re-enqueue or dry-run the task.
+
+## Related
+
+- [Task pipeline](/developers/tasks) — the pass contract for plugin authors (types, budgets, recovery semantics)
+- [Cron jobs](/admin/automation/cron-jobs) — the scheduler whose jobs execute through `cron-run`
+- [Heartbeat](/admin/gateway/heartbeat) — heartbeat cadence, delivery, and wake-gates

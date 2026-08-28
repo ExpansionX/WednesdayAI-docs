@@ -1,0 +1,72 @@
+---
+title: "Session consumer claims"
+description: "The session.storage.consumerClaims config block: claim ledger defaults, obligation-gated pruning, DLQ, and retention backstops for plugin session-work consumers."
+audience: admin
+doc-schema-version: 1
+---
+
+
+# Session consumer claims
+
+Plugins can register as **session consumers** — durable workers that claim ended-session work (summaries, learning captures, exports) with at-least-once delivery, leases, retries, and crash recovery. The claim ledger lives in the session storage backend (SQLite/Postgres sibling tables; an in-process degraded store on `fs-jsonl`). Operators control it through `session.storage.consumerClaims` and see its decisions as diagnostics events.
+
+If no plugin on your install declares `sessionConsumers` in its manifest, this system is inert — the gate is a no-op and pruning behaves as before.
+
+## Config keys and defaults
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    storage: {
+      consumerClaims: {
+        progressWindowMs: 86_400_000,       // 24h (default)
+        maxRetentionBackstopMs: 2_592_000_000, // 30d (default)
+        sweepCadenceMs: 60_000,             // 1min (default)
+        maxAttempts: 5,                     // default
+        leaseMs: 30_000,                    // 30s (default)
+        retryBaseMs: 1_000,                 // default
+      },
+    },
+  },
+}
+```
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `progressWindowMs` | `86400000` (24 h) | How long a consumer can hold unacked work while still counting as making progress (alive leases + in-window acks pin retention) |
+| `maxRetentionBackstopMs` | `2592000000` (30 d) | Last-resort age cap: a session is released for prune after this even if a consumer never finishes, with an audit event |
+| `sweepCadenceMs` | `60000` (1 min) | How often the reconciler sweeps for newly ended sessions and expired leases |
+| `maxAttempts` | `5` | Retry budget per claim; exhausted claims go to the dead-letter queue (terminal) |
+| `leaseMs` | `30000` (30 s) | Claim lease duration; expired leases are reaped and re-offered |
+| `retryBaseMs` | `1000` | Backoff base for retryable failures |
+
+Changes take effect when the gateway restarts (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+## How pruning interacts with claims
+
+Session pruning is **obligation-gated**, not purely age-based: before deleting a session, the prune gate checks every registered consumer's obligation for that session's lane.
+
+- A **slow-but-alive** consumer (enabled, holding a live lease, or acking within the progress window) **pins retention** — its backlog is never pruned out from under it.
+- An obligation is released on terminal `processed`, DLQ (retry budget exhausted), uninstall (purges rows + watermark), or the retention backstop (which always emits an audit event — never a silent drop).
+- **Disable ≠ uninstall**: disabling a plugin's consumer preserves its watermark; only uninstall purges it.
+
+Operators with age-based prune expectations will see sessions retained longer while consumers work through backlogs; the 30-day backstop caps unbounded growth.
+
+## Diagnostics events
+
+The ledger emits `session_consumer_claim` diagnostics events (`src/infra/diagnostic-events.ts`):
+
+| Event | Meaning |
+| ----- | ------- |
+| `dlq_terminal` | A claim exhausted `maxAttempts` and is dead-lettered |
+| `backstop_released` | The retention backstop released a still-unprocessed session for prune |
+| `skipped_backlog` | Work was skipped because it fell outside the consumer's declared scopes/lanes |
+
+Each carries `consumerId` (`<pluginId>:<effectKind>[/<subCursor>]`), `laneId`, `sessionId?`, `reason`, and `attemptCount?`. Watch for `backstop_released` if you shrink `maxRetentionBackstopMs` — it flags dropped-but-unprocessed sessions.
+
+## Related
+
+- [Session consumer claims (developer)](/developers/plugins/session-consumer-claims) — manifest declaration and SDK surface
+- [Sessions](/admin/session) — storage backends and maintenance
+- [Gateway observability](/admin/gateway/observability) — where diagnostics events surface

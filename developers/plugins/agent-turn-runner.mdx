@@ -1,0 +1,181 @@
+<!-- Navigation: add "developers/plugins/agent-turn-runner" to the Plugins group in docs.json when registering this page. -->
+
+---
+title: "Agent-turn runner"
+sidebarTitle: "Agent turns"
+description: "How an agent turn is enqueued on the backbone, delayed when the session is busy, claimed, and executed exactly once — and what plugin authors may and may not do with the agent.turn topic."
+audience: developer
+doc-schema-version: 1
+---
+
+# Agent-turn runner
+
+An agent turn is one unit of "run the agent now": a cron job firing, a heartbeat waking the session, or a nudge prodding it. Turns are enqueued as durable work on the [backbone](/developers/plugins/backbone) under the topic `agent.turn`, then claimed and executed by a single core consumer — the agent-turn runner in `src/acp/control-plane/`.
+
+This page documents the enqueue/claim/execute flow. It is core-internal surface (the types are not plugin-SDK exports); plugin authors read it to understand turn timing, busy behavior, and the authorization boundary on `agent.turn`.
+
+Current producers: the cron service (`src/cron/service/timer.ts`), the heartbeat runner (`src/infra/heartbeat-runner.ts`), and the nudge path (`src/infra/nudge.ts`).
+
+## The AgentTurnPayload contract
+
+Every turn is a work-class `BusMessage` whose payload is an `AgentTurnPayload`:
+
+```typescript
+// src/acp/control-plane/agent-turn-enqueue.ts (core-internal, not an SDK export)
+type AgentTurnKind = "cron" | "work" | "heartbeat" | "nudge";
+
+type AgentTurnBusy = "skip" | "delay" | "run";
+
+type AgentTurnPayload = {
+  kind: AgentTurnKind;
+  jobId: string;
+  agentId: string;
+  sessionKey: string;
+  message: string;
+  lane: string;
+  runId: string;
+  busy?: AgentTurnBusy;
+};
+```
+
+The work id is a deterministic idempotency key:
+
+```typescript
+function agentTurnIdempotencyKey(payload) {
+  return `agent-turn:${payload.kind}:${payload.jobId}:${payload.runId}`;
+}
+```
+
+Enqueuing the same `(kind, jobId, runId)` twice cannot create two work items — the backbone's unique idempotency key rejects the duplicate. `jobId` and `runId` must be non-empty strings or `enqueueAgentTurn` throws.
+
+## Enqueue path
+
+`enqueueAgentTurn(backbone, payload, opts?)` publishes the turn through the production backbone (`topic: "agent.turn"`, `source: "core:agent-turn-runner"`, `accessContext: { system: "core", laneId, actorId: agentId }`). Before publishing it checks whether the session is busy — by default, whether the main command-queue lane has queued items — and applies the payload's busy policy:
+
+| Policy   | When session is busy                                             | Returns                    |
+| -------- | ---------------------------------------------------------------- | -------------------------- |
+| `skip` (default) | Drop the turn entirely                                   | `` `${id}:skipped` ``      |
+| `delay`  | Buffer the turn, run it when the lane goes idle                  | `` `${id}:delayed` ``      |
+| `run`    | Enqueue anyway — the turn must run now                           | the work id                |
+
+The `:delayed` return repeats unchanged for a duplicate buffered turn, and becomes `` `${id}:rejected-overflow` `` when the session already holds 32 delayed turns (the hard cap). Producers choose the policy: cron jobs with `wakeMode: "next-heartbeat"` use `delay` (otherwise the default `skip` applies), nudges use `delay`, heartbeat-triggered turns use `run`.
+
+<Warning>
+Only the suffix-free return value is a real work id. Callers that need to inspect the outcome distinguish busy results by suffix — `workId.endsWith(":skipped")` — because the suffixed forms never existed as work items.
+</Warning>
+
+## Delayed turns and the idle waiter
+
+A delayed turn is not on the backbone yet — it waits in an in-process per-session buffer, guarded by an idle waiter:
+
+- The waiter polls the main command-queue lane every 50 ms and releases the buffer when the lane drains to zero.
+- The wait has a hard budget of 10 minutes; on expiry the buffer is released anyway (logged as a warning).
+- On release, each buffered turn is published and immediately claimed-and-executed in order. If one turn fails, the loop stops and the remainder stay buffered; the waiter re-arms after 1 s.
+- A released turn whose work item is not claimable (typically already consumed elsewhere) is retried; after 5 s of being unclaimable it is dropped with a warning, and the head-of-line item rotates to the back so one stuck turn cannot block the session forever.
+
+Delayed turns are in-process state: they do not survive a gateway restart. That is acceptable by design because their producers (cron catch-up, heartbeat) re-derive missed turns on restart.
+
+## Claim and execute
+
+The runner is the single consumer (`consumerId: "core:agent-turn-runner"`). Its contract:
+
+```typescript
+// src/acp/control-plane/agent-turn-runner.ts (core-internal, not an SDK export)
+type AgentTurnExecuteResult =
+  | { ok: true; result?: unknown; provider?: string; model?: string }
+  | { ok: false; error: string };
+
+type AgentTurnRunner = {
+  claimAndExecute(input: {
+    workId?: string;        // targeted claim of one specific work item
+    execute: (claim) => Promise<AgentTurnExecuteResult>;
+    abortSignal?: AbortSignal;
+    leaseMs?: number;       // default 60_000; must outlive the turn
+  }): Promise<AgentTurnExecuteResult>;
+  stop(): Promise<void>;
+  getActiveCount(): number;
+};
+```
+
+What `claimAndExecute` guarantees, in order:
+
+1. **Targeted claim.** With `workId`, the claim returns only that exact pending item — the just-published turn cannot be stolen by another dispatch tick. A claim that returns a different work item is released and thrown as an error.
+2. **Lease guard.** The claim lease (default 60 s, overridable per call) must be a finite positive number and must outlive the turn; an expired lease makes the item reclaimable elsewhere.
+3. **Exactly-once via session runs.** Before executing, the runner checks the session-run store: if this `(sessionKey, runId)` already reached a terminal status (`completed`, `failed`, `cancelled`, `abandoned`), the work is acked and the call returns `{ ok: true }` without re-running.
+4. **Run recording.** A session-run row is started before execution (kind derived from `payload.kind`) and completed or failed after it — the durable audit trail for the turn.
+5. **Failure nacks.** An execute result of `{ ok: false }`, a thrown error, or an aborted signal fails the run and nacks the claim (retry per the backbone work retry semantics). `stop()` drains in-flight turns before returning.
+
+**What not to do:**
+
+```typescript
+// ❌ passing a lease shorter than the turn
+runner.claimAndExecute({
+  workId,
+  leaseMs: 5_000, // a 30 s model turn loses its lease at 5 s; another tick re-claims
+                  // and the turn executes twice
+  execute,
+});
+
+// ❌ swallowing execute errors and acking anyway
+execute: async (claim) => {
+  try {
+    await runTurn(claim.message.payload);
+    return { ok: true };
+  } catch {
+    return { ok: true }; // ❌ a failed turn recorded as completed — no retry, no audit
+  }
+},
+```
+
+## Runtime installation
+
+At gateway startup, `installAgentTurnRuntimeFromStorage` selects the mode:
+
+- **Production** — when the configured session storage runtime provides a bus work backend (SQLite or Postgres), a production backbone is built on it and the runner uses durable claims.
+- **Loopback** — otherwise, an in-memory backbone is installed and the gateway logs `agent-turn using in-process loopback; session.storage busWork is unavailable`. Turns still run, but claims and dedupe are process-local.
+
+The active runtime is fetched with `getAgentTurnRuntime()`, which throws `agent-turn runtime is not initialized` before installation. `getActiveAgentTurnCount()` exposes the in-flight turn count (used by busy checks and diagnostics).
+
+## Execution paths
+
+Two executors sit behind `claimAndExecute`:
+
+- **`runMainAgentTurn`** (`src/acp/control-plane/agent-turn-execute.ts`) — the default for cron/heartbeat/nudge/work turns on the main session. It enqueues the turn message as a system event (consecutive duplicates short-circuit to `{ ok: true, duplicate: true }`), then runs the heartbeat-style model turn with the fixed prompt `"Process the pending system events for this session."`. Preflight, delivery preparation, and the model turn reuse the heartbeat runner; if the turn fails before delivery, the system event is rolled back so a retry is not swallowed as a duplicate.
+- **`executeCronClaimedTurn`** (`src/acp/control-plane/agent-turn-cron-execute.ts`) — the isolated-cron path for jobs that run a full agent invocation (CLI providers via the CLI runner, everything else via the embedded agent with model fallback).
+
+## Observing agent turns from a plugin
+
+`agent.turn` is a system topic under fail-closed [backbone authorization](/developers/plugins/backbone#authorization-authz): core is the only current producer, and only the core runner claims it. A plugin cannot enqueue or claim `agent.turn` unless its manifest explicitly grants that produce/consume topic — and it should not, because two consumers on one work item race the lease.
+
+What plugins can legitimately do:
+
+- Subscribe to `channel.message` events (with grants) to observe the traffic a turn produces — see [channel publish](/developers/plugins/backbone#channel-publish).
+- Register task passes for background work that is not an agent turn — see [task dispatcher](/developers/plugins/backbone#task-dispatcher).
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+| ------- | ----- | --- |
+| Log: `agent-turn work not found` | The targeted work id was already consumed, or never persisted (loopback mode after a restart) | Benign in release flows — the drop-after-5-s guard handles it; check for duplicate enqueuers if frequent |
+| Work id ends in `:skipped` | Session busy and policy `skip` | Expected for default cron turns; set the job `wakeMode` if the turn must survive busy periods |
+| Work id ends in `:rejected-overflow` | More than 32 delayed turns buffered for the session | Reduce turn frequency for that session, or accept the drop |
+| Log: `agent-turn using in-process loopback` | Session storage provides no bus work backend (for example `jsonl-fs`) | Switch `session.storage` to SQLite or Postgres for durable turns, then restart the gateway |
+| Error: `agent-turn runtime is not initialized` | Code called `getAgentTurnRuntime()` before gateway install | Initialize from storage first (or install the test loopback) |
+
+## For administrators
+
+Agent turns have no dedicated config keys — behavior is set by the session storage backend and by the features that produce turns:
+
+```json5
+{
+  session: {
+    storage: {
+      backend: "sqlite", // or "postgres" — required for durable agent turns
+    },
+  },
+}
+```
+
+- **Durable turns need SQLite or Postgres.** With other backends the runner degrades to an in-process loopback (logged warning): turns still execute, but restarts lose buffered and unclaimed turns. Changing the backend requires a gateway restart (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+- **Busy behavior is producer-chosen, not configured.** Default cron turns skip when the session is busy; jobs marked `wakeMode: "next-heartbeat"` delay instead. Per-session delayed buffering is capped at 32 turns with a 10-minute wait budget — beyond that, turns are dropped and logged.
+- **Turn audit lives in session runs.** Every executed turn writes a session-run row (`kind`: cron / heartbeat / nudge / work) with terminal status — inspect those when a turn's outcome is unclear.

@@ -1,0 +1,179 @@
+---
+title: "Exec approvals"
+sidebarTitle: "Exec approvals"
+description: "The exec approval flow: when shell commands require approval, how approvals are delivered and decided, allow-always persistence, timeouts, and fail-closed defaults."
+audience: admin
+---
+
+# Exec approvals
+
+When an agent tries to run a shell command that its exec policy does not already permit, WednesdayAI pauses the command and asks a human to approve it. This page documents that approval flow end to end: what triggers a prompt, where it is delivered, how decisions are made, and what happens when nobody answers. The policy definitions themselves (`tools.exec.security`, `ask`, safe bins, the approvals file format) are covered in [Tool policy](/admin/gateway/tool-policy) — this page covers the approval lifecycle on top of them.
+
+## When approval is required
+
+Key: `tools.exec.security` — default `"deny"`; key: `tools.exec.ask` — default `"on-miss"`. Both take effect immediately — no gateway restart needed (tool policy is read per turn).
+
+An approval prompt is raised when:
+
+| Condition | Notes |
+|-----------|-------|
+| `ask: "always"` | Every exec call prompts, even allowlisted binaries |
+| `ask: "on-miss"` and `security: "allowlist"` and the command misses the allowlist (or cannot be analysed) | The default-approval path: allowlist hit runs silently, miss prompts |
+| The command uses a heredoc in `allowlist` mode | Heredocs can hide payloads; they always prompt |
+| The command looks obfuscated | Encoded/concatenated commands force a prompt and a visible warning, regardless of other settings |
+
+With the defaults (`security: "deny"`), exec is fully blocked and no approval flow exists — approvals only come into play once exec is enabled. The `readonly`, `minimal`, and `coding` presets (`tools.exec.preset`) all run `allowlist` security with `on-miss` asking, so they are approval-friendly baselines.
+
+## Exec policy presets
+
+Key: `tools.exec.preset` — no default (unset; explicit `tools.exec.*` fields govern). Takes effect immediately — tool policy is read per turn.
+
+| Preset | Security | Ask | What it allows |
+| ------ | -------- | --- | -------------- |
+| `readonly` | `allowlist` | `on-miss` | Safe bins plus read-only diagnostics (`ls`, `cat`, `df`, `du`, `ps`, `uname`, `whoami`, `hostname`, `date`, `pwd`, `which`, `file`, `stat`) at standard paths |
+| `minimal` | `allowlist` | `on-miss` | Safe bins only — the seven default stdin-only tools, no allowlist pack |
+| `coding` | `allowlist` | `on-miss` | `readonly` plus `git`, `node`, `npm`, `pnpm`, `python3`, `rg` at standard and Homebrew paths |
+| `full` | `full` | `off` | Unrestricted exec with no approval asks |
+
+Explicit `tools.exec.security` / `ask` / `safeBins` fields beat preset values (agent-level config beats global config), and the allowlist pack comes only from a preset. An unknown preset id is warned about and ignored — explicit fields still apply.
+
+## The approval lifecycle
+
+1. **Request.** The exec tool registers a pending approval with the gateway (`exec.approval.request`) and immediately returns an `approval-pending` result to the agent. The prompt includes the full command, working directory, host, agent, and the effective security mode. Pending approvals expire after **120 seconds** by default (`timeoutMs` on the RPC; the exec tool uses the fixed default).
+2. **Delivery.** The gateway broadcasts `exec.approval.requested` to connected approval-capable clients (control UI, CLI) and optionally forwards the prompt to chat channels — see [Forwarding approvals to chat](#forwarding-approvals-to-chat).
+3. **Decision.** An operator resolves the approval with one of three decisions:
+
+| Decision | Effect |
+|----------|--------|
+| `allow-once` | Runs this one command. One-time approvals are consumed atomically — the same id cannot be replayed |
+| `allow-always` | Runs the command **and** persists its resolved binary path as an allowlist entry, so future calls to that binary do not prompt |
+| `deny` | Blocks the command; the agent is told it was denied |
+
+4. **Outcome.** The agent receives system events as the command proceeds: an "Exec running" notice if it runs longer than `tools.exec.approvalRunningNoticeMs` (default `10000`; per-agent only; `0` disables), and an "Exec finished" summary with exit code and output tail when it completes — or an "Exec denied" event with the reason.
+
+`allow-always` persistence only happens in `allowlist` security mode, and it writes to the exec approvals file (`~/.openclaw/exec-approvals.json`) — the same file whose own `security`/`ask` defaults can only make the effective policy stricter, never looser (see [Tool policy: exec approvals file](/admin/gateway/tool-policy#exec-approvals-file)).
+
+## Approving from chat
+
+In any paired chat channel, an authorised sender can decide a pending approval:
+
+```text
+/approve <id> allow-once
+/approve <id> allow-always
+/approve <id> deny
+```
+
+Convenience aliases are accepted: `allow` / `once` for `allow-once`, `always` for `allow-always`, and `reject` / `block` for `deny`. The `<id>` is the approval id shown in the prompt (forwarded chat prompts carry the full id; the agent-facing pending result shows a short 8-character form of the same id).
+
+- Only **authorised senders** (allowlisted or paired) may decide approvals; messages from anyone else are ignored.
+- Approvals arriving over the gateway's internal message channels additionally require the `operator.approvals` (or `operator.admin`) scope.
+- You should see a confirmation reply (`✅ Exec approval ... submitted for <id>`); the "Exec denied" / "Exec finished" events follow in the conversation.
+
+## Forwarding approvals to chat
+
+By default, prompts reach operators connected to the gateway (control UI, CLI). Two config surfaces forward them into chat channels — both are read when an approval is raised, so changes take effect on the next approval with no restart.
+
+### Any channel
+
+Key: `approvals.exec.enabled` — default `false`.
+
+```json5
+{
+  approvals: {
+    exec: {
+      enabled: true,
+      mode: "both",       // "session" (default) | "targets" | "both"
+      agentFilter: ["main"],          // omit = all agents
+      sessionFilter: ["telegram"],    // substring or regex on session keys
+      targets: [
+        { channel: "telegram", to: "123456789" },
+        { channel: "slack", to: "C0123456789", accountId: "default" },
+      ],
+    },
+  },
+}
+```
+
+`mode: "session"` sends the prompt to the chat the triggering conversation came from; `"targets"` sends to the explicit `targets` list; `"both"` does both. Text prompts are answered with `/approve`.
+
+### Discord (buttons)
+
+Key: `channels.discord.execApprovals.enabled` — default `false`; requires `approvers` to be set.
+
+```json5
+{
+  channels: {
+    discord: {
+      execApprovals: {
+        enabled: true,
+        approvers: ["201816799504484352"],   // Discord user IDs — required
+        target: "dm",          // "dm" (default) | "channel" | "both"
+        agentFilter: ["main"],
+        sessionFilter: [],
+        cleanupAfterResolve: false,   // delete prompt DMs after resolve/timeout
+      },
+    },
+  },
+}
+```
+
+Discord prompts carry interactive approve/deny buttons. With `target: "channel"` or `"both"`, buttons only work for configured approvers — everyone else gets an ephemeral denial. A per-account override is supported via `channels.discord.accounts.<id>.execApprovals` with the same shape.
+
+<Warning>
+Approving `allow-always` from chat persists an allowlist entry immediately. Review `openclaw approvals get` regularly and remove entries for binaries you no longer want auto-approved (`openclaw approvals allowlist remove <pattern>`) — every approved path is a standing grant for the agent.
+</Warning>
+
+## Timeouts and fail-closed defaults
+
+| Situation | Behaviour |
+|-----------|-----------|
+| Nobody answers within 120 s | The decision resolves to "no answer" and the `askFallback` from the approvals file applies |
+| `askFallback: "deny"` (default) | Timed-out commands are denied ("approval-timeout") |
+| `askFallback: "allowlist"` | Timed-out commands run only if they satisfied the allowlist anyway; otherwise denied |
+| `askFallback: "full"` | Timed-out commands run — the only permissive fallback |
+| No approval-capable client connected and forwarding disabled | The approval is auto-expired immediately — the command does not wait 120 s to fail |
+| Command fails analysis (unparseable) in `allowlist` mode | Denied outright with "allowlist miss"; a miss that prompts and times out is denied as well |
+
+The `askFallback` and `autoAllowSkills` keys live in the `defaults` block of `~/.openclaw/exec-approvals.json` (`askFallback` default `"deny"`, `autoAllowSkills` default `false`). See [Tool policy: exec approvals file](/admin/gateway/tool-policy#exec-approvals-file) for the file format.
+
+## Node exec approvals
+
+With `tools.exec.host: "node"`, commands run on a paired remote node, and approvals carry an exact binding of the argv, cwd, agent, session, and a hash of any env overrides — the approved decision is only valid for that exact command shape. Per-node approvals files are managed through RPC:
+
+| Method | Scope | Effect |
+|--------|-------|--------|
+| `exec.approvals.node.get` | `operator.admin` | Read a node's approvals file (`system.execApprovals.get` on the node) |
+| `exec.approvals.node.set` | `operator.admin` | Write a node's approvals file, with `baseHash` concurrency like the host file |
+
+The prompt flow (request, `/approve`, timeout, fallback) is identical to gateway-host exec.
+
+## Managing the approvals file
+
+The host approvals file can be read and replaced over RPC (`exec.approvals.get` / `exec.approvals.set`, both `operator.admin`, `baseHash`-guarded), or from the CLI (`openclaw approvals`, alias `openclaw exec-approvals`):
+
+```bash
+openclaw approvals get                     # show the approvals snapshot
+openclaw approvals get --agent work --json
+openclaw approvals allowlist add "/usr/local/bin/rg"      # --agent / --node supported
+openclaw approvals allowlist remove "/usr/local/bin/rg"
+```
+
+Editing the file by hand works too — the gateway re-reads it when evaluating exec calls; no restart is required.
+
+## Troubleshooting
+
+| Symptom | Cause | Fix |
+|---------|-------|-----|
+| "Exec denied (… approval-timeout)" | Nobody approved within 120 s and `askFallback` is `deny` | Approve faster, connect an approval client, or enable chat forwarding |
+| Prompts never arrive in chat | `approvals.exec.enabled` / `channels.discord.execApprovals.enabled` is false, or filters excluded the agent/session | Enable forwarding and check `agentFilter` / `sessionFilter` |
+| Approval auto-expires instantly | No approval-capable client connected and no forward target accepted the prompt | Keep the control UI connected or enable forwarding |
+| `/approve` replies "requires operator.approvals" | The sender's gateway client lacks the approvals scope | Grant `operator.approvals` (or `operator.admin`) to that client |
+| An approved binary still prompts every time | You approved with `allow-once`, or `ask: "always"` is in force, or the entry did not persist (basenames are ignored — entries must be absolute path globs) | Approve with `allow-always`, or relax `ask`; verify with `openclaw approvals get` |
+| "Exec denied (… obfuscation-detected)" | The command used encoding/concatenation tricks | Rewrite the command plainly; obfuscated commands always require explicit approval |
+
+## Related
+
+- [Tool policy](/admin/gateway/tool-policy) — exec security modes, safe bins, and the approvals file format
+- [Config writes](/admin/gateway/config-writes) — how config changes are written and applied
+- [Security hardening](/admin/security)
+- [Exec (developers)](/developers/exec) — building exec-aware plugin tools

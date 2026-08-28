@@ -1,0 +1,257 @@
+---
+title: "Media understanding providers"
+description: "Register audio transcription, image description, and video understanding providers from a plugin, including credential resolution and apiKeyProvider borrowing."
+audience: developer
+---
+
+{/* Nav registration needed (docs.json): add "developers/plugins/media-understanding-providers" to Developers > "Extension points" (suggested after "developers/plugins/web-search-provider"). */}
+
+# Media understanding providers
+
+Plugins can register **media understanding providers** that handle audio transcription, image description, and video understanding. Each provider implements the wire-protocol logic for one or more capabilities and is discoverable by auto-detection. Users enable plugins per entry in config; providers themselves are selected through `tools.media` model entries.
+
+## Contract
+
+```ts
+import type { MediaUnderstandingProviderPlugin } from "openclaw/plugin-sdk";
+
+const provider: MediaUnderstandingProviderPlugin = {
+  id: "my-provider",                        // unique id: used in `provider:` config and auto-detection
+  label: "My Provider",                     // human-readable name for logs and UI
+  capabilities: ["audio", "image", "video"], // one or more of "audio" | "image" | "video"
+  autoDetectOrder: { audio: 50, image: 40 }, // optional: per-capability ordering, lower tried first
+  defaultModels: { audio: "my-model-v1" },   // optional: fallback model per capability
+  envVars: ["MY_PROVIDER_API_KEY"],          // optional: credential env vars only
+  // Handlers are flat top-level fields - one per capability you declare:
+  transcribeAudio: async (request) => { /* ... */ },
+  describeImage: async (request) => { /* ... */ },
+  describeVideo: async (request) => { /* ... */ },
+};
+```
+
+There is no `functions` wrapper - `transcribeAudio`, `describeImage`, and `describeVideo` sit at the top level of the object passed to `api.registerMediaUnderstandingProvider(...)`. Implement one handler per entry in `capabilities`.
+
+All handler functions are async; they run inside the plugin host and do not block the gateway, but a slow handler delays the user-visible media result, so honour `request.timeoutMs`.
+
+## Minimal provider
+
+```ts
+import type {
+  AudioTranscriptionRequest,
+  AudioTranscriptionResult,
+} from "openclaw/plugin-sdk";
+
+async function transcribeAudio(
+  request: AudioTranscriptionRequest,
+): Promise<AudioTranscriptionResult> {
+  if (!request.apiKey) {
+    throw new Error("MY_PROVIDER_API_KEY not found");
+  }
+
+  const response = await fetch("https://api.example.com/transcribe", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${request.apiKey}`,
+      "Content-Type": request.mime ?? "application/octet-stream",
+    },
+    body: new Uint8Array(request.buffer),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Transcription failed: ${response.statusText}`);
+  }
+
+  const result = (await response.json()) as { transcript: string };
+  return { text: result.transcript, model: request.model };
+}
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerMediaUnderstandingProvider({
+    id: "my-audio-provider",
+    label: "My Audio Provider",
+    capabilities: ["audio"],
+    autoDetectOrder: { audio: 50 },
+    defaultModels: { audio: "my-model-v1" },
+    envVars: ["MY_PROVIDER_API_KEY"],
+    transcribeAudio,
+  });
+}
+```
+
+## Shared wire helpers
+
+The SDK exports wire-protocol helpers for common patterns. Types come from the SDK root; runtime helpers live on the `provider-media-understanding` subpath:
+
+```ts
+import type {
+  AudioTranscriptionRequest,
+  AudioTranscriptionResult,
+} from "openclaw/plugin-sdk";
+import {
+  transcribeOpenAiCompatibleAudio,
+  describeOpenAiCompatibleImage,
+  describeOpenAiCompatibleVideo,
+  normalizeBaseUrl,
+  fetchWithTimeout,
+  postTranscriptionRequest,
+  postJsonRequest,
+  readErrorResponse,
+} from "openclaw/plugin-sdk/provider-media-understanding";
+```
+
+### Multipart uploads
+
+Prefer `postTranscriptionRequest` (or `transcribeOpenAiCompatibleAudio`, which wraps it) over a hand-rolled `fetch` for any `multipart/form-data` upload. All outbound requests pass through the SSRF egress guard, which dispatches on a bundled HTTP client that only recognises its own `FormData` class. A body built from `globalThis.FormData` is not recognised, and the request goes out with **no boundary and no fields** - the endpoint answers with a confusing complaint about a missing parameter rather than a transport error. The shared helpers rebuild the body for the dispatching client, so they are always safe.
+
+If you must build a multipart body yourself, do not set `content-type` or `content-length` manually - let the client derive the boundary.
+
+## OpenAI-compatible providers
+
+For audio transcription via OpenAI-compatible APIs (Groq, OpenRouter, DeepInfra, and so on):
+
+```ts
+import { transcribeOpenAiCompatibleAudio } from "openclaw/plugin-sdk/provider-media-understanding";
+
+const DEFAULT_AUDIO_BASE_URL = "https://api.groq.com/openai/v1";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerMediaUnderstandingProvider({
+    id: "groq-audio",
+    label: "Groq",
+    capabilities: ["audio"],
+    autoDetectOrder: { audio: 20 },
+    defaultModels: { audio: "whisper-large-v3-turbo" },
+    envVars: ["GROQ_API_KEY"],
+    transcribeAudio: (req) =>
+      transcribeOpenAiCompatibleAudio({
+        ...req,
+        baseUrl: req.baseUrl ?? DEFAULT_AUDIO_BASE_URL,
+      }),
+  });
+}
+```
+
+For image description and video understanding, use `describeOpenAiCompatibleImage` / `describeOpenAiCompatibleVideo` the same way.
+
+## Credential resolution
+
+Your handler receives the resolved credential in `request.apiKey`. The runner fills it from the first source that yields a value:
+
+1. A stored auth profile for the provider (`auth-profiles.json`) - an explicit `profile` on the model entry, else the configured profile order.
+2. An environment variable core maps for well-known provider ids.
+3. Any variable named in your registration's `envVars`, in the order you list them.
+4. `models.providers.<id>.apiKey` in `openclaw.json`.
+
+Step 3 is what makes a plugin self-sufficient: a provider id core has never heard of still authenticates from its own declared variable. A provider whose credential resolves nowhere is **skipped** during auto-detection rather than attempted and failed.
+
+Declare every credential variable your provider accepts, not just the canonical one - core maps `GEMINI_API_KEY` for `google`, for example, but an operator who exported only `GOOGLE_API_KEY` depends on it appearing in `envVars`. The first variable that resolves to a non-empty value wins.
+
+What not to do:
+
+```ts
+envVars: ["MY_PROVIDER_API_KEY", "MY_BASE_URL"], // wrong - MY_BASE_URL is not a credential
+```
+
+`envVars` holds **credentials only**. A non-secret entry is handed to your handler as `request.apiKey` whenever the real key is unset - base URLs and other non-secret settings belong in the plugin's own `configSchema`, not here.
+
+<Note>
+Releases up to and including 0.4.10 treated `envVars` as documentation only, so a provider absent from core's internal map could never authenticate no matter what the operator exported. If you maintain a provider plugin, no change is needed beyond declaring `envVars`.
+</Note>
+
+## Borrowing a credential with `apiKeyProvider`
+
+A media model entry can set `apiKeyProvider` to split credential resolution from implementation selection: `provider` keeps naming the wire implementation (your handler), while `apiKeyProvider` names a `models.providers` entry that supplies the **key, base URL, and headers**:
+
+```json5
+{
+  tools: {
+    media: {
+      models: [
+        {
+          provider: "openai",          // your implementation runs the wire protocol
+          apiKeyProvider: "bifrost",   // credentials + baseUrl + headers come from here
+          model: "gpt-4o",
+        },
+      ],
+    },
+  },
+}
+```
+
+Semantics, resolved by the runner:
+
+- Credentials resolve against the `apiKeyProvider` id (auth profiles, env, and its `models.providers.bifrost.apiKey`).
+- **Your registration's `envVars` are not consulted** when `apiKeyProvider` is set - the credential provider's contract is unknown to your declaration.
+- The `models.providers.<apiKeyProvider>` entry also supplies `baseUrl` and `headers` as fallbacks. Precedence: the model entry's own `baseUrl` wins, then the capability-level config, then the credential provider's `models.providers` entry. Headers merge with entry-level and capability-level headers taking precedence over the provider entry's.
+- Your handler sees the outcome as plain `request.apiKey`, `request.baseUrl`, and `request.headers` - nothing about the borrowing leaks into the wire protocol.
+
+Use this when an operator fronts a model behind a gateway (for example Bifrost) but wants your provider's wire implementation: they configure credentials once under `models.providers.bifrost` and point media entries at it.
+
+## Auto-detection ordering
+
+`autoDetectOrder` controls which provider is tried first when multiple providers are enabled and no explicit model entry is configured:
+
+```ts
+{
+  autoDetectOrder: {
+    audio: 10, // tried first (lower number = earlier)
+    image: 20,
+    // video omitted = not auto-detectable for this capability
+  },
+}
+```
+
+Auto-detection happens per capability independently. With both OpenAI and Groq enabled for audio, Groq runs first when its `autoDetectOrder.audio` is lower. Providers whose credentials resolve nowhere are skipped, not attempted.
+
+## Request and result shapes
+
+**Audio** (`transcribeAudio`): `buffer` (raw bytes), `fileName`, `apiKey`, `timeoutMs`; optional `mime`, `model`, `language` (BCP 47), `prompt`, `baseUrl`, `headers`, `query`, `fetchFn` (tests). Returns `{ text: string; model?: string }`.
+
+**Image** (`describeImage`): `buffer`, `fileName`, `model`, `provider`, `timeoutMs`, `agentDir`, `cfg`; optional `mime`, `prompt`, `maxTokens`, `profile` / `preferredProfile`, `apiKey`, `baseUrl`, `headers`, `fetchFn`. Returns `{ text: string; model?: string }`.
+
+**Video** (`describeVideo`): `buffer`, `fileName`, `apiKey`, `timeoutMs`; optional `mime`, `model`, `prompt`, `baseUrl`, `headers`, `fetchFn`. Returns `{ text: string; model?: string }`.
+
+## Blocking the agent loop
+
+The `register` function runs at gateway startup - do not perform synchronous blocking I/O (`fs.readFileSync`, `execSync`) inside it. Handlers are async and do not block the gateway, but a slow handler delays the user-visible transcription or description, so set and honour timeouts and return errors rather than hanging.
+
+Do not do this:
+
+```ts
+export default function register(api: OpenClawPluginApi): void {
+  const ca = fs.readFileSync("./ca.pem"); // synchronous blocking I/O at startup
+  api.registerMediaUnderstandingProvider({ /* ... */ });
+}
+```
+
+Do this instead:
+
+```ts
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const ca = await fs.promises.readFile("./ca.pem", "utf8"); // async I/O at startup
+  api.registerMediaUnderstandingProvider({ /* ... */ });
+}
+```
+
+## Testing your provider
+
+The SDK exports fetch-capturing test doubles:
+
+```ts
+import { createAuthCaptureJsonFetch } from "openclaw/plugin-sdk/testing";
+
+const { fetch: stubFetch, requests } = createAuthCaptureJsonFetch({
+  response: { text: "transcribed audio" },
+});
+
+// pass stubFetch as request.fetchFn, invoke your handler, then assert:
+// expect(requests[0].headers.Authorization).toContain("Bearer");
+```
+
+`createRequestCaptureJsonFetch` and `installPinnedHostnameTestHooks` are exported from the same subpath.
+
+## What's next
+
+- [Web search providers](/developers/plugins/web-search-provider) - the same provider pattern for search
+- [Realtime voice providers](/developers/realtime-voice-api) - streaming voice instead of file media
+- [Your first plugin](/developers/plugins/your-first-plugin)

@@ -1,0 +1,117 @@
+---
+title: "Deep observability"
+description: "Runtime snapshots, CPU/heap/report capture, profiling markers, and stuck-session thresholds for the WednesdayAI gateway."
+audience: admin
+---
+
+<!--
+Nav registration needed in docs.json (not yet present):
+Administrators tab → add "admin/gateway/deep-observability" after "admin/gateway/observability".
+-->
+
+# Deep observability
+
+Deep observability covers the diagnostics that go beyond logs and OTel traces: on-demand runtime snapshots of the gateway process, CPU/heap/report captures, profiling start/stop markers, and the thresholds that detect stuck processing sessions. Everything is off by default and is controlled under `diagnostics` in `~/.openclaw/openclaw.json`. Changes require a gateway restart.
+
+For continuous metric export (OTel metrics, traces, logs) see [Observability](/admin/gateway/observability) and [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse). For the exported runtime metric names, see the developer page [Deep observability runtime metrics](/developers/deep-observability).
+
+## `diagnostics.capture`
+
+Enables on-demand evidence collection from the running gateway. All capture RPC methods fail with `diagnostic capture is disabled` unless `enabled: true` and `mode` is not `"off"`.
+
+```json5
+{
+  diagnostics: {
+    capture: {
+      enabled: true,
+      mode: "manual", // "off" | "manual" | "always" | "schedule" (default "off")
+      maxDurationMs: 30_000, // default 30000; CPU capture ceiling
+      outputDir: "~/.openclaw/diagnostics/captures", // default shown
+      // schedule: "<expression>", // used when mode is "schedule"
+    },
+  },
+}
+```
+
+| Key             | Type   | Default                              | Description                                                             |
+| --------------- | ------ | ------------------------------------ | ----------------------------------------------------------------------- |
+| `enabled`       | bool   | `false`                              | Master switch for capture                                               |
+| `mode`          | string | `"off"`                              | `off`, `manual` (RPC-triggered), `always`, or `schedule`                |
+| `maxDurationMs` | number | `30000`                              | Maximum CPU capture duration; requests above this are rejected           |
+| `outputDir`     | string | `~/.openclaw/diagnostics/captures`   | Where heap snapshots and reports are written                            |
+| `schedule`      | string | —                                    | Schedule expression used when `mode` is `"schedule"`                     |
+
+Capture ids must match `[a-zA-Z0-9_.-]+` and cannot contain `..`; output paths are validated to stay inside `outputDir`.
+
+## Gateway diagnostics methods
+
+Capture is invoked over the gateway RPC socket. The server exposes these methods (all gated on the config above):
+
+| Method                       | What it does                                                                                                                              |
+| ---------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| `diagnostics.runtime.snapshot` | Returns a live snapshot: pid, Node version, platform, arch, uptime, memory usage, CPU usage, resource usage                              |
+| `diagnostics.capture.cpu`    | Samples CPU over `durationMs` (default 1000 ms; allowed range 100 ms to `maxDurationMs`) and returns user/system CPU micros consumed     |
+| `diagnostics.capture.heap`   | Writes a V8 heap snapshot to `<outputDir>/<id>.heapsnapshot` (directory mode 0700, file mode 0600) and returns the file path             |
+| `diagnostics.capture.report` | Writes a redacted Node diagnostic report to `<outputDir>/<id>.report.json` — only header, JavaScript heap, resource usage, and libuv thread resource usage are kept |
+| `diagnostics.profiling.start` / `diagnostics.profiling.stop` | Mark profiling windows (returns `started` / `stopped` markers; profile storage is stack-managed, not gateway-managed) |
+
+<Warning>
+A heap snapshot pauses the gateway process while it is taken and can be as large as the heap itself. Trigger it on an idle gateway, and treat the `.heapsnapshot` file as sensitive — it can contain message fragments and session data. Delete captures when the investigation ends.
+</Warning>
+
+## `diagnostics.otel.runtime`
+
+Adds continuous Node.js runtime metrics (event loop, GC, heap, CPU, file descriptors) to the OTel metric stream. Cheap, but off by default:
+
+```json5
+{
+  diagnostics: {
+    otel: {
+      // ... your OTel endpoint config
+      runtime: {
+        enabled: true,
+        intervalMs: 15_000, // default 15000; values below 1000 are clamped
+        collectProc: true, // default true; Linux /proc counters
+      },
+    },
+  },
+}
+```
+
+This requires OTel export to be configured — see [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse). The exported metric names are listed in [Deep observability runtime metrics](/developers/deep-observability).
+
+## Stuck-session thresholds
+
+Two keys control when a processing session is considered stuck:
+
+```json5
+{
+  diagnostics: {
+    stuckSessionWarnMs: 300_000, // default 300000 (5 min); clamp 1s–24h
+    stuckSessionAbortMs: 1_800_000, // default 1800000 (30 min)
+  },
+}
+```
+
+- `stuckSessionWarnMs` — time without progress before a "stuck session" diagnostic is logged. Values outside 1 s to 24 h fall back to the default.
+- `stuckSessionAbortMs` — silence-since-last-progress before a stuck processing session is force-aborted. Only fires when there is queued work (`queueDepth > 0`).
+
+## Diagnostics flags
+
+Targeted debug logs without raising global verbosity, under `diagnostics.flags`:
+
+```json5
+{
+  diagnostics: { flags: ["telegram.http"] },
+}
+```
+
+Flags are case-insensitive strings with wildcard support (`telegram.*` matches `telegram.http`; `*` enables all). One-off override: `OPENCLAW_DIAGNOSTICS=telegram.http,telegram.payload`. Restart the gateway after changing flags.
+
+## Related
+
+- [Observability](/admin/gateway/observability) — OTel span overview
+- [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse) — full OTel configuration
+- [Grafana and Prometheus setup](/admin/observability/grafana-setup) — dashboards and alerts
+- [Logging](/admin/gateway/logging) — file and console logs
+- [Troubleshooting](/admin/troubleshooting) — including the gateway restart preflight gate

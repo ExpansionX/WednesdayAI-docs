@@ -43,6 +43,7 @@ Every plugin **must** ship an `openclaw.plugin.json` file in the **plugin root**
 | `channels` | `string[]` | Channel ids this plugin registers, e.g. `["matrix"]`. |
 | `providers` | `string[]` | Provider ids this plugin registers. |
 | `skills` | `string[]` | Skill directories to load, relative to the plugin root. |
+| `sessionConsumers` | `SessionConsumerDeclaration[]` | Declare ended-session work consumers. See [sessionConsumers](#sessionconsumers). |
 | `uiHints` | `object` | Per-field config UI hints (label, placeholder, `sensitive`, `advanced`). |
 
 ## The config schema
@@ -87,6 +88,14 @@ Rules:
 | `sensitive` | Render as a secret (masked) input |
 | `advanced` | Hide behind an "advanced" disclosure |
 | `tags` | Grouping tags |
+
+### `sessionConsumers`
+
+Declares that this plugin consumes **ended-session work**. Each entry keys a durable claim stream: `effectKind` (required, unique per plugin), optional `subCursors` (max 8), `consumeScopes`, `consumeLanes`, and `enabled` (default `true`). Entries are validated at manifest load — non-array shapes, invalid `effectKind` patterns, or duplicate `effectKind`s are plugin errors.
+
+At runtime, `api.claimSessionWork()` / `api.ackSessionWork()` gate the queue: the `consumerId` is loader-bound to your manifest declaration (never caller-supplied), and claims outside your declared scopes or lanes are skipped, never leased. Declared consumers also obligation-gate session pruning — the session store will not prune sessions with non-terminal claims from your plugin.
+
+See [Session consumer claims](/developers/plugins/session-consumer-claims) for the full contract, lease semantics, and diagnostics events.
 
 ## Where config lands
 

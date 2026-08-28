@@ -1,0 +1,207 @@
+---
+title: "Learning Core"
+sidebarTitle: "Learning"
+description: "Operate the Learning Core plugin: modes, promotion thresholds, storage placement, restart effects, verification, and troubleshooting."
+audience: admin
+---
+
+{/* Nav registration needed (docs.json): add "admin/learning" to Administrators > "Gateway configuration" (suggested after "admin/gateway/session-journal"). */}
+
+# Learning Core
+
+Learning Core is the bundled extension that turns finished chats into lessons and queued skill proposals. This page covers operation: enabling it, tuning promotion thresholds, placing its storage, and verifying a deployment. For what end users see, see [Learning](/users/learning); for internals and extension seams, see [Learning Core internals](/developers/learning).
+
+## Enable the plugin
+
+The plugin is disabled by default. Enable the entry and set the mode:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "learning-core": {
+        enabled: true,
+        config: {
+          mode: "observe",
+        },
+      },
+    },
+  },
+}
+```
+
+This change takes effect after a gateway restart (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+`mode` accepts `off`, `observe` (default), and `assist`:
+
+- `off` stops capture entirely.
+- `observe` records candidates and promotes lessons but never changes replies.
+- `assist` does the same capture work **and** injects up to `maxLessonsForPrompt` (default `5`) active lessons into the next reply's context.
+
+## Configuration reference
+
+All keys live under `plugins.entries.learning-core.config` in `openclaw.json`:
+
+| Key                                    | Default   | Effect                                                                                          |
+| -------------------------------------- | --------- | ----------------------------------------------------------------------------------------------- |
+| `mode`                                 | `observe` | `off`, `observe`, or `assist`.                                                                  |
+| `exportMarkdown`                       | `true`    | Write a human-readable Markdown audit trail into `<workspace>/memory/learning/`.                |
+| `minOccurrences`                       | `3`       | Repeats needed before a general lesson is proposed.                                             |
+| `minOccurrencesWithCorrection`         | `2`       | Repeats needed for a correction lesson. Authoritative for that kind - it does not also need `minOccurrences`. |
+| `minConfidence`                        | `0.7`     | Lessons scoring below this are never proposed. Bounded to `[0, 1]`.                              |
+| `requireDistinctSessions`              | `true`    | Repeats must come from at least two different sessions.                                         |
+| `maxLessonsForPrompt`                  | `5`       | How many active lessons `assist` mode injects. Read only when `mode` is `assist`.               |
+| `consolidation.enabled`                | `false`   | Register the budgeted LLM consolidation pass. Restart required after changing.                  |
+| `consolidation.maxCallsPerAgentPerDay` | `8`       | Per-agent daily call ceiling for consolidation.                                                 |
+| `consolidation.exploreEpsilon`         | `0.1`     | Chance the consolidation pass explores an untagged candidate. Bounded to `[0, 1]`.              |
+| `distill.enabled`                      | `false`   | Queue owner-gated skill proposals from successful sessions. Distill never writes `SKILL.md`.    |
+
+Invalid values fall back to the default (for example a `minOccurrences` of `0` or a non-number resolves to `3`), so a typo degrades rather than fails startup.
+
+`maxLessonsForPrompt` only matters in `assist` mode. Consolidation and distill stay off unless you set their `enabled` flags:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "learning-core": {
+        enabled: true,
+        config: {
+          mode: "assist",
+          minOccurrences: 3,
+          minOccurrencesWithCorrection: 2,
+          consolidation: {
+            enabled: true,
+            maxCallsPerAgentPerDay: 8,
+          },
+          distill: { enabled: true },
+        },
+      },
+    },
+  },
+}
+```
+
+## Storage placement
+
+Learning Core carries no database of its own. It resolves placement through the shared domain-storage resolver, which **follows the system session store by default**: a host whose sessions live in Postgres gets learning state in Postgres too, with no extra configuration.
+
+Resolved defaults, with `<state>` being the state directory (`~/.openclaw` unless `OPENCLAW_STATE_DIR` is set):
+
+| Resolved backend | Location                                                |
+| ---------------- | ------------------------------------------------------- |
+| `postgres`       | schema `plugin_learning_core`, table `learning_records` |
+| `sqlite`         | `<state>/learning/learning-core/learning.db`            |
+| `fs-jsonl`       | `<state>/learning/learning-core/`                       |
+
+### Overriding placement
+
+Set `plugins.entries.learning-core.config.storage` to pin a backend independently of the system store:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "learning-core": {
+        config: {
+          storage: {
+            backend: "sqlite", // "fs-jsonl" | "sqlite" | "postgres"
+            sqlitePath: "/var/lib/wednesdayai/learning.db",
+            databaseUrl: "postgres://user:password@db.internal:5432/wednesdayai",
+            schema: "plugin_learning_core",
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Only include the keys you need. Resolution order:
+
+1. An explicit `backend` wins outright.
+2. With no `backend`, a `databaseUrl` implies `postgres` and a `sqlitePath` implies `sqlite`.
+3. With neither, the system session store backend is used.
+
+`schema` applies to Postgres only and must match `^[a-z_][a-z0-9_]{0,62}$`. It is validated before it reaches the database, because Postgres cannot parameterise an identifier - an unsafe value is rejected at resolution, not interpolated.
+
+### Guards
+
+- An unrecognised `backend` throws at resolution rather than silently degrading.
+- Resolving to `postgres` with no `databaseUrl` on either the override or the system store throws, naming the domain.
+- A `sqlitePath` that resolves to the same file as core's own session database is refused, so a learning schema change can never affect session storage.
+
+Restart the gateway after changing storage placement. Both SQL dialects create their table (`learning_records`, keyed `(workspace_id, agent_id, record_type, record_id)`) with `CREATE TABLE IF NOT EXISTS` on first use - there is no separate migration step to schedule.
+
+## Capture, promote, and apply
+
+The runtime pipeline has three stages:
+
+1. **Capture.** A `session.end` claim admits one redacted candidate when the transcript has a user excerpt, then acknowledges `processed`. No excerpt means no candidate row; the claim is still acknowledged. The claim path never writes a lesson.
+2. **Promote.** The `learning-core.promote` task pass (deterministic) turns pending candidates into lessons. The budgeted LLM pass `learning-core.consolidation` does the same under its daily call ceiling. When Dream Cycle is off **and** `consolidation.enabled` is false, promote runs inline right after the claim ack, so observe-mode hosts still get lessons without a night-time job.
+3. **Apply.** `learning-core.distill` and promotion thresholds queue skill proposals. Approval writes atomically (tmp file + `fsync` + rename) to `$OPENCLAW_STATE_DIR/skills/<name>/SKILL.md` (or `~/.openclaw/skills/<name>/SKILL.md`). `learning-core.reconcile-skills` restores a deleted or mutated skill file from the proposal's stored `desiredState` hash.
+
+Those are the effective (namespaced) pass ids in `task_runs` and logs. Proposals are security-scanned before apply; a proposal that trips a scanner rule is stored as `quarantined` and cannot transition back to `pending`.
+
+## Capability levels
+
+`learning.overview` reports a `capability` alongside the resolved backend:
+
+| Backend    | Capability | Meaning                                                             |
+| ---------- | ---------- | ------------------------------------------------------------------- |
+| `postgres` | `full`     | Indexed queries, scope filtering, supersede chains.                 |
+| `sqlite`   | `full`     | Same, single-file.                                                  |
+| `fs-jsonl` | `reduced`  | Append-only log folded in memory. Fine for small single-user hosts. |
+
+## Backend failure behaviour
+
+Learning Core degrades to `fs-jsonl` rather than dropping a lesson:
+
+- **SQLite** that cannot be opened (unwritable path, corrupt file) falls back at construction with a warning logged. The parent directory is created if missing.
+- **Postgres** does not connect at construction, so a refusing server surfaces on first operation. The first rejection logs a warning, swaps to the fs-jsonl store, and retries that one operation there, so the caller still succeeds. After the swap, further errors are the fallback's own and propagate normally.
+
+The downgrade is visible: if a host you configured for Postgres reports `fs-jsonl` from `learning.overview`, the fallback has fired - check the gateway log for `lesson store backend failed; falling back to fs-jsonl`.
+
+## Migrating from a JSONL deployment
+
+No migration command is required. When a SQL backend is configured on a host that previously ran `fs-jsonl`, the store folds the existing log in on read:
+
+- The read-through **only reads** - it never locks, rewrites, compacts, or deletes the old log.
+- Where a lesson id exists in both places, the **SQL row wins** (it is the newer state).
+- It covers **lessons only** - a proposal that exists solely in the legacy log does not appear in the queue.
+
+Once `learning.overview` reports the lesson counts you expect, archive the JSONL directory at your leisure. The read-through resolves it relative to the state directory, so a changed `OPENCLAW_STATE_DIR` hides the old log without deleting it.
+
+## Verifying a deployment
+
+Do not infer capture from a green test suite - observe the live system. None of these scripts call `wednesdayai gateway start`.
+
+```bash
+OPENCLAW_VERIFY_SESSION_ID=<a session that ended on this gateway> \
+  bash scripts/verify-learning-core-full.sh
+```
+
+A missing `OPENCLAW_VERIFY_SESSION_ID` fails closed (exit 2), and a skipped leg is not a pass. Placement-only (never touches live config): `bash scripts/verify-learning-core-placement.sh`.
+
+## Observability
+
+Read-only gateway methods: `learning.overview` (backend, capability, counts), `learning.listLessons`, `learning.searchLessons` (optional `k`, default `5`), `learning.listProposals`, `learning.inspectProposal`. Mutating: `learning.decideProposal` and bulk `learning.decideProposals` (stops on the first failure).
+
+Claims live in `session_consumer_claims` under a namespaced consumer id of the form `<agentId>:learning-core:session.end` - query with a prefix match, not equality against the bare plugin id. The active JSONL log uses the `extensions.learningCore` rotation profile (`maxFileBytes`, `maxBackups`, `compress`, `maxQueuedBytes` apply; `file` is ignored).
+
+## Troubleshooting
+
+**Claims are processed but no lessons appear.** Expected on the claim path. Confirm a `record_type='candidate'` row exists for the session with `verify-learning-core-full.sh`; a lesson appears only after promote (inline when dreams and consolidation are off) or a consolidation pass. If even the candidate is missing, the transcript yielded no user excerpt.
+
+**`learning.overview` reports a backend you did not configure.** Either the system session store resolved differently than expected, or a fallback fired - check the gateway log.
+
+**Postgres permission errors on first use.** The role needs `CREATE` on the database, or pre-create the `plugin_learning_core` schema and grant table-creation rights inside it.
+
+**`PLUGIN_REGISTER_ERROR: Plugin task pass id must not contain "."`** The plugin failed to load because a pass was registered with a dotted id such as `learning-core.promote`. Pass ids are bare; the backbone namespaces them. Restart the gateway after deploying the fixed build.
+
+## Related
+
+- [Learning](/users/learning) - what your users see
+- [Learning Core internals](/developers/learning) - store contract and extension seams
+- [Dream Cycle](/admin/dream-cycle) - idle-time reflection that feeds learning candidates
+- [Configuration](/admin/gateway/configuration) - top-level config file basics

@@ -1,0 +1,191 @@
+---
+title: "Sessions"
+description: "Session lifecycle, keys, persistence, and privacy in WednesdayAI: reset policy, DM scoping, storage backends, and maintenance."
+audience: admin
+doc-schema-version: 1
+---
+
+
+# Sessions
+
+A **session** is one conversation between a sender (or group) and an agent: its message history, tool results, and settings. WednesdayAI keeps one direct-chat session per agent as the primary session and gives group chats, threads, and cron jobs their own keys. All session state is owned by the gateway — UI clients query the gateway rather than reading files.
+
+This page covers session keys and DM scoping, the reset lifecycle, where state lives on disk, external storage backends, maintenance, and the identity/privacy boundary.
+
+## Session keys
+
+Direct chats follow `session.dmScope` (default `"main"`):
+
+| `dmScope` | Session key | Use for |
+| --------- | ----------- | ------- |
+| `"main"` (default) | `agent:<agentId>:<mainKey>` — all DMs share the agent's main session | Single-user continuity across devices and channels |
+| `"per-peer"` | `agent:<agentId>:dm:<peerId>` | Isolate by sender id across channels |
+| `"per-channel-peer"` | `agent:<agentId>:<channel>:dm:<peerId>` | Multi-user inboxes (recommended) |
+| `"per-account-channel-peer"` | `agent:<agentId>:<channel>:<accountId>:dm:<peerId>` | Multi-account inboxes |
+
+Group and channel chats always isolate: `agent:<agentId>:<channel>:group:<id>` (rooms/channels use `:channel:<id>`). Telegram forum topics append `:topic:<threadId>`. Other sources: isolated cron jobs use `cron:<job.id>`, webhooks `hook:<uuid>`.
+
+`session.scope: "global"` collapses everything onto a single `global` key. `session.mainKey` renames the main session key (default `main`).
+
+### Secure DM scoping
+
+<Warning>
+  If more than one person can DM your agent, the default `dmScope: "main"` lets every sender
+  read the same conversation context — a privacy leak. Isolate DMs per sender.
+</Warning>
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    dmScope: "per-channel-peer",   // isolate DM context per channel + sender
+  },
+}
+```
+
+Local CLI onboarding writes `session.dmScope: "per-channel-peer"` by default when the key is unset; explicit values are preserved. Verify with `openclaw security audit`.
+
+### Linking one person across channels
+
+`session.identityLinks` maps platform-prefixed ids to a canonical identity, so the same person shares one DM session under `per-peer`-style scopes:
+
+```json5
+{
+  session: {
+    dmScope: "per-channel-peer",
+    identityLinks: {
+      alice: ["telegram:123456789", "discord:987654321012345678"],
+    },
+  },
+}
+```
+
+## Reset lifecycle
+
+Sessions are reused until they expire; expiry is evaluated on the next inbound message.
+
+- **Daily reset (default):** a session is stale once its last update predates the most recent daily boundary — **4:00 AM local time on the gateway host** (`session.reset.atHour`).
+- **Idle reset (optional):** `session.reset.idleMinutes` adds a sliding idle window. When both are set, **whichever expires first wins**.
+- **Legacy idle-only:** setting `session.idleMinutes` without any `session.reset` / `resetByType` config keeps idle-only mode for backward compatibility.
+- **Per-type overrides:** `session.resetByType` overrides the policy for `direct`, `group`, and `thread` sessions (`dm` is a deprecated alias of `direct`).
+- **Per-channel overrides:** `session.resetByChannel` overrides the policy for a channel and takes precedence over `reset` / `resetByType`.
+- **Manual reset:** exact `/new` or `/reset` (plus any triggers in `session.resetTriggers`) starts a fresh session id; `/new <model>` also switches model. Isolated cron jobs always mint a fresh session id per run.
+
+```json5
+{
+  session: {
+    reset: { mode: "daily", atHour: 4, idleMinutes: 120 },
+    resetByType: {
+      direct: { mode: "idle", idleMinutes: 240 },
+      group: { mode: "idle", idleMinutes: 120 },
+    },
+    resetByChannel: {
+      discord: { mode: "idle", idleMinutes: 10080 },
+    },
+  },
+}
+```
+
+Changes take effect when the gateway restarts (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`). Expiry itself is evaluated lazily on the next message — no restart-free timer fires.
+
+## Where state lives
+
+On the gateway host, per agent:
+
+- Store index: `~/.openclaw/agents/<agentId>/sessions/sessions.json` — a map of `sessionKey -> { sessionId, updatedAt, ... }`. Deleting entries is safe; they are recreated on demand.
+- Transcripts: `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl` (Telegram topic sessions use `<sessionId>-topic-<threadId>.jsonl`).
+- Group entries may carry `displayName`, `channel`, `subject`, `room`, `space`, and `origin` metadata for UI labelling.
+
+Token counts in UIs come from the gateway's store fields (`inputTokens`, `outputTokens`, `totalTokens`, `contextTokens`) — clients never parse JSONL transcripts to compute totals.
+
+## External storage
+
+By default sessions live as local JSONL files plus the `sessions.json` index (the `fs-jsonl` path). Configure `session.storage` for durable or shared storage:
+
+```json5
+{
+  session: {
+    storage: {
+      backend: "postgres",        // "fs-jsonl" | "sqlite" | "postgres"
+      mode: "primary",            // "primary" | "mirror"
+      cache: "redis",             // "none" | "redis" (postgres only) — see /developers/redis-session-cache
+      databaseUrl: "postgres://user:pass@host:5432/wednesdayai",   // or OPENCLAW_DATABASE_URL
+      // sqlitePath: "~/.openclaw/sessions.db",   // sqlite default when backend unset
+      fallbackToJsonlOnError: false,
+    },
+  },
+}
+```
+
+Resolution rules when `session.storage` is set but `backend` is not: a configured `databaseUrl` selects `postgres`; otherwise `sqlite` (default path `<state dir>/sessions.db`, i.e. `~/.openclaw/sessions.db`). Without any `session.storage` block, sessions run on the fs-jsonl default.
+
+The configured backend is the single source of truth for transcripts. Switching from JSONL to SQLite/Postgres needs no manual migration — the store index is rebuilt on demand, the database schema converges automatically on startup, and existing `.jsonl` files may be backfilled once (disable with `session.storage.migration.validateOnStart: false` for a clean cut-over). See [Redis session cache](/developers/redis-session-cache) for the hot-cache layer and [Session consumer claims](/admin/gateway/session-consumer-claims) for the durable claim ledger both database backends carry.
+
+## Maintenance
+
+`session.maintenance` bounds `sessions.json` and transcript artifacts. Maintenance runs during session-store writes and on demand via `openclaw sessions cleanup`.
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `session.maintenance.mode` | `"warn"` | `"warn"` reports what would be evicted; `"enforce"` applies cleanup |
+| `session.maintenance.pruneAfter` | `"30d"` | Prune entries older than this duration |
+| `session.maintenance.maxEntries` | `500` | Cap entry count (oldest first) |
+| `session.maintenance.rotateBytes` | `10mb` | Rotate `sessions.json` above this size |
+| `session.maintenance.resetArchiveRetention` | same as `pruneAfter` (`30d`) | Retention for archived reset transcripts; `false` disables cleanup |
+| `session.maintenance.maxDiskBytes` | unset (disabled) | Optional per-agent sessions-directory disk budget |
+| `session.maintenance.highWaterBytes` | 80% of `maxDiskBytes` | Target size after disk-budget cleanup |
+
+`"enforce"` order: prune stale entries → cap entry count → archive orphaned transcripts → purge old `*.deleted.*` / `*.reset.*` archives → rotate `sessions.json` → enforce disk budget toward `highWaterBytes`.
+
+```json5
+{
+  session: {
+    maintenance: {
+      mode: "enforce",
+      pruneAfter: "45d",
+      maxEntries: 800,
+      maxDiskBytes: "1gb",
+      highWaterBytes: "800mb",
+    },
+  },
+}
+```
+
+Preview before enforcing: `openclaw sessions cleanup --dry-run --json`.
+
+## Identity and privacy
+
+Plugins and providers never receive raw identity configuration. The boundary:
+
+- **`session.identityLinks` stays core configuration.** Plugin contexts expose resolved fields (`canonicalIdentity`, `senderIsOwner`, and `identitySource` — one of `"sender"`, `"parent-session"`, `"job-config"` describing how the identity was resolved), never the raw `identityLinks` map.
+- **`channelConversationId`** identifies the transport conversation or thread (legacy plugin fields named `conversationId` refer to this channel identity).
+- **`providerConversationId`** is an opaque SHA-256-derived correlation id WednesdayAI mints for model calls (prefixed hash of `agent + session`, 32 hex chars). It is not a storage column; store it only as an opaque value.
+- **`hashedUserId`** is a one-way hash of the sender identity — plugins can correlate users without seeing phone numbers or handles.
+- **`turn.turnId`** identifies one user turn (same value as `runId` in the v1 plugin contract). User and assistant entries for one exchange share it — dedupe append fan-out with turn id + entry id or raw hash.
+- **`sessionId` / `sessionKey` may be absent** during very early `message_received` hooks; WednesdayAI omits them rather than fabricating values.
+- **Heartbeat and cron attribution:** `heartbeat.identity` (or a cron job's `identity`) attributes a system run to a registered user — it must case-insensitively match a `session.identityLinks` key at run time; absent means a system run with no identity. Matches resolve to `identitySource: "job-config"`.
+
+This does not make untrusted plugins safe — plugins still run in-process with gateway trust — but the SDK gives them resolved, hashed, or opaque fields instead of raw config. See [Identity attribution](/admin/gateway/system-prompt#identity-attribution) for how identity reaches the system prompt.
+
+## Inspecting
+
+- `openclaw status` — store path and recent sessions.
+- `openclaw sessions --json` — every entry (filter with `--active <minutes>`).
+- `openclaw gateway call sessions.list --params '{}'` — sessions from a running (or remote, via `--url`/`--token`) gateway.
+- `/status` in chat — reachability, context usage, current toggles.
+- `/context list` / `/context detail` — system prompt and workspace-file contributions.
+
+## Troubleshooting
+
+**Two different people share context in DMs** — `dmScope: "main"` is the default and pools all DMs into one session. Set `dmScope: "per-channel-peer"` (or `"per-account-channel-peer"` for multi-account) and confirm with `openclaw security audit`.
+
+**Session does not reset at the expected daily time** — the daily boundary uses the gateway host's local time (default 4:00 AM). If the host timezone differs from yours, adjust `session.reset.atHour` or the host timezone, then restart the gateway.
+
+**`sessions.json` grows large and writes slow down** — enable `mode: "enforce"` with both `pruneAfter` and `maxEntries` limits; add `maxDiskBytes` + `highWaterBytes` for hard bounds. Preview with `openclaw sessions cleanup --dry-run --json`.
+
+## Related
+
+- [System prompt](/admin/gateway/system-prompt) — what each session starts with
+- [Session consumer claims](/admin/gateway/session-consumer-claims) — durable session-work ledger for plugins
+- [Redis session cache](/developers/redis-session-cache) — Postgres hot-cache layer
+- [Heartbeat](/admin/gateway/heartbeat) — periodic runs on the main session

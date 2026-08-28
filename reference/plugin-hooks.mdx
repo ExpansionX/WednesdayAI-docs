@@ -1,0 +1,186 @@
+---
+title: "Plugin hooks reference"
+sidebarTitle: "Plugin hooks"
+description: "Exhaustive reference for the 35 plugin lifecycle hooks: registration, contexts, per-hook event and result types, mutation semantics, and timeouts."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Plugin hooks reference
+
+This is the exhaustive contract reference for WednesdayAI's **plugin lifecycle hooks** — the typed events registered inside a plugin with `api.on(name, handler, opts?)`. Source of truth: `PluginHookName`, `PluginHookHandlerMap`, and the `PluginHook*` types in `src/plugins/types.ts`, re-exported from `openclaw/plugin-sdk`.
+
+For the authoring guide (which hook to pick, mutation categories, examples) see [Hooks](/developers/hooks). For standalone `HOOK.md` hooks and the bundled hook catalogue, see [Hooks catalogue](/reference/hooks-catalogue) — those are a different system.
+
+## Registration
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.on("before_tool_call", (event, ctx) => {
+    // event and ctx are statically typed per hook name
+    return { block: true, blockReason: "not allowed after hours" };
+  }, { priority: 10 });   // optional; higher runs later within a hook
+}
+```
+
+- Handlers may be synchronous or `async`; the runtime awaits them.
+- Handlers for the same hook run **sequentially** in registration order; `{ priority }` orders across plugins.
+- **Context lifecycle hooks** (`context.collect`, `context.project`, `context.prune`, `compaction.plan`) are awaited with a **5 000 ms timeout**; a timed-out handler is logged and skipped. Other hooks have no dedicated timeout but sit on the run's critical path — keep them fast.
+- A thrown handler error is caught and logged per `catchErrors` policy; it does not crash the gateway.
+
+## Shared context types
+
+Most hooks receive one of these as the second (`ctx`) argument:
+
+```typescript
+// Agent context — model/prompt/tool/session/gateway hooks
+type PluginHookAgentContext = {
+  agentId?: string; sessionKey?: string; sessionId?: string; runId?: string;
+  workspaceDir?: string; messageProvider?: string;
+  trigger?: string;            // "user" | "heartbeat" | "cron" | "steer" | "memory" | "internal"
+  channelId?: string; workspaceLane?: WorkspaceLaneResolution;
+  channelContext?: PluginHookChannelContext;  // { channelId, senderExternalId?, channelConversationId?, [key: string]: unknown }
+  runtimeIdentity?: PluginRuntimeIdentity;    // resolved identity — see below
+  turn?: PluginTurnIdentity;                  // turn correlation — see below
+} & SenderIdentityFields;
+
+// Message context — message_* hooks
+type PluginHookMessageContext = {
+  channelId: string; accountId?: string;
+  conversationId?: string;      // legacy alias of channelConversationId
+  channelConversationId?: string; messageProvider?: string;
+  sessionId?: string; sessionKey?: string; runId?: string; messageId?: string;
+  senderId?: string; senderName?: string; senderUsername?: string; senderE164?: string;
+  canonicalIdentity?: string; senderIsOwner?: boolean; laneId?: string;
+  workspaceLane?: WorkspaceLaneResolution;
+  channelContext?: PluginHookChannelContext;
+  runtimeIdentity?: PluginRuntimeIdentity; turn?: PluginTurnIdentity;
+};
+
+// Tool context — before/after_tool_call
+type PluginHookToolContext = {
+  agentId?: string; sessionKey?: string;
+  sessionId?: string;           // ephemeral session UUID — regenerated on /new and /reset
+  runId?: string; toolName: string; toolCallId?: string;
+  runtimeIdentity?: PluginRuntimeIdentity; turn?: PluginTurnIdentity;
+};
+
+// Context lifecycle — storage.afterAppend, context.*, compaction.plan
+// See ContextLifecycleContext in /developers/context-engine.
+```
+
+`PluginRuntimeIdentity` carries resolved identity: `agentId`/`agentName`, `sessionId`/`sessionKey`, `channelConversationId`, opaque `providerConversationId` + `hashedUserId`, raw sender fields (`senderId`/`senderName`/`senderUsername`/`senderE164`), `canonicalIdentity` + `identitySource` (`"sender" | "parent-session" | "job-config"`), `senderIsOwner`, `messageProvider`, `channelId`, and `laneId` (opaque workspace-lane digest). `PluginTurnIdentity` carries `turnId` (equals `runId`), sequence numbers (`userSeq`/`assistantSeq`, global variants), and entry ids.
+
+## Hook catalogue
+
+### Model and prompt hooks
+
+| Hook | Fires | Event shape (abridged) | Return |
+| ---- | ----- | ---------------------- | ------ |
+| `before_model_resolve` | Before the model/provider is chosen | `{ prompt: string }` | `{ modelOverride?, providerOverride? }` |
+| `before_prompt_build` | Before system prompt + context assembly | `{ prompt, messages: unknown[], systemPrompt?: string }` | `{ systemPrompt?, prependContext? }` — `systemPrompt` appended after built sections; `prependContext` inserted before the user turn |
+| `before_context_send` | Just before messages go to the model | `{ messages: AgentMessage[], modelId, provider, contextWindowTokens }` | `{ messages? }` replaces the outgoing list |
+| `before_agent_start` | Legacy combined pre-run hook | `{ prompt, messages?: unknown[] }` | combines prompt-build + model-resolve results |
+| `llm_input` | After input is prepared | `{ runId, sessionId, provider, model, systemPrompt?, prompt, historyMessages, imagesCount }` | void (observe) |
+| `llm_output` | After the model returns | `{ runId, sessionId, provider, model, assistantTexts, lastAssistant?, usage? }` | void (observe) |
+| `model_call_ended` | Once per run attempt, after the full tool-use loop | `{ runId, callId, provider, model, durationMs, outcome: "completed" \| "error", failureKind?, timeToFirstByteMs?, usage?, responseHeaders?, proxyMetadata? }` | void — but may **mutate `usage` / `proxyMetadata` in place** (core reads `proxyMetadata` back for actualProvider/actualModel); runs serially |
+| `agent_end` | Agent run finishes | `{ messages: unknown[], success, error?, durationMs? }` | void (observe) |
+
+<Note>
+  `model_call_ended` fires per <em>attempt</em>, not per individual LLM API call inside a
+  tool-use loop. Use <code>llm_output</code> for a stable post-run observation point.
+</Note>
+
+### Message hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `message_received` | Inbound message received (session ids may be absent — never fabricated) | `{ from, content, timestamp?, metadata? }` on `PluginHookMessageContext` | void (observe) |
+| `message_sending` | Before an outbound message is sent | `{ to, content, metadata? }` | `{ content?, cancel? }` — rewrite or cancel |
+| `message_sent` | After delivery (success or failure) | `{ to, content, success, error? }` | void (observe) |
+
+### Tool hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `before_tool_call` | Before a tool executes | `{ toolName, params, runId?, toolCallId? }` | `{ params?, block?, blockReason? }` — rewrite params or short-circuit |
+| `after_tool_call` | After a tool executes | `{ toolName, params, runId?, toolCallId?, result?, error?, durationMs? }` | void (observe) |
+| `tool_result_persist` | Before a tool result is written to the transcript | `{ toolName?, toolCallId?, message: AgentMessage, isSynthetic? }` | `{ message? }` replaces the persisted message |
+| `before_message_write` | Before any message is written to the transcript | `{ message, sessionKey?, agentId? }` | `{ block?, message? }` — block the write or replace the message |
+
+### Session hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `session_start` | A session starts | `{ sessionId, sessionKey?, resumedFrom? }` | void (observe) |
+| `session_end` | A session ends | `{ sessionId, sessionKey?, messageCount, durationMs? }` | void (observe) |
+| `before_reset` | On `/new` / `/reset`, before the session clears | `{ sessionFile?, messages?, reason? }` | void (observe) |
+
+### Subagent hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `subagent_spawning` | Before a subagent spawn | `{ childSessionKey, agentId, label?, mode: "run" \| "session", requester?, threadRequested }` | `{ status: "ok", threadBindingReady? }` to allow, or `{ status: "error", error }` to block |
+| `subagent_delivery_target` | Resolving where a subagent reply is delivered | `{ childSessionKey, requesterSessionKey, requesterOrigin?, childRunId?, spawnMode?, expectsCompletionMessage }` | `{ origin? }` overrides the delivery origin |
+| `subagent_spawned` | A subagent has spawned | spawn base + `{ runId }` | void (observe) |
+| `subagent_ended` | A subagent ended | `{ targetSessionKey, targetKind: "subagent" \| "acp", reason, sendFarewell?, accountId?, runId?, endedAt?, outcome?, error? }` | void (observe) |
+
+Subagent hooks receive `PluginHookSubagentContext`: `{ runId?, childSessionKey?, requesterSessionKey?, runtimeIdentity?, turn? }`.
+
+### Gateway hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `gateway_start` | Gateway process starts | `{ port: number }` | void (observe) |
+| `gateway_stop` | Gateway process stops | `{ reason? }` | void (observe) |
+
+### Transform hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `transform_llm_input` | Mutate the message list before the model call | `{ messages: AgentMessage[], provider, model }` | `{ messages }` — replaces the input |
+| `transform_llm_output` | Mutate assistant output after the model call | `{ assistantTexts: string[], lastAssistant?, provider, model }` | `{ assistantTexts? }` |
+
+### Storage and context lifecycle hooks
+
+All receive `ContextLifecycleContext` (see [Context engine](/developers/context-engine)). These are the context-engine surface:
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `storage.afterAppend` | After a conversation entry is appended to storage | `{ entry: StoredConversationEntry, cursor: StorageCursor }` | void (observe) |
+| `context.collect` | Collecting context for the current turn | `{ prompt, cleanUserMessage, messages, envelope, storage? }` | `PromptContribution` — merged by placement, priority-sorted |
+| `context.project` | Projecting contributions into messages | `{ messages, contributions, envelope, storage? }` | `{ messages?, projection?, contribution? }` |
+| `context.prune` | Pruning under token pressure | `{ messages, tokenWindow?, usage?, storage? }` | `{ messages?, dropped?, contribution?, compactionHandled? }` |
+| `compaction.plan` | Planning a compaction pass | `{ messages, tokenWindow?, usage?, storageCursor? }` | `{ plan?, messages?, contribution? }` |
+
+### Compaction observer hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `before_compaction` | Before compaction runs | `{ messageCount, compactingCount?, tokenCount?, messages?, sessionFile? }` — all pre-compaction messages are already on disk | void (observe) |
+| `after_compaction` | After compaction completes | `{ messageCount, tokenCount?, compactedCount, sessionFile? }` | void (observe) |
+
+### Scheduling and outcome hooks
+
+| Hook | Fires | Event shape | Return |
+| ---- | ----- | ----------- | ------ |
+| `agent_idle` | Core idle monitor crosses an idle threshold or a schedule window opens (ADR 0048) | `{ agentId, idleSinceMs, idleForMs, trigger: "idle" \| "schedule" }` | void (observe) |
+| `task_outcome` | Task/subagent completion outcome emitted (ADR 0048) | `{ taskRunId?, agentId?, source: "task" \| "subagent" \| "session", outcome: "completed" \| "failed" \| "preempted" \| "cancelled", quality?, meta? }` — `"session"` source is reserved and not yet produced; handlers must treat it as reachable | void (observe) |
+
+## What not to do
+
+```typescript
+// ❌ import { HookContext } from "openclaw/plugin-sdk";  — does not exist
+// ❌ return value from an observe-only hook (llm_output, agent_end, ...) — ignored
+// ❌ slow context.* handler — abandoned after 5000 ms, contribution lost
+// ❌ mutating event.messages in place — return a new value instead
+```
+
+## Related
+
+- [Hooks](/developers/hooks) — authoring guide and mutation categories
+- [Context engine](/developers/context-engine) — the `context.*` / `compaction.plan` pipeline in depth
+- [Hooks catalogue](/reference/hooks-catalogue) — standalone `HOOK.md` hooks and bundled hooks (a separate system)

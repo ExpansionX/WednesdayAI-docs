@@ -1,0 +1,146 @@
+---
+title: "Exec and plugin tools"
+sidebarTitle: "Exec"
+description: "How the built-in exec tool and its approval policy relate to plugin development: running commands from a plugin, what exec policy does and does not gate, and approval-aware tool design."
+audience: developer
+---
+
+# Exec and plugin tools
+
+`exec` (aliased as `bash`) is the built-in tool agents use to run shell commands. Its security policy (`tools.exec.security` / `ask`) and the human approval flow are enforced **inside that tool's implementation** — they are not a general process-level sandbox. This page covers what that means when you build plugin tools: what your tools can do, what the policy gates, and how to design tools that respect the operator's approval expectations.
+
+## The contract
+
+```ts
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  // Subprocess execution on the plugin runtime — NOT gated by tools.exec policy.
+  const { runCommandWithTimeout } = api.runtime.system;
+
+  // Custom gateway RPC methods, if you need your own request/decision flow.
+  api.registerGatewayMethod("my-plugin.thing", async ({ params, respond }) => {
+    respond(true, { ok: true }, undefined);
+  });
+}
+```
+
+`runCommandWithTimeout` has this shape:
+
+```ts
+type SpawnResult = {
+  pid?: number;
+  stdout: string;
+  stderr: string;
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  killed: boolean;
+  termination: "exit" | "timeout" | "no-output-timeout" | "signal";
+  noOutputTimedOut?: boolean;
+};
+```
+
+## What exec policy gates, and what it does not
+
+| Surface | Gated by `tools.exec` policy / approvals? |
+|---------|------------------------------------------|
+| The built-in `exec` / `bash` tool | Yes — allowlist checks, safe bins, and the approval flow all apply |
+| Your plugin tool's `execute()` code | **No** — tool code runs in-process with the gateway |
+| `api.runtime.system.runCommandWithTimeout(...)` | **No** — it spawns directly, with a timeout but no approval prompt |
+
+What does gate your plugin tool is the **tool policy** (allow/deny lists): the tool itself can be blocked with `tools.deny`, limited by `tools.allow`, or scoped per agent. Entries match the exact tool name, your plugin id (all its tools), or `group:plugins` (all plugin tools). An optional tool (`{ optional: true }`) must be added to `tools.allow` before the model sees it — see [Agent tools: optional tools](/developers/agent-tools#optional-tools-opt-in).
+
+The practical consequence: a plugin tool that shells out can run commands the operator never approved through the exec flow. Treat that as a trust decision you are making on the operator's behalf, and be explicit about it in your manifest description and README.
+
+## Running commands from a plugin
+
+When your plugin genuinely needs a subprocess (a bundled CLI, a git helper), use `runCommandWithTimeout` and always pass a timeout:
+
+```ts
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTool({
+    name: "my-plugin_deploy",
+    description:
+      "Deploy the workspace using the bundled deploy CLI. Runs on the gateway host.",
+    parameters: Type.Object({ ref: Type.String() }),
+    ownerOnly: true,
+    async execute(_id, params) {
+      const result = await api.runtime.system.runCommandWithTimeout(
+        ["deploy", "--ref", String(params.ref)],
+        { timeoutMs: 60_000, cwd: "/opt/my-app" },
+      );
+      const text = [
+        `exit=${result.code ?? "signal:" + result.signal}`,
+        result.stdout.trim(),
+        result.stderr.trim(),
+      ]
+        .filter(Boolean)
+        .join("\n");
+      return { content: [{ type: "text", text }] };
+    },
+  });
+}
+```
+
+Notes on the example:
+
+- `ownerOnly: true` restricts the tool to owner senders — the closest analogue to the exec approval flow available to plugin tools. Use it for anything with host-side effects.
+- `runCommandWithTimeout` never throws on non-zero exit; check `result.code` and surface `stderr` to the model.
+- The argv form (no shell string) avoids shell-injection ambiguity in model-supplied parameters.
+
+### What not to do
+
+```ts
+// ❌ do not shell out with a shell string built from model input
+import { execSync } from "node:child_process";
+const out = execSync(`deploy --ref ${params.ref}`).toString(); // sync, shell-interpolated, blocks the loop
+```
+
+```ts
+// ❌ do not assume tools.exec policy or approvals protect your tool
+//    (a plugin tool that spawns bypasses the exec approval flow entirely)
+```
+
+## Designing approval-aware tools
+
+Prefer reusing the built-in exec flow over shelling out yourself:
+
+1. **Let the model call `exec`.** If your plugin's job can be expressed as commands, register prompts/skills that instruct the model to use the built-in `exec` tool instead of registering your own subprocess tool. The operator's `tools.exec` policy, allowlist, and approval prompts then apply for free. This is the recommended default.
+2. **Mark host-effecting tools `ownerOnly`.** When you must spawn directly, `ownerOnly: true` ensures only the paired/allowlisted owner can trigger it.
+3. **Document the trust story.** State in your manifest description whether your tool executes commands, on which host, and that it does not go through exec approvals. Operators read this when deciding whether to install.
+4. **Custom decision flows.** If your plugin needs its own human-in-the-loop step, `api.registerGatewayMethod` gives you a request/respond RPC surface; broadcast events and resolve patterns can be modelled on the gateway's own approval methods. This is advanced — reach for it only when the built-in flow genuinely cannot express the decision.
+
+## Async safety
+
+**Blocking the agent loop.** `register` may be synchronous or async, but never perform synchronous blocking I/O inside it — `execSync`/`readFileSync` stall the event loop for the entire gateway during startup. Tool `execute()` functions are always async, but a slow one blocks **the user's reply** until it completes.
+
+```ts
+// ❌ synchronous blocking I/O at startup stalls the whole gateway
+export default function register(api: OpenClawPluginApi): void {
+  const version = execSync("my-cli --version").toString();
+  // ...
+}
+```
+
+```ts
+// ✅ make register async and await subprocesses
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const result = await api.runtime.system.runCommandWithTimeout(
+    ["my-cli", "--version"],
+    5_000,
+  );
+  const version = result.stdout.trim();
+  // ...
+}
+```
+
+Always pass `timeoutMs` (or the numeric shorthand). A hung child process otherwise blocks the tool call — and the user's reply — indefinitely; prefer `noOutputTimeoutMs` for commands that stream nothing when stuck.
+
+## Related
+
+- [Agent tools](/developers/agent-tools) — the full `registerTool` surface, optional tools, and allowlists
+- [Exec approvals (admins)](/admin/gateway/exec-approvals) — the approval flow your tools sit alongside
+- [Tool policy (admins)](/admin/gateway/tool-policy) — `tools.exec` security modes and the approvals file
+- [Write your first plugin](/developers/plugins/your-first-plugin)

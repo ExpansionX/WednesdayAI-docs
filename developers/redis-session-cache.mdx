@@ -1,0 +1,120 @@
+---
+title: "Redis session cache"
+description: "The Postgres session-storage Redis hot cache: write-through cursor and tail invalidation, cursor-consistent reads, graceful degradation, and every config key."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Redis session cache
+
+When session storage runs on Postgres, WednesdayAI can front it with a **Redis hot cache** (`session.storage.cache: "redis"`). The cache is a strictly-optional accelerator: every read path falls back to Postgres on any miss, timeout, or error, and writes always go through Postgres first. Implementation: `src/config/sessions/ctx-redis-cache.ts` (`CtxRedisCache`), wired in `src/config/sessions/storage-config.ts`.
+
+This page is written for developers extending or debugging the storage layer. Operators configuring the cache can jump to [For administrators](#for-administrators).
+
+## Write-through pattern
+
+After every conversation append commits to Postgres, the cache is updated in a write-through step (`afterAppend`):
+
+1. **Cursor write** — `SET ctx:<sessionId>:cursor <cursor JSON> EX <ttl>` records the new storage cursor (seq, entry id, `rawSha256`).
+2. **Tail invalidation** — `DEL ctx:<sessionId>:tail` drops the cached transcript tail, so the next read repopulates it from Postgres.
+
+The cursor is the cache-coherence anchor: every cached payload (tail, projection) stores the cursor it was built from, and a read only serves cache when that cursor **exactly matches** the current cursor (`backend`, `sessionId`, `seq`, `rawSha256`). Any append changes the cursor, which invalidates derived payloads by comparison rather than by explicit purge.
+
+```text
+append → Postgres commit → SET cursor (EX ttl) → DEL tail
+read   → GET tail → cursor match? serve : SELECT from Postgres → SET tail (EX ttl)
+```
+
+## What is cached
+
+| Redis key | Payload | Notes |
+| --------- | ------- | ----- |
+| `ctx:<sessionId>:cursor` | `StorageCursor` | Written on every append; TTL-bounded |
+| `ctx:<sessionId>:tail` | `{ cursor, limit, entries }` | Tail read-through; served only when the cached `limit >=` requested limit and cursors match |
+| `ctx:<sessionId>:projection:<type>` | `{ cursor, payload }` | Derived projections (e.g. session summaries), cursor-consistent |
+| `ctx:<sessionId>:session` | session row JSON | Durable high-water-mark persistence used by the store layer |
+
+Payloads larger than **64 KiB** serialized are never cached, and tail entries carrying `metadata.largePayloadRefs` are skipped — oversized blobs stay Postgres-only so the cache stays fast.
+
+## Degradation semantics
+
+The cache is designed to be silently disposable:
+
+- **Operation timeout: 250 ms.** Any Redis op slower than that is abandoned and the Postgres path serves the read.
+- **Connect timeout: 1 s; close timeout: 250 ms.** A cache that cannot come up at gateway start is skipped (`redis ctx cache unavailable; continuing without cache`).
+- **Failures log at most once per 60 s** (`Redis ctx cache operation failed; continuing from Postgres`) instead of per operation.
+- **Missing `redisUrl`** logs `redis ctx cache requires session.storage.redisUrl; continuing without cache` and starts cacheless.
+
+There is no consistency risk in killing Redis at any time — the worst case is extra Postgres reads while the TTL window expires.
+
+## Configuration surface
+
+Resolved by `resolveSessionStorageConfig` (`src/config/sessions/storage-config.ts`):
+
+| Config | Default | Effect |
+| ------ | ------- | ------ |
+| `session.storage.cache` | `"none"` | `"redis"` enables the cache — **only effective with `backend: "postgres"`** |
+| `session.storage.redisUrl` | — | Redis connection string; required for the cache (no default) |
+| `session.storage.redis.keyPrefix` | `"ctx"` | Key namespace |
+| `session.storage.redis.ttlSeconds` | `300` | TTL applied to every cache write |
+
+Internal knobs (not config-exposed, from `CtxRedisCacheOptions`): `operationTimeoutMs` 250, `maxPayloadBytes` 64 KiB, `failureLogIntervalMs` 60 000.
+
+## For administrators
+
+Enable the cache on an existing Postgres session storage:
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    storage: {
+      backend: "postgres",
+      databaseUrl: "postgres://user:pass@host:5432/wednesdayai",  // or OPENCLAW_DATABASE_URL
+      cache: "redis",
+      redisUrl: "redis://cache-host:6379",
+      redis: {
+        keyPrefix: "ctx",     // default
+        ttlSeconds: 300,      // default: 5 minutes
+      },
+    },
+  },
+}
+```
+
+- The cache takes effect at gateway startup — restart after changing these keys (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+- `cache: "redis"` without `backend: "postgres"` is ignored (SQLite and JSONL backends have no Redis cache path).
+- Redis going down or being flushed is safe: reads fall back to Postgres automatically and logged warnings are rate-limited to once a minute. Expect elevated Postgres load and slower tail reads during an outage — nothing else changes.
+- The cache stores derived/correlated data only; **Postgres remains the sole durable store**. Do not point `ttlSeconds` at retention expectations — TTL only bounds staleness of cached copies.
+- `redis` (the `node-redis` client) is loaded lazily; only Postgres+cache installs need it available.
+
+Related: [Sessions](/admin/session) covers the storage backends themselves; [Session consumer claims](/admin/gateway/session-consumer-claims) covers the adjacent `consumerClaims` block.
+
+## Extending from a plugin
+
+Plugins do not talk to this cache directly — they see it through storage reads (`ConversationReadQuery` on the context-engine hooks) which are already cache-accelerated. If your plugin adds its own projections, key them by session and validate against the storage cursor before reuse, mirroring `CtxRedisCache.readProjection`:
+
+```typescript
+import type { StorageCursor } from "openclaw/plugin-sdk";
+
+type CachedProjection = { cursor: StorageCursor; payload: Record<string, unknown> };
+
+function isFresh(cached: CachedProjection, current: StorageCursor | undefined): boolean {
+  if (!current) return false;
+  return (
+    cached.cursor.backend === current.backend &&
+    cached.cursor.sessionId === current.sessionId &&
+    cached.cursor.seq === current.seq &&
+    cached.cursor.rawSha256 === current.rawSha256
+  );
+}
+```
+
+**What not to do:** do not cache derived data keyed only by `sessionId` without the cursor — an append between your read and your reuse silently serves stale context.
+
+## Related
+
+- [Context engine](/developers/context-engine) — the read paths this cache accelerates
+- [Sessions](/admin/session) — storage backends, maintenance, and privacy
+- [Plugin hooks reference](/reference/plugin-hooks) — `storage.afterAppend` and context hooks

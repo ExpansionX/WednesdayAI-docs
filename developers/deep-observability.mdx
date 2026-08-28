@@ -1,0 +1,96 @@
+---
+title: "Deep observability runtime metrics"
+sidebarTitle: "Runtime metrics"
+description: "The Node.js runtime metric surface exported by the diagnostics-otel extension: event loop, GC, heap, CPU, and process counters."
+audience: developer
+---
+
+<!--
+Nav registration needed in docs.json (not yet present):
+Developers tab → add "developers/deep-observability".
+-->
+
+# Deep observability runtime metrics
+
+The `diagnostics-otel` extension ships a runtime metrics collector (`extensions/diagnostics-otel/src/runtime-metrics.ts`) that exports Node.js process health — event loop, garbage collection, V8 heap, CPU, and process counters — as standard OTel metrics alongside the application metrics. This page documents that metric surface so you can build dashboards, alerts, and recording rules against it without reading the collector source.
+
+The collector is config-driven, not part of the plugin SDK: operators enable it with `diagnostics.otel.runtime` (see [Deep observability](/admin/gateway/deep-observability)). As a plugin author you do not interact with it directly — you consume its output in your OTel backend, or you follow the same patterns if you ship your own collector.
+
+## Contract
+
+The runtime config shape (`RuntimeMetricsConfig`) and the collected snapshot:
+
+```typescript
+export type RuntimeMetricsConfig = {
+  enabled?: boolean; // default false
+  intervalMs?: number; // default 15_000; values below 1000 are clamped to 1000
+  collectProc?: boolean; // default true — Linux /proc/self/fd and /proc/self/io counters
+};
+
+export type RuntimeMetricsCollector = {
+  stop: () => void; // clears the interval, disconnects the GC observer,
+                    // disables the event-loop delay monitor, removes callbacks
+};
+```
+
+Collection semantics:
+
+- A `setInterval` timer (default 15 s) takes a fresh snapshot; every observable gauge reports the latest snapshot when scraped.
+- Per-window deltas (CPU time, page faults, fs reads/writes) are computed against the previous snapshot, not process start.
+- Event loop delay p99 is measured with `monitorEventLoopDelay({ resolution: 20 })`, reset each window.
+- GC pauses arrive via a `PerformanceObserver` on `gc` entries — they are event-driven, not windowed.
+- `stop()` fully unwinds everything it started; there is no background work left behind.
+
+## Metric surface
+
+| Metric                                          | OTel type          | Unit | Labels | Source |
+| ----------------------------------------------- | ------------------ | ---- | ------ | ------ |
+| `nodejs.eventloop.utilization`                   | observable gauge   | —    | —      | `perf_hooks.eventLoopUtilization` delta per window |
+| `nodejs.eventloop.delay.p99`                     | observable gauge   | s    | —      | `monitorEventLoopDelay` percentile 99, per window |
+| `v8js.gc.duration`                               | histogram          | s    | `v8js.gc.type` = `major` \| `minor` \| `incremental` \| `weakcb` | GC performance entries |
+| `process.memory.usage`                           | observable gauge   | By   | `type` = `rss` \| `heap_total` \| `heap_used` \| `external` \| `array_buffers` | `process.memoryUsage()` |
+| `process.cpu.time`                               | observable counter | s    | `cpu.mode` = `user` \| `system` | `process.cpuUsage()` (cumulative) |
+| `process.runtime.nodejs.resource_usage`          | observable gauge   | —    | `type` = `user_cpu_time` \| `system_cpu_time` \| `max_rss` \| `minor_page_fault` \| `major_page_fault` \| `fs_read` \| `fs_write` (µs for CPU times) | `process.resourceUsage()` (cumulative) |
+| `process.runtime.nodejs.resource_usage.delta`    | observable gauge   | —    | same `type` set | same source, per-window delta |
+| `process.uptime`                                 | observable gauge   | s    | —      | `process.uptime()` |
+| `v8js.memory.heap.space.size`                    | observable gauge   | By   | `v8js.heap.space.name` | `v8.getHeapSpaceStatistics()` |
+| `v8js.memory.heap.space.available_size`          | observable gauge   | By   | `v8js.heap.space.name` | same |
+| `v8js.memory.heap.space.physical_size`           | observable gauge   | By   | `v8js.heap.space.name` | same |
+| `v8js.memory.heap.used`                          | observable gauge   | By   | `v8js.heap.space.name` | same |
+| `v8js.memory.heap.limit`                         | observable gauge   | By   | —      | `v8.getHeapStatistics().heap_size_limit` |
+| `process.unix.file_descriptor.count`             | observable gauge   | `{file_descriptor}` | — | `/proc/self/fd` entry count (Linux, `collectProc`) |
+| `wednesdayai.process.io`                         | observable gauge   | —    | `type` (raw `/proc/self/io` field names, e.g. `read_bytes`, `write_bytes`) | `/proc/self/io` (Linux, `collectProc`) |
+
+Prometheus converts dots to underscores: `nodejs.eventloop.utilization` → `nodejs_eventloop_utilization`. The `/proc`-backed metrics silently report nothing on non-Linux platforms — dashboards should not alert on their absence alone.
+
+## Alerting baselines
+
+Start with warning-level alerts and tune during a burn-in period (from the deep observability stack guidance):
+
+- Event loop utilization or delay p99 sustained above target for 5 minutes.
+- GC pause p99 spikes or a rising major-GC rate.
+- RSS growth slope sustained over 30–60 minutes; heap used approaching `v8js_memory_heap_limit`.
+- File descriptor count trending upward without a corresponding session load change.
+
+Keep recording-rule outputs bounded — precompute `wednesdayai:event_loop_utilization:avg5m`-style rules rather than repeating raw quantile expressions in every panel.
+
+## What not to do
+
+Do not build runtime dashboards or alerts on high-cardinality labels. The extension's metric attribute policy (`extensions/diagnostics-otel/src/attribute-policy.ts`) is an allowlist: raw IDs (`runId`, `sessionKey`, `chatId`, `userId`, `accountId`, `messageId`) are dropped before metrics are recorded, and only bounded names (`provider`, `model`, `channel`, `status`, `tool.name`, …) pass through. If you add your own metrics via the plugin SDK's meter, apply the same rule:
+
+```typescript
+// ❌ unbounded label — one series per session, breaks Prometheus
+counter.add(1, { sessionKey });
+
+// ✅ bounded or hashed — series count stays flat
+counter.add(1, { openclaw.channel: "telegram" });
+counter.add(1, { sessionHash: stableHash(sessionKey) }); // 16-hex-char sha256 prefix
+```
+
+Also avoid correlating these process metrics with per-conversation data in the same panel — use the trace tree ([OTel and Langfuse diagnostics](/admin/observability/otel-langfuse)) for per-run attribution and keep runtime metrics at the process level.
+
+## Related
+
+- [Deep observability](/admin/gateway/deep-observability) — operator config for `diagnostics.otel.runtime` and capture
+- [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse) — application metric and trace surface
+- [Grafana and Prometheus setup](/admin/observability/grafana-setup) — dashboards and alert rules

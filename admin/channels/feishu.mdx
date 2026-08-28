@@ -1,0 +1,354 @@
+---
+title: "Feishu"
+sidebarTitle: "Feishu (Lark)"
+description: "Connect WednesdayAI to Feishu or Lark with the Feishu plugin: app setup, WebSocket events, access control, and configuration."
+audience: admin
+---
+
+{/* Nav registration needed (docs.json): add "admin/channels/feishu" to Administrators > Channels (suggested after "admin/channels/matrix"). */}
+
+# Feishu
+
+Feishu (called Lark outside China) is a team chat platform. The Feishu plugin connects WednesdayAI to a Feishu bot app using Feishu's **WebSocket long-connection** event subscription, so messages are received without exposing a public webhook URL. An HTTP webhook mode is also available.
+
+Replies always route back to Feishu. DMs share the agent's main session; group chats are isolated per group.
+
+## Plugin required
+
+Feishu ships as a plugin and is not bundled with the core install.
+
+```bash
+openclaw plugins install @openclaw/feishu
+```
+
+Local checkout (when running from a git repo):
+
+```bash
+openclaw plugins install ./extensions/feishu
+```
+
+## Quick setup
+
+**1. Create a Feishu app:**
+
+1. Sign in to [Feishu Open Platform](https://open.feishu.cn/app) — Lark (global) tenants use [open.larksuite.com/app](https://open.larksuite.com/app) and must set `domain: "lark"` in the config.
+2. Click **Create enterprise app**, fill in name, description, and icon.
+3. From **Credentials & Basic Info**, copy the **App ID** (format `cli_xxx`) and **App Secret**. Keep the secret private.
+
+**2. Configure permissions:**
+
+On **Permissions**, click **Batch import** and paste:
+
+```json
+{
+  "scopes": {
+    "tenant": [
+      "aily:file:read",
+      "aily:file:write",
+      "application:application.app_message_stats.overview:readonly",
+      "application:application:self_manage",
+      "application:bot.menu:write",
+      "cardkit:card:read",
+      "cardkit:card:write",
+      "contact:user.employee_id:readonly",
+      "corehr:file:download",
+      "event:ip_list",
+      "im:chat.access_event.bot_p2p_chat:read",
+      "im:chat.members:bot_access",
+      "im:message",
+      "im:message.group_at_msg:readonly",
+      "im:message.p2p_msg:readonly",
+      "im:message:readonly",
+      "im:message:send_as_bot",
+      "im:resource"
+    ],
+    "user": ["aily:file:read", "aily:file:write", "im:chat.access_event.bot_p2p_chat:read"]
+  }
+}
+```
+
+**3. Enable the bot capability:**
+
+In **App Capability → Bot**: enable the bot and set its name.
+
+**4. Configure event subscription (requires the gateway running):**
+
+In **Event Subscription**:
+
+1. Choose **Use long connection to receive events** (WebSocket).
+2. Add the event `im.message.receive_v1`.
+
+<Warning>
+Complete your WednesdayAI config and start the gateway **before** saving the long-connection event subscription — if the gateway is not running, the long-connection setup may fail to save.
+</Warning>
+
+**5. Publish the app:**
+
+Create a version in **Version Management & Release**, submit for review, and publish. Enterprise apps usually auto-approve.
+
+**6. Configure WednesdayAI:**
+
+The recommended path is the wizard — `openclaw channels add` (or `openclaw onboard` on a fresh install), choosing **Feishu** and pasting the App ID + App Secret. Or edit `~/.openclaw/openclaw.json` directly:
+
+```json5
+{
+  channels: {
+    feishu: {
+      enabled: true,
+      dmPolicy: "pairing",
+      accounts: {
+        main: {
+          appId: "cli_xxx",
+          appSecret: "<APP_SECRET>",
+          botName: "My AI assistant",
+        },
+      },
+    },
+  },
+}
+```
+
+Environment variable fallback (default account only):
+
+```bash
+FEISHU_APP_ID="cli_xxx"
+FEISHU_APP_SECRET="xxx"
+```
+
+Config entries take precedence over environment variables.
+
+Restart the gateway after changing credentials or connection settings (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+**7. Test:**
+
+Send the bot a DM in Feishu. With the default DM policy it replies with a pairing code:
+
+```bash
+openclaw pairing list feishu
+openclaw pairing approve feishu <CODE>
+```
+
+## Lark (global) domain
+
+If your tenant is on Lark (international), set the domain to `lark` at the top level or per account:
+
+```json5
+{
+  channels: {
+    feishu: {
+      domain: "lark",
+      accounts: {
+        main: {
+          appId: "cli_xxx",
+          appSecret: "<APP_SECRET>",
+        },
+      },
+    },
+  },
+}
+```
+
+## Access control
+
+### DMs
+
+- Default: `dmPolicy: "pairing"` — unknown users receive a pairing code and are ignored until approved.
+- `allowlist`: only senders in `channels.feishu.allowFrom` may DM (Feishu user Open IDs, format `ou_xxx`).
+- `open`: all users (requires `allowFrom: ["*"]`).
+- `disabled`: no DMs.
+
+### Groups
+
+- Default: `groupPolicy: "allowlist"` — groups are blocked unless listed in `groupAllowFrom` (Feishu group chat IDs, format `oc_xxx`).
+- `open`: all groups allowed (still mention-gated by default).
+- `disabled`: no group messages.
+- `requireMention` (default `true`): the bot only responds in groups when @-mentioned. Set `false` per group for auto-reply.
+
+Common configurations:
+
+```json5
+// All groups, @-mention required (default behavior)
+{
+  channels: {
+    feishu: {
+      groupPolicy: "open",
+      // requireMention defaults to true
+    },
+  },
+}
+
+// Specific groups only, no @-mention needed in one of them
+{
+  channels: {
+    feishu: {
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["oc_xxx", "oc_yyy"],
+      groups: {
+        oc_xxx: { requireMention: false },
+      },
+    },
+  },
+}
+
+// Restrict which senders are processed inside a group (full sender gating)
+{
+  channels: {
+    feishu: {
+      groupPolicy: "allowlist",
+      groupAllowFrom: ["oc_xxx"],
+      groups: {
+        oc_xxx: {
+          allowFrom: ["ou_user1", "ou_user2"], // only these members' messages are processed
+        },
+      },
+    },
+  },
+}
+```
+
+## Finding group and user IDs
+
+- **Group IDs (`oc_xxx`):** start the gateway, @-mention the bot in the group, then run `openclaw logs --follow` and look for `chat_id`. (Alternative: Feishu API debugger.)
+- **User IDs (`ou_xxx`):** start the gateway, DM the bot, then check `openclaw logs --follow` for `open_id`, or run `openclaw pairing list feishu` to see Open IDs in pending pairing requests.
+
+Restart is not required after collecting IDs; only config edits need a gateway restart.
+
+## Webhook mode (optional)
+
+Set `connectionMode: "webhook"` to receive events over HTTP instead of the WebSocket long connection. This mode requires a **Verification Token** (Feishu Open Platform → your app → **Events & Callbacks → Encryption tab → Verification Token**):
+
+```json5
+{
+  channels: {
+    feishu: {
+      connectionMode: "webhook",
+      verificationToken: "<TOKEN>",
+      // webhookPath: "/feishu/events", // default
+      // webhookHost: "127.0.0.1",      // default bind host
+      // webhookPort: 3000,              // default bind port
+    },
+  },
+}
+```
+
+The webhook server binds to `127.0.0.1` by default — put a reverse proxy in front for public exposure, and change `webhookHost` only if you intentionally need a different bind address.
+
+## Multiple accounts
+
+```json5
+{
+  channels: {
+    feishu: {
+      defaultAccount: "main",
+      accounts: {
+        main: {
+          appId: "cli_xxx",
+          appSecret: "<APP_SECRET>",
+          botName: "Primary bot",
+        },
+        backup: {
+          appId: "cli_yyy",
+          appSecret: "<APP_SECRET>",
+          botName: "Backup bot",
+          enabled: false,
+        },
+      },
+    },
+  },
+}
+```
+
+`defaultAccount` selects the account used when outbound sends do not specify one. Each account can override `domain`, `typingIndicator`, `resolveSenderNames`, chunking, and limits.
+
+## Streaming and message limits
+
+```json5
+{
+  channels: {
+    feishu: {
+      streaming: true,          // default: card streaming — the reply card updates as text is generated
+      textChunkLimit: 4000,     // default: 4000 chars per message
+      chunkMode: "length",      // default: "length"; "newline" packs paragraphs, "paragraph" = one message per paragraph
+      mediaMaxMb: 30,           // default: 30 MB upload/download cap
+    },
+  },
+}
+```
+
+Set `streaming: false` to wait for the full reply before sending.
+
+## API quota flags
+
+Two settings reduce Feishu API usage at the cost of UX detail:
+
+- `typingIndicator` (default `true`): set `false` to skip typing-indicator calls.
+- `resolveSenderNames` (default `true`): set `false` to skip sender profile lookups (sender names are not shown).
+
+## Commands
+
+`/status`, `/reset`, and `/model` work as plain text. Feishu does not support native command menus, so commands must be typed as text messages.
+
+## Configuration reference
+
+| Key | Default | Description |
+| --- | --- | --- |
+| `channels.feishu.enabled` | `true` | Enable the channel |
+| `channels.feishu.domain` | `feishu` | API domain: `feishu` or `lark` |
+| `channels.feishu.connectionMode` | `websocket` | Event transport: `websocket` or `webhook` |
+| `channels.feishu.verificationToken` | — | Required in webhook mode |
+| `channels.feishu.webhookPath` | `/feishu/events` | Webhook route path |
+| `channels.feishu.webhookHost` | `127.0.0.1` | Webhook bind host |
+| `channels.feishu.webhookPort` | `3000` | Webhook bind port |
+| `channels.feishu.defaultAccount` | `default` | Account used for outbound sends without an explicit account |
+| `channels.feishu.accounts.<id>.appId` | — | Feishu App ID (`cli_xxx`) |
+| `channels.feishu.accounts.<id>.appSecret` | — | Feishu App Secret |
+| `channels.feishu.accounts.<id>.botName` | — | Bot display name |
+| `channels.feishu.accounts.<id>.domain` | `feishu` | Per-account domain override |
+| `channels.feishu.dmPolicy` | `pairing` | `pairing` \| `allowlist` \| `open` \| `disabled` |
+| `channels.feishu.allowFrom` | — | DM allowlist (Open IDs `ou_xxx`) |
+| `channels.feishu.groupPolicy` | `allowlist` | `open` \| `allowlist` \| `disabled` |
+| `channels.feishu.groupAllowFrom` | — | Group allowlist (chat IDs `oc_xxx`) |
+| `channels.feishu.groups.<chat_id>.requireMention` | `true` | Require @-mention in that group |
+| `channels.feishu.groups.<chat_id>.allowFrom` | — | Sender gating inside that group (Open IDs) |
+| `channels.feishu.groups.<chat_id>.enabled` | `true` | Enable that group |
+| `channels.feishu.textChunkLimit` | `4000` | Outbound text chunk size (chars) |
+| `channels.feishu.chunkMode` | `length` | `length` \| `newline` (pack) \| `paragraph` |
+| `channels.feishu.mediaMaxMb` | `30` | Media upload/download cap (MB) |
+| `channels.feishu.streaming` | `true` | Streaming card output |
+| `channels.feishu.typingIndicator` | `true` | Send typing indicators |
+| `channels.feishu.resolveSenderNames` | `true` | Resolve sender display names |
+
+Config changes require a gateway restart to take effect.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Bot does not receive any messages">
+    1. Confirm the app is published and approved in Feishu Open Platform.
+    2. Confirm event subscription includes `im.message.receive_v1` and uses the long connection.
+    3. Confirm the permission scopes are complete (batch import above).
+    4. Confirm the gateway is running: `openclaw gateway status`.
+    5. Check logs: `openclaw logs --follow`.
+  </Accordion>
+  <Accordion title="Bot does not respond in group chats">
+    1. Confirm the bot is added to the group.
+    2. @-mention the bot — mention is required by default.
+    3. With the default `groupPolicy: "allowlist"`, the group must be listed in `groupAllowFrom`.
+    4. Check logs for drops: `openclaw logs --follow`.
+  </Accordion>
+  <Accordion title="DMs are ignored">
+    The sender is probably pending pairing approval. Run `openclaw pairing list feishu` and approve with `openclaw pairing approve feishu <CODE>`.
+  </Accordion>
+  <Accordion title="Message send failures">
+    Confirm the app has the `im:message:send_as_bot` permission and is published, then check `openclaw logs --follow` for the API error.
+  </Accordion>
+  <Accordion title="App Secret leaked">
+    Reset the App Secret in Feishu Open Platform, update `channels.feishu.accounts.<id>.appSecret`, and restart the gateway.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [Channel setup](/admin/channels/index)
+- [Channel troubleshooting](/admin/troubleshooting)
+- For your users, the pairing-code flow is described in [Pair your first channel](/users/pairing/first-channel)

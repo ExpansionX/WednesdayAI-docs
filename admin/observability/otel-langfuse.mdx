@@ -1,0 +1,378 @@
+---
+title: "OTel and Langfuse diagnostics"
+sidebarTitle: "OTel & Langfuse"
+description: "OpenTelemetry trace, metric, and log export from WednesdayAI, with Langfuse as a first-class backend."
+audience: admin
+---
+
+<!--
+Nav registration needed in docs.json (not yet present):
+Administrators tab → add "admin/observability/otel-langfuse" near "admin/gateway/observability".
+This page is the deep reference; admin/gateway/observability and admin/gateway/logging link into it.
+-->
+
+# OTel and Langfuse diagnostics
+
+WednesdayAI exports traces, metrics, and logs via the OpenTelemetry Protocol (OTLP). The `diagnostics-otel` extension wires core run, model-call, and tool events into a nested OTel span tree. Langfuse is supported as a first-class backend via a convenience config block that derives the ingest endpoint and Basic-auth header automatically.
+
+All configuration lives under `diagnostics.otel` in `~/.openclaw/openclaw.json`. Changes require a gateway restart (Linux: `systemctl --user restart openclaw-gateway`; macOS: `openclaw gateway restart --deep`).
+
+For the broader logging surface (file logs, log levels, OTLP log export) see [Logging](/admin/gateway/logging). For Grafana/Prometheus dashboards and alerting see [Grafana and Prometheus setup](/admin/observability/grafana-setup).
+
+## Quick start with Langfuse
+
+```json5
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      langfuse: {
+        host: "https://langfuse.example.com",
+        publicKey: "pk-lf-...",
+        secretKey: "sk-lf-...",
+      },
+      captureContent: {
+        enabled: true,
+        inputMessages: true,
+        outputMessages: true,
+        toolInputs: true,
+        toolOutputs: true,
+      },
+    },
+  },
+}
+```
+
+After restart, check the startup summary in the gateway log:
+
+```text
+diagnostics-otel: exporters configured tracesEnabled=true metricsEnabled=true logsEnabled=true preloadedSdk=false otelSdkDisabled=unset traceUrl=https://langfuse.example.com/api/public/otel/v1/traces traceHeaders=Authorization=present nodeSdk=started
+```
+
+The line reports effective signal URLs, whether auth headers are present, whether `OPENCLAW_OTEL_PRELOADED=1` skipped NodeSDK startup, and whether `OTEL_SDK_DISABLED` is set. Header values, URL userinfo, query strings, and fragments are intentionally redacted from logs.
+
+<Note>
+Without raw `captureContent`, traces still carry safe summaries and hashes, but raw prompt, completion, system prompt, tool argument, and tool schema payloads are omitted. See [captureContent](#capture-content) below.
+</Note>
+
+If the gateway loads a managed plugin from `~/.openclaw/extensions/diagnostics-otel`, keep that managed copy current — a globally updated WednesdayAI package does not automatically replace an already-installed managed extension.
+
+## Configuration reference
+
+### `diagnostics.otel`
+
+| Key               | Type                      | Default         | Description                                                                                                                                       |
+| ----------------- | ------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`         | boolean                   | `false`         | Master switch for OTel export                                                                                                                     |
+| `endpoint`        | string                    | —               | Global OTLP endpoint for all signals. Derived from `langfuse.host` when absent, then from `OTEL_EXPORTER_OTLP_ENDPOINT`                            |
+| `tracesEndpoint`  | string                    | —               | Per-signal trace endpoint override; wins over the shared endpoint and Langfuse derivation                                                          |
+| `metricsEndpoint` | string                    | —               | Per-signal metric endpoint override                                                                                                               |
+| `logsEndpoint`    | string                    | —               | Per-signal log endpoint override                                                                                                                  |
+| `protocol`        | `http/protobuf` \| `grpc` | `http/protobuf` | Only `http/protobuf` is implemented. `grpc` is accepted by the schema but the extension logs a warning and does not start                            |
+| `serviceName`     | string                    | `openclaw`      | OTel service name resource attribute (falls back to `OTEL_SERVICE_NAME`)                                                                          |
+| `traces`          | boolean                   | `true`          | Enable trace export                                                                                                                               |
+| `metrics`         | boolean                   | `true`          | Enable metrics export                                                                                                                             |
+| `logs`            | boolean                   | `false`         | Enable log export over OTLP                                                                                                                       |
+| `sampleRate`      | 0.0–1.0                   | `1.0`           | Trace sampling ratio, applied to root spans (parent-based sampling)                                                                               |
+| `flushIntervalMs` | number                    | SDK default     | Metric/log export interval. Values below 1000 are clamped to 1000                                                                                 |
+| `captureContent`  | boolean or object         | `false`         | Capture prompt/completion/tool content on spans. See [captureContent](#capture-content)                                                           |
+| `runtime`         | object                    | —               | Runtime metrics collector config. See [Deep observability](/admin/gateway/deep-observability)                                                      |
+| `modelPricing`    | object                    | —               | Override or extend the built-in USD/M-token price table. See [Cost attribution](#cost-attribution)                                                |
+| `langfuse`        | object                    | —               | Langfuse convenience config. See [Langfuse convenience block](#langfuse-convenience-block)                                                        |
+| `sessionSpans`    | boolean                   | `true`          | Group runs sharing a `sessionKey` under a parent `openclaw.session` span. Also settable inside the `langfuse` block                                                                |
+
+### captureContent
+
+Object form with per-field control:
+
+```json5
+{
+  captureContent: {
+    enabled: true,
+    inputMessages: true, // user/assistant message content on model-call spans
+    outputMessages: true, // model output content
+    toolInputs: true, // tool call arguments
+    toolOutputs: true, // tool call results
+    systemPrompt: false, // system prompt text (often contains sensitive config)
+    toolDefinitions: false, // tool schemas (bulky, rarely needed in traces)
+  },
+}
+```
+
+Rules, resolved in this order:
+
+- `captureContent: false` or unset — captures nothing.
+- `captureContent: true` (bare boolean) — enables input messages, output messages, tool inputs, tool outputs, and tool definitions. `systemPrompt` stays disabled.
+- Object form with `enabled: false` — overrides all sub-keys; captures nothing.
+- Object form — each unset sub-key defaults to `false`.
+
+<Warning>
+Captured content leaves your host. It is character-capped at 128 KB per field and sensitive tokens are redacted via the configured `redactPatterns`, but system prompts frequently contain operator configuration — keep `systemPrompt` off unless you specifically need it. Telegram-correlated content is always replaced with `telegram-content-redacted` regardless of this setting.
+</Warning>
+
+When capture is disabled, model spans export `openclaw.model.*.summary` and `openclaw.model.*.hash` attributes instead of raw content. Trace headers in Langfuse are still populated from safe message summaries (counts, roles, redacted hashes), or from the first/last captured raw model I/O when capture is on.
+
+### Langfuse convenience block
+
+```json5
+{
+  langfuse: {
+    host: "https://langfuse.example.com",
+    publicKey: "pk-lf-...",
+    secretKey: "sk-lf-...",
+    filterInfraSpans: true,
+    sessionSpans: true,
+    sessionIdleTimeoutMs: 1_800_000,
+  },
+}
+```
+
+| Key                    | Type    | Default    | Description                                                                                                                       |
+| ---------------------- | ------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `host`                 | string  | —          | Langfuse base URL. Must be bare `http`/`https` without query string or fragment. Derives the OTLP endpoint and Basic-auth header   |
+| `publicKey`            | string  | —          | Langfuse public key (`pk-lf-…`)                                                                                                   |
+| `secretKey`            | string  | —          | Langfuse secret key (`sk-lf-…`)                                                                                                   |
+| `filterInfraSpans`     | boolean | `true`     | Drop infrastructure/polling spans from the Langfuse-bound exporter. See [filterInfraSpans](#filterinfraSpans)                      |
+| `sessionSpans`         | boolean | `true`     | Group runs sharing a `sessionKey` under a parent `openclaw.session` span. See [Session spans](#session-spans)                      |
+| `sessionIdleTimeoutMs` | number  | `1800000`  | Close the session span after this much inactivity. Default 30 minutes                                                             |
+
+When `langfuse` is set and no explicit `endpoint` is configured, the plugin derives the global OTLP endpoint as `{host}/api/public/otel` and generates the Basic-auth header Langfuse's OTLP ingest requires. User-supplied `Authorization` in `otel.headers` always wins over the derived auth.
+
+### filterInfraSpans
+
+When `true` (the default), a span-level filter wraps the Langfuse OTLP exporter. Only spans carrying a Langfuse trace name, observation type, or `gen_ai.tool.name` attribute reach Langfuse; infrastructure spans (Telegram polling, webhook intake, account state) are dropped. All other OTLP backends (Tempo, a custom `endpoint`) never get the wrapper — infrastructure spans still flow there unfiltered.
+
+Set `filterInfraSpans: false` when you want the full raw span stream in Langfuse, for example while debugging Telegram polling latency.
+
+### Endpoint precedence
+
+For each signal, the plugin resolves the first available endpoint in this order:
+
+| Signal  | Config key                         | Env override                          | Fallbacks                                                                          |
+| ------- | ---------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------- |
+| Traces  | `diagnostics.otel.tracesEndpoint`  | `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`  | `diagnostics.otel.endpoint`, `langfuse.host`, shared `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| Metrics | `diagnostics.otel.metricsEndpoint` | `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` | `diagnostics.otel.endpoint`, `langfuse.host`, shared `OTEL_EXPORTER_OTLP_ENDPOINT` |
+| Logs    | `diagnostics.otel.logsEndpoint`    | `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT`    | `diagnostics.otel.endpoint`, `langfuse.host`, shared `OTEL_EXPORTER_OTLP_ENDPOINT` |
+
+Two environment switches change startup behavior:
+
+- `OTEL_SDK_DISABLED=true` disables OpenTelemetry SDK behavior globally.
+- `OPENCLAW_OTEL_PRELOADED=1` tells this extension not to start its own NodeSDK — use it only when another provider already exports the same signals. The startup log then reports `nodeSdk=skipped-preloaded`.
+
+To split backends — traces to Langfuse, metrics and logs to a local collector:
+
+```json5
+{
+  diagnostics: {
+    otel: {
+      enabled: true,
+      metricsEndpoint: "http://otel-collector:4318",
+      logsEndpoint: "http://otel-collector:4318",
+      langfuse: {
+        host: "https://langfuse.example.com",
+        publicKey: "pk-lf-...",
+        secretKey: "sk-lf-...",
+      },
+    },
+  },
+}
+```
+
+Signal-specific overrides do not inherit Langfuse auth.
+
+## Trace hierarchy
+
+Spans form a nested tree matching the actual execution path. When `sessionSpans` is enabled (the default), turns sharing a `sessionKey` are grouped under a parent `openclaw.session` trace root:
+
+```text
+openclaw.session                 (one per session key; groups multi-turn conversations)
+  openclaw.run                   (one per agent turn)
+    openclaw.model.call          (one per LLM invocation)
+      execute_tool {name}        (one per tool call, zero or more)
+      openclaw.tool.loop         (loop detector warning/block, if emitted)
+    openclaw.session_run.running (short lifecycle spans when run ids are available)
+
+# Separate roots — background task / dream lifecycle:
+openclaw.task.started | completed | failed | preempted | …
+openclaw.task.recovery_exhausted   (error status; boot recovery moved the run to dlq)
+openclaw.dream.cycle_started | cycle_completed | pass_completed | …
+```
+
+With `sessionSpans: false` the `openclaw.session` layer is omitted and each `openclaw.run` is its own trace root. Tool spans that arrive after the model stream ends (common in streaming) are still parented to the model-call span, not the run span.
+
+## Task and dream spans
+
+When the task pipeline or Dream Cycle emits diagnostics, `diagnostics-otel` exports a short span per event, named `openclaw.<event.type>` (for example `openclaw.task.completed`).
+
+Task attributes (when present): `openclaw.task.action`, `openclaw.task.id`, `openclaw.task.run_id`, `openclaw.task.stage`, `openclaw.task.attempts`, `openclaw.task.reason`, `openclaw.task.error`, `openclaw.task.duration_ms`.
+
+Dream attributes (when present): `openclaw.dream.action`, `openclaw.dream.cycle_fingerprint`, `openclaw.dream.stage`, `openclaw.dream.pass_id`, `openclaw.dream.reason`, `openclaw.dream.cap`.
+
+Error span status is set for `task.failed`, `task.recovery_exhausted`, `task.boundary_violation`, `dream.contemplation_failed`, and `dream.fetch_failed`.
+
+## Session spans
+
+When `langfuse.sessionSpans` is `true` (default), the plugin maintains one `openclaw.session` trace-root span per active session key:
+
+- One session span per session key — created on the first run and reused across subsequent turns.
+- `langfuse.trace.name` is set to `session:<8hex>` on the session span; `openclaw.run` child spans omit it so they surface as observations under the session, not separate traces.
+- Idle timeout — the span closes after `sessionIdleTimeoutMs` with no run starts or completions (default 30 minutes). The next run opens a new session span.
+- Gateway stop — open session spans are ended synchronously on shutdown; there is no graceful drain.
+- Cost roll-up — `langfuse.trace.cost` is set on each run span to that run's accumulated cost. Langfuse aggregates per-run costs in its session view.
+
+Each run span carries `gen_ai.thread.id` (the run id), `langfuse.session.id` (the session key), `langfuse.user.id`, and a hashed `openclaw.sessionKey` for privacy-safe debugging.
+
+## Cost attribution
+
+The plugin computes USD cost per `openclaw.run` and sets `langfuse.trace.cost` on the run span. Cost accumulates across model calls within the run and is written once at run completion; zero-cost runs omit the attribute.
+
+Built-in pricing table (USD per million tokens):
+
+| Provider  | Model             | Input  | Output |
+| --------- | ----------------- | ------ | ------ |
+| anthropic | claude-opus-4-8   | $15    | $75    |
+| anthropic | claude-sonnet-4-6 | $3     | $15    |
+| anthropic | claude-haiku-4-5  | $0.80  | $4     |
+| anthropic | claude-fable-5    | $3     | $15    |
+| anthropic | claude-3-5-sonnet | $3     | $15    |
+| anthropic | claude-3-5-haiku  | $0.80  | $4     |
+| anthropic | claude-3-opus     | $15    | $75    |
+| anthropic | claude-3-haiku    | $0.25  | $1.25  |
+| openai    | gpt-4o            | $2.50  | $10    |
+| openai    | gpt-4o-mini       | $0.15  | $0.60  |
+| google    | gemini-2.5-pro    | $1.25  | $10    |
+| google    | gemini-2.5-flash  | $0.15  | $0.60  |
+| google    | gemini-2.0-flash  | $0.10  | $0.40  |
+| google    | gemini-1.5-pro    | $1.25  | $5     |
+| google    | gemini-1.5-flash  | $0.075 | $0.30  |
+
+Date-suffix and region-prefix variants (for example `claude-sonnet-4-6-20250622`, `us.claude-opus-4-8`) are normalised before lookup. When the provider reports token counts but no cost, fallback cost is computed from this table; when no entry matches, cost is not set.
+
+Override or extend pricing for unlisted models with `diagnostics.otel.modelPricing`:
+
+```json5
+{
+  diagnostics: {
+    otel: {
+      modelPricing: {
+        openai: {
+          o3: { inputPerMToken: 10, outputPerMToken: 40 },
+        },
+      },
+    },
+  },
+}
+```
+
+`modelPricing` entries win over the built-in table for the same provider/model key.
+
+## Telegram fleet diagnostics
+
+Telegram fleet supervision emits channel-specific diagnostic events for account lifecycle, polling, webhook intake, Bot API calls, update handling, and delivery. The OTel exporter maps them to spans named `openclaw.telegram.<event>` — for example `telegram.poll.started`, `telegram.webhook.received`, `telegram.update.deduped`, `telegram.delivery.flood_wait` — and to the `openclaw.telegram.*` metrics listed below.
+
+Privacy behavior:
+
+- Raw bot tokens, raw chat/user/thread IDs, webhook secrets, webhook URLs, and message content are never exported. Identity is carried as stable hashes (`telegram.account.hash`, `telegram.chat.hash`, `telegram.user.hash`, …).
+- `captureContent` does not override Telegram redaction. Telegram-correlated trace I/O, model input/output, system prompts, tool definitions, tool spans, and status text are replaced with `telegram-content-redacted`.
+- OTLP log records that look Telegram-shaped get a redacted body (`telegram-log-redacted`) and drop aggregate argument fields that could contain IDs or message content.
+
+## Metrics
+
+The plugin exports these OTel metrics (Prometheus surfaces them with underscores — see [Grafana and Prometheus setup](/admin/observability/grafana-setup)):
+
+| Metric                                        | Type      | Description                                                      |
+| --------------------------------------------- | --------- | ---------------------------------------------------------------- |
+| `openclaw.tokens`                             | counter   | Token usage by type (input, output, cache_read, cache_write, …)  |
+| `openclaw.cost.usd`                           | counter   | Estimated model cost in USD                                      |
+| `openclaw.run.duration_ms`                    | histogram | Agent run duration                                               |
+| `openclaw.run.attempt` / `openclaw.run.outcome` | counter | Run attempts; completions by `openclaw.outcome`=`ok`\|`error`    |
+| `openclaw.context.tokens`                     | histogram | Context window limit and used                                    |
+| `gen_ai.client.token.usage`                   | histogram | Tokens per signal (GenAI semconv)                                |
+| `gen_ai.client.operation.duration`            | histogram | Model-call duration (GenAI semconv, seconds)                     |
+| `openclaw.message.queued` / `processed`       | counter   | Message queue ingress and outcomes                               |
+| `openclaw.message.duration_ms`                | histogram | Message processing latency                                       |
+| `openclaw.webhook.received` / `error` / `duration_ms` | counter/histogram | Webhook ingress, errors, latency                         |
+| `openclaw.queue.depth` / `wait_ms`            | histogram | Queue depth and wait time                                        |
+| `openclaw.queue.lane.*`                       | mixed     | Lane enqueue/dequeue, active, queued, task duration              |
+| `openclaw.session.state` / `stuck` / `stuck_age_ms` | counter/histogram | Session transitions and stuck-session detection          |
+| `openclaw.session.run.active`                 | gauge     | Durable session runs currently marked running                    |
+| `openclaw.session.run.interrupted`            | counter   | Session runs interrupted by gateway restart                      |
+| `openclaw.session.run.recovery.*`             | counter   | Recovery decisions / resumed / cancelled for interrupted runs    |
+| `openclaw.session.system_prompt_flip`         | counter   | System prompt hash flips between consecutive turns (cache busts) |
+| `openclaw.session.system_prompt_stability`    | gauge     | Cumulative comparisons and flips (`openclaw.stat` label)         |
+| `openclaw.gateway.event_loop_lag`             | counter   | Event loop lag threshold exceeded                                |
+| `openclaw.gateway.telemetry.last_seen_timestamp` | gauge  | Epoch seconds of the most recent diagnostic event seen           |
+| `openclaw.diagnostics_otel.content.truncated` / `redacted` | counter | Content values truncated/redacted before export       |
+| `openclaw.diagnostics_otel.handler.failures`  | counter   | Exporter handler failures caught without crashing the gateway    |
+| `openclaw.telegram.events`                    | counter   | Telegram lifecycle/poll/webhook/update/delivery events           |
+| `openclaw.telegram.api.duration_ms`           | histogram | Telegram Bot API request duration                                |
+| `openclaw.telegram.retry_after_ms`            | histogram | Telegram retry-after / flood-wait delays                         |
+| `openclaw.telegram.webhook.pending_updates`   | histogram | Telegram webhook pending-update count                            |
+
+The `system_prompt_flip` / `system_prompt_stability` pair tells you when something rewrites the system prompt between turns and busts provider prefix caches — see [System prompt stability metrics](/reference/prompt-caching#system-prompt-stability-metrics).
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="No traces arrive in Langfuse">
+    1. Confirm the startup summary contains `tracesEnabled=true`, the expected sanitized `traceUrl`, `traceHeaders=Authorization=present`, and `nodeSdk=started`.
+    2. If it says `nodeSdk=skipped-preloaded`, check why `OPENCLAW_OTEL_PRELOADED=1` is set in the gateway environment — the preloaded provider must then be configured to export traces to Langfuse.
+    3. If `otelSdkDisabled` is not `unset`, remove or override `OTEL_SDK_DISABLED=true` for the gateway service.
+    4. Check per-signal env vars: `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` can route traces away from the Langfuse endpoint.
+    5. If `openclaw --version` is current but extension behavior is stale, check for a managed copy under `~/.openclaw/extensions/diagnostics-otel` and refresh it.
+  </Accordion>
+  <Accordion title="Empty input/output in Langfuse">
+    - **Summaries present, raw content missing** — expected when `captureContent` is disabled; the trace header shows message-count and role summaries. Enable `captureContent` for raw text.
+    - **Run completed with no model call** (routing or command-only turn) — the trace header is synthesized from channel and session identity. Check `openclaw.run` span attributes for `openclaw.channel` and `openclaw.sessionKeyHash`.
+    - **Telegram-correlated runs** — redaction markers instead of raw text are expected, not a capture failure.
+  </Accordion>
+  <Accordion title="Runs appear as separate traces instead of grouped under a session">
+    Confirm `diagnostics.otel.langfuse.sessionSpans` is not `false` and that `langfuse.session.id` appears on `openclaw.run` spans. If it is missing, the extension may not be receiving a `sessionKey` from the gateway — verify the extension is active with `openclaw gateway status --deep`.
+  </Accordion>
+  <Accordion title="No langfuse.trace.cost on run spans">
+    Cost requires a pricing-table entry or a `modelPricing` override for the provider/model in use, and a non-zero accumulated cost. The Grafana cost panel additionally requires the `openclaw_cost_usd_total` series — confirm the metrics endpoint is reachable.
+  </Accordion>
+  <Accordion title="Only infrastructure noise in Langfuse, or none at all">
+    `filterInfraSpans: true` (default) drops polling/webhook spans from Langfuse only. Set it to `false` to send everything to Langfuse, or point a custom `endpoint` (Tempo, collector) at the unfiltered stream.
+  </Accordion>
+</AccordionGroup>
+
+## For users
+
+If your administrator has tracing enabled, you can view your conversations in Langfuse. A healthy agent turn appears as one trace with `openclaw.run` at the root; model and tool calls appear underneath it.
+
+Background maintenance work also leaves short traces named like `openclaw.task.completed` or `openclaw.dream.cycle_completed` — those are not chat messages. If a background job gives up after too many retries you may see `openclaw.task.recovery_exhausted` marked as an error. That means the system stopped retrying and parked the job; ask your administrator if something you expected never finished. A gateway restart by itself does not park interrupted jobs — those are retried. `recovery_exhausted` means the job had already used its retries or had been stuck for about 25 minutes.
+
+## For developers
+
+The implementation lives in `extensions/diagnostics-otel/src/service.ts`. Startup resolves shared and per-signal OTLP endpoints, derives Langfuse Basic auth only when the `langfuse` block owns the endpoint, starts the NodeSDK for traces and metrics, and starts the logs exporter separately.
+
+`hasPreloadedOtelSdk()` returns true only when `OPENCLAW_OTEL_PRELOADED === "1"`. It does not inspect OpenTelemetry globals, because importing `@opentelemetry/api` is not proof that another provider intentionally owns export. In preloaded mode the extension still subscribes to diagnostic events, but trace export belongs to the preloaded provider.
+
+Model content is never reconstructed from saved conversation history. The run attempt builds a mutable model-call context, updated from the final input transform after projection and `transform_llm_input` hooks, and subscriber handlers emit `model.call.started` / `model.call.completed` diagnostic events from the assistant stream lifecycle. Keep new model-content fields optional and bounded at the diagnostic emitter before adding exporter mappings.
+
+To emit task or dream diagnostics from a plugin, use the SDK builders so type and `action` stay aligned — do not cast loose objects:
+
+```typescript
+import { emitDiagnosticEvent, taskDiagnostic } from "openclaw/plugin-sdk";
+
+emitDiagnosticEvent(
+  taskDiagnostic("completed", {
+    taskId: "my-plugin.my-pass",
+    taskRunId,
+    passId: "my-pass",
+    durationMs,
+  }),
+);
+```
+
+Builders are input-shaped: omit `ts` / `seq` — `emitDiagnosticEvent` stamps them. Field names are part of the contract (`passId`, not `passName`; `attempts`, not `attempt`). The exporter handles every `task.*` and `dream.*` action in one path and starts a span named `openclaw.${evt.type}`; the payload switch is exhaustiveness-checked, so a new diagnostic variant fails compilation until an export case is added — unknown types are never silently dropped.
+
+## Related
+
+- [Observability](/admin/gateway/observability) — traced span overview and task recovery
+- [Logging](/admin/gateway/logging) — log levels, file logs, OTLP log export
+- [Grafana and Prometheus setup](/admin/observability/grafana-setup) — dashboards and alert rules
+- [Deep observability](/admin/gateway/deep-observability) — runtime snapshots and capture controls
+- [Prompt caching](/reference/prompt-caching) — system prompt stability and cache diagnostics

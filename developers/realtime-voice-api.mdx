@@ -1,0 +1,335 @@
+---
+title: "Realtime voice API"
+sidebarTitle: "Realtime voice API"
+description: "Build realtime voice providers on the WednesdayAI plugin SDK: the provider contract, bridge types, the gateway relay wire protocol, and the shared agent consult tool."
+audience: developer
+---
+
+
+Realtime voice providers give WednesdayAI full-duplex spoken conversations: audio streams in from a client, a provider model transcribes and responds, and synthesized audio streams back out. As a provider author you implement one plugin object — a provider descriptor plus a bridge that owns the provider connection — and WednesdayAI supplies session management, the gateway relay, and a shared tool for consulting the configured agent.
+
+This page covers the provider SDK contract, the types you implement, the gateway wire protocol clients use, and the agent consult tool. Operator setup (installing a provider, config keys, restarts) lives in [Realtime voice setup](/admin/gateway/realtime-voice). The reference implementation is `extensions/openai-realtime` in the WednesdayAI repo (`src/provider.ts` for the descriptor, `src/openai-bridge.ts` for the bridge).
+
+## Provider SDK contract
+
+A realtime voice provider is a plain object registered from a plugin's `register` function. The contract, re-exported from `openclaw/plugin-sdk`:
+
+```ts
+import type {
+  RealtimeVoiceProviderPlugin,
+  RealtimeVoiceBridge,
+  RealtimeVoiceBridgeCreateRequest,
+  RealtimeVoiceProviderCapabilities,
+  RealtimeVoiceProviderConfiguredContext,
+  RealtimeVoiceProviderConfig,
+  RealtimeVoiceProviderResolveConfigContext,
+} from "openclaw/plugin-sdk";
+
+const myProvider: RealtimeVoiceProviderPlugin = {
+  id: "my-realtime", // lowercased and trimmed before use
+  label: "My Realtime",
+  aliases: ["myrt"], // optional: alternate ids clients may pass as providerId
+  capabilities: {
+    transports: ["gateway-relay"],
+    inputAudioFormats: [{ encoding: "pcm16", sampleRateHz: 24000, channels: 1 }],
+    outputAudioFormats: [{ encoding: "pcm16", sampleRateHz: 24000, channels: 1 }],
+    supportsBargeIn: true,
+    supportsServerVad: true,
+    supportsToolCalls: true,
+  },
+  isConfigured: (ctx: RealtimeVoiceProviderConfiguredContext) =>
+    typeof ctx.providerConfig.apiKey === "string" && ctx.providerConfig.apiKey !== "",
+  resolveConfig: (ctx: RealtimeVoiceProviderResolveConfigContext): RealtimeVoiceProviderConfig => ({
+    ...ctx.rawConfig,
+  }),
+  createBridge: (req: RealtimeVoiceBridgeCreateRequest): RealtimeVoiceBridge =>
+    new MyRealtimeBridge(req),
+};
+```
+
+Required members are `id`, `label`, `isConfigured`, and `createBridge`. Everything else — `aliases`, `defaultModel`, `models`, `autoSelectOrder`, `capabilities`, `resolveConfig`, `createBrowserSession` — is optional.
+
+Register it from the plugin entry point:
+
+```ts
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import { myProvider } from "./provider.js";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerRealtimeVoiceProvider(myProvider);
+}
+```
+
+The plugin manifest (`openclaw.plugin.json`) declares the id and the user-facing config schema:
+
+```json
+{
+  "id": "my-realtime",
+  "name": "My Realtime",
+  "description": "My realtime voice provider (gateway-relay transport).",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "apiKey": { "type": "string" },
+      "model": { "type": "string" },
+      "voice": { "type": "string" }
+    }
+  }
+}
+```
+
+How the pieces resolve at runtime:
+
+- User config lives under `talk.providers.<id>` in `openclaw.json`. The gateway passes the raw block to `resolveConfig`, then to `isConfigured` to decide whether the provider is selectable. A provider that is not configured is never picked.
+- Provider ids are normalized (trimmed, lowercased) on registration and lookup. Registering a second provider with the same normalized id is silently ignored — first registration wins.
+- `createBridge` is synchronous: it constructs your bridge and returns it. It must not connect yet — the gateway calls `bridge.connect()` itself.
+
+### Async safety
+
+The `register` function may be synchronous or async, but must never perform synchronous blocking I/O — it runs during gateway startup and a blocking call stalls the event loop for every channel.
+
+```ts
+// Do not do this — synchronous I/O at startup stalls the gateway:
+export default function register(api: OpenClawPluginApi): void {
+  const data = fs.readFileSync("./voices.json", "utf8"); // ❌
+  api.registerRealtimeVoiceProvider(makeProvider(data));
+}
+
+// Do this instead:
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const data = await fs.promises.readFile("./voices.json", "utf8"); // ✅
+  api.registerRealtimeVoiceProvider(makeProvider(data));
+}
+```
+
+Two bridge lifecycle rules:
+
+- **`createBridge()` must not fire any callbacks synchronously.** The session runtime binds `onReady`, `onToolCall`, and the rest after `createBridge` returns; events fired during construction are silently discarded. Defer everything to after `connect()` is called.
+- Bridge callbacks (`onAudio`, `onTranscript`, `onToolCall`, …) fire on the shared event loop. Keep them fast; never block. Long work triggered by a tool call belongs in the tool-result path, not inside the callback.
+
+## Provider types
+
+All types below are exported from `openclaw/plugin-sdk`.
+
+### Audio formats
+
+Two audio formats exist in the contract, both mono:
+
+```ts
+import {
+  REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ,
+  REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ,
+  type RealtimeVoiceAudioFormat,
+} from "openclaw/plugin-sdk";
+
+const pcm24k: RealtimeVoiceAudioFormat = REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ;
+// { encoding: "pcm16", sampleRateHz: 24000, channels: 1 }
+const ulaw8k: RealtimeVoiceAudioFormat = REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ;
+// { encoding: "g711_ulaw", sampleRateHz: 8000, channels: 1 }
+```
+
+The gateway-relay transport always runs PCM16 24 kHz in both directions. The SDK exports resampling and μ-law conversion helpers (`resamplePcm`, `resamplePcmTo8k`, `pcmToMulaw`, `mulawToPcm`, `convertPcmToMulaw8k`) if your upstream needs a different rate.
+
+### Capabilities
+
+`RealtimeVoiceProviderCapabilities` declares what you support; clients and admin surfaces read it:
+
+| Field | Type | Meaning |
+| ----- | ---- | ------- |
+| `transports` | `TalkTransport[]` | `"gateway-relay"`, `"webrtc"`, `"provider-websocket"`, `"managed-room"` |
+| `inputAudioFormats` | `RealtimeVoiceAudioFormat[]` | Formats your bridge accepts |
+| `outputAudioFormats` | `RealtimeVoiceAudioFormat[]` | Formats your bridge emits |
+| `supportsBrowserSession?` | `boolean` | You implement `createBrowserSession` |
+| `supportsBargeIn?` | `boolean` | You handle interruption (`handleBargeIn`) |
+| `supportsServerVad?` | `boolean` | Provider-side voice activity detection |
+| `supportsToolCalls?` | `boolean` | You surface `onToolCall` / `submitToolResult` |
+| `supportsVideoFrames?` | `boolean` | Video input supported |
+| `supportsSessionResumption?` | `boolean` | Sessions can resume after a drop |
+
+### The bridge
+
+The bridge owns the provider connection for one voice session:
+
+```ts
+import type { RealtimeVoiceBridge } from "openclaw/plugin-sdk";
+
+interface MyBridge extends RealtimeVoiceBridge {
+  connect(): Promise<void>; // open the provider connection; resolve when ready
+  sendAudio(audio: Buffer): void; // user audio (PCM frame) toward the provider
+  setMediaTimestamp(ts: number): void; // playback clock hint, if your provider uses one
+  sendUserMessage?(text: string): void; // optional: inject a text user turn
+  triggerGreeting?(instructions?: string): void; // optional: open with a spoken greeting
+  handleBargeIn?(options?: RealtimeVoiceBargeInOptions): void; // interrupt current output
+  submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
+  acknowledgeMark(): void; // client confirmed playback reached a mark
+  close(reason?: "completed" | "error" | "cancelled"): void;
+  isConnected(): boolean;
+}
+```
+
+You receive the callbacks you must call, plus session parameters, in `RealtimeVoiceBridgeCreateRequest` — a combination of `RealtimeVoiceBridgeCallbacks` and optional `cfg`, `providerConfig`, `audioFormat`, `instructions`, `model`, `voice`, `autoRespondToAudio`, `interruptResponseOnInputAudio`, and `tools`.
+
+The callbacks:
+
+| Callback | When you call it |
+| -------- | ---------------- |
+| `onAudio(audio: Buffer)` | Synthesized audio frame for the user |
+| `onClearAudio()` | Drop queued output (for example on barge-in) |
+| `onMark?(markName: string)` | A playback boundary was emitted (see mark strategy below) |
+| `onTranscript?(role, text, isFinal)` | Interim (`isFinal: false`) or final transcript text |
+| `onEvent?(event)` | Raw protocol event for diagnostics (`direction`, `type`, optional `detail`/`itemId`/`responseId`) |
+| `onToolCall?(event)` | The provider model invoked a function tool |
+| `onReady?()` | Connection is live and configured |
+| `onError?(error)` | Unrecoverable failure — the relay closes the session |
+| `onClose?(reason)` | The provider closed the connection itself |
+| `onVadBargeIn?()` | Provider-side VAD detected the user speaking over output |
+
+`onMark` pairs with the session's mark strategy. The gateway relay uses `"transport"`: your `onMark` emission travels to the client, and the client acknowledges it; the gateway then calls your `acknowledgeMark()`. Use marks so the gateway knows when barge-in should cancel still-playing audio versus treat input as echo.
+
+### Tools and tool results
+
+Voice tools use a plain JSON-Schema function shape (`RealtimeVoiceTool`): `{ type: "function", name, description, parameters }`. When the provider model calls one, emit `onToolCall` with `{ itemId, callId, name, args }`. Whoever owns the session (the client, or server-side consult handling) computes a result and submits it back through `submitToolResult(callId, result, options)`.
+
+`RealtimeVoiceToolResultOptions` controls what happens after the result is submitted:
+
+- `suppressResponse?: boolean` — submit the result without prompting the provider to generate a new assistant response. Use it when another surface already delivered the user-visible answer.
+- `willContinue?: boolean` — more results for this call follow; the provider should keep waiting.
+
+If your provider buffers multiple in-flight tool calls, set `supportsToolResultContinuation: true` on the bridge object.
+
+### Barge-in options
+
+`handleBargeIn` receives `RealtimeVoiceBargeInOptions`:
+
+- `audioPlaybackActive?: boolean` — the caller confirms assistant audio is still playing in its output sink, letting you interrupt even without real playback marks.
+- `force?: boolean` — interrupt even when audio-duration guards would classify the event as echo.
+
+## Wire protocol
+
+Clients open realtime voice through gateway WebSocket methods (schema: `src/gateway/protocol/schema/talk-realtime.ts`). The default and recommended transport is `gateway-relay`: the gateway hosts the provider bridge and relays audio, so provider credentials never reach the client.
+
+### Methods
+
+| Method | Params | Result |
+| ------ | ------ | ------ |
+| `talk.realtime.session` | `providerId?`, `transport?`, `instructions?`, `model?`, `voice?`, `vadThreshold?`, `silenceDurationMs?`, `prefixPaddingMs?`, `reasoningEffort?`, `tools?` | Relay session descriptor (below) or a provider browser session |
+| `talk.realtime.audio` | `relaySessionId`, `audioBase64`, `timestamp?` | `undefined` |
+| `talk.realtime.mark` | `relaySessionId` | `undefined` |
+| `talk.realtime.toolResult` | `relaySessionId`, `callId`, `result?`, `willContinue?`, `suppressResponse?` | `undefined` |
+| `talk.realtime.bargeIn` | `relaySessionId`, `audioPlaybackActive?`, `force?` | `undefined` |
+| `talk.realtime.stop` | `relaySessionId` | `undefined` |
+| `talk.realtime.status` | — | `{ sessions: [...] }` with per-session `id`, `provider`, `connId`, `startedAt`, `durationMs`, `audioBytesIn`, `audioBytesOut` |
+
+Transport selection in `talk.realtime.session`:
+
+- Omitted or `"gateway-relay"` — always the gateway relay.
+- `"auto"` — the provider's `createBrowserSession` if it exists, otherwise the relay.
+- `"webrtc"`, `"provider-websocket"`, `"managed-room"` — delegated to `createBrowserSession`; if the provider does not implement it, the request fails with `transport "<t>" is not supported by provider "<id>"`.
+
+A successful relay session returns:
+
+```json
+{
+  "provider": "my-realtime",
+  "transport": "gateway-relay",
+  "relaySessionId": "<uuid>",
+  "audio": {
+    "inputEncoding": "pcm16",
+    "inputSampleRateHz": 24000,
+    "outputEncoding": "pcm16",
+    "outputSampleRateHz": 24000
+  },
+  "model": "my-model",
+  "voice": "my-voice",
+  "expiresAt": 1767139200
+}
+```
+
+### Relay events
+
+The gateway broadcasts session events to the owning connection on the `talk.realtime.relay` channel. Each event carries its `relaySessionId` plus a `type`:
+
+| `type` | Payload | Meaning |
+| ------ | ------- | ------- |
+| `ready` | — | Bridge connected; audio can flow |
+| `audio` | `audioBase64` | Assistant audio frame toward the client |
+| `clear` | — | Drop queued client-side playback |
+| `mark` | `markName` | Playback boundary; client acknowledges via `talk.realtime.mark` |
+| `transcript` | `role`, `text`, `final` | Interim or final transcript |
+| `toolCall` | `itemId`, `callId`, `name`, `args` | Provider invoked a function tool |
+| `vadBargeIn` | — | Provider VAD detected barge-in |
+| `error` | `message` | Unrecoverable error; session closes |
+| `close` | `reason` (`completed` \| `error` \| `cancelled`) | Session ended |
+
+`audio`, `clear`, and `mark` events may be dropped if the client connection falls behind; `error` and `close` are always delivered.
+
+### Limits
+
+- Sessions expire after 30 minutes; the gateway closes them with reason `completed`.
+- Each `talk.realtime.audio` frame is capped at 512 KiB of base64 text; larger frames are rejected.
+- Maximum 2 concurrent relay sessions per client connection and 64 per gateway.
+- Relay sessions are bound to the connection that created them — audio for another connection's `relaySessionId` fails with `Unknown realtime relay session`.
+
+## Agent consult tool
+
+Realtime sessions that should answer with the assistant's real knowledge — memory, workspace context, agent tools — use the shared consult tool instead of reimplementing delegation. The SDK exports the descriptor and all helpers from `openclaw/plugin-sdk`:
+
+```ts
+import {
+  REALTIME_VOICE_AGENT_CONSULT_TOOL,
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  buildRealtimeVoiceAgentConsultWorkingResponse,
+  buildRealtimeVoiceAgentConsultPrompt,
+  collectRealtimeVoiceAgentConsultVisibleText,
+  parseRealtimeVoiceAgentConsultArgs,
+  resolveRealtimeVoiceAgentConsultToolPolicy,
+  resolveRealtimeVoiceAgentConsultTools,
+  resolveRealtimeVoiceAgentConsultToolsAllow,
+  buildRealtimeVoiceAgentConsultPolicyInstructions,
+} from "openclaw/plugin-sdk";
+```
+
+`REALTIME_VOICE_AGENT_CONSULT_TOOL` is a `RealtimeVoiceTool` named `openclaw_agent_consult` with one required argument:
+
+| Arg | Required | Meaning |
+| --- | -------- | ------- |
+| `question` | yes | The concrete question or task the user asked |
+| `context` | no | Relevant context or a transcript summary |
+| `responseStyle` | no | Style hint for the spoken answer |
+
+When you receive it via `onToolCall`, parse with `parseRealtimeVoiceAgentConsultArgs` — it tolerates providers that deliver `args` as a JSON string, and accepts `question`, `prompt`, `query`, or `task` as the key for the question. It throws if no question is present.
+
+Tool exposure is policy-driven. `resolveRealtimeVoiceAgentConsultToolPolicy(value, fallback)` normalizes a configured value to one of three policies:
+
+| Policy | Consult tool | Agent tool allowlist |
+| ------ | ------------ | -------------------- |
+| `safe-read-only` | exposed | `read`, `web_search`, `web_fetch`, `x_search`, `memory_search`, `memory_get` |
+| `owner` | exposed | unrestricted — the agent's default tools apply |
+| `none` | not exposed | empty |
+
+`resolveRealtimeVoiceAgentConsultTools(policy, customTools)` merges the consult tool with your own realtime tools; the consult tool is always first and custom tools cannot replace its contract by name. `resolveRealtimeVoiceAgentConsultToolsAllow(policy)` returns the paired allowlist for the delegated agent turn (`undefined` for `owner`, `[]` for `none`).
+
+Running the consult:
+
+1. While the delegated agent turn runs, feed `buildRealtimeVoiceAgentConsultWorkingResponse()` to the voice model — it instructs it to tell the user briefly that it is checking, then wait.
+2. Build the delegated prompt with `buildRealtimeVoiceAgentConsultPrompt({ args, transcript, surface, userLabel })`. It bounds the transcript to the last 12 entries so long conversations do not crowd out the live request, and instructs the agent to return only concise speakable text — no markdown, tool logs, or private reasoning.
+3. Collect the answer with `collectRealtimeVoiceAgentConsultVisibleText(payloads)` — it skips error-channel and reasoning payloads so hidden text is never spoken.
+4. Submit the result to the voice provider with `submitToolResult(callId, result)` — or with `suppressResponse: true` if another channel already delivered the answer.
+
+`buildRealtimeVoiceAgentConsultPolicyInstructions({ toolPolicy, consultPolicy })` adds spoken-behavior instructions for the voice model: `"always"` consults before every substantive answer, `"substantive"` consults only when facts, memory, or tools are needed, and `"auto"` (or omitted) adds nothing.
+
+## Troubleshooting
+
+- `Unknown realtime relay session` — the session expired (30-minute TTL), was already closed, or belongs to a different client connection. Open a new session.
+- `Too many active realtime relay sessions` / `... for this connection` — gateway caps: 64 sessions total, 2 per connection. Stop idle sessions.
+- `Realtime relay audio frame is too large` — split audio into frames under 512 KiB of base64.
+- `transport "..." is not supported by provider "..."` — you requested a browser transport from a provider without `createBrowserSession`. Use `"auto"` or `"gateway-relay"`, or implement `createBrowserSession`.
+- Sessions close on the first provider `error` event — the reference OpenAI bridge treats every error event as fatal, including non-fatal cancel-race and rate-limit advisories. If your provider emits recoverable errors, classify them before calling `onError`.
+
+## Related
+
+- [Realtime voice setup](/admin/gateway/realtime-voice) — operator-facing install and config
+- [Write your first plugin](/developers/plugins/your-first-plugin)
+- [Plugin manifest reference](/developers/plugins/manifest)
+- [Plugin SDK reference](/developers/sdk)

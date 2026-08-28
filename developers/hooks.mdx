@@ -101,6 +101,8 @@ These are the `PluginHookName` values accepted by `api.on(...)`. Fire timing and
 | `context.project` | Projecting collected contributions into messages | Yes — `messages`, `projection`, `contribution` |
 | `context.prune` | Pruning context under token pressure | Yes — `messages`, `dropped`, `compactionHandled`, `contribution?` |
 | `compaction.plan` | Planning a compaction pass | Yes — `plan`, `messages`, `contribution` |
+| `agent_idle` | The core idle monitor crosses an idle threshold or a schedule window opens | No (observe) |
+| `task_outcome` | A task or subagent run completes with an outcome | No (observe) |
 
 ### `before_prompt_build` example
 
@@ -127,6 +129,26 @@ Both `systemPrompt` and `prependContext` are optional — return either, both, o
   `compactionHandled: true` from `context.prune`) so the runtime skips its built-in compaction
   trigger and avoids double-compaction races.
 </Tip>
+
+## Runtime and turn identity context
+
+Agent, message (`message_*`), tool, and `before_message_write` hook contexts carry two optional identity objects alongside their per-hook fields:
+
+- **`ctx.runtimeIdentity?: PluginRuntimeIdentity`** — who and where: `agentId`, `sessionKey`, channel ids, sender fields (`senderId`, `senderName`, `senderE164`, `canonicalIdentity`), and the privacy-safe digests `providerConversationId` / `hashedUserId` (truncated SHA-256, never raw provider ids). `identitySource` (`"sender" | "parent-session" | "job-config"`) is the provenance of `canonicalIdentity` and is never defaulted — absent provenance means the emitting seam did not know it.
+- **`ctx.turn?: PluginTurnIdentity`** — correlation for the current turn: `turnId` (falls back to the run id), `runId`, `sessionId`, `turnNumber`, `inboundMessageId`, `userEntryId` / `assistantEntryId`, and per-session plus global sequence numbers.
+
+Treat every field as optional: hooks fired outside a channel run (gateway start, cron) may carry neither object. See the [plugin hooks reference](/reference/plugin-hooks) for the full typed contract.
+
+## Inbound channel replies
+
+`message_sending` and `message_sent` fire not only on adapter-initiated outbound sends but also on **replies to inbound channel messages** — every built-in channel (Telegram, Discord, Slack, Signal, iMessage, WhatsApp web, Matrix, MS Teams) routes inbound reply delivery through the same shared helpers (`applyMessageSendingHook` / `createMessageSentEmitter`, re-exported from `openclaw/plugin-sdk`).
+
+| Hook | Event | Result |
+| ---- | ----- | ------ |
+| `message_sending` | `{ to, content, metadata? }` before each payload chunk is sent | `{ content?, cancel? }` — rewrite the text or cancel the send |
+| `message_sent` | `{ to, content, success, error? }` after the actual send attempt | void (observe) |
+
+`message_sending` rewrites payload text only — media is never rewritten. A throwing handler is logged and the original payload still sends. `message_sent` fires only after a real send attempt, including after partial sends of chunked replies.
 
 ## Standalone hooks (HOOK.md)
 

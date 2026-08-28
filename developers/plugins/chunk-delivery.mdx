@@ -1,0 +1,107 @@
+---
+title: "Chunk delivery"
+description: "How long outbound replies split into channel messages: chunkMode length/newline/paragraph, textChunkLimit defaults, the deprecated chunkNewlinePacking key, and the SDK resolvers."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Chunk delivery
+
+Chat platforms cap message length, so WednesdayAI splits long outbound replies into multiple messages before sending. Channel adapters and reply-shaping plugins control the split through per-channel config and the SDK resolvers in `src/auto-reply/chunk.ts` — `resolveChunkDelivery`, `resolveTextChunkLimit` (both re-exported from `openclaw/plugin-sdk`).
+
+## Config surface
+
+Per channel (and per account within a channel):
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  channels: {
+    telegram: {
+      textChunkLimit: 4000,          // chars; Telegram default 4000, Discord default 2000
+      chunkMode: "paragraph",        // "length" (default) | "newline" | "paragraph"
+      accounts: {
+        "<accountId>": {             // per-account overrides win over the channel level
+          chunkMode: "newline",
+        },
+      },
+    },
+  },
+}
+```
+
+| Key | Values | Default | Effect |
+| --- | ------ | ------- | ------ |
+| `textChunkLimit` | positive int | 4000 (Telegram/generic), 2000 (Discord) | Hard per-message character cap |
+| `chunkMode` | `"length" \| "newline" \| "paragraph"` | `"length"` | Split policy — see below |
+| `chunkNewlinePacking` | boolean | `true` | **Deprecated.** With `"newline"`: pack paragraphs up to the limit (`false` = one message per paragraph). Use `chunkMode: "paragraph"` instead |
+
+## Modes
+
+`chunkMode` resolves to a runtime boundary mode plus a pack flag (`ResolvedChunkDelivery`):
+
+| `chunkMode` | Resolves to | Behaviour |
+| ----------- | ----------- | --------- |
+| `"length"` (default) | `{ mode: "length", pack: true }` | Split only when a message would exceed `textChunkLimit`. Newlines stay inside chunks; boundaries prefer safe break points |
+| `"newline"` | `{ mode: "newline", pack: true }` | Split on paragraph/line boundaries; consecutive paragraphs are **packed** into one message up to the limit |
+| `"paragraph"` | `{ mode: "newline", pack: false }` | One message per paragraph — no packing. Config-facing alias; the runtime never reports mode `"paragraph"` |
+
+Split safety, all modes: code fences are never split mid-fence — a forced split at the limit closes and reopens the fence so Markdown stays valid — and breaks avoid splitting a surrogate pair mid-emoji.
+
+## The deprecated packing key
+
+`chunkNewlinePacking` still parses but logs a deprecation warning (once per `channel:account`):
+
+| Situation | Warning |
+| --------- | ------- |
+| Set with `chunkMode: "length"` | Only applies with `"newline"`/`"paragraph"`; remove the key |
+| Set to `false` with `"newline"` | Use `chunkMode: "paragraph"` for one message per paragraph |
+| Set to `true` with `"newline"` | Remove the key — newline mode packs by default |
+
+Migration: `chunkNewlinePacking: false` → `chunkMode: "paragraph"`; any other use → delete the key.
+
+## Using the resolvers
+
+```typescript
+import {
+  resolveChunkDelivery,
+  resolveTextChunkLimit,
+} from "openclaw/plugin-sdk";
+
+// In a channel adapter / reply pipeline, with the loaded config:
+const limit = resolveTextChunkLimit(cfg, "telegram", accountId);
+// → channels.telegram.textChunkLimit (account override first), else the channel default
+
+const delivery = resolveChunkDelivery(cfg, "telegram", accountId);
+// → { mode: "length" | "newline", pack: boolean }
+//   "paragraph" never appears here — it resolves to { mode: "newline", pack: false }
+```
+
+- `resolveChunkDelivery(cfg, provider, accountId?)` — merge order: account override → channel config → defaults. Returns `{ mode: "length", pack: true }` for the internal message channel (`INTERNAL_MESSAGE_CHANNEL`) and unknown providers.
+- `resolveChunkMode(...)` — convenience: `resolveChunkDelivery(...).mode`.
+- `resolveChunkNewlinePacking(...)` — **deprecated**; returns `.pack`.
+- `resolveTextChunkLimit(cfg, provider, accountId?, { fallbackLimit? })` — caller-supplied fallback (e.g. a dock's `outbound.textChunkLimit`) when no config key exists; the hard fallback is 4000.
+
+## Interaction with block streaming
+
+When block streaming is on, stream chunk sizes are clamped to `textChunkLimit`, and the resolved delivery controls flush behaviour: with `mode: "newline"` and `pack: false` (i.e. `chunkMode: "paragraph"`), blocks flush eagerly per paragraph; with packing on, the outbound packer composes larger messages. See [Streaming](/admin/streaming).
+
+## What not to do
+
+```typescript
+// ❌ treat "paragraph" as a runtime mode
+if (resolveChunkDelivery(cfg, "telegram").mode === "paragraph") { /* unreachable */ }
+
+// ❌ new code reading chunkNewlinePacking
+if (resolveChunkNewlinePacking(cfg, "telegram") === false) { /* deprecated — use mode+pack */ }
+
+// ❌ assume a fixed 4000 default for every channel
+const limit = 4000; // Discord caps at 2000 by default — call resolveTextChunkLimit
+```
+
+## Related
+
+- [Streaming](/admin/streaming) — block and preview streaming
+- [Auto-reply pipeline](/developers/auto-reply) — where chunking sits in the reply path
+- [Channel adapters](/developers/channel-adapters) — building a channel plugin

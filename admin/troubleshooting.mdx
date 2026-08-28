@@ -75,6 +75,50 @@ Match the symptom to the likely cause before digging deeper:
   </Accordion>
 </AccordionGroup>
 
+## Gateway restart preflight gate
+
+`openclaw gateway restart` (and `gateway start`) runs checks before it touches the service. When a check blocks, no restart happens — the running gateway keeps its current config. The command exits non-zero with the reason.
+
+What the preflight checks, in order:
+
+| Check | Blocking? | What it does |
+| ----- | --------- | ------------ |
+| Service loaded | Yes (soft) | If the systemd/launchctl service is not loaded, the command reports `not-loaded` with start hints instead of restarting |
+| Config validity | **Yes** | Reads a snapshot of `~/.openclaw/openclaw.json`. An invalid config blocks the restart entirely |
+| Token drift | No | Compares the `OPENCLAW_GATEWAY_TOKEN` baked into the service environment against the token resolved from config. A mismatch prints a ⚠️ warning, then the restart proceeds |
+| Post-restart health | **Yes** | After restarting, waits up to 60 s (500 ms × 120 attempts) for the gateway port to become healthy |
+
+When the config validity gate blocks, the output looks like:
+
+```text
+Cannot restart Gateway: config is invalid
+
+File: ~/.openclaw/openclaw.json
+Problem:
+  - <issue lines>
+...
+The Gateway is still running on its current config. No restart was performed.
+```
+
+Fix it with:
+
+```bash
+openclaw config validate   # see the issues without changing anything
+openclaw doctor --fix      # removes unknown keys, fills missing defaults
+openclaw gateway restart   # retry
+```
+
+If the post-restart health check times out, the CLI first looks for stale gateway processes (leftover PIDs from a previous run holding or competing for the port), terminates them, and retries the restart once. If it still cannot reach a healthy port within 60 s, it fails with port diagnostics — including "Gateway process is running but port is still free" when the process is up but never bound the port (startup hang, crash loop, or a very slow VM) — plus these next steps:
+
+```bash
+openclaw gateway status --deep
+openclaw doctor
+```
+
+<Note>
+With `--json`, the preflight failures and health warnings are emitted as structured JSON (`action: "restart"`, `ok: false`, `warnings: [...]`) instead of terminal text — useful for scripts and automation.
+</Note>
+
 ## `openclaw` command not found
 
 ```bash

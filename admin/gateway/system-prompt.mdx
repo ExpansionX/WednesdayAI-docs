@@ -184,8 +184,40 @@ The prompt is split into a stable (cached) region and a volatile region at build
 
 Plugin authors can inject content into the system prompt at run time via the `before_prompt_build` lifecycle hook — without touching admin config. See [Hooks](/developers/hooks) for the hook API; the return value accepts `systemPrompt` (appended after the built sections) and `prependContext` (inserted before the user turn).
 
+## Identity attribution
+
+WednesdayAI attributes each agent run to a sender when it can, and labels **how** it resolved that identity. Two config surfaces drive this:
+
+- **`session.identityLinks`** maps platform-prefixed ids (for example `telegram:123456789`) to canonical identities. When an inbound sender matches a key, the run is attributed to that canonical identity with `identitySource: "sender"`.
+- **`heartbeat.identity`** (and the equivalent `identity` field on cron jobs) attributes a scheduled system run to a registered user. The value must case-insensitively match a `session.identityLinks` key at run time; a match resolves with `identitySource: "job-config"`, an absent or non-matching value leaves the run as a system run with no identity. Subagent runs may inherit the requester's identity, validated against the same `identityLinks` keys (`identitySource: "parent-session"`).
+
+```json5
+{
+  session: {
+    identityLinks: {
+      alice: ["telegram:123456789", "discord:987654321012345678"],
+    },
+  },
+  agents: {
+    defaults: {
+      heartbeat: {
+        every: "30m",
+        identity: "alice",   // attribute heartbeat runs to alice (must match an identityLinks key)
+      },
+    },
+  },
+}
+```
+
+Resolution precedence: inbound sender match → inherited requester identity (validated) → configured job/heartbeat identity → identity-less. Each successful injection beyond the sender path emits one `runtime identity injected` info log — the live observable for attribution.
+
+For model-provider calls, WednesdayAI derives opaque correlation ids rather than forwarding raw identities: `providerConversationId` (hashed `agent + session`) and `hashedUserId` (one-way hash of the sender identity). The provider prompt-cache key is deliberately keyed on **agent + model only**, never on conversation or user, so the shared tools+system prefix keeps one cache entry across every conversation under that agent and model.
+
+Related: [Sessions — Identity and privacy](/admin/session#identity-and-privacy).
+
 ## Related
 
 - [Hooks](/developers/hooks) — `before_prompt_build` and `context.collect` hook reference
 - [Gateway configuration](/admin/gateway/configuration) — gateway-wide settings
 - [Agent tools](/developers/agent-tools) — exposing capabilities to the agent
+- [Sessions](/admin/session) — session keys, reset lifecycle, and privacy boundary
