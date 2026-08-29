@@ -1,6 +1,6 @@
 ---
 title: "Agent signals"
-description: "Publish structured non-user stimuli into WednesdayAI via api.runtime.signals: context hints and heartbeat wakes."
+description: "Publish structured non-user stimuli into WednesdayAI via api.runtime.signals: context hints, heartbeat wakes, notifications, and background turns."
 audience: developer
 ---
 
@@ -12,12 +12,14 @@ Keep domain behaviour in your plugin. Core only owns flow control, dedupe, admis
 
 ## Modes
 
-The current implementation supports two modes:
+Four modes are supported:
 
 - `context` — stores the signal for plugin subscribers and future context collection. It does **not** wake a model turn.
 - `heartbeat` — stores the signal, queues a session-scoped system-event summary, and requests a targeted heartbeat wake.
+- `notify` — delivers the signal summary as an outbound notification to its `deliveryTarget`, respecting visibility suppression and active hours. It does not wake a model turn.
+- `background` — runs a background agent turn for the target session, deferring while lanes are busy when `requiresIdle: true`.
 
-The `background`, `notify`, and `steer` modes are reserved for future plumbing and currently return `unsupported-mode`.
+The `steer` mode is reserved for future plumbing and returns `unsupported-mode`.
 
 ## Publishing a signal
 
@@ -49,7 +51,7 @@ if (!result.accepted && result.reason !== "duplicate") {
 | `type` | `string` | Required. Signal type, e.g. `commitment.due`. |
 | `source` | `string` | Required. Your plugin id. |
 | `payload` | `unknown` | Required. Structured data (kept out of transcripts by default). |
-| `mode` | `"context" \| "heartbeat"` | Dispatch mode. |
+| `mode` | `"context" \| "heartbeat" \| "notify" \| "background" \| "steer"` | Dispatch mode; `steer` is rejected with `unsupported-mode`. |
 | `summary` | `string` | Concise prompt-visible summary (max ~500 chars). |
 | `sessionKey` / `agentId` | `string` | Target session/agent. |
 | `priority` | `"low" \| "normal" \| "high" \| "urgent"` | Eviction ranking. |
@@ -123,7 +125,7 @@ Signals are **ephemeral** — not a durable queue. Plugins that need guaranteed 
 Use Agent Signals as plumbing, not product policy:
 
 - Put domain logic in the plugin; publish concise summaries.
-- Use `context` mode for passive context; `heartbeat` mode when the agent should consider acting soon.
+- Use `context` mode for passive context; `heartbeat` mode when the agent should consider acting soon; `notify` to deliver a notification without a turn; `background` to run a turn outside the user conversation.
 - Add `dedupeKey` for recurring or retried stimuli, and `ttlMs` for stale alerts.
 - Avoid including secrets or large payloads.
 

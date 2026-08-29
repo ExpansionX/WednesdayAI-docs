@@ -60,6 +60,17 @@ When `sandbox.mode` is `off` (the default), tool code runs with the same permiss
 
 Inbound media is copied into the active sandbox workspace (`media/inbound/*`). With `workspaceAccess: "none"`, eligible skills are mirrored into the sandbox workspace so the (sandbox-rooted) `read` tool can see them.
 
+## Session tools visibility
+
+`agents.defaults.sandbox.sessionToolsVisibility` controls which sessions a **sandboxed** session can see and message through the session tools (`sessions_list`, `sessions_history`, `sessions_send`):
+
+| Value | Effect |
+| ----- | ------ |
+| `spawned` (default) | Sandboxed sessions are forced to `tree` visibility regardless of `tools.sessions.visibility`, and a sandboxed non-subagent session can only target sessions it spawned |
+| `all` | No sandbox clamp — `tools.sessions.visibility` governs |
+
+This key is only read from `agents.defaults.sandbox`; a per-agent `agents.list[].sandbox` block does not override it.
+
 ## Custom bind mounts
 
 `agents.defaults.sandbox.docker.binds` mounts additional host directories. Format: `host:container:mode`, e.g. `"/home/user/source:/source:ro"`. Global and per-agent binds are merged (under `scope: "shared"`, per-agent binds are ignored).
@@ -79,7 +90,21 @@ Inbound media is copied into the active sandbox workspace (`media/inbound/*`). W
 ```
 
 <Warning>
-Binds bypass the sandbox filesystem and expose host paths with whatever mode you set. WednesdayAI blocks dangerous sources (`docker.sock`, `/etc`, `/proc`, `/sys`, `/dev`, and parent mounts that would expose them). Mount secrets and credentials `:ro` unless absolutely required — binding `/var/run/docker.sock` effectively hands host control to the sandbox.
+Binds bypass the sandbox filesystem and expose host paths with whatever mode you set. WednesdayAI blocks dangerous sources (`/etc`, `/proc`, `/sys`, `/dev`, `/root`, `/boot`, Docker socket paths such as `/var/run/docker.sock`, and the `/run`/`/var/run` directories that alias them, plus parent mounts that would expose any of these). These blocks are absolute — the `dangerouslyAllow*` overrides below do not lift them. Mount secrets and credentials `:ro` unless absolutely required — binding `/var/run/docker.sock` effectively hands host control to the sandbox.
+</Warning>
+
+### Dangerous overrides
+
+Three `agents.defaults.sandbox.docker.dangerouslyAllow*` booleans lift sandbox security blocks. All default to `false`.
+
+| Key | Block it lifts |
+| --- | -------------- |
+| `dangerouslyAllowReservedContainerTargets` | Allows bind mounts whose **target** inside the container is a reserved path (`/workspace`, `/agent`) |
+| `dangerouslyAllowExternalBindSources` | Allows bind **sources** outside the runtime-allowlisted roots (the sandbox workspace and agent workspace roots) |
+| `dangerouslyAllowContainerNamespaceJoin` | Allows `network: "container:<id>"`, joining another container's network namespace |
+
+<Warning>
+These flags remove guardrails that keep the sandbox contained. `dangerouslyAllowReservedContainerTargets` can shadow WednesdayAI's own sandbox mounts; `dangerouslyAllowExternalBindSources` exposes arbitrary host paths (only the absolute denylist above still applies); `dangerouslyAllowContainerNamespaceJoin` defeats network isolation. Use them only for containers you trust as much as the host, and remove them as soon as you can.
 </Warning>
 
 ## Images and setup
@@ -103,9 +128,58 @@ For the sandboxed browser:
 scripts/sandbox-browser-setup.sh
 ```
 
-By default, sandbox containers run with **no network** (`docker.network: "none"`). Override with `agents.defaults.sandbox.docker.network`. `network: "host"` and `network: "container:<id>"` are blocked by default; the namespace-join break-glass override is `agents.defaults.sandbox.docker.dangerouslyAllowContainerNamespaceJoin: true`.
+By default, sandbox containers run with **no network** (`docker.network: "none"`). Override with `agents.defaults.sandbox.docker.network`. `network: "host"` and `network: "container:<id>"` are blocked by default (see [Dangerous overrides](#dangerous-overrides) for the namespace-join break-glass override).
 
 `openclaw doctor` checks the sandbox image and offers to build or switch it when sandboxing is enabled but the image is missing.
+
+## Resource limits and hardening
+
+`agents.defaults.sandbox.docker` caps what a sandbox container can consume. Unset keys fall back to the Docker daemon default.
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `cpus` | unset (Docker default) | CPU limit, e.g. `0.5`, `1`, `2` |
+| `memory` | unset (Docker default) | Memory limit, e.g. `"512m"`, `"2g"`, or bytes as a number |
+| `memorySwap` | unset (Docker default) | Memory+swap limit (same format as `memory`) |
+| `pidsLimit` | unset (Docker default) | Process-count limit (`0` = Docker default) |
+| `ulimits` | unset | Per-name ulimits, e.g. `{ nofile: "1024:4096" }` (`"soft:hard"` string, number, or `{ soft, hard }`) |
+
+Isolation defaults are already hardened: `readOnlyRoot: true`, `capDrop: ["ALL"]`, and tmpfs mounts at `/tmp`, `/var/tmp`, `/run`. `seccompProfile` and `apparmorProfile` accept a path or profile name; `unconfined` is rejected for both.
+
+```json5
+{
+  agents: {
+    defaults: {
+      sandbox: {
+        docker: { cpus: 1, memory: "512m", pidsLimit: 256 },
+      },
+    },
+  },
+}
+```
+
+Per-agent `docker` blocks override these keys per agent; under `scope: "shared"` the per-agent block is ignored (same rule as binds). Changes apply to containers created after the next config load — existing containers keep their settings until recreated.
+
+## Auto-prune
+
+`agents.defaults.sandbox.prune` force-removes sandbox and sandbox-browser containers (`docker rm -f` plus their registry entries, running or not). The prune pass runs at most every 5 minutes; a container is pruned when **either** condition hits:
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `idleHours` | `24` | Prune when unused for more than N hours (`0` disables the idle check) |
+| `maxAgeDays` | `7` | Prune when older than N days (`0` disables the age check) |
+
+Set both to `0` to disable auto-prune entirely. Per-agent `prune` blocks are ignored under `scope: "shared"`.
+
+```json5
+{
+  agents: {
+    defaults: {
+      sandbox: { prune: { idleHours: 8, maxAgeDays: 3 } },
+    },
+  },
+}
+```
 
 ## Sandbox vs tool policy vs elevated
 

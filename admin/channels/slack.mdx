@@ -65,7 +65,7 @@ SLACK_BOT_TOKEN=xoxb-...
         - `message.channels`, `message.groups`, `message.im`, `message.mpim`
         - `reaction_added`, `reaction_removed`
         - `member_joined_channel`, `member_left_channel`
-        - `channel_rename`
+        - `channel_created`, `channel_rename`, `channel_id_changed`
         - `pin_added`, `pin_removed`
 
         Also enable App Home **Messages Tab** for DMs.
@@ -239,12 +239,25 @@ and still route command execution against the target conversation session (`Comm
 - Thread replies can create thread session suffixes (`:thread:<threadTs>`) when applicable.
 - `channels.slack.thread.historyScope` default is `thread`; `thread.inheritParent` default is `false`.
 - `channels.slack.thread.initialHistoryLimit` controls how many existing thread messages are fetched when a new thread session starts (default `20`; set `0` to disable).
+- `channels.slack.historyLimit`: max channel messages fetched as history context (default `50`; set `0` to disable). Falls back to `messages.groupChat.historyLimit` when unset.
+- `channels.slack.dmHistoryLimit`: max DM turns kept as history context; per-user override via `channels.slack.dms["<userId>"].historyLimit`.
 
 Reply threading controls:
 
 - `channels.slack.replyToMode`: `off|first|all` (default `off`)
-- `channels.slack.replyToModeByChatType`: per `direct|group|channel`
+- `channels.slack.replyToModeByChatType`: per-chat-type overrides keyed by `direct|group|channel`, each `off|first|all`. When set for a chat type, it takes precedence over `replyToMode` and over the legacy `dm.replyToMode` fallback
 - legacy fallback for direct chats: `channels.slack.dm.replyToMode`
+
+```json5
+{
+  channels: {
+    slack: {
+      replyToMode: "off",
+      replyToModeByChatType: { direct: "all", group: "first", channel: "off" },
+    },
+  },
+}
+```
 
 Manual reply tags are supported:
 
@@ -404,7 +417,9 @@ Reaction events still respect Slack access controls; unauthorized senders are dr
         "reaction_removed",
         "member_joined_channel",
         "member_left_channel",
+        "channel_created",
         "channel_rename",
+        "channel_id_changed",
         "pin_added",
         "pin_removed"
       ]

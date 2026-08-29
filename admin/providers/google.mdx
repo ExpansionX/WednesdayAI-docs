@@ -93,13 +93,20 @@ Use model IDs as `google/<model-id>` (example: `google/gemini-2.5-pro`).
 
 ## Vertex AI
 
-For enterprise Vertex AI access, use the `google-vertex` provider. This uses Application Default Credentials (ADC) via `gcloud`:
+For enterprise Vertex AI access, use the `google-vertex` provider. Authentication resolves in this order:
+
+1. `GOOGLE_CLOUD_API_KEY` — explicit Vertex API key.
+2. Application Default Credentials (ADC), configured with `gcloud`:
 
 ```bash
 gcloud auth application-default login
 ```
 
-OpenClaw resolves Vertex credentials via the ADC chain — no `GEMINI_API_KEY` is needed. The base URL is `https://{location}-aiplatform.googleapis.com` and uses the `google-vertex` API backend.
+The ADC path requires three things: credentials (the `gcloud` ADC file, or `GOOGLE_APPLICATION_CREDENTIALS` pointing at a service account key file), `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`), and `GOOGLE_CLOUD_LOCATION`. Without the project or location, requests fail with `Vertex AI requires a project ID` / `Vertex AI requires a location`.
+
+`google-vertex` also honors the Gemini key pool for key-rotated workloads: `GEMINI_API_KEYS` (comma-separated), `GEMINI_API_KEY`, `GEMINI_API_KEY_<n>`, and `GOOGLE_API_KEY` (fallback).
+
+The base URL is `https://{location}-aiplatform.googleapis.com` and uses the `google-vertex` API backend.
 
 ### google-vertex config snippet
 
@@ -143,6 +150,8 @@ Available `google-vertex` models mirror most `google` models: `gemini-2.5-pro`, 
 **Vertex AI: no credentials**
 
 - Run `gcloud auth application-default login` to authenticate, or set `GOOGLE_APPLICATION_CREDENTIALS` to a service account key file.
+- ADC also requires `GOOGLE_CLOUD_PROJECT` (or `GCLOUD_PROJECT`) and `GOOGLE_CLOUD_LOCATION`; missing either fails credential resolution.
+- To skip ADC, set `GOOGLE_CLOUD_API_KEY` with an explicit Vertex API key.
 
 ## Related
 

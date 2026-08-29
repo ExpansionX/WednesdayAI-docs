@@ -100,6 +100,42 @@ On error, `ok` is `false` and `error` is set:
 { "type": "res", "id": "req-2", "ok": false, "error": { "code": "NOT_FOUND", "message": "Session not found" } }
 ```
 
+### Server-push events
+
+The gateway pushes events to all connected clients in this frame shape:
+
+```json
+{ "type": "event", "event": "<name>", "payload": { }, "seq": 42, "stateVersion": { "presence": 7, "health": 3 } }
+```
+
+`seq` is a monotonically increasing broadcast sequence; `stateVersion` is present on state-snapshot events (`presence`, `health`). Slow consumers that cannot keep up are disconnected (close code `1008`); discardable events are dropped instead.
+
+| Event | Payload | Emitted when |
+| ----- | ------- | ------------|
+| `connect.challenge` | `{ nonce, ts }` | Immediately on connection (see handshake above) |
+| `agent` | `{ runId, seq, stream, ts, sessionKey?, data }` | Agent run streaming updates (assistant deltas, tool events, lifecycle phases) |
+| `chat` | `{ runId, sessionKey, seq, state, message?, errorMessage? }` where `state` is `delta` \| `final` \| `error` | Webchat run progress and final messages |
+| `presence` | `{ presence: [...] }` | System presence snapshot changes |
+| `tick` | `{ ts }` | Periodic keepalive |
+| `health` | Health summary snapshot | Health refresh; sensitive fields are redacted unless the client has admin scope |
+| `heartbeat` | Heartbeat event | After each heartbeat run; redacted unless admin scope |
+| `cron` | Cron job lifecycle event (e.g. `{ action: "finished", jobId }`) | Cron job state changes |
+| `talk.mode` | `{ enabled, phase, ts }` | Voice talk mode changes |
+| `talk.realtime.relay` | Realtime voice relay frames | During realtime voice sessions |
+| `shutdown` | `{ reason, restartExpectedMs }` | Gateway is shutting down |
+| `node.pair.requested` | Pairing request | A node requests pairing (requires the pairing scope) |
+| `node.pair.resolved` | Pairing resolution | A node pairing request is approved/rejected (pairing scope) |
+| `node.invoke.request` | Invocation request | The gateway dispatches a command to a connected node |
+| `device.pair.requested` | Device pairing request | A device requests pairing (pairing scope) |
+| `device.pair.resolved` | Device pairing resolution | A device pairing request is approved/rejected (pairing scope) |
+| `voicewake.changed` | `{ triggers }` | Voice wake-word triggers change |
+| `exec.approval.requested` | Approval request | An exec approval is requested (approvals scope) |
+| `exec.approval.resolved` | Approval resolution | An exec approval decision is made (approvals scope) |
+| `sessions.runsUpdate` | `{ runs, capturedAt, stuckThresholdMs }` | Active session run state changes |
+| `update.available` | `{ updateAvailable: { currentVersion, latestVersion, channel } \| null }` | Gateway update availability changes |
+
+Pairing and exec-approval events are only delivered to operator connections holding the matching scope (or admin). Plugins and channel extensions can register additional methods and events beyond this table.
+
 ### RPC methods
 
 <Note>
@@ -118,6 +154,8 @@ Common methods, grouped by namespace:
 | Logs / health | `logs.tail`, `usage.status`, `usage.cost` |
 | Cron | `cron.list`, `cron.status`, `cron.add`, `cron.update`, `cron.remove`, `cron.run`, `cron.runs` |
 | System / update | `update.run` |
+| System state | `last-heartbeat`, `set-heartbeats`, `system-presence`, `system-event` — heartbeat and presence RPCs behind the `openclaw system` CLI (flat method names; there is no `system.*` prefix) |
+| Plugins | `plugins/health` — current plugin health report (status, per-plugin diagnostics) |
 | Pairing (devices) | `device.pair.list`, `device.pair.approve`, `device.pair.reject`, `device.pair.remove`, `device.token.rotate`, `device.token.revoke` |
 | Nodes | `node.list`, `node.describe`, `node.invoke`, `node.event`, `node.rename`, `node.pair.list`, `node.pair.approve`, `node.pair.reject`, `node.pair.request`, `node.pair.verify` |
 | Models | `models.list` |
@@ -130,7 +168,7 @@ Common methods, grouped by namespace:
 | Wizard | `wizard.start`, `wizard.next`, `wizard.status`, `wizard.cancel` |
 
 <Note>
-`openclaw gateway status`, `openclaw gateway health`, and `openclaw gateway probe` are CLI helpers that establish a connection and read the handshake/health payload - they are not single RPC method names. Likewise `tools.invoke` is exposed over HTTP (`POST /tools/invoke`), not as a control-plane method.
+`openclaw gateway status`, `openclaw gateway health`, and `openclaw gateway probe` are CLI helpers that establish a connection and read the handshake/health payload - they are not single RPC method names. Likewise `tools.invoke` is exposed over HTTP (`POST /tools/invoke`), not as a control-plane method. Hooks have no RPC namespace either - manage them with the `openclaw hooks` CLI and the `hooks.*` config keys.
 </Note>
 
 ### Config RPC rate limiting
