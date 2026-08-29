@@ -35,3 +35,11 @@ Use Mintlify MDX components for callouts and layout — not raw HTML. Common one
 ## Core repo relationship
 
 The underlying product lives at `github.com/ExpansionX/WednesdayAI-core`. Docs must stay accurate with that codebase — config keys, CLI flags, hook signatures, SDK exports. Use the `/sync-check` skill to surface stale or missing coverage after core changes.
+
+When shipping a docs sync for a core release (commit subject `docs: sync for vX.Y.Z`), regenerate the per-release docs changelog as part of the same PR:
+
+```bash
+bash scripts/generate-changelog.sh
+```
+
+This rewrites `changelog.mdx` from the sync-commit history (newest version first). Review and commit it with the sync.
