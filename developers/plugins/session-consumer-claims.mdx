@@ -1,0 +1,147 @@
+---
+title: "Session consumer claims"
+description: "Declare sessionConsumers in your plugin manifest and consume ended-session work with claimSessionWork/ackSessionWork — scopes, lanes, leases, and diagnostics events."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Session consumer claims
+
+WednesdayAI gives plugins a durable, at-least-once work queue over **ended sessions**: each finished session is materialized as claim rows per registered consumer, and your plugin pulls, leases, and acks them through the SDK. This replaces polling the session store or hooking the volatile `session_end` event (an in-process subscriber absent at emit time silently misses the session forever).
+
+The pieces:
+
+- **Manifest** — declare `sessionConsumers` in `openclaw.plugin.json`.
+- **SDK** — `api.claimSessionWork(opts)` / `api.ackSessionWork(claimId, result)` / optional `api.onSessionWorkAvailable({ effectKind })`.
+- **Diagnostics** — `session_consumer_claim` events surface DLQ, backstop, and skipped-backlog decisions.
+
+Contracts live in `src/plugins/manifest.ts` (`SessionConsumerDeclaration`) and `src/plugins/types.ts` (`ClaimedSessionWork`, `SessionWorkResult`), re-exported from `openclaw/plugin-sdk`. Design decisions: ADR 0041 (claim ledger) and ADR 0062 (seam carries `sessionKey` + `outcome`).
+
+## Manifest declaration
+
+```json
+{
+  "id": "my-learner",
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+  "sessionConsumers": [
+    {
+      "effectKind": "lesson-capture",
+      "subCursors": ["nightly", "realtime"],
+      "consumeScopes": ["session:read"],
+      "consumeLanes": ["telegram:dm:*"],
+      "enabled": true
+    }
+  ]
+}
+```
+
+| Field | Rules |
+| ----- | ----- |
+| `effectKind` | Required. Lowercase identifier (`^[a-z][a-z0-9.-]*$`). Keys the claim rows; **at most once per plugin** — duplicates are a manifest error (the reconciler keys claims by `(pluginId, effectKind)`) |
+| `subCursors` | Optional bounded fan-out (max **8**, each `^[a-z][a-z0-9-]*$`) — one claim stream per sub-cursor |
+| `consumeScopes` | Optional string list; claims outside the approved scopes are skipped, not leased |
+| `consumeLanes` | Optional lane filter: `""` (main/no-peer lane), `"*"` (wildcard), or `"{channel}:{method}:{peer}"` lane ids |
+| `enabled` | Defaults to `true` |
+
+Your `consumerId` is **loader-bound** — `${manifestId}:${effectKind}[/<subCursor>]` — and never caller-supplied. A plugin cannot claim work as another plugin, and unauthorized items (outside your manifest's scopes/lanes) are skipped before they reach you.
+
+## Claiming and acking work
+
+```typescript
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.on("gateway_start", () => {
+    void pump(api);
+  });
+
+  // Optional: notified by the sweep after reconciliation and lease-reap
+  api.onSessionWorkAvailable = async ({ effectKind }) => {
+    await pump(api, effectKind);
+  };
+}
+
+async function pump(api: OpenClawPluginApi, effectKind?: string): Promise<void> {
+  for (let i = 0; i < 5; i++) {
+    const work = await api.claimSessionWork({ effectKind, limit: 1 });
+    if (!work) return;
+    try {
+      await process(work);
+      await api.ackSessionWork(work.claimId, { kind: "processed" });
+    } catch (err) {
+      await api.ackSessionWork(work.claimId, {
+        kind: "failed",
+        error: err instanceof Error ? err.message : String(err),
+        retryable: true,
+      });
+      return; // back off; the retry schedule owns the next attempt
+    }
+  }
+}
+```
+
+`claimSessionWork(opts?)` options: `{ subCursor?, laneId?, limit?, leaseMs?, effectKind? }`. It returns `null` when no durable claims store is wired (`fs-jsonl` without the degraded store) or no work is available.
+
+The claim payload (`ClaimedSessionWork`):
+
+```typescript
+type ClaimedSessionWork = {
+  claimId: string;
+  sessionId: string;
+  consumerId: string;          // "<pluginId>:<effectKind>[/<subCursor>]"
+  laneId: string;
+  effectKind: string;
+  schemaVersion: number;
+  attemptCount: number;
+  leaseOwner?: string;
+  agentId?: string;
+  sessionKey?: string;         // absent on pre-ADR-0062 rows
+  outcome?: "completed" | "aborted" | "unknown";  // absent on pre-ADR-0062 rows
+  transcript: ConversationReadQuery;  // scoped read of the session transcript
+};
+```
+
+`ackSessionWork(claimId, result)` takes `{ kind: "processed" }` or `{ kind: "failed", error, retryable }`. After `maxAttempts` (default 5) retryable failures the claim dead-letters (`dlq_terminal` event).
+
+## Async safety
+
+`claimSessionWork`/`ackSessionWork` are async storage calls — never call them inside synchronous hook bodies without handling the promise. Claims hold **leases** (default 30 s): a claim you hold but neither ack nor release blocks re-offer until the lease expires. Batch small: claim → process → ack before claiming again, as in the pump above. Do not hold claims across user-facing request paths.
+
+**What not to do:**
+
+```typescript
+// ❌ fire-and-forget ack — failures vanish silently and the lease times out
+void api.ackSessionWork(work.claimId, { kind: "processed" });
+
+// ❌ claiming everything at startup and holding it
+const backlog = await api.claimSessionWork({ limit: 1000 }); // leases expire mid-processing
+```
+
+## Diagnostics events
+
+Emitting from `src/infra/diagnostic-events.ts`, type `session_consumer_claim`:
+
+```typescript
+type DiagnosticSessionConsumerClaimEvent = {
+  type: "session_consumer_claim";
+  event: "dlq_terminal" | "backstop_released" | "skipped_backlog";
+  consumerId: string;
+  laneId: string;
+  sessionId?: string;
+  reason: string;
+  attemptCount?: number;
+};
+```
+
+Surface these in your plugin's observability story — `backstop_released` means a session your consumer never finished was pruned anyway.
+
+## Operator-facing behaviour
+
+Declaring `sessionConsumers` makes pruning **obligation-gated** for your lanes: sessions you have not consumed are pinned (bounded by a 30-day backstop). Document this for operators in your plugin README, and point them at [Session consumer claims (admin)](/admin/gateway/session-consumer-claims).
+
+## Related
+
+- [Session consumer claims (admin)](/admin/gateway/session-consumer-claims) — config keys, defaults, prune interaction
+- [Session store](/developers/plugins/session-store) — reading session data
+- [Plugin manifest](/developers/plugins/manifest) — required fields and validation

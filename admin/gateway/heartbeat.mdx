@@ -8,7 +8,7 @@ title: "Heartbeat"
 
 # Heartbeat (Gateway)
 
-> **Heartbeat vs Cron?** See [Cron vs Heartbeat](/automation/cron-vs-heartbeat) for guidance on when to use each.
+> **Heartbeat vs Cron?** See [Cron vs heartbeat](/users/cron#cron-vs-heartbeat) for guidance on when to use each.
 
 Heartbeat runs **periodic agent turns** on a configured session so the model can
 surface anything that needs attention without spamming you. By default that is
@@ -57,6 +57,28 @@ Example config:
   prompt includes a “Heartbeat” section and the run is flagged internally.
 - Active hours (`heartbeat.activeHours`) are checked in the configured timezone.
   Outside the window, heartbeats are skipped until the next tick inside the window.
+
+## Configuration
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `every` | duration string | `"30m"` | Heartbeat interval. `0m` disables. Default is `1h` when Anthropic OAuth/setup-token is detected. |
+| `model` | string | — | Model override for heartbeat runs (`provider/model`). |
+| `target` | string | `"none"` | Delivery target: `none`, `last`, or an explicit channel id (`whatsapp`, `telegram`, `discord`, `slack`, etc.). |
+| `to` | string | — | Channel-specific recipient override (e.g. E.164 for WhatsApp, Telegram chat id). For Telegram topics: `<chatId>:topic:<threadId>`. |
+| `accountId` | string | — | Account id for multi-account channels (e.g. Telegram with multiple bots). |
+| `identity` | string | — | Attribute heartbeat runs to a registered identity. See [Identity attribution](#identity-attribution). |
+| `directPolicy` | `allow` \| `block` | `allow` | Controls direct/DM delivery. `block` suppresses DM delivery while still running the turn. |
+| `prompt` | string | _(see below)_ | Overrides the default prompt body (sent verbatim; not merged). |
+| `ackMaxChars` | number | `300` | Max chars allowed after `HEARTBEAT_OK` before the reply is delivered. |
+| `lightContext` | boolean | — | Use lightweight bootstrap context; keeps only heartbeat-specific files like `HEARTBEAT.md`. |
+| `isolatedSession` | boolean | — | Each tick runs in a fresh sibling `:heartbeat` session. Delivery and duplicate suppression still use the base session. |
+| `skipWhenBusy` | boolean | — | Skip this agent's heartbeat while its session-keyed subagent or nested lanes are busy. |
+| `activeHours` | object | — | Restrict heartbeats to a time window. See [Active hours](#active-hours). |
+| `includeReasoning` | boolean | `false` | Also deliver a separate `Reasoning:` message when extended thinking is available. |
+| `session` | string | `"main"` | Session key for the heartbeat run. When `isolatedSession: true`, set the base key here — the runtime appends `:heartbeat`. |
+| `suppressToolErrorWarnings` | boolean | — | Suppress tool-error warning payloads during heartbeat runs. |
+| `wakeGate` | object | — | Cheap declarative check that decides whether the persona turn runs. See [Wake-gate](#wake-gate). |
 
 ## What the heartbeat prompt is for
 
@@ -263,6 +285,14 @@ Use `accountId` to target a specific account on multi-account channels like Tele
 - Heartbeat-only replies do **not** keep the session alive; the last `updatedAt`
   is restored so idle expiry behaves normally.
 
+## Identity attribution
+
+Key: `heartbeat.identity` — default unset (the heartbeat runs as a pure system turn with no identity).
+
+Set it to a registered identity key (a `session.identityLinks` entry, matched case-insensitively) to run the heartbeat under that user's identity lane — the turn is attributed to them the same way their chat-initiated turns are, instead of running identity-less. An unmatched value is never fabricated into an identity: the run simply stays unattributed.
+
+This attribute governs the **run**, not the destination: `target` / `to` / `accountId` still decide where check-ins are delivered. The companion behaviour on the cron side is identity-linked delivery, where a `delivery.to` holding an identity key resolves to the channel-native chat id linked to that identity — see [Cron jobs: Identity attribution](/admin/automation/cron-jobs#identity-attribution).
+
 ## Visibility controls
 
 By default, `HEARTBEAT_OK` acknowledgments are suppressed while alert content is
@@ -409,12 +439,10 @@ nudge against a busy target session defers; it does not bypass any check.
 The nudge is reachable from four trigger surfaces, all producing the same main-session injection and
 persona wake:
 
-- **Cron** — a job with a `wakeGate` payload (see
-  [Cron vs Heartbeat](/automation/cron-vs-heartbeat#nudge-and-wake-gate-jobs)).
-- **Heartbeat** — a heartbeat configured with a `wakeGate` (next section).
-- **Plugin / hook** — `api.runtime.signals.nudge(...)` (see
-  [Agent Signals](/plugins/agent-signals#nudge)).
-- **CLI** — [`openclaw agent nudge`](/cli/agent-nudge).
+- **Cron** — a job with a `wakeGate` payload (see [Cron jobs](/admin/automation/cron-jobs))
+- **Heartbeat** — a heartbeat configured with a `wakeGate` (see [Wake-gate](#wake-gate) below)
+- **Plugin / hook** — `api.runtime.signals.nudge(...)` (see [Agent Signals](/developers/agent-signals#nudge))
+- **CLI** — `openclaw agent nudge`
 
 ### Plugin / hook example
 

@@ -68,6 +68,11 @@ Optional keys:
 - If plugin config exists but the plugin is **disabled**, the config is kept and
   a **warning** is surfaced in Doctor + logs.
 
+<Tip>
+  Run `openclaw plugins doctor` to see manifest, schema, and config issues across all
+  discovered plugins.
+</Tip>
+
 ## Notes
 
 - The manifest is **required for all plugins**, including local filesystem loads.
@@ -79,3 +84,21 @@ Optional keys:
 - If your plugin depends on native modules, document the build steps and any
   package-manager allowlist requirements (for example, pnpm `allow-build-scripts`
   - `pnpm rebuild <package>`).
+
+### `sessionConsumers`
+
+Declares that this plugin consumes **ended-session work**. Each entry keys a durable claim stream: `effectKind` (required, unique per plugin), optional `subCursors` (max 8), `consumeScopes`, `consumeLanes`, and `enabled` (default `true`). Entries are validated at manifest load — non-array shapes, invalid `effectKind` patterns, or duplicate `effectKind`s are plugin errors.
+
+At runtime, `api.claimSessionWork()` / `api.ackSessionWork()` gate the queue: the `consumerId` is loader-bound to your manifest declaration (never caller-supplied), and claims outside your declared scopes or lanes are skipped, never leased. Declared consumers also obligation-gate session pruning — the session store will not prune sessions with non-terminal claims from your plugin.
+
+See [Session consumer claims](/developers/plugins/session-consumer-claims) for the full contract, lease semantics, and diagnostics events.
+
+## Where config lands
+
+Users set plugin config under the plugin's `id`. Inside `register`, it arrives as `api.pluginConfig` (`Record<string, unknown> | undefined`). Always handle a missing or partial config gracefully.
+
+## What's next
+
+- [Write your first plugin](/developers/plugins/your-first-plugin)
+- [Publishing a plugin](/developers/plugins/publishing)
+- [Plugin SDK reference](/developers/sdk)

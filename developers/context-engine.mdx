@@ -1,0 +1,174 @@
+---
+title: "Context engine"
+description: "How WednesdayAI assembles per-turn context: the collect → project → prune → compaction lifecycle, PromptContribution blocks, and how to take over compaction from a plugin."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Context engine
+
+Every agent run assembles a fresh context: the system prompt (built from sections), the session transcript, workspace files, tool schemas, and contributions from plugins. The context engine is the pipeline that collects those pieces, projects them into the message list, prunes under token pressure, and compacts when the window is full. Plugins join it through four lifecycle hooks — `context.collect`, `context.project`, `context.prune`, and `compaction.plan` — all registered with `api.on(...)` and imported only from `openclaw/plugin-sdk`.
+
+This page documents the engine contract: the hook order, the typed events, the contribution shape, and the takeover rules for plugins that own compaction.
+
+## Pipeline
+
+```text
+inbound turn
+  └─ context.collect    plugins contribute PromptContribution blocks
+  └─ context.project    contributions projected into the outgoing message list
+  └─ (model call)
+  └─ context.prune      token-pressure pruning (in-memory, per turn)
+  └─ compaction.plan    summarisation planning (persists to the transcript)
+```
+
+- Each lifecycle hook runs handlers **sequentially** in registration order (ties broken by the optional `{ priority }` on `api.on`).
+- Context lifecycle handlers are awaited with a **5 000 ms default timeout**; a handler that exceeds it is logged and skipped. Return promptly — do background work outside the handler.
+- `context.prune` and `compaction.plan` only run under token pressure; a turn with plenty of window skips both.
+
+## The contribution contract
+
+`context.collect` handlers return a `PromptContribution`. Merge order and block placement are owned by the engine.
+
+```typescript
+import type { PromptContribution } from "openclaw/plugin-sdk";
+
+const contribution: PromptContribution = {
+  // Context blocks, merged by placement field and sorted by priority (desc, stable):
+  prependSystemPrompt: [],   // before the built system prompt
+  systemPrompt: undefined,   // plain string — last writer wins on merge
+  appendSystemPrompt: [],    // after the built system prompt
+  prependContext: [],        // before the user turn
+  appendContext: [],         // after the user turn
+  prependBeforeMetadata: [], // before the metadata block group
+  injectAfterMetadata: [],   // after the metadata block group
+  appendAfterUserMessage: [],// after the clean user message
+  metadata: [],              // metadata lane blocks
+  pluginData: {},            // merged into stored entries for later reads
+};
+```
+
+Each block is a `ContextBlock`:
+
+```typescript
+type ContextBlock = {
+  id?: string;
+  source: string;          // your plugin id — label for /context reporting
+  text: string;
+  priority?: number;       // higher sorts earlier within a placement field
+  tokenEstimate?: number;
+  metadata?: Record<string, unknown>;
+};
+```
+
+When multiple plugins contribute, blocks in the same placement field are sorted by `priority` descending (registration order breaks ties). `pluginData` objects merge with last-writer-wins per key.
+
+## The lifecycle context
+
+All four hooks receive a `ContextLifecycleContext` as the handler's second argument:
+
+```typescript
+type ContextLifecycleContext = {
+  agentId?: string;
+  sessionId: string;
+  sessionKey?: string;
+  runId?: string;            // stable across retries within the turn
+  workspaceDir?: string;
+  trigger?: string;          // "user" | "heartbeat" | "cron" | "steer" | "memory" | "internal"
+  channelId?: string;
+  modelId?: string;
+  provider?: string;
+  tokenWindow?: { modelId: string; provider: string; contextWindowTokens?: number; reservedOutputTokens?: number; estimatedInputTokens?: number };
+  usage?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number; total?: number };
+  storageCursor?: { backend: "fs-jsonl" | "sqlite" | "postgres"; sessionId: string; seq?: number; entryId?: string; /* ... */ };
+  turnNumber?: number;       // completed user-message turns; DB backends only
+  sessionCreatedAt?: Date;   // DB backends only
+  runtimeIdentity?: PluginRuntimeIdentity;
+  turn?: PluginTurnIdentity;
+};
+```
+
+<Warning>
+  `turnNumber` and `sessionCreatedAt` are `undefined` on the default JSONL backend and on
+  storage lookup failure. Always guard:
+  `if ((ctx.turnNumber ?? 0) < 10)` and `if (ctx.sessionCreatedAt)`.
+</Warning>
+
+## Hook reference
+
+### `context.collect`
+
+Fires while the turn's prompt envelope is built. Event: `{ prompt, cleanUserMessage, messages, envelope, storage? }`. Return a `PromptContribution` (or void).
+
+### `context.project`
+
+Fires as contributions are projected into the outgoing message list. Event: `{ messages, contributions, envelope, storage? }`. Return `{ messages?, projection?, contribution? }` — replace the message list, attach a JSON projection (cached and replayable), or amend the contribution.
+
+### `context.prune`
+
+Fires under token pressure, in-memory only (the transcript is not rewritten). Event: `{ messages, tokenWindow?, usage?, storage? }`. Return `{ messages?, dropped?, contribution?, compactionHandled? }`.
+
+`compactionHandled: true` tells the runtime the context is sufficiently pruned and `compaction.plan` should not fire this turn. It is only effective as a per-turn fallback — the stable way to suppress built-in compaction is declaring ownership (below).
+
+### `compaction.plan`
+
+Fires when compaction is being planned. Event: `{ messages, tokenWindow?, usage?, storageCursor? }`. Return `{ plan?, messages?, contribution? }`.
+
+## Observing without mutating
+
+`before_compaction` / `after_compaction` (observe) fire around the compaction pass with `{ messageCount, tokenCount?, sessionFile?, ... }`. All pre-compaction messages are already on disk when they fire, so heavy post-processing can read `sessionFile` asynchronously without blocking the pipeline. `storage.afterAppend` (observe) fires after each conversation entry is appended, with the stored entry and storage cursor — use `turn.turnId` plus entry id or `rawSha256` to dedupe append fan-out.
+
+## Taking over compaction
+
+A plugin that fully owns compaction declares it in its definition:
+
+```typescript
+import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+
+export default {
+  name: "my-compactor",
+  ownsCompaction: true,   // runtime skips its built-in compaction trigger
+  async register(api) {
+    api.on("context.prune", (event) => {
+      // your pruning policy; returning compactionHandled is redundant here
+      return { messages: event.messages.slice(-20) };
+    });
+    api.on("compaction.plan", (event) => {
+      // your summarisation planning
+    });
+  },
+} satisfies OpenClawPluginDefinition;
+```
+
+Without `ownsCompaction`, returning `compactionHandled: true` from `context.prune` suppresses `compaction.plan` for that turn only. Mixing both signals correctly avoids double-compaction races.
+
+## What the engine does when plugins don't
+
+- **Context windows** come from the provider's model catalog; when multiple providers expose the same model id with different windows, the **smaller** window wins (fail-safe budgeting). `agents.defaults.contextTokens` overrides the estimate.
+- **Replay**: prior turns replay from storage in `"clean"` mode by default (channel-framing-free enriched messages); `agents.defaults.ctx.replayMode: "framed"` restores raw entries.
+- **Compaction** (`agents.defaults.compaction`): summarises older history into a persistent summary entry. Defaults: `enabled: true`, `mode: "safeguard"`, `maxHistoryShare: 0.5`, `identifierPolicy: "strict"` (summaries are instructed to preserve opaque identifiers — UUIDs, hashes, hostnames — verbatim), `memoryFlush.enabled: true` (a silent pre-compaction turn that encourages durable notes).
+- **Session pruning** (`agents.defaults.contextPruning`, opt-in) trims old **tool results** in-memory per request; it never rewrites history.
+- **Post-compaction re-anchor**: the `## Session Startup` and `## Red Lines` sections of the workspace `AGENTS.md` are re-injected after compaction so critical rules survive summarisation. Any workspace file relying on this must keep those headings byte-identical.
+
+## Async safety
+
+Hook handlers may be sync or async, but they run **sequentially on the turn's critical path** — a slow handler delays the model call, and one exceeding the 5 000 ms context-hook timeout is abandoned. Do not perform blocking I/O; offload heavy work to `sessionFile` reads after `after_compaction`, or to your own background queue keyed by `turnId`.
+
+**Do not do this:**
+
+```typescript
+api.on("context.collect", async (event) => {
+  const big = await fetchExternalGraph(event.prompt); // network call on the critical path
+  return { appendContext: [{ source: "my-plugin", text: big }] };
+});
+```
+
+**Do this instead:** cache contributions in `register()` or a background task, and keep `context.collect` a cheap lookup.
+
+## Related
+
+- [Hooks](/developers/hooks) — the `api.on` guide and full hook catalogue
+- [Plugin hooks reference](/reference/plugin-hooks) — exhaustive event/result types
+- [System prompt](/admin/gateway/system-prompt) — how the built sections are assembled
+- [Sessions](/admin/session) — storage backends and transcript persistence

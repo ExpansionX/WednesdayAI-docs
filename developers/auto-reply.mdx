@@ -1,0 +1,100 @@
+---
+title: "Auto-reply pipeline"
+description: "How an inbound message becomes outbound replies: dispatch stages, the GetReplyOptions contract, run kinds, typing policy, and bootstrap context modes."
+audience: developer
+doc-schema-version: 1
+---
+
+
+# Auto-reply pipeline
+
+The auto-reply pipeline (`src/auto-reply/`) turns one inbound message into zero or more outbound replies. Channel adapters hand a finalized message context to the dispatcher; the dispatcher resolves routing and commands, runs the agent turn, and delivers replies through the channel. Plugins observe and mutate the path via the hooks listed at the bottom.
+
+## Pipeline stages
+
+```text
+inbound message
+  └─ envelope / templating        MsgContext built and finalized (finalizeInboundContext)
+  └─ command detection            /commands parsed from the inbound text (commands-registry)
+  └─ dispatch                     dispatchInboundMessage → dispatchReplyFromConfig
+  └─ getReply                     model selection, system prompt build, agent run
+  └─ reply delivery               ReplyDispatcher (typing indicators, block replies, chunking)
+```
+
+- `dispatchInboundMessage` (`src/auto-reply/dispatch.ts`) wraps the run in `withReplyDispatcher`, which guarantees dispatcher reservations are released on every exit path — errors included.
+- Slash commands short-circuit the model run when handled; unhandled text flows to the agent.
+- Delivery is policy-gated: `session.sendPolicy` rules (allow/deny by channel, chat type, key prefix) can block outbound sends, and the owner can override per session at runtime with `/send on|off|inherit`.
+
+## The GetReplyOptions contract
+
+`getReplyFromConfig(ctx, opts, cfg)` accepts `GetReplyOptions` (defined in `src/auto-reply/types.ts`; channel adapters inside the repo import it there — it is not re-exported through the plugin SDK, though `ReplyPayload` is). The fields a channel adapter or embedder most commonly sets:
+
+```typescript
+const opts = {
+  runId: crypto.randomUUID(),     // override for agent events (default: random UUID)
+  abortSignal: controller.signal, // aborts the underlying agent run
+  isHeartbeat: false,             // mark the run as a heartbeat turn
+  typingPolicy: "user_message",   // "auto" | "user_message" | "system_event" | "internal_webchat" | "heartbeat"
+  suppressTyping: false,          // force-disable typing indicators (system/internal/cross-channel routes)
+  bootstrapContextMode: "full",   // "full" | "lightweight"
+  bootstrapContextRunKind: "default", // "default" | "heartbeat" | "cron"
+  disableBlockStreaming: false,
+  blockReplyTimeoutMs: 30_000,    // timeout for block reply delivery
+  skillFilter: [],                // restrict loaded skills (empty = no skills)
+  timeoutOverrideSeconds: 0,      // 0 = no override; threads to agent timeout resolution
+};
+```
+
+Callback seams (all optional): `onReplyStart`, `onPartialReply`, `onReasoningStream` / `onReasoningEnd`, `onAssistantMessageStart`, `onBlockReply(payload, { abortSignal?, timeoutMs? })`, `onToolResult`, `onToolStart`, `onModelSelected({ provider, model, thinkLevel })`, `onAgentRunStart(runId)`, `onTypingController`, `onTypingCleanup`.
+
+Correlation: `channelCorrelation` carries a **privacy-safe** channel/run correlation envelope for diagnostics and run storage — prefer it over raw channel ids. Heartbeat runs pass `heartbeatModelOverride` and `heartbeatIdentity` (resolved per-agent config).
+
+## Bootstrap context and cache stability
+
+Two options control what a system-triggered run sees at startup:
+
+- **`bootstrapContextMode`** — `"full"` (default) injects the standard workspace bootstrap files; `"lightweight"` keeps only `HEARTBEAT.md`, used by `heartbeat.lightContext` runs to stay cheap.
+- **`bootstrapContextRunKind`** — selects the run-kind flavour of the bootstrap context: `"default"`, `"heartbeat"`, or `"cron"`.
+
+<Note>
+  Shared-session heartbeat runs pass <code>bootstrapContextRunKind: "default"</code> so the
+  system prompt stays <strong>byte-identical</strong> to user turns — this preserves the
+  provider prompt-cache prefix. Heartbeat instructions are delivered in the trigger message
+  instead of the prompt. Only isolated heartbeat sessions use the heartbeat run kind.
+</Note>
+
+## Run kinds and session-run records
+
+Every turn is recorded as a session run (`src/config/sessions/session-run-types.ts`):
+
+- **Kind**: `"chat" | "subagent" | "cron" | "heartbeat" | "nudge" | "acp" | "work" | "unknown"`.
+- **Status**: `"pending" | "running" | "completed" | "failed" | "interrupted" | "needs_recovery_decision" | "recovering" | "cancelled" | "abandoned"`.
+- **Recovery mode**: `"off" | "decide" | "auto"`; `capturedEnd` is true only when the LLM stream emitted a genuine end-of-turn terminal event.
+
+Transcript entries record `triggerSource` (`"user" | "heartbeat" | "cron" | "subagent" | "acp" | "system"`) and `isAutomated` (true when the trigger is not `user`). Runs sharing a `sessionKey` can be wrapped in one trace root (`sessionSpans`). An outer agent-turn claim can own the row — pass `suppressSessionRunRecording: true` for nested turns that must not double-record.
+
+## Typing policy
+
+`typingPolicy` decides whether a run class shows typing indicators; `session.typingMode` (`"never" | "instant" | "thinking" | "message"`) decides how they render, and `session.typingIntervalSeconds` the refresh cadence. `suppressTyping: true` overrides everything for system/internal/cross-channel routes.
+
+## Reply payload
+
+Handlers and callbacks receive a `ReplyPayload`: `{ text?, mediaUrl?, mediaUrls?, replyToId?, replyToTag?, replyToCurrent?, audioAsVoice?, isError?, isReasoning?, channelData? }`. `isReasoning` payloads must be suppressed by channels without a dedicated reasoning lane (WhatsApp, web). `channelData` carries per-channel envelope data owned by the adapter.
+
+Outbound text is then chunked per channel policy — `textChunkLimit` and `chunkMode` (`"length"` default, `"newline"`, `"paragraph"`). See [Chunk delivery](/developers/plugins/chunk-delivery).
+
+## Where plugins plug in
+
+- `message_received` / `message_sending` / `message_sent` — observe and gate the inbound/outbound edges
+- `before_model_resolve` / `before_prompt_build` / `before_context_send` / `transform_llm_input` / `transform_llm_output` — shape the model turn
+- `onBlockReply`-equivalent surfaces for channels; `blockStreamingDefault` for block replies
+- `storage.afterAppend` — observe every persisted entry
+
+See the [plugin hooks reference](/reference/plugin-hooks) for the full contract.
+
+## Related
+
+- [Chunk delivery](/developers/plugins/chunk-delivery) — outbound chunking modes
+- [Streaming](/admin/streaming) — block and preview streaming configuration
+- [Context engine](/developers/context-engine) — what the model sees per turn
+- [Plugin hooks reference](/reference/plugin-hooks) — hook contract

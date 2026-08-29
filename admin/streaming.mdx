@@ -1,0 +1,98 @@
+---
+title: "Streaming"
+description: "How replies stream to channels: block streaming, preview streaming modes, chunking, coalescing, and human pacing — with every config key and default."
+audience: admin
+doc-schema-version: 1
+---
+
+
+# Streaming
+
+WednesdayAI streams replies to chat channels through two independent layers. There is **no token-by-token streaming to channel messages** — both layers are message-based.
+
+- **Block streaming** — emit completed assistant text blocks as real channel messages while the model is still working.
+- **Preview streaming** — maintain a temporary preview message on Telegram, Discord, and Slack that is edited/replaced until the final reply lands.
+
+Restart the gateway after changing any key on this page (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+## Block streaming
+
+Block streaming sends assistant output in coarse chunks as it becomes available. It is **off by default**.
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `agents.defaults.blockStreamingDefault` | `"off"` | Master default; `"on"` enables block replies |
+| `channels.<channel>.blockStreaming` | unset | Per-channel/account force on (`true`) or off (`false`); overrides the default |
+| `agents.defaults.blockStreamingBreak` | `"text_end"` | Boundary: flush per assistant text block (`"text_end"`) or per whole message (`"message_end"`) |
+| `agents.defaults.blockStreamingChunk.minChars` | `800` | Low bound — don't emit a chunk until at least this many chars (final flush always sends) |
+| `agents.defaults.blockStreamingChunk.maxChars` | `1200` | High bound — split before/at this size; clamped to the channel `textChunkLimit` |
+| `agents.defaults.blockStreamingChunk.breakPreference` | `"paragraph"` | Split preference: `"paragraph"` → `"newline"` → `"sentence"`; code fences are never split (fences are closed and reopened when forced) |
+| `agents.defaults.blockStreamingCoalesce` | see below | Merge consecutive chunks before send |
+| `agents.defaults.models["<provider/model>"].streaming` | `true` (`false` for Ollama, to avoid SDK issue #1205) | Whether the model call itself streams |
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  agents: {
+    defaults: {
+      blockStreamingDefault: "on",
+      blockStreamingBreak: "text_end",
+      blockStreamingChunk: { minChars: 800, maxChars: 1200, breakPreference: "paragraph" },
+    },
+  },
+}
+```
+
+Boundary semantics: `"text_end"` streams blocks as the chunker emits them; `"message_end"` waits until the assistant message finishes, then flushes (still chunked if the buffered text exceeds `maxChars`).
+
+### Coalescing
+
+`agents.defaults.blockStreamingCoalesce` (`{ minChars?, maxChars?, idleMs? }`) merges streamed chunks to reduce single-line spam. Buffers flush on an idle gap (`idleMs`, default 1000 ms), when `maxChars` is exceeded, or at the final flush. The joiner follows `breakPreference` (`paragraph` → `\n\n`, `newline` → `\n`, `sentence` → space). Default coalesce `minChars` is raised to 1500 for Signal, Slack, and Discord unless overridden. Per-channel/account overrides: `channels.<channel>.blockStreamingCoalesce`.
+
+### Human pacing
+
+`agents.defaults.humanDelay` adds a randomized pause **between block replies** (not before the first, not on final replies or tool summaries): `mode: "off"` (default), `"natural"` (800–2500 ms), or `"custom"` with `minMs`/`maxMs`.
+
+## Preview streaming
+
+Canonical key: `channels.<channel>.streaming` with modes `"off"`, `"partial"` (single preview message, edited), `"block"` (chunked preview updates), and `"progress"` (status preview during generation, final answer at completion).
+
+| Channel | `off` | `partial` | `block` | `progress` |
+| ------- | ----- | --------- | ------- | ---------- |
+| Telegram | yes | yes | yes | maps to `partial` |
+| Discord | yes | yes | yes | maps to `partial` |
+| Slack | yes | yes | yes | yes |
+
+```json5
+{
+  channels: {
+    telegram: {
+      streaming: "partial",   // live-edited preview message
+    },
+    slack: {
+      streaming: "partial",
+      nativeStreaming: true,  // Slack-native streaming API for partial mode (default: true)
+    },
+  },
+}
+```
+
+Legacy keys auto-migrate: Telegram/Discord `streamMode` + boolean `streaming` → the `streaming` enum; Slack boolean `streaming` → `nativeStreaming`. Preview streaming is skipped when block streaming is explicitly enabled on the same channel (avoids double-streaming), and iMessage does not stream at all.
+
+## Interaction with chunking
+
+Block-stream chunk sizes are clamped to the channel's `textChunkLimit`, and the channel's `chunkMode` controls how outbound text packs into messages (`length` default; `newline` packs paragraphs; `paragraph` one message per paragraph — see [Chunk delivery](/developers/plugins/chunk-delivery)). With `chunkMode: "paragraph"`, block streaming flushes eagerly per paragraph. Discord additionally splits tall replies at `channels.discord.maxLinesPerMessage` (default 17).
+
+## Troubleshooting
+
+**Replies arrive all at once** — block streaming is off by default. Set `agents.defaults.blockStreamingDefault: "on"` (or `channels.<channel>.blockStreaming: true`) for progressive block replies, and check the channel supports preview/block streaming (iMessage does not).
+
+**Preview stops mid-reply** — the provider may have hit an output limit or returned an early stop. Check `journalctl --user -u openclaw-gateway -f` (Linux) or `./scripts/clawlog.sh` (macOS) for finish reasons; try `/model` to switch models.
+
+**Every paragraph is a separate message** — your channel is on `chunkMode: "paragraph"` (or block streaming with eager paragraph flush). Switch to `chunkMode: "newline"` to pack paragraphs up to `textChunkLimit`, or `"length"` to split only by size.
+
+## Related
+
+- [Chunk delivery](/developers/plugins/chunk-delivery) — how long replies split into channel messages
+- [Gateway configuration](/admin/gateway/configuration) — gateway-wide settings
+- [Hooks catalogue](/reference/hooks-catalogue) — `message:sent` and delivery events

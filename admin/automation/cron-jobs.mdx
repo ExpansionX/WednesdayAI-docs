@@ -1,0 +1,185 @@
+<!--
+docs.json registration needed (not added per task constraints):
+Administrators tab → new "Automation" group (or "Maintenance") → add "admin/automation/cron-jobs".
+-->
+
+---
+title: "Cron jobs"
+description: "The Gateway scheduler reference — cron.* config keys and defaults, job types, schedules, delivery, storage cutover, retry behavior, and failure alerts."
+audience: admin
+---
+
+# Cron jobs
+
+Cron is the Gateway's built-in scheduler. It persists jobs, fires them at the right time, and can deliver output to a chat or webhook. Every "run this every morning" or "poke the agent in 20 minutes" is a cron job — cron runs inside the Gateway, not inside the model.
+
+Job execution goes through the [task pipeline](/admin/gateway/tasks): each fire of a migrated job is a `cron-run` task run.
+
+<Note>
+Deciding between heartbeat and cron? The user-facing comparison lives at [Reminders and schedules — Cron vs heartbeat](/users/cron#cron-vs-heartbeat); for your own scheduling decisions see [Heartbeat](/admin/gateway/heartbeat).
+</Note>
+
+<Note>
+All `cron.*` config changes hot-apply — the Gateway restarts only the cron service in place when it detects the change. No Gateway restart is needed.
+</Note>
+
+## Quick start
+
+```bash
+# One-shot reminder on the main session, auto-deleted after it fires
+openclaw cron add \
+  --name "Reminder" \
+  --at "2026-02-01T16:00:00Z" \
+  --session main \
+  --system-event "Reminder: check the cron docs draft" \
+  --wake now \
+  --delete-after-run
+
+# Recurring isolated job with delivery to Slack
+openclaw cron add \
+  --name "Morning brief" \
+  --cron "0 7 * * *" \
+  --tz "America/Los_Angeles" \
+  --session isolated \
+  --message "Summarize overnight updates." \
+  --announce \
+  --channel slack \
+  --to "channel:C1234567890"
+
+openclaw cron list
+openclaw cron run <job-id>        # force-run now (or --due to run only when due)
+openclaw cron runs --id <job-id>  # run history
+```
+
+The Web UI (**Cron Jobs** in the operations console) groups the raw fields into the three job types below and offers **Run now** / **Run if due** test actions.
+
+## Config reference
+
+All keys live under `cron` in `openclaw.json`.
+
+| Key | Default | Effect |
+| --- | ------- | ------ |
+| `cron.enabled` | `true` | Enables the scheduler. The env var `OPENCLAW_SKIP_CRON=1` also disables it. |
+| `cron.store` | `~/.openclaw/cron/jobs.json` | Import source for the `cron_jobs` table on first start. After import the table is the source of truth; hand-editing this file has no effect. |
+| `cron.maxConcurrentRuns` | `1` | Max cron jobs running at once. |
+| `cron.retry.maxAttempts` | `3` (0–10) | Max retries for one-shot (`at`) jobs on transient errors. |
+| `cron.retry.backoffMs` | `[30000, 60000, 300000]` | Backoff delays per retry attempt. |
+| `cron.retry.retryOn` | all transient types | Restrict retries to a subset: `rate_limit`, `network`, `timeout`, `server_error`. |
+| `cron.webhook` | — | Deprecated legacy fallback URL, used only by stored jobs with `notify: true`. Prefer per-job `delivery.mode: "webhook"`. |
+| `cron.webhookToken` | — | Bearer token sent as `Authorization: Bearer <token>` on webhook deliveries (legacy and per-job webhook mode). |
+| `cron.sessionRetention` | `"24h"` | How long completed isolated run sessions are kept before pruning. Duration string or `false` to disable. |
+| `cron.runLog.maxBytes` | `2_000_000` | Max `cron/runs/<jobId>.jsonl` size before pruning. Number or size string (`"2mb"`). |
+| `cron.runLog.keepLines` | `2000` | When pruning a run log, keep only the newest N lines. |
+| `cron.failureAlert.enabled` | `false` | Opt-in failure alerts. When `false` (or absent), no failure alerts fire regardless of other `failureAlert` keys. |
+| `cron.failureAlert.after` | `2` | Fire the alert after this many consecutive failures. |
+| `cron.failureAlert.cooldownMs` | `3600000` (1 h) | Min pause between repeated alerts for a job. |
+| `cron.failureAlert.mode` | — | Alert delivery style: `announce` or `webhook`. |
+| `cron.failureAlert.accountId` | — | Account for multi-account delivery channels. |
+| `cron.failureDestination.channel` | — | Where failure alerts go across all jobs (`whatsapp`, `telegram`, `discord`, `slack`, …). |
+| `cron.failureDestination.to` | — | Channel-specific recipient target for failure alerts. |
+| `cron.failureDestination.accountId` | — | Account override for the failure-alert channel. |
+| `cron.failureDestination.mode` | — | `announce` or `webhook`. |
+| `cron.stuckRunMs` | `7200000` (2 h) | A job whose `runningAtMs` marker is older than this is considered stuck and cleared on the next tick. |
+
+Example — failure alerts to a Telegram chat after 3 consecutive failures, plus looser retention:
+
+```json5
+{
+  cron: {
+    failureAlert: {
+      enabled: true,
+      after: 3,
+      cooldownMs: 1800000, // 30 min
+    },
+    failureDestination: {
+      channel: "telegram",
+      to: "123456789",
+    },
+    sessionRetention: "7d",
+    runLog: { maxBytes: "10mb", keepLines: 5000 },
+  },
+}
+```
+
+## Job types
+
+Cron exposes three job types, each a pairing of a session target and a payload kind:
+
+| Job type | Session | Payload kind | What it does |
+| -------- | ------- | ------------ | ------------ |
+| Timeline message | main | `systemEvent` | Enqueues an agent turn (`kind` cron) on the main session — reminders and scheduled nudges. |
+| Assistant task | isolated | `agentTurn` | Runs a dedicated agent turn in `cron:<jobId>` with a fresh session each run. Default delivery is `announce`. |
+| Check first, then nudge | main | `wakeGate` | Runs a cheap gate (command or model check); only nudges the main session when the check finds work. |
+
+- **Schedules**: `at` (one-shot ISO timestamp; UTC when the timezone is omitted), `every` (fixed interval in ms), `cron` (5-field, or 6-field with seconds, with optional IANA `tz`; host-local timezone when omitted).
+- **Stagger**: recurring top-of-hour expressions (e.g. `0 * * * *`) get a deterministic per-job offset in a 0–5 minute window. Override per job with `schedule.staggerMs` (`--stagger 30s`, or `--exact` for 0).
+- **Wake modes**: `wakeMode: "now"` (default) delivers immediately — a busy main lane skips the turn; `wakeMode: "next-heartbeat"` parks the delivery until the main lane goes idle. Isolated jobs always run at fire time; `wakeMode` only controls the post-run main-session wake.
+- **Delivery** (isolated jobs): `announce` (summary to `delivery.channel`/`delivery.to`, default when `delivery` is omitted), `webhook` (POST the finished event to `delivery.to`), or `none`. Webhook mode is valid for main-session jobs too.
+- **Model overrides**: isolated jobs accept per-job `model` and `thinking`. Main-session `model` overrides change the shared main session model — avoid them.
+- **Identity attribution**: `--identity <key>` links runs to a `session.identityLinks` key. Isolated `agentTurn` jobs only; rejected on other shapes. Operator-only — the agent-facing cron tool can never set it.
+- **Agent binding**: `--agent <id>` pins a job to an agent; missing or unknown ids fall back to the default agent.
+- One-shot (`at`) jobs delete after success by default (`deleteAfterRun: false` keeps them, disabled).
+
+### Identity attribution
+
+Key: `identity` on the job — default unset (a pure system run with no identity).
+
+- Set it with `--identity <user>` on `openclaw cron add` (and `cron edit`, which also takes `--clear-identity` to unset it). The value must case-insensitively match a `session.identityLinks` key at run time; isolated `agentTurn` jobs only, and it is operator-set only — the agent-facing cron tool can never set it.
+- Identity-linked delivery targets: a `delivery.to` value that is a `session.identityLinks` key is resolved to that channel's linked chat id at delivery time. An ambiguous or unlinked key is never remapped to a different id — it fails downstream as an unknown recipient (the one exception: WhatsApp implicit delivery still substitutes the `allowFrom` entry).
+
+## Storage and the table cutover
+
+Job definitions live in the `cron_jobs` table in the Gateway session store (SQLite or Postgres), sibling to `task_runs`. On first start after upgrade the Gateway imports `~/.openclaw/cron/jobs.json` (or `cron.store`) into the table with every row `migrated = false`, then the table is the source of truth.
+
+- After import, `cron add`/`edit`/`remove`/`list`/`run` read and write the table. Hand-editing `jobs.json` while the Gateway runs has no effect.
+- Emptying `cron_jobs` and restarting re-imports `jobs.json` and resets `migrated`.
+- A migrated job is claimed through the task pipeline (two Gateway processes cannot both fire it); each fire leaves a `task_runs` row with trigger source `cron`. After downtime, enabled migrated jobs catch up: at least one fire per missed occurrence (duplicate delivery accepted), keyed `cron-run:<jobId>:<nextRunAtMs>`.
+- Postgres: every epoch-ms column is `BIGINT`; a guarded `ALTER ... TYPE BIGINT` runs on Gateway start for older 32-bit tables.
+- Run history: `~/.openclaw/cron/runs/<jobId>.jsonl` (auto-pruned by `cron.runLog`); pipeline fires also appear in `wednesdayai task status --task cron-run`.
+
+Restart the Gateway after upgrade so the table is created and the import runs (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+## Retry behavior
+
+Errors are classified **transient** (rate limit, network, server errors, Cloudflare) or **permanent** (auth, validation).
+
+- **One-shot (`at`) jobs**: transient errors retry up to `cron.retry.maxAttempts` (default 3) with backoff 30s → 1m → 5m. Permanent errors disable immediately. On success or skip the job disables (or deletes when `deleteAfterRun`).
+- **Recurring (`cron` / `every`) jobs**: consecutive errors apply backoff 30s → 1m → 5m → 15m → 60m before the next scheduled run; the job stays enabled and backoff resets after the next success.
+
+The task-level retry for `cron-run` is intentionally `maxAttempts: 1` so `cron.retry` stays the single operator-visible backoff — do not layer task retries on cron jobs.
+
+## Disable cron
+
+- `cron.enabled: false` in config
+- `OPENCLAW_SKIP_CRON=1` environment variable
+
+<Warning>
+With `tasks.enabled: false`, migrated jobs (`migrated = true`) stay on the pipeline claim path and do not fire until the pipeline is re-enabled. Unmigrated jobs keep using the legacy timer.
+</Warning>
+
+## Troubleshooting
+
+### Nothing runs
+
+- Check `cron.enabled` and `OPENCLAW_SKIP_CRON`; cron runs inside the Gateway process, so the Gateway must be up continuously.
+- After upgrade, restart the Gateway so the `cron_jobs` table is created and `jobs.json` imports.
+- `[cron] failed to start: value "..." is out of range for type integer` means the Postgres table still has 32-bit epoch-ms columns — restart on a build with the guarded `ALTER`.
+- For `cron` schedules, confirm `--tz` vs the host timezone.
+
+### Main job requires `payload.kind="systemEvent"`
+
+Timeline messages and wake gates are the main-session job types; assistant tasks must stay isolated (`agentTurn`). Pair the target and payload kind correctly.
+
+### `wake-gate-empty`
+
+The check ran and found no work, so the run was correctly recorded as `Skipped` instead of nudging.
+
+### Telegram delivers to the wrong place
+
+Forum topics must use the explicit form `-100…:topic:<id>` in the delivery target.
+
+## Related
+
+- [Task pipeline](/admin/gateway/tasks) — the queue that executes `cron-run`, budgets, and recovery
+- [Heartbeat](/admin/gateway/heartbeat) — heartbeat cadence and wake-gates on the heartbeat path
+- [Reminders and schedules](/users/cron) — the user-facing guide to what these jobs do from chat

@@ -1,0 +1,258 @@
+<!--
+docs.json registration needed (not added per task constraints):
+Developers tab → "Extension points" group → add "developers/tasks" after "developers/agent-signals".
+-->
+
+---
+title: "Task pipeline"
+sidebarTitle: "Task pipeline"
+description: "The background task pass contract: TaskPass and PassContext types, registration, budgets, preemption, retry, and crash recovery semantics for plugin authors."
+audience: developer
+---
+
+# Task pipeline
+
+The task pipeline runs registered **task passes** through the Gateway work queue with durable run records, unit budgets, preemption, and crash recovery. A pass is a plain object that claims one work item per run; the claim and the run record commit in a single storage transaction, so a crash can never strand a claim without a matching run.
+
+The pipeline is the execution substrate for the core `cron-run` and `heartbeat-tick` passes and for any passes your plugin registers. It requires a SQLite or Postgres session store — the dev-only JSONL store refuses transactional claims and the pipeline stays disabled.
+
+## The TaskPass contract
+
+```ts
+import type { TaskPass } from "openclaw/plugin-sdk";
+
+const pass: TaskPass = {
+  id: "my-maintenance",
+  stage: "light", // optional stage label stamped onto task_runs.stage
+  priority: 100, // dispatch order: ascending, stable for ties
+  scope: "global", // "global" | "agent" | "lane" — picks the budget scope
+  costClass: "deterministic", // "deterministic" | "llm" (llm is subject to restart-loop denial)
+  timeoutMs: 30_000, // optional per-pass run timeout; default 30_000
+  retryPolicy: { maxAttempts: 5, backoff: "exponential", baseMs: 1000, maxMs: 300_000 },
+  run: async (ctx) => {
+    // do the work
+  },
+  rollback: async (ctx) => {
+    // optional compensating action, invoked by `wednesdayai task rollback`
+  },
+};
+```
+
+`run` receives a `PassContext`:
+
+```ts
+import type { PassContext } from "openclaw/plugin-sdk";
+
+async function run(ctx: PassContext): Promise<void> {
+  ctx.signal; // AbortSignal — aborted on preemption, timeout, and stop
+  ctx.taskRunId; // durable run id for events and store calls
+  ctx.mode; // "normal" | "dry_run" — skip side effects in dry_run
+  ctx.payload; // parsed JSON payload of the claimed work item ({} when unparseable)
+  ctx.storage.taskRuns; // narrow store surface — the budget ledger and raw bus are unreachable
+  ctx.log; // subsystem logger
+  ctx.emitDiagnostic; // (event: DiagnosticEventInput) => void
+}
+```
+
+The narrow `storage` type is deliberate: pass code must never touch the budget ledger or the raw bus. There is no escape hatch to a fuller runtime — do not cast `ctx.storage` to something wider.
+
+## Registering a pass from a plugin
+
+Call `api.registerTaskPass` inside your plugin's `register()`. Registrations are buffered during plugin load and drained into the registry at Gateway boot under the namespaced id `<pluginId>.<passId>`, so plugin ids can never collide with core passes.
+
+```ts
+import type { OpenClawPluginApi, TaskPass } from "openclaw/plugin-sdk";
+
+const pass: TaskPass = {
+  id: "thumbnail-sweep", // bare id — no dots
+  priority: 100,
+  scope: "lane",
+  costClass: "deterministic",
+  run: async (ctx) => {
+    // sweep stale thumbnails
+  },
+};
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTaskPass(pass);
+}
+```
+
+Rules enforced at registration:
+
+- The pass id must not contain `.` — the boot drain namespaces it as `<pluginId>.<passId>`, and a dot in either half lets two registrations collide. A dotted id throws `PLUGIN_REGISTER_ERROR` and the plugin does not load.
+- A duplicate `(pluginId, passId)` pair throws at registration time.
+- `registerTaskPass` is synchronous and only buffers. A pass registered after Gateway boot is never dispatched — and if the pipeline is disabled at boot, the buffer is discarded so a later boot never picks up stale passes.
+
+## Enqueueing governed work
+
+A registered pass does nothing until work is enqueued against its topic. Plugins enqueue through `api.enqueueTaskWork`:
+
+```ts
+import type { PluginEnqueueTaskWorkInput } from "openclaw/plugin-sdk";
+
+const input: PluginEnqueueTaskWorkInput = {
+  taskId: "thumbnail-sweep", // bare pass id as your plugin declared it
+  payload: { folder: "/tmp/thumbs" }, // lands on ctx.payload at run time
+  triggerSource: "schedule", // stamped onto task_runs.trigger_source
+  triggerFingerprint: "2026-08-28", // dedupe scope — see below
+  mode: "normal", // "normal" | "dry_run"
+};
+
+await api.enqueueTaskWork(input);
+```
+
+- `taskId` is the **bare** pass id. The backend namespaces it — never pass `<pluginId>.<passId>` yourself.
+- `triggerFingerprint` scopes idempotency: the work item id is `taskId:triggerFingerprint:mode`. Use a stable fingerprint (a date bucket, a cursor) to make re-enqueues collapse, or a unique one to force separate runs.
+- `triggerSource` appears in `wednesdayai task status --json` output and in `task_outcome` hooks.
+- The call rejects until the task pipeline has started (and when `tasks.enabled: false`). Catch and retry or schedule around Gateway boot — do not assume it resolves.
+
+## Run lifecycle
+
+```
+pending → running → completed | failed | retrying | dlq | preempted | deferred |
+                       preempted_ceiling | rolled_back | cancelled
+```
+
+- **Co-commit**: claiming the work item and inserting the `running` row happen in one transaction; completion closes the claim, finalizes the run, and applies budget entries in one transaction.
+- **Preemption** consumes no attempt. An aborted pass requeues with `preemptionCount + 1`. At `preemptionCeiling` (default 3) the run is deferred for a one-hour cool-down; at twice the ceiling it terminates as `preempted_ceiling` — a distinct terminal state, never DLQ.
+- **Budget denials** defer the run (`budget_denials + 1`) with a retry time. Deferrals never consume attempts.
+- **Retry exhaustion** sends the run to `dlq`.
+
+## Budgets
+
+The governor meters **units only**, at admission time (each claimed run meters `estimatedUnits: 1`). Checks evaluate run → lane → global, then the monthly ceiling; the first failure wins.
+
+- Per-run scope keys on the run id; per-lane on `lane:<passId>`; global on `global`. A `payload.scopeKey` you supply overrides the derived key.
+- The rolling window is `tasks.budget.windowHours` (default 24); the hard global ceiling is monthly.
+- Attempts count toward caps, not only successful completions.
+- `costUsd` fields exist in the config schema but are **not enforced** — do not rely on them for spend control.
+- `llm`-costClass passes are additionally deferred when the Gateway restart-loops (default: more than 5 restarts in 10 minutes) so a crash-looping host cannot burn budget.
+
+Budget denial is not an error: the run defers and retries later. Design passes to tolerate repeated deferral.
+
+## Preemption and timeouts
+
+- The dispatcher aborts in-flight runs through `ctx.signal` on Gateway stop and on preemption. Honor the signal: check `ctx.signal.aborted` in loops and pass it to fetch/child processes. A pass that ignores it still runs to completion, but its work is duplicated after requeue.
+- The default run timeout is 30 s. Set `timeoutMs` on the pass for longer work; when it exceeds the 35 s claim lease, the dispatcher renews the lease at half-lease cadence so a crashed gateway still frees the work within one lease window.
+- On timeout the dispatcher aborts the controller and records the run as `failed` (not preempted) — a timed-out run consumes a retry attempt.
+
+**What not to do:**
+
+```ts
+run: async (ctx) => {
+  const res = await fetch("https://api.example.invalid/bulk"); // ❌ no signal — unabortable
+  await writeAll(res);
+}
+```
+
+**Do this instead:**
+
+```ts
+run: async (ctx) => {
+  const res = await fetch("https://api.example.invalid/bulk", {
+    signal: ctx.signal, // ✅ aborts with the run
+  });
+  await writeAll(res);
+}
+```
+
+## Retry policy
+
+Retry policy is data on the work item, validated with strict integer bounds:
+
+- `maxAttempts`: 1–50 (default policy: 5)
+- `backoff`: `"fixed"` | `"exponential"` (default policy: exponential)
+- `baseMs`: 100–3,600,000 (default policy: 1000)
+- `maxMs`: 100–86,400,000 (default policy: 300,000)
+
+When you omit `retryPolicy`, the default policy above applies. Exhaustion sends the run to `dlq`.
+
+<Warning>
+Do not invent a second retry language for cron-style work. The core `cron-run` pass deliberately uses `{ maxAttempts: 1 }` so the public `cron.retry` config stays the operator-visible backoff — layering task retries on top would double-retry cron jobs.
+</Warning>
+
+## Crash recovery and idempotency
+
+On boot, every recoverable run is classified:
+
+| Classification | Next status | Consumes an attempt? |
+| -------------- | ----------- | -------------------- |
+| running on current instance | `retrying` | No — status-only resume-interrupt |
+| running on stale instance | `retrying` | Yes |
+| `retrying` within age threshold | `retrying` | Yes |
+| `preempted` | `retrying` | No |
+| `deferred` | `deferred` | No — wait-idle |
+| terminal | unchanged | — |
+
+Recovery applies a ceiling using the run's own retry policy (default: 5 attempts, 300 s max backoff):
+
+- **Attempt exhaustion** — `attempts >= maxAttempts` (except `preempted`) → `dlq`, reason `retry exhausted (max attempts reached)`.
+- **Age stall** — a `retrying` run older than `maxAttempts × maxMs` (25 minutes under the default policy) → `dlq`, reason `stalled beyond age threshold`.
+
+Execution is **at-least-once**: the same work item can run again after a crash. Passes must be idempotent across replay, and `rollback` carries the same contract — if the durable `rolled_back` marker fails to persist, an operator retry re-invokes the handler. Respect `ctx.mode === "dry_run"` by skipping all side effects.
+
+## Core passes
+
+The Gateway registers these at boot; your namespaced ids cannot collide with them.
+
+| Pass id | Trigger source | Role |
+| ------- | -------------- | ---- |
+| `cron-run` | `cron` | Executes a claimed cron job. Retry policy is `{ maxAttempts: 1 }` — `cron.retry` remains the operator-visible backoff. |
+| `heartbeat-tick` | `heartbeat` | Runs one heartbeat interval. Skip results complete the pass; they are not failures. |
+| `task-runlog-retention` | `boot` | Prunes `task_run_events` older than 30 days (daily re-enqueue; reports counts without deleting in `dry_run`). |
+
+## Emitting diagnostics
+
+`ctx.emitDiagnostic` accepts the closed `DiagnosticEventInput` union. Use the `taskDiagnostic` builder so the event type and `action` stay aligned and OTel can export the span:
+
+```ts
+import { taskDiagnostic } from "openclaw/plugin-sdk";
+
+// inside run(ctx):
+ctx.emitDiagnostic(
+  taskDiagnostic("completed", {
+    taskId: "thumbnail-sweep",
+    taskRunId: ctx.taskRunId,
+    passId: "thumbnail-sweep",
+    durationMs: 12,
+  }),
+);
+```
+
+Do not cast ad-hoc objects into the emit signature. Builders are input-shaped (no `ts`/`seq` — the emitter stamps those). Live field names matter: `passId` (not `passName`) and `attempts` (not `attempt`).
+
+## Async safety
+
+> **Blocking the agent loop**
+>
+> `api.registerTaskPass` is synchronous and only buffers an object — it must not perform I/O at all. If your plugin needs startup I/O before deciding to register a pass, make the plugin's `register` function async and await it.
+>
+> Pass `run()` functions execute inside the Gateway's event loop. They never block the dispatch tick (the dispatcher awaits them), but a pass doing **synchronous blocking I/O** (`fs.readFileSync`, `execSync`) stalls the entire Gateway — every channel, hook, and heartbeat — for the duration. Never use sync I/O APIs in a pass.
+>
+> A slow `run()` holds its concurrency slot and its work-lease until it finishes or times out; with the default `dispatchConcurrency: 1`, one slow pass delays every other pass's next run.
+>
+> **Do not do this:**
+>
+> ```ts
+> run: async (ctx) => {
+>   const manifest = fs.readFileSync("/var/data/manifest.json", "utf8"); // ❌ sync I/O stalls the gateway
+>   await process(manifest);
+> }
+> ```
+>
+> **Do this instead:**
+>
+> ```ts
+> run: async (ctx) => {
+>   const manifest = await fs.promises.readFile("/var/data/manifest.json", "utf8"); // ✅ async I/O
+>   await process(manifest);
+> }
+> ```
+
+## Related
+
+- [Task pipeline configuration](/admin/gateway/tasks) — every `tasks.*` config key, default, and effect
+- [Cron jobs](/admin/automation/cron-jobs) — the admin reference for the scheduler built on `cron-run`
+- [Plugin SDK](/developers/sdk) — the full `api` surface, including `registerTaskPass` and `enqueueTaskWork`
+- [Your first plugin](/developers/plugins/your-first-plugin) — plugin structure, manifest, and loading

@@ -1,0 +1,160 @@
+---
+title: "Config writes"
+sidebarTitle: "Config writes"
+description: "How plugins read and write WednesdayAI configuration: api.config, api.pluginConfig, api.runtime.config.writeConfigFile, validation, and the top-level removal guard."
+audience: developer
+---
+
+# Config writes
+
+Plugins can read the running configuration and — when justified — write `openclaw.json` through the same guarded writer the CLI uses. Before reaching for a global config write, check whether your own plugin config (`api.pluginConfig`, declared in your manifest) covers the need: it is scoped, validated, and never risks clobbering unrelated settings.
+
+## The contract
+
+Config access on the plugin API:
+
+```ts
+import type { OpenClawPluginApi, OpenClawConfig } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  // Full running config — a snapshot taken at registration time (read-only in practice).
+  const config: OpenClawConfig = api.config;
+
+  // Your plugin's own config slice from plugins.entries.<your-id>.config, if any.
+  const pluginConfig = api.pluginConfig; // Record<string, unknown> | undefined
+
+  // The guarded writer and loader, same functions the CLI uses.
+  const { loadConfig, writeConfigFile } = api.runtime.config;
+}
+```
+
+| Surface | Type | Use |
+|---------|------|-----|
+| `api.config` | `OpenClawConfig` | Read the config as loaded at registration |
+| `api.pluginConfig` | `Record<string, unknown> \| undefined` | Read your plugin's own configured values |
+| `api.runtime.config.loadConfig` | `() => OpenClawConfig` | Re-read the current config (cached briefly, ~200 ms) |
+| `api.runtime.config.writeConfigFile` | `(cfg, options?) => Promise<void>` | Persist a full config document |
+
+`register` may be synchronous or async (`(api: OpenClawPluginApi) => void | Promise<void>`).
+
+## Prefer pluginConfig over global writes
+
+If the values your plugin needs are yours alone, declare them in `openclaw.plugin.json` and read them from `api.pluginConfig`. The manifest schema is plain JSON Schema:
+
+```json
+{
+  "id": "my-plugin",
+  "name": "My Plugin",
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiKey": { "type": "string", "description": "API key for the upstream service" },
+      "maxResults": { "type": "number", "default": 10 }
+    }
+  }
+}
+```
+
+Users configure it under `plugins.entries.my-plugin.config` in `openclaw.json`, the control UI renders a form from your schema, and you never touch the global document. Capture the value in a closure at registration time — do not read `api.pluginConfig` from inside `execute()`:
+
+```ts
+export default function register(api: OpenClawPluginApi): void {
+  const pluginConfig = api.pluginConfig; // capture at registration
+
+  api.registerTool({
+    name: "my-plugin_lookup",
+    description: "Look up an entity in the upstream service.",
+    parameters: Type.Object({ query: Type.String() }),
+    async execute(_id, params) {
+      const apiKey = pluginConfig?.apiKey as string | undefined;
+      if (!apiKey) {
+        return { content: [{ type: "text", text: "Plugin not configured: apiKey is missing." }] };
+      }
+      // ...
+    },
+  });
+}
+```
+
+## Writing global config
+
+When a plugin genuinely must change global config (for example a channel onboarding flow), use `api.runtime.config.writeConfigFile`. It has the same guarantees as every other config write in the system:
+
+- **Validation first.** The document is validated against the full schema including plugin schemas. An invalid config throws before anything touches disk.
+- **Top-level removal guard.** If the write would drop a top-level key that exists on disk, it throws an error with `code === "CONFIG_WRITE_REFUSED"`. Name intended removals in `options.allowTopLevelKeyRemoval`.
+- **Atomic write with backups.** Temp file plus rename; `openclaw.json.bak` plus a rotation ring of four more backups.
+- **`${VAR}` restoration.** Unchanged environment-variable references in the existing file are preserved, not replaced with resolved values.
+
+```ts
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  // Read fresh, modify minimally, write back.
+  const current = api.runtime.config.loadConfig();
+  const next = structuredClone(current);
+  next.messages = { ...next.messages, maxBytes: 1_000_000 };
+
+  try {
+    await api.runtime.config.writeConfigFile(next);
+    api.logger.info("raised messages.maxBytes");
+  } catch (err) {
+    if ((err as { code?: string }).code === "CONFIG_WRITE_REFUSED") {
+      api.logger.warn(`config write refused: ${String(err)}`);
+      return;
+    }
+    throw err;
+  }
+}
+```
+
+### What not to do
+
+Do not construct the next document from a stale snapshot of `api.config` and write it back wholesale:
+
+```ts
+// ❌ api.config was captured at registration; the file may have changed since.
+//    This clobbers concurrent edits and can trip the top-level guard.
+const next = { ...api.config, messages: { maxBytes: 1_000_000 } };
+await api.runtime.config.writeConfigFile(next);
+```
+
+```ts
+// ❌ Never write config with hand-rolled fs calls — you lose validation,
+//    backups, secret restoration, and the audit trail.
+import fs from "node:fs/promises";
+await fs.writeFile(configPath, JSON.stringify(next));
+```
+
+Load immediately before the write, change the fewest paths possible, and let the writer handle the rest. Note there is no `baseHash` optimistic-concurrency check at this layer (that lives in the gateway RPC methods) — a plugin write is last-writer-wins at the file level, so keep the read-modify-write window short.
+
+## Restart and reload implications
+
+A config write from a plugin lands on disk; the gateway file watcher then applies the reload policy:
+
+- Changes under your plugin's own registration (installing or removing plugins, `plugins.*`) require a **gateway restart** to take effect.
+- Many operational paths (`tools`, `agents`, `messages`, `cron`, `hooks`, `models`) hot-reload or apply on the next turn under the default `gateway.reload.mode: "hybrid"`.
+- If your plugin changes config at registration time, log a clear warning that a restart may be needed — the plugin runtime does not restart the gateway for you.
+
+## Async safety
+
+`writeConfigFile` is async and performs file I/O with atomic rename — always `await` it, and never block the event loop around it:
+
+```ts
+// ❌ do not block startup on synchronous file access while preparing the write
+const raw = fs.readFileSync("./defaults.json", "utf-8");
+```
+
+```ts
+// ✅ make register async and await all I/O
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const defaults = JSON.parse(await fs.promises.readFile("./defaults.json", "utf-8"));
+  // ... prepare and await writeConfigFile
+}
+```
+
+A slow awaited write delays only your plugin's registration. Synchronous blocking I/O in `register()` stalls the event loop for the whole gateway process during startup.
+
+## Related
+
+- [Agent tools](/developers/agent-tools) — registering tools that read `pluginConfig`
+- [Plugin manifest](/developers/plugins/manifest) — declaring `configSchema`
+- [Config writes (admins)](/admin/gateway/config-writes) — the full write-path reference
+- [Reference: config](/reference/config)

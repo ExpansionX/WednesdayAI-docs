@@ -1,0 +1,202 @@
+---
+title: "Learning Core internals"
+sidebarTitle: "Learning Core"
+description: "The LessonStore contract, record lifecycle, placement resolution, task passes, and the seams for extending Learning Core."
+audience: developer
+---
+
+{/* Nav registration needed (docs.json): add "developers/learning" to Developers > "Extension points" (suggested after "developers/plugins/session-store"). */}
+
+# Learning Core internals
+
+Learning Core is a bundled extension (`extensions/learning-core`, plugin id `learning-core`). This page documents the contracts an extension author touches: the `LessonStore` interface, the record lifecycle, placement resolution, the task passes, and the capture path. For operating a deployment see the [admin page](/admin/learning); for the user-facing feature see [Learning](/users/learning).
+
+Bundled extensions carry no `openclaw` peer dependency - fork-base compatibility is expressed by the package SemVer and the `forkBase` marker in `dist/build-info.json`. The Postgres backend `require`s `pg` lazily (mirroring core's own pool construction), so no runtime dependency is added to the package.
+
+## Placement resolution lives in core
+
+Backend selection is a core concern, exported from the plugin SDK:
+
+```ts
+import { resolveDomainStorage, type DomainStoragePlacement } from "openclaw/plugin-sdk";
+
+const placement = resolveDomainStorage({ domain: "learning-core", config });
+```
+
+`DomainStoragePlacement` is a discriminated union:
+
+```ts
+type DomainStoragePlacement =
+  | { backend: "postgres"; databaseUrl: string; schema: string }
+  | { backend: "sqlite"; path: string }
+  | { backend: "fs-jsonl"; dir: string };
+```
+
+The resolver is the single source of the selection rule (explicit `backend` wins; else `databaseUrl` implies `postgres`; else `sqlitePath` implies `sqlite`; else follow the system session store). Do not re-derive "which backend" inside a plugin - a second copy of the rule is exactly the drift this seam exists to prevent. Any plugin needing per-domain placement calls the same function with its own `domain`; the default Postgres schema derives as `plugin_<domain with dashes replaced by underscores>`.
+
+## The `LessonStore` contract
+
+One interface, three implementations (SQLite, Postgres, fs-jsonl), one conformance suite. Members:
+
+```text
+listLessons        getLesson        upsertLesson       mergeLesson
+listProposals      getProposal      findProposalWithScope   listProposalsWithScope
+insertProposalIfAbsent             upsertProposal     recordProposalDecision
+appendAudit        listAudit
+supersedeLesson    listActiveLessons                  getLessonChain
+describeBackend
+upsertCandidate    getCandidate     listPendingCandidates   markCandidateProcessed
+searchLessons
+```
+
+Candidates live in `learning_records` with `record_type='candidate'` - the **same table** as lessons. `listLessons` must not return them; `searchLessons` returns lessons only.
+
+What not to do:
+
+```ts
+// Do not invent a second table or overload record_kind.
+await store.upsertLesson({ recordKind: "candidate", ...lesson });
+```
+
+Do this instead:
+
+```ts
+await store.upsertCandidate(candidate); // record_type='candidate' in the same table
+```
+
+`describeBackend()` returns `{ backend, capability }` and is what `learning.overview` surfaces. On the fallback wrapper it reports the delegate **currently** in use, so a Postgres store that has degraded reports `fs-jsonl`.
+
+Adding a member means adding it to all three implementations **and** to the conformance suite. The suite is the contract; an implementation that passes it is portable by construction.
+
+## Record lifecycle
+
+`lesson-record.ts` is the only place that decides lifecycle shape:
+
+```ts
+export const LESSON_RECORD_KINDS = ["lesson", "skill"] as const;
+export const LESSON_DURABILITIES = ["durable", "decaying", "ephemeral"] as const;
+export const LESSON_SCHEMA_VERSION = 1;
+```
+
+- `withLessonDefaults` stamps a new record with current defaults.
+- `applyLegacyLessonDefaults` forward-migrates a pre-C0 record.
+- `isLessonActive` evaluates `valid_from` / `invalid_at` against a supplied `now` - callers pass the clock in; the function never reads it.
+
+If you find yourself writing a durability literal anywhere else, that is the defect.
+
+**Supersede over delete.** `supersedeLesson` writes the successor, links `supersedes_id`, and closes the predecessor's validity window. Nothing is removed; `getLessonChain` walks the links. This path has a production caller (the `learning` tool), so it is not test-only code.
+
+## Backend selection and fallback
+
+`createLessonStore` memoises by resolved location: SQLite databases by path, Postgres pools by URL. Without memoisation the same file would be opened (and the same database pooled) three times, because `index.ts` builds a store at three call sites.
+
+Fallback differs by backend because the failure surfaces differ:
+
+- **SQLite** fails at open, so it is wrapped in a `try` and falls back immediately to the `FileLearningStore`.
+- **Postgres** does not connect at construction. It is wrapped in `FirstFailureFallbackLessonStore`: the first rejection swaps the delegate and **retries that one operation** on the fallback so the caller sees success. After the swap, an error is the fallback's own and propagates.
+
+## Task passes
+
+Four built-in passes. `registerTaskPass` takes the **bare** id; the backbone namespaces it as `<pluginId>.<passId>`. The effective ids are stable - do not rename:
+
+| Effective id                     | Stage   | Cost class       | Writes                                                                       |
+| -------------------------------- | ------- | ----------------- | ----------------------------------------------------------------------------- |
+| `learning-core.promote`          | `light` | `deterministic`  | Lessons from pending candidates when consolidation is off. Inlined after the claim ack when Dream Cycle is also off. |
+| `learning-core.consolidation`    | `deep`  | `llm`             | Lessons under `maxCallsPerAgentPerDay` (default `8`).                          |
+| `learning-core.distill`          | `rem`   | `llm`             | Pending skill proposals only. Never writes `SKILL.md`.                        |
+| `learning-core.reconcile-skills` | `light` | `deterministic`  | Restores applied `SKILL.md` files from the stored `desiredState` hash.         |
+
+The `TaskPass` shape is `{ id, stage?, priority, scope, costClass, timeoutMs?, run }` - there is no `handler` field.
+
+Apply writes under the managed skills dir (`$OPENCLAW_STATE_DIR/skills` or `~/.openclaw/skills`) using a hash-verified tmp + `fsync` + rename protocol. After a successful rename, a later decision-write failure must not delete the file; reconcile repairs from `desiredState`.
+
+`searchLessons(query, identity, k)` uses FTS5 (SQLite), `search_tsv` + GIN (Postgres), or a substring scan (fs-jsonl, or when the optional search DDL was skipped by the backend). Hyphenated FTS5 queries are tokenized because hyphen is the FTS `NOT` operator.
+
+## Capture path
+
+Learning Core is a session consumer (manifest: `effectKind: "session.end"`, `consumeLanes: ["*"]`). `onSessionWorkAvailable` filters to `session.end`, then loops `claimSessionWork` until the queue drains:
+
+- When `mode` is `off`, the handler acknowledges without persisting.
+- Otherwise it writes an `ExtractionCandidate` (only when a transcript excerpt exists) and acks `processed`. It must **not** call `upsertLesson` / `mergeLesson`.
+- On a processing failure, the catch block logs `api.logger.warn` (message, error code, claim and session ids) **before** acking the claim as failed/retryable - a throwing `ackSessionWork` must never mask the real error.
+
+Core namespaces consumer ids as `<agentId>:<pluginId>:<effectKind>`, with an unscoped `<pluginId>:<effectKind>` fallback and an optional `/<subCursor>` suffix. Anything that counts or looks up claims must match all those shapes - equality against a bare `learning-core` matches nothing.
+
+When `mode` is `assist`, `register` also subscribes to `context.collect` and prepends `ctx:{sessionKey}:lessons.active` with up to `maxLessonsForPrompt` (default `5`) active lesson texts. Do not import context-engine from this plugin.
+
+## Reading transcript text
+
+Production entries are `StoredConversationEntry`, which has **no `content` field** - text lives in `contentText` and `contentBlocks`. An extractor that reads only `content` yields zero candidates on every real session while the claim path still acks `processed`, so the failure is completely silent. Two rules follow:
+
+1. Fixtures must use the real `StoredConversationEntry` shape. A `{ role, content }` fixture is a shape that never occurs in production and will pass while the code is dead.
+2. Text from storage carries a `[<from> <host> <timestamp>]` prefix, trailing space included. Correction patterns must account for it; a bare `^`-anchored regex can never match.
+
+## Gateway and tool seams
+
+Seven gateway methods are registered in `index.ts`: `learning.overview`, `learning.listLessons`, `learning.searchLessons`, `learning.listProposals`, `learning.inspectProposal`, `learning.decideProposal`, `learning.decideProposals`. The read path goes **through the store**, not the raw JSONL log - leaving the read path on the log while capture moved to SQL would show an empty list while capture silently succeeded.
+
+`learning.decideProposal` looks a proposal up with an empty scope deliberately (so the lookup spans every workspace), returns the proposal's own scope in the result, then builds a scoped store from it for the write.
+
+The `learning` tool is registered per invocation with the caller's scope and owner flag. Every action is refused unless `senderIsOwner` is true.
+
+## Blocking the agent loop
+
+`register` is synchronous today. Do not add synchronous blocking I/O (`fs.readFileSync`, `execSync`) inside it - that stalls gateway startup. Pass `run` functions are async and must not block the event loop on LLM or disk work without `await`.
+
+Do not do this:
+
+```ts
+export default function register(api: OpenClawPluginApi): void {
+  const raw = fs.readFileSync("./lessons.json", "utf8"); // synchronous blocking I/O at startup
+  api.registerTaskPass({ id: "promote", run: () => JSON.parse(raw) });
+}
+```
+
+A dotted pass id (`"learning-core.promote"`) throws `PLUGIN_REGISTER_ERROR` at gateway boot (`Plugin task pass id must not contain "."`). Register the bare id; the backbone stores the effective id.
+
+Do this instead:
+
+```ts
+export default function register(api: OpenClawPluginApi): void {
+  api.registerTaskPass({
+    id: "promote",
+    stage: "light",
+    priority: 50,
+    scope: "agent",
+    costClass: "deterministic",
+    run: async () => {
+      await runPromotePass({ store, cfg, now: new Date().toISOString() });
+    },
+  });
+}
+```
+
+## Testing
+
+| Suite                                   | Proves                                                                                  |
+| --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `lesson-store-conformance.test.ts`      | All three backends satisfy the same contract. Reports which backends were skipped.       |
+| `claim-to-store.reachability.test.ts`   | A `session.end` claim lands exactly one candidate (not a lesson) and acks `processed`.    |
+| `lesson-store-factory.test.ts`          | Selection, memoisation, and both fallback shapes.                                        |
+| `lesson-store-factory.fallback.test.ts` | Every store member survives a Postgres outage on the fs-jsonl fallback.                  |
+| `lesson-store-postgres.test.ts`         | Refusal paths, transaction rollback, legacy-id migration branch.                         |
+| `legacy-jsonl-readthrough.test.ts`      | Read-only folding, SQL-wins precedence, proposals excluded.                              |
+| `message-text.test.ts`                  | Extraction against the real stored-entry shape.                                          |
+
+The conformance suite runs the Postgres store twice: against a live server when `OPENCLAW_DB_URL` is set, and against `createInMemoryPgPool()` - a `PgPoolLike` double that **throws on any statement it does not recognise** - on every host. The double is not a substitute for the live leg.
+
+Run the extension's tests with the standard battery; there is no separate learning-core lane.
+
+## Adding a backend
+
+1. Implement `LessonStore`.
+2. Add the dialect DDL to `learning-schema.ts`, keeping identifier validation in that module (the schema name is checked at both SQL interpolation boundaries, and again in the `PostgresLessonStore` constructor, because a caller can construct the store directly and bypass the DDL path).
+3. Add the backend to the union in core's domain-storage resolver and to `SessionStorageBackendKind`, so selection stays in one place.
+4. Add it to `BACKENDS` in the conformance suite and make the suite pass unmodified.
+5. Decide the failure surface - open-time or first-operation - and wire the matching fallback shape in the factory.
+
+## What's next
+
+- [Learning Core admin](/admin/learning) - operation, placement, verification
+- [Analysis runtime](/developers/analysis-runtime) - the LLM lane consolidation runs through
+- [Plugin manifest](/developers/plugins/manifest)

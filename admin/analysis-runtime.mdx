@@ -1,0 +1,58 @@
+---
+title: "Analysis runtime"
+description: "Operating the shared plugin analysis lane: fixed concurrency limits, queueing behaviour, timeouts, and what to monitor when plugins saturate."
+audience: admin
+---
+
+{/* Nav registration needed (docs.json): add "admin/analysis-runtime" to Administrators > "Gateway configuration" (suggested after "admin/dream-cycle"). */}
+
+# Analysis runtime
+
+The analysis runtime is the shared, bounded LLM lane plugins use for focused work - memory recall, fact extraction, topic detection, learning consolidation, dream contemplation. It runs through the same provider, auth-profile, and timeout plumbing as agent turns, on a dedicated lane so background analysis never queues behind a live user reply.
+
+**There are no config keys for the analysis runtime.** Its limits are fixed at build time; tuning happens in the plugins that use it (for example `consolidation.maxCallsPerAgentPerDay` in [Learning Core](/admin/learning) or `contemplation.maxCallsPerCycle` in [Dream Cycle](/admin/dream-cycle)). For the developer-facing API, see [Analysis runtime (developers)](/developers/analysis-runtime).
+
+## Limits
+
+| Limit                                   | Value | Effect                                                                                        |
+| --------------------------------------- | ----- | ---------------------------------------------------------------------------------------------- |
+| Awaited analysis, global                | `1`   | Only one awaited analysis run executes at a time across all plugins.                            |
+| Awaited analysis, per plugin            | `1`   | A second awaited run from the same plugin waits for the first.                                  |
+| Background analysis, per plugin         | `4`   | At most 4 active background jobs per plugin. Further `enqueue` calls are refused (see below).   |
+| Default per-run timeout                  | `15 s` | Applies when a plugin does not pass its own `timeoutMs`.                                       |
+
+## Behaviour at the limits
+
+- **Background saturation.** When a plugin already has 4 active background jobs, `enqueue` returns `accepted: false` with reason `queue-full` instead of queueing indefinitely. Well-written plugins log or retry; a plugin that ignores the refusal silently drops that unit of work.
+- **Preemption by live work.** Background analysis yields to awaited analysis. If a background job is already running, a new awaited `run` is rejected immediately rather than waiting behind the job.
+- **Invalid requests are rejected synchronously.** An empty `purpose` or `input`, a `provider` without a `model`, or a disallowed tool in the allow-list never claims the lane or a quota.
+- **No nested runs.** An analysis run that itself triggers another analysis run is rejected (`nested analysis runs are not supported`), so one plugin cannot indirectly multiply the lane.
+
+## Interaction with plugin budgets
+
+The per-plugin analysis caps bound **concurrency**, not spend. Daily spend ceilings live in the consuming plugin's own config:
+
+- Learning Core consolidation: `plugins.entries.learning-core.config.consolidation.maxCallsPerAgentPerDay` (default `8`).
+- Dream Cycle contemplation: `plugins.entries.dream-cycle.config.contemplation.maxCallsPerCycle` (default `3`).
+
+A host with many plugins doing background analysis can still see steady provider traffic within these caps - each plugin gets its own 4-job window.
+
+## What to monitor
+
+- `queue-full` rejections in plugin or gateway logs are the saturation signal. Recurring rejections for one plugin mean it is producing background work faster than 4 concurrent jobs drain - check its own budget settings before assuming a gateway problem.
+- Analysis runs are logged by the `plugins/runtime/analysis` subsystem (`run started` / `run completed` with duration and status). Slow or timing-out runs show as `timeout` statuses with durations pinned at the effective timeout.
+- Memory-tool analysis is restricted to the read-only `memory_search` and `memory_get` tools; anything else in an analysis allow-list is rejected before running. There is nothing to configure here - it is a fixed property of the lane.
+
+## Troubleshooting
+
+**A plugin's background features lag or miss entries.** Check for `queue-full` rejections from that plugin. Lower its production rate (its own budget keys) rather than expecting a queue to absorb bursts.
+
+**`timeout` statuses in logs.** The run exceeded its timeout (the plugin's own `timeoutMs`, else the 15 s default). Either the provider is slow for that prompt size or the prompt is too broad - both are plugin-side fixes.
+
+**An awaited hook analysis is rejected while a background job runs.** Expected: awaited work does not wait behind background jobs. The retry happens naturally on the next trigger.
+
+## Related
+
+- [Analysis runtime (developers)](/developers/analysis-runtime) - the `api.runtime.analysis` API, parameters, and result statuses
+- [Learning Core](/admin/learning) and [Dream Cycle](/admin/dream-cycle) - the main analysis consumers
+- [Logging](/admin/gateway/logging) - subsystem log configuration

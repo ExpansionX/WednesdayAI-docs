@@ -1,0 +1,204 @@
+---
+title: "Dream Cycle"
+description: "Idle-time background reflection: sleep stages, contemplation, idle and schedule triggers, observability, and the safety guardrails."
+audience: admin
+---
+
+{/* Nav registration needed (docs.json): add "admin/dream-cycle" to Administrators > "Gateway configuration" (suggested after "admin/learning"). */}
+
+# Dream Cycle
+
+Dream Cycle is the bundled extension that runs background reflection while an agent is idle. When an agent goes quiet (or a schedule window opens), the cycle runs an ordered series of **sleep stages** that review recent task outcomes, optionally consult a contemplation model, adapt per-agent success weights, and record repeated-work candidates for the learning loop.
+
+Everything is off until you turn it on. The cycle never talks to a model endpoint, the filesystem, or the network directly - each capability is behind a guarded facade (see [Safety guardrails](#safety-guardrails)).
+
+## Enable the engine
+
+The plugin is disabled by default, and its engine has a second, inner switch:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "dream-cycle": {
+        enabled: true,
+        config: {
+          enabled: true,
+        },
+      },
+    },
+  },
+}
+```
+
+The outer `enabled` activates the plugin; the inner `config.enabled` activates the engine. With the inner flag unset or `false` the plugin registers nothing: no passes, no triggers, no gateway methods.
+
+This change takes effect after a gateway restart (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+## Sleep stages
+
+Three stages ship by default:
+
+| Stage   | Order | Cadence (hours) | Enabled by default | Max pass runs |
+| ------- | ----- | --------------- | ------------------ | ------------- |
+| `light` | 1     | 6               | yes                | 10            |
+| `deep`  | 2     | 24              | yes                | 10            |
+| `rem`   | 3     | 168             | yes                | 10            |
+
+A stage runs only when its cadence has elapsed since its last run; otherwise the cycle skips it. `maxPassRuns` caps how many passes one stage run may execute.
+
+Supplying `stages` **replaces** the default list outright, so list every stage you want:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "dream-cycle": {
+        config: {
+          enabled: true,
+          stages: [
+            { name: "light", order: 1, cadenceHours: 4, enabled: true, maxPassRuns: 5 },
+            { name: "deep", order: 2, cadenceHours: 24, enabled: true, maxPassRuns: 10 },
+            { name: "rem", order: 3, cadenceHours: 168, enabled: false, maxPassRuns: 10 },
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+The engine sorts enabled stages by `order` and ignores the rest. A stage entry without a `name` is dropped; duplicate names keep only the first. Missing fields fall back to `order` by position, `cadenceHours: 24`, `enabled: true`, and `maxPassRuns: 10`.
+
+## Contemplation backend
+
+Contemplation has **no default model**. Both `provider` and `model` must be set, or the contemplation pass returns unconfigured and emits a `dream.contemplation_unconfigured` diagnostic once per cycle. Nothing else in the cycle is blocked by this.
+
+```json5
+{
+  plugins: {
+    entries: {
+      "dream-cycle": {
+        config: {
+          enabled: true,
+          contemplation: {
+            provider: "example-provider",
+            model: "example-model",
+            maxCallsPerCycle: 3,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+| Key                        | Default | Effect                                                                                                              |
+| -------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------- |
+| `contemplation.provider`   | (none)  | Provider id for contemplation inference. Both this and `model` are required.                                        |
+| `contemplation.model`      | (none)  | Model id for contemplation inference.                                                                               |
+| `contemplation.maxCallsPerCycle` | `3` | Hard per-cycle cap. `0` allows no calls. Once reached, further calls emit `dream.rate_capped` without reaching the provider. |
+
+Inference runs through the analysis runtime at the provider layer, so the configured provider and model use the same credentials, routing, and accounting as any other analysis run.
+
+## Triggers
+
+The cycle is started by core, not by the plugin. Two top-level `tasks` keys control when - both are off/empty by default, and **both require the task pipeline to be running** (`tasks.enabled: true`, the default).
+
+### Idle trigger
+
+Core watches for agents that have gone quiet and emits an `agent_idle` event, which the plugin turns into queued task work:
+
+```json5
+{
+  tasks: {
+    idle: {
+      enabled: true,
+      thresholdMinutes: 30,
+      pollSeconds: 60,
+    },
+  },
+}
+```
+
+| Key                | Default | Effect                                                            |
+| ------------------ | ------- | ------------------------------------------------------------------ |
+| `enabled`          | `false` | Turn idle watching on.                                            |
+| `thresholdMinutes` | `30`    | How long an agent must have no run activity before it counts idle. |
+| `pollSeconds`      | `60`    | How often the monitor checks.                                     |
+
+An agent counts as idle only when its newest run has not been updated inside the threshold and the command queues are quiet. One idle-triggered cycle is enqueued per agent per UTC day - a second idle stretch the same day collides on the same work id and is deduplicated.
+
+### Schedule windows
+
+Pin cycles to fixed windows instead of, or alongside, idle watching:
+
+```json5
+{
+  tasks: {
+    schedule: {
+      windows: ["02:00-04:00", "0 3 * * 0"],
+    },
+  },
+}
+```
+
+Each entry is one of two forms, decided by whether the string contains a space:
+
+- **Local time range** `HH:MM-HH:MM` (no space). A range whose close is at or before its open crosses midnight, so `22:00-02:00` is valid and covers four hours.
+- **Cron expression** (always contains a space), evaluated with croner. `0 3 * * 0` fires at 03:00 every Sunday.
+
+Each window occurrence fires at most once, keyed to the window bucket start - a gateway restart mid-window does not fire it a second time, and the same window tomorrow is a fresh bucket. An unparseable entry is skipped with a warning and does not stop the other windows.
+
+<Note>
+Setting `tasks.idle.enabled` or a non-empty `tasks.schedule.windows` starts the monitor only when the task pipeline is running. If durable run storage is unavailable, the monitor is not started and a `task.idle_monitor_disabled` diagnostic is emitted rather than failing silently.
+</Note>
+
+## Safety guardrails
+
+Passes never touch the filesystem, the network, or a model directly - every capability is a narrow facade inside the ordinary task governance rails:
+
+- **Writes** go through a file facade scoped to a private `dream-cycle` directory under the state directory (owner-only permissions). Absolute paths, parent-relative segments, and symlink escapes are rejected before any write and emit a boundary-violation diagnostic.
+- **Fetches** go through a guarded fetch facade applying the strict SSRF policy (private and loopback destinations stay blocked). Responses are size-limited, defaulting to 5 MiB (`fetch.maxBytes` overrides); an oversized body is rejected, not buffered.
+- **Inference** stays at the provider layer via the analysis runtime - no endpoint, key, or transport detail lives in the plugin.
+- **Rate caps are enforced before the call**: `contemplation.maxCallsPerCycle` bounds calls per cycle, and each stage is separately bounded by `maxPassRuns`.
+- **Task governance applies unchanged** - every pass run is a task run with budgets, concurrency limits, retry policy, and preemption by live user turns.
+
+## Observability
+
+Task runs, including dream passes, are visible from the CLI:
+
+```bash
+wednesdayai task status
+wednesdayai task status --json
+```
+
+The plugin registers three read-only gateway methods:
+
+| Method             | Returns                                                            |
+| ------------------ | -------------------------------------------------------------------- |
+| `dream.status`     | Per-stage state: last run and whether the stage is due.              |
+| `dream.weights`    | Per-agent completed and failed totals with a derived success rate.   |
+| `dream.candidates` | Repeated-work candidate records collected by crystallisation.        |
+
+Diagnostic events cover the lifecycle: `dream.cycle_started`, `dream.cycle_completed`, `dream.stage_skipped`, `dream.pass_completed`, `dream.contemplation_unconfigured`, `dream.contemplation_skipped`, `dream.contemplation_failed`, `dream.rate_capped`, `dream.jsonl_parse_skipped`, `dream.crystallisation_candidate`, `dream.fetch_failed`, `task.boundary_violation`, and `task.idle_monitor_disabled`. With `diagnostics-otel` enabled these export as `openclaw.dream.*` / `openclaw.task.*` spans; failed contemplation and fetch set OTel error status.
+
+## Where dreams stop
+
+The dream cycle stops at **candidates**. It records that a piece of work has recurred and writes a candidate record - it never writes `SKILL.md`, queues skill proposals, or touches the skills directory. Turning a candidate into a proposal is owned exclusively by [Learning Core](/admin/learning), so the review and approval path for new skills stays in one place.
+
+## Troubleshooting
+
+**No cycles ever run.** Check all three switches: the outer plugin `enabled`, the inner `config.enabled`, and a trigger (`tasks.idle.enabled` or non-empty `tasks.schedule.windows`) with `tasks.enabled: true`. Confirm the monitor was not disabled by missing durable run storage (`task.idle_monitor_disabled`).
+
+**`dream.contemplation_unconfigured` fires every cycle.** Both `contemplation.provider` and `contemplation.model` must be set. The rest of the cycle is unaffected.
+
+**`dream.rate_capped` in logs.** The per-cycle contemplation cap was hit. Raise `contemplation.maxCallsPerCycle` if the cap is too tight - it exists to bound spend per cycle.
+
+**Cycles fire less often than the cadence suggests.** A stage runs only when its cadence has elapsed **and** a cycle was triggered. With no idle or schedule trigger configured, no cycle starts regardless of cadence.
+
+## Related
+
+- [Learning Core](/admin/learning) - owns the candidate-to-proposal path dreams stop short of
+- [Learning](/users/learning) - what your users see
+- [Configuration](/admin/gateway/configuration) - top-level config file basics

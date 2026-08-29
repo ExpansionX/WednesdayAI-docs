@@ -1,0 +1,118 @@
+---
+title: "Grafana and Prometheus setup"
+sidebarTitle: "Grafana & Prometheus"
+description: "Wire WednesdayAI OTel metrics into Grafana dashboards and Prometheus alerting with the shipped dashboard and alert rules."
+audience: admin
+---
+
+<!--
+Nav registration needed in docs.json (not yet present):
+Administrators tab → add "admin/observability/grafana-setup" near "admin/gateway/observability".
+-->
+
+# Grafana and Prometheus setup
+
+This guide wires a WednesdayAI gateway running the `diagnostics-otel` plugin into Grafana and Prometheus so you get error-rate, latency, token, cost, and session dashboards plus alerting. WednesdayAI pushes metrics over OTLP — there is no scrape-only `/metrics` endpoint, so Prometheus needs an OTLP receiver (or a collector in front of it).
+
+For trace export and the full OTel configuration reference, see [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse). For log export over OTLP, see [Logging](/admin/gateway/logging).
+
+## Before you begin
+
+- The `diagnostics-otel` plugin enabled with metrics export on (`diagnostics.otel.metrics: true`, the default when OTel is enabled).
+- An OTLP-compatible collector (or Prometheus ≥ 2.47 with its built-in OTLP receiver) reachable from the gateway host.
+- Grafana 10 or newer with a Prometheus data source.
+
+## Export metrics
+
+Set the OTLP endpoint in `~/.openclaw/openclaw.json` so the plugin exports metrics. OTLP/HTTP uses port 4318:
+
+```json5
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      metrics: true,
+      endpoint: "http://collector-host:4318",
+      protocol: "http/protobuf",
+    },
+  },
+}
+```
+
+Restart the gateway for this to take effect (Linux: `systemctl --user restart openclaw-gateway`; macOS: `openclaw gateway restart --deep`).
+
+Point Prometheus at the collector (or expose the OTLP receiver on Prometheus itself):
+
+```yaml
+# prometheus.yml — when Prometheus receives OTLP directly
+otlp:
+  promote_all_resource_attributes: true
+```
+
+Metric names are emitted in OpenTelemetry dotted form and surface in Prometheus with dots converted to underscores: `openclaw.run.outcome` becomes `openclaw_run_outcome_total`.
+
+## Import the dashboard
+
+A ready-made dashboard ships in the WednesdayAI source tree at `extensions/diagnostics-otel/dashboards/grafana-otel.json` (uid `wednesdayai-otel`).
+
+<Steps>
+<Step title="Open Grafana import">
+In Grafana choose **Dashboards → New → Import** and upload the `grafana-otel.json` file.
+</Step>
+<Step title="Select the data source">
+Select your Prometheus data source for the `DS_PROMETHEUS` variable.
+</Step>
+</Steps>
+
+The dashboard covers:
+
+| Panel | PromQL basis |
+| ----- | ------------ |
+| Run error rate | `openclaw_run_outcome_total` by `openclaw_outcome` |
+| Model call latency p95 | `gen_ai_client_operation_duration_bucket` |
+| Token throughput | `openclaw_tokens_total` by `openclaw_token` |
+| Cost per hour (USD) | `openclaw_cost_usd_total` |
+| Active session runs | `openclaw_session_run_active` |
+| Run duration p95 | `openclaw_run_duration_ms_bucket` |
+
+## Import the alert rules
+
+The alert rules ship at `extensions/diagnostics-otel/alerts/prometheus-rules.yaml` (group `wednesdayai-otel`). Add the file to your Prometheus `rule_files` and reload Prometheus.
+
+| Alert | Condition | For |
+| ----- | --------- | --- |
+| `OtelRunErrorRateHigh` | run error rate > 10% | 5 minutes |
+| `OtelModelCallLatencyHigh` | model call p95 latency > 10s | 5 minutes |
+| `OtelCostOverrun` | estimated cost > $10/hour | 1 hour |
+
+## Cost panel prerequisites
+
+The cost-per-hour panel and the `OtelCostOverrun` alert require USD cost attribution (the `openclaw_cost_usd_total` series). Cost is computed from the `diagnostics-otel` built-in pricing table or a `diagnostics.otel.modelPricing` override — see [Cost attribution](/admin/observability/otel-langfuse#cost-attribution). If your provider/model has no pricing entry, those panels read empty and the cost alert never fires; the rest of the dashboard is unaffected.
+
+## Tune alert thresholds
+
+The `OtelCostOverrun` threshold of 10 USD per hour is a placeholder. Retune it for your workload in your Prometheus rules or Alertmanager configuration before relying on it.
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="All panels are empty">
+    1. Confirm metrics export is on: the gateway startup log line should include `metricsEnabled=true`.
+    2. Confirm the collector receives data: `curl -v http://collector-host:4318/v1/metrics` from the gateway host.
+    3. Confirm Prometheus can query the collector's output for `openclaw_run_outcome_total`.
+  </Accordion>
+  <Accordion title="Only the cost panels are empty">
+    The model in use has no entry in the built-in pricing table. Add one via `diagnostics.otel.modelPricing` and restart the gateway.
+  </Accordion>
+  <Accordion title="Metrics names look doubled or suffixed">
+    Prometheus converts OTel dots to underscores and adds `_total` for counters. Query `openclaw_tokens_total`, not `openclaw.tokens`.
+  </Accordion>
+</AccordionGroup>
+
+## Related
+
+- [OTel and Langfuse diagnostics](/admin/observability/otel-langfuse) — full configuration reference, content capture, cost attribution
+- [Observability](/admin/gateway/observability) — overview of traced spans and task recovery
+- [Logging](/admin/gateway/logging) — OTLP log export and sampling
+- [Deep observability](/admin/gateway/deep-observability) — runtime snapshots, heap/CPU capture, profiling
