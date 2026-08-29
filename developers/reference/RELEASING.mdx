@@ -121,3 +121,12 @@ Process to derive future publish candidates:
 4. Keep inherited `@openclaw/*` packages compatibility-only unless a package is known to target this fork.
 
 Release notes must also call out **new optional bundled plugins** that are **not on by default** (example: `tlon`).
+
+## Trusted npm publishing
+
+Core (and the WhatsApp dependency plugin) publish through a closed, OIDC-backed workflow — never a local `npm publish`:
+
+- **Workflow**: `.github/workflows/npm-publish.yml` runs with `permissions: { contents: read, id-token: write }` (npm trusted publishing via OIDC). It triggers on pushes to `main` (dev path; docs and markdown-only changes are ignored) and on `workflow_dispatch` with a closed mode set: `dev-canary`, `stable-create`, `stable-resume`, `reconcile`. Dispatch inputs pin an exact `source-sha`, plus `release-tag` / `candidate-id` / `stage-evidence` as the mode requires — no floating refs.
+- **Invocation identity** (`scripts/npm-publish/invocation.ts`): every run carries an `InvocationInput` (event `push` | `workflow_dispatch`, mode `stable` | `dev` | `recover`) resolved into an `InvocationContext` whose package order is fixed: `@wednesdayai/whatsapp` first, core second. Out-of-order or unbounded identifiers are rejected before anything ships.
+- **Sealed inventories** (`scripts/npm-publish/stable.ts`): stable publications move through a state machine whose terminal inventory state is `sealed`; receipts record every transition, and a core package published out of order lands in `core-published-out-of-order` for reconcile instead of diverging silently.
+- **Static checks in the meantime**: `scripts/release-check.ts` performs static-only release checks; the OIDC workflow is the settled sole-publisher design (see #407), not yet the enforced only path.

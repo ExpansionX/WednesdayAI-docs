@@ -111,6 +111,8 @@ Cron exposes three job types, each a pairing of a session target and a payload k
 | Assistant task | isolated | `agentTurn` | Runs a dedicated agent turn in `cron:<jobId>` with a fresh session each run. Default delivery is `announce`. |
 | Check first, then nudge | main | `wakeGate` | Runs a cheap gate (command or model check); only nudges the main session when the check finds work. |
 
+Every cron outcome is produced as an agent turn — the isolated-run summary, failure alerts, auto-disable notices, and the post-run main-session wake are all enqueued through the `agent.turn` machinery (see `src/cron/service/agent-turn.ts`). Cron never sends messages directly; delivery flows through the same backbone path as heartbeat and nudge turns.
+
 - **Schedules**: `at` (one-shot ISO timestamp; UTC when the timezone is omitted), `every` (fixed interval in ms), `cron` (5-field, or 6-field with seconds, with optional IANA `tz`; host-local timezone when omitted).
 - **Stagger**: recurring top-of-hour expressions (e.g. `0 * * * *`) get a deterministic per-job offset in a 0–5 minute window. Override per job with `schedule.staggerMs` (`--stagger 30s`, or `--exact` for 0).
 - **Wake modes**: `wakeMode: "now"` (default) delivers immediately — a busy main lane skips the turn; `wakeMode: "next-heartbeat"` parks the delivery until the main lane goes idle. Isolated jobs always run at fire time; `wakeMode` only controls the post-run main-session wake.

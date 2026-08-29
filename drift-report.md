@@ -1,175 +1,29 @@
 # Docs drift report v0.4.11
 
-- 52 persona page(s) likely missing/stale
-- 0 covered, 113 unmapped
+Generated 2026-08-29 after the full coverage pass, the 52-item accuracy sweep, and the merge of `docs/cognitive-substrate-0d` into `main`.
 
-## Likely missing/stale persona pages
+## Gate results
 
-- `admin/channels/bluebubbles.mdx` (core changed: `docs/channels/bluebubbles.md`)
-- `admin/channels/discord.mdx` (core changed: `docs/channels/discord.md`)
-- `admin/channels/feishu.mdx` (core changed: `docs/channels/feishu.md`)
-- `admin/channels/google-chat.mdx` (core changed: `docs/channels/google-chat.md`)
-- `admin/channels/imessage.mdx` (core changed: `docs/channels/imessage.md`)
-- `admin/channels/irc.mdx` (core changed: `docs/channels/irc.md`)
-- `admin/channels/matrix.mdx` (core changed: `docs/channels/matrix.md`)
-- `admin/channels/mattermost.mdx` (core changed: `docs/channels/mattermost.md`)
-- `admin/channels/msteams.mdx` (core changed: `docs/channels/msteams.md`)
-- `admin/channels/nextcloud-talk.mdx` (core changed: `docs/channels/nextcloud-talk.md`)
-- `admin/channels/signal.mdx` (core changed: `docs/channels/signal.md`)
-- `admin/channels/slack.mdx` (core changed: `docs/channels/slack.md`)
-- `admin/channels/telegram.mdx` (core changed: `docs/channels/telegram.md`)
-- `admin/channels/whatsapp.mdx` (core changed: `docs/channels/whatsapp.md`)
-- `admin/channels/zalo.mdx` (core changed: `docs/channels/zalo.md`)
-- `admin/channels/zalouser.mdx` (core changed: `docs/channels/zalouser.md`)
-- `admin/gateway/config-writes-developer.mdx` (core changed: `docs/gateway/config-writes-developer.md`)
-- `admin/gateway/config-writes.mdx` (core changed: `docs/gateway/config-writes.md`)
-- `admin/gateway/configuration-examples.mdx` (core changed: `docs/gateway/configuration-examples.md`)
-- `admin/gateway/configuration-reference.mdx` (core changed: `docs/gateway/configuration-reference.md`)
-- `admin/gateway/configuration.mdx` (core changed: `docs/gateway/configuration.md`)
-- `admin/gateway/heartbeat.mdx` (core changed: `docs/gateway/heartbeat.md`)
-- `admin/gateway/index.mdx` (core changed: `docs/gateway/index.md`)
-- `admin/gateway/logging.mdx` (core changed: `docs/gateway/logging.md`)
-- `admin/gateway/protocol.mdx` (core changed: `docs/gateway/protocol.md`)
-- `admin/gateway/security/index.mdx` (core changed: `docs/gateway/security/index.md`)
-- `admin/gateway/security/network-egress-policy.mdx` (core changed: `docs/gateway/security/network-egress-policy.md`)
-- `admin/gateway/session-consumer-claims.mdx` (core changed: `docs/gateway/session-consumer-claims.md`)
-- `admin/gateway/tasks.mdx` (core changed: `docs/gateway/tasks.md`)
-- `admin/gateway/troubleshooting.mdx` (core changed: `docs/gateway/troubleshooting.md`)
-- `developers/plugins/agent-signals.mdx` (core changed: `docs/plugins/agent-signals.md`)
-- `developers/plugins/agent-tools.mdx` (core changed: `docs/plugins/agent-tools.md`)
-- `developers/plugins/agent-turn-runner.mdx` (core changed: `docs/plugins/agent-turn-runner.md`)
-- `developers/plugins/backbone.mdx` (core changed: `docs/plugins/backbone.md`)
-- `developers/plugins/dream-cycle.mdx` (core changed: `docs/plugins/dream-cycle.md`)
-- `developers/plugins/learning-core-admin.mdx` (core changed: `docs/plugins/learning-core-admin.md`)
-- `developers/plugins/learning-core-developer.mdx` (core changed: `docs/plugins/learning-core-developer.md`)
-- `developers/plugins/learning-core.mdx` (core changed: `docs/plugins/learning-core.md`)
-- `developers/plugins/media-understanding-providers.mdx` (core changed: `docs/plugins/media-understanding-providers.md`)
-- `developers/plugins/session-consumer-claims.mdx` (core changed: `docs/plugins/session-consumer-claims.md`)
-- `admin/providers/deepgram.mdx` (core changed: `docs/providers/deepgram.md`)
-- `admin/providers/index.mdx` (core changed: `docs/providers/index.md`)
-- `admin/providers/mistral.mdx` (core changed: `docs/providers/mistral.md`)
-- `users/tools/chrome-extension.mdx` (core changed: `docs/tools/chrome-extension.md`)
-- `users/tools/exec-admin.mdx` (core changed: `docs/tools/exec-admin.md`)
-- `users/tools/exec-approvals.mdx` (core changed: `docs/tools/exec-approvals.md`)
-- `users/tools/exec-developer.mdx` (core changed: `docs/tools/exec-developer.md`)
-- `users/tools/exec-user.mdx` (core changed: `docs/tools/exec-user.md`)
-- `users/tools/exec.mdx` (core changed: `docs/tools/exec.md`)
-- `users/tools/index.mdx` (core changed: `docs/tools/index.md`)
-- `users/tools/plugin.mdx` (core changed: `docs/tools/plugin.md`)
-- `users/tools/subagents.mdx` (core changed: `docs/tools/subagents.md`)
+- `docs-surface-check --mode=pages`: **0 problems, 0 warnings**
+- Manifest (`docs-surface.yaml` in core): 190 tracked surfaces, **all `coverage: documented`** (0 gap, 0 wrong)
+- Site nav: **420 pages**, 0 missing files
+- Redirects: **287** (260 auto-generated path-prefix + 27 manual), 0 destinations outside nav
+- Internal links: 0 broken occurrences (was 1,787 across 567 targets before the redirect pass)
 
-## Unmapped core docs (no persona rule)
+## What this state reflects
 
-- `CHANGELOG.md`
-- `docs/.i18n/README.md`
-- `docs/.i18n/glossary.ja-JP.json`
-- `docs/.i18n/glossary.zh-CN.json`
-- `docs/automation/auto-reply.md`
-- `docs/automation/cron-jobs.md`
-- `docs/automation/cron-vs-heartbeat.md`
-- `docs/automation/hooks.md`
-- `docs/automation/troubleshooting.md`
-- `docs/brand/BRAND-GUIDELINES.md`
-- `docs/cli/agent-nudge.md`
-- `docs/cli/browser.md`
-- `docs/cli/config.md`
-- `docs/cli/cron.md`
-- `docs/cli/gateway.md`
-- `docs/cli/index.md`
-- `docs/cli/task.md`
-- `docs/concepts/agent.md`
-- `docs/concepts/config-changes-user.md`
-- `docs/concepts/context.md`
-- `docs/concepts/markdown-formatting.md`
-- `docs/concepts/multi-agent.md`
-- `docs/concepts/product-naming-developer.md`
-- `docs/concepts/product-naming-user.md`
-- `docs/concepts/product-naming.md`
-- `docs/concepts/session-analytics.md`
-- `docs/concepts/session-history-hygiene.md`
-- `docs/concepts/session-tool.md`
-- `docs/concepts/session.md`
-- `docs/concepts/streaming.md`
-- `docs/concepts/system-prompt.md`
-- `docs/concepts/tasks.md`
-- `docs/design/learning-core.md`
-- `docs/diagnostics/flags.md`
-- `docs/diagnostics/otel-langfuse.md`
-- `docs/docs.json`
-- `docs/help/environment.md`
-- `docs/help/faq.md`
-- `docs/help/testing.md`
-- `docs/help/troubleshooting.md`
-- `docs/logging.md`
-- `docs/network.md`
-- `docs/nodes/audio.md`
-- `docs/nodes/images.md`
-- `docs/nodes/media-understanding.md`
-- `docs/pi.md`
-- `docs/plans/.wai-topic`
-- `docs/plans/agent-turn-producers/.precheck.passed`
-- `docs/plans/agent-turn-producers/decisions-ledger.md`
-- `docs/plans/agent-turn-producers/phase-1-executor.md`
-- `docs/plans/agent-turn-producers/phase-1/001-parameterize-the-heartbeat-core-and-create-runmainagentturn-non-heartbeat-mode.md`
-- `docs/plans/agent-turn-producers/phase-1/011-claimandexecute-nacks-mismatched-claims-instead-of-stranding-them.md`
-- `docs/plans/agent-turn-producers/phase-2-cron-consumer.md`
-- `docs/plans/agent-turn-producers/phase-2/002-gateway-cron-wiring-claims-and-executes-the-main-turn-it-publishes.md`
-- `docs/plans/agent-turn-producers/phase-2/003-realign-gateway-e2e-server-cron-test-ts-to-the-claimed-turn-contract.md`
-- `docs/plans/agent-turn-producers/phase-3-delay-and-alias.md`
-- `docs/plans/agent-turn-producers/phase-3/004-release-delayed-turns-on-the-main-lane-idle-edge.md`
-- `docs/plans/agent-turn-producers/phase-3/005-wakemode-next-heartbeat-aliases-busy-delay-and-delivers.md`
-- `docs/plans/agent-turn-producers/phase-4-nudge-consumer.md`
-- `docs/plans/agent-turn-producers/phase-4/006-requestnudge-claims-and-executes-the-nudge-turn-it-publishes.md`
-- `docs/plans/agent-turn-producers/phase-4/007-isolated-wake-nudges-reach-a-terminal-kind-nudge-turn.md`
-- `docs/plans/agent-turn-producers/phase-5-proofs.md`
-- `docs/plans/agent-turn-producers/phase-5/008-busy-skip-and-run-are-proven-against-a-genuinely-occupied-lane.md`
-- `docs/plans/agent-turn-producers/phase-5/009-isolated-producers-still-never-touch-main-after-the-consumer-wiring.md`
-- `docs/plans/agent-turn-producers/phase-5/012-gateway-close-stops-producers-before-the-agent-turn-consumer-and-cancels-delayed-waiters.md`
-- `docs/plans/agent-turn-producers/phase-5/013-realign-cron-timer-semantics-tests-to-the-wired-agent-turn-main-contract.md`
-- `docs/plans/agent-turn-producers/phase-6-docs.md`
-- `docs/plans/agent-turn-producers/phase-6/010-operator-docs-describe-delivered-next-heartbeat-and-nudge-semantics.md`
-- `docs/plans/agent-turn-producers/phase-7/014-delayed-queue-release-robustness.md`
-- `docs/plans/agent-turn-producers/phase-7/015-cron-wiring-surfaces-failures-and-overflow.md`
-- `docs/plans/agent-turn-producers/phase-7/016-claimed-heartbeat-row-and-event-honesty.md`
-- `docs/plans/agent-turn-producers/phase-7/017-small-integration-cleanups.md`
-- `docs/plans/agent-turn-producers/phase-7/018-per-key-poison-tracking-and-shared-claim-predicate.md`
-- `docs/plans/agent-turn-producers/plan.md`
-- `docs/plans/agent-turn-producers/reviews/001.approved`
-- `docs/plans/agent-turn-producers/reviews/006.approved`
-- `docs/plans/agent-turn-producers/reviews/code-review-round-1.md`
-- `docs/plans/agent-turn-producers/reviews/code-review-round-2.md`
-- `docs/plans/agent-turn-producers/reviews/code-review-round-3.md`
-- `docs/plans/agent-turn-producers/reviews/find-codex.md`
-- `docs/plans/agent-turn-producers/reviews/find-glm.md`
-- `docs/plans/agent-turn-producers/reviews/find-opus.md`
-- `docs/plans/agent-turn-producers/reviews/find-prompt.md`
-- `docs/plans/agent-turn-producers/reviews/judge-prompt-codex.md`
-- `docs/plans/agent-turn-producers/reviews/judge-prompt-glm.md`
-- `docs/plans/agent-turn-producers/reviews/judge-prompt-opus.md`
-- `docs/plans/agent-turn-producers/reviews/tournament-1.md`
-- `docs/plans/cron-bigint-learning-core-hotfix/reviews/code-review-round-1.md`
-- `docs/plans/cron-bigint-learning-core-hotfix/reviews/code-review-round-2.md`
-- `docs/plans/pre-0.4.11-remediation/plan.md`
-- `docs/reference/AGENTS.default.md`
-- `docs/reference/api-usage-costs.md`
-- `docs/reference/prompt-caching.md`
-- `docs/reference/templates/AGENTS.dev.md`
-- `docs/reference/templates/BOOT.md`
-- `docs/reference/templates/IDENTITY.md`
-- `docs/reference/templates/TOOLS.dev.md`
-- `docs/reference/templates/USER.dev.md`
-- `docs/superpowers/specs/2026-06-28-cognitive-substrate-program-design.md`
-- `docs/superpowers/specs/2026-07-23-cognitive-substrate-0b.md`
-- `docs/superpowers/specs/2026-07-25-context-collect-raw-user-text.md`
-- `docs/web/control-ui.md`
-- `docs/wednesdayai-site/admin/gateway/chunk-delivery.mdx`
-- `docs/wednesdayai-site/admin/gateway/configuration.mdx`
-- `docs/wednesdayai-site/developers/plugins/chunk-delivery.mdx`
-- `docs/wednesdayai-site/users/pairing/first-channel.mdx`
-- `docs/wednesdayai-site/users/pairing/how-replies-arrive.mdx`
-- `docs/zh-CN/reference/AGENTS.default.md`
-- `docs/zh-CN/reference/templates/AGENTS.dev.md`
-- `docs/zh-CN/reference/templates/BOOT.md`
-- `docs/zh-CN/reference/templates/IDENTITY.md`
-- `docs/zh-CN/reference/templates/TOOLS.dev.md`
-- `docs/zh-CN/reference/templates/USER.dev.md`
+1. **Full coverage pass (2026-08-28/29)**: 51 missing pages authored against source; 9 manifest path remaps to the audience-prefixed site IA; docs.json nav registration.
+2. **Accuracy sweep**: all 52 tracked `coverage: wrong` items resolved against source (providers auth, channel config keys, CLI/API/reference corrections, sandbox + secrets limits, user commands, developer pages).
+3. **Merge of `docs/cognitive-substrate-0d`** (merge commit `d17c2e3`): reconciled with the externally synced main (PRs #18-#22); source-verified sections preserved; richer sync versions kept where they were supersets.
+4. **Sync-orphan registration**: 279 pages brought by the sync PRs were on disk but unregistered; now in 22 labeled nav groups. `changelog.mdx` stays navbar-linked by design.
+5. **Post-merge accuracy**: `/tts` real subcommands, `session.maintenance` enum (`enforce`/`warn`), flat system-state RPC names, trusted npm publishing section (OIDC workflow, invocation identity, sealed inventories), agent-turn durable delay + boot recovery (#403), cron outcomes as `agent.turn` producers, isolated-heartbeat event ownership.
+
+## Regenerating
+
+Run from the core repo:
+
+```bash
+node scripts/docs-surface-check.mjs --mode=pages --docs-root=/data/Code/WednesdayAI-docs
+```
+
+Known follow-ups live as `docs-coverage`-labelled issues / WAI ledger items keyed by surface id, per AGENTS.md §15.

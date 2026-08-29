@@ -66,14 +66,22 @@ Only the suffix-free return value is a real work id. Callers that need to inspec
 
 ## Delayed turns and the idle waiter
 
-A delayed turn is not on the backbone yet — it waits in an in-process per-session buffer, guarded by an idle waiter:
+A delayed turn is tracked in two places: a durable `agent.turn` work item on the backbone (see [Durable delay and boot recovery](#durable-delay-and-boot-recovery) below) and an in-process per-session buffer guarded by an idle waiter:
 
 - The waiter polls the main command-queue lane every 50 ms and releases the buffer when the lane drains to zero.
 - The wait has a hard budget of 10 minutes; on expiry the buffer is released anyway (logged as a warning).
-- On release, each buffered turn is published and immediately claimed-and-executed in order. If one turn fails, the loop stops and the remainder stay buffered; the waiter re-arms after 1 s.
+- On release, each buffered turn is claimed by its exact work id and executed in order (the durable row already exists — no re-publish). If one turn fails, the loop stops and the remainder stay buffered; the waiter re-arms after 1 s.
 - A released turn whose work item is not claimable (typically already consumed elsewhere) is retried; after 5 s of being unclaimable it is dropped with a warning, and the head-of-line item rotates to the back so one stuck turn cannot block the session forever.
 
-Delayed turns are in-process state: they do not survive a gateway restart. That is acceptable by design because their producers (cron catch-up, heartbeat) re-derive missed turns on restart.
+### Durable delay and boot recovery
+
+`busy: "delay"` acceptance is durable before it is reported. When a turn is accepted for delay, it is first enqueued as a real `agent.turn` work item whose payload carries the core-set `acceptedBusyDelay: true` marker — only then does the enqueue return the `${id}:delayed` suffix. The whole count/write/buffer update is serialized per session, so acceptance is never reported for work that is not already durable.
+
+- The per-session durable-delay cap is 32 turns (`DELAYED_AGENT_TURN_CAP`); overflow returns `${id}:rejected-overflow` instead of accepting.
+- Re-accepting the same id is idempotent — it returns `${id}:delayed` without writing a second row.
+- At gateway boot, recovery re-arms **only** pending `agent.turn` rows carrying the `acceptedBusyDelay` marker; unmarked rows are ordinary work owned by their own producer and are left alone. Marked rows are grouped per session in work-id ascending order and handed back to the in-process delayed machinery, so the normal lane-idle release path runs them. Recovery never claims or executes a turn by itself.
+
+Only the waiter/buffer timing is in-process: if the gateway restarts while a durable delayed turn is armed, the turn itself survives in storage and is re-armed at boot; the idle-waiter release cadence restarts with it.
 
 ## Claim and execute
 
