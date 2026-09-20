@@ -236,6 +236,60 @@ it("returns text content", async () => {
 pnpm --filter @wednesdayai/my-plugin test:fast
 ```
 
+## Testing the real tool pipeline
+
+The fake-`api` approach above unit-tests `execute()` in isolation. To test the
+pipeline the gateway actually runs — plugin discovery, factory resolution,
+allowlist filtering, and the model-facing tool definition — import the testing
+seam:
+
+```ts
+import {
+  createEmptyPluginRegistry,
+  loadOpenClawPlugins,
+  resolvePluginTools,
+  setActivePluginRegistry,
+  toToolDefinitions,
+} from "wednesdayai/plugin-sdk/testing";
+// "openclaw/plugin-sdk/testing" is the compatible spelling.
+```
+
+The subpath is supported for test code only — never import it from production
+plugin code, and it is never loaded by the runtime loader. (This is a deliberate
+divergence from upstream openclaw, which keeps its testing barrel repo-local.)
+
+Three steps:
+
+1. **Discovery** — `loadOpenClawPlugins({ cache: false, workspaceDir, config })`
+   with explicit `plugins.enabled: true`, `plugins.allow`, and
+   `plugins.load.paths` pointing at fixture plugin files (a `.cjs` entry plus an
+   `openclaw.plugin.json` manifest). Returns the real plugin registry.
+2. **Resolution + filtering** — `resolvePluginTools({ context })` invokes each
+   registered tool factory and applies `runToolAllowlist` (and the optional-tool
+   `allow` policy). One documented quirk: entries registered as bare factories
+   carry no tool names up front, so a `runToolAllowlist` pre-filter skips them
+   even when their resolved tool name matches — register tools with names if you
+   rely on that filter.
+3. **Adaptation** — `toToolDefinitions(tools)` produces the model-facing
+   definitions: `label` falls back to `name` when unset, thrown errors become
+   structured error results, and `execute(toolCallId, params, signal, onUpdate)`
+   passes the `AbortSignal` as the **third** argument — never a host-context
+   object.
+
+`loadOpenClawPlugins` activates the global plugin registry. Reset it between
+tests so suites stay order-independent:
+
+```ts
+import { afterEach } from "vitest";
+
+afterEach(() => {
+  setActivePluginRegistry(createEmptyPluginRegistry());
+});
+```
+
+`PluginLoadOptions`, `PluginRegistry`, `PluginToolRegistration`, and
+`HookContext` are exported as types for annotating fixtures.
+
 ## Best practices
 
 - **Single responsibility** — one tool per well-defined action.
