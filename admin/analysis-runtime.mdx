@@ -1,58 +1,123 @@
 ---
-title: "Analysis runtime"
-description: "Operating the shared plugin analysis lane: fixed concurrency limits, queueing behaviour, timeouts, and what to monitor when plugins saturate."
+summary: "Operate and observe plugin analysis runs: models, credentials, limits, diagnostics"
+read_when:
+  - You operate a WednesdayAI gateway whose plugins run LLM analysis (memory, topic detection, brain-style extensions)
+  - You need to trace analysis cost, latency, or failures in logs and diagnostics
+title: "Plugin Analysis Runtime Operations"
 audience: admin
+sources:
+  - src/plugins/runtime/runtime-analysis.ts
+  - src/plugins/runtime/runtime-analysis-direct.ts
+  - src/plugins/runtime/analysis-limits.ts
+  - src/config/types.plugins.ts
+  - src/plugins/loader.ts
+  - src/config/schema.help.ts
+generated: 2026-09-21
 ---
 
-{/* Nav registration needed (docs.json): add "admin/analysis-runtime" to Administrators > "Gateway configuration" (suggested after "admin/dream-cycle"). */}
+# Plugin analysis runtime operations
 
-# Analysis runtime
+Plugins can run focused LLM analysis (`api.runtime.analysis`) alongside normal agent turns.
+This page covers what operators need: which model and credentials those runs use, the resource
+limits that bound them, and how to observe them.
 
-The analysis runtime is the shared, bounded LLM lane plugins use for focused work - memory recall, fact extraction, topic detection, learning consolidation, dream contemplation. It runs through the same provider, auth-profile, and timeout plumbing as agent turns, on a dedicated lane so background analysis never queues behind a live user reply.
+## Model and credential selection
 
-**There are no config keys for the analysis runtime.** Its limits are fixed at build time; tuning happens in the plugins that use it (for example `consolidation.maxCallsPerAgentPerDay` in [Learning Core](/admin/learning) or `contemplation.maxCallsPerCycle` in [Dream Cycle](/admin/dream-cycle)). For the developer-facing API, see [Analysis runtime (developers)](/developers/analysis-runtime).
+- An analysis run uses the caller-supplied `provider` + `model` pair when the plugin sets one;
+  otherwise it falls back to the agent's configured default model (`agents.defaults.model.primary`
+  or the per-agent override). A provider without a model is rejected outright.
+- Credentials resolve through the same auth-profile plumbing as agent turns. Plugins may pin a
+  profile with `authProfileId`; otherwise the default profile order applies. `aws-sdk` auth
+  (Amazon Bedrock) and GitHub Copilot token exchange are both supported.
+- Tool-less runs (the common case) execute as a single direct provider completion carrying only
+  the plugin's prompt and input — they do not load the agent system prompt, so their token cost
+  is bounded by what the plugin sends.
 
-## Limits
+## Resource limits
 
-| Limit                                   | Value | Effect                                                                                        |
-| --------------------------------------- | ----- | ---------------------------------------------------------------------------------------------- |
-| Awaited analysis, global                | `1`   | Only one awaited analysis run executes at a time across all plugins.                            |
-| Awaited analysis, per plugin            | `1`   | A second awaited run from the same plugin waits for the first.                                  |
-| Background analysis, per plugin         | `4`   | At most 4 active background jobs per plugin. Further `enqueue` calls are refused (see below).   |
-| Default per-run timeout                  | `15 s` | Applies when a plugin does not pass its own `timeoutMs`.                                       |
+| Limit                        | Default                            | Behavior when hit                                                         |
+| ---------------------------- | ---------------------------------- | ------------------------------------------------------------------------- |
+| Global parallel `run(...)`   | 2                                  | Extra awaited runs queue (`maxSequential`) or reject                      |
+| Global sequential overflow   | 0                                  | With default 0, extra awaited runs reject immediately                     |
+| Per-plugin active `run(...)` | 1 (clamped to `maxParallel`)       | Extra same-plugin awaited runs queue (`maxSequentialPerPlugin`) or reject |
+| Per-plugin queue             | inherits `maxSequential` (clamped) | Extra same-plugin overflow rejects when that plugin's queue is full       |
+| Background jobs per plugin   | 4 active                           | `enqueue(...)` returns `accepted: false`, `reason: "queue-full"`          |
+| Timeout default              | 15 s awaited, 30 s background      | Run returns `status: "timeout"`                                           |
+| Timeout clamp                | 250 ms through 120 s               | Caller-supplied `timeoutMs` clamped into range                            |
 
-## Behaviour at the limits
+Tune the global analysis budget in `openclaw.json`:
 
-- **Background saturation.** When a plugin already has 4 active background jobs, `enqueue` returns `accepted: false` with reason `queue-full` instead of queueing indefinitely. Well-written plugins log or retry; a plugin that ignores the refusal silently drops that unit of work.
-- **Preemption by live work.** Background analysis yields to awaited analysis. If a background job is already running, a new awaited `run` is rejected immediately rather than waiting behind the job.
-- **Invalid requests are rejected synchronously.** An empty `purpose` or `input`, a `provider` without a `model`, or a disallowed tool in the allow-list never claims the lane or a quota.
-- **No nested runs.** An analysis run that itself triggers another analysis run is rejected (`nested analysis runs are not supported`), so one plugin cannot indirectly multiply the lane.
+```json5
+{
+  plugins: {
+    analysisConcurrency: {
+      maxParallel: 2,
+      maxSequential: 0,
+      maxParallelPerPlugin: 1,
+      // omit maxSequentialPerPlugin to inherit maxSequential
+    },
+  },
+}
+```
 
-## Interaction with plugin budgets
+Operator `plugins.analysisConcurrency` global fields win when set. Otherwise WednesdayAI takes the most
+permissive `maxParallel` / `maxSequential` among winning enabled plugin manifests. Inner
+`maxParallelPerPlugin` / `maxSequentialPerPlugin` attach to that plugin id. Operator per-plugin fields
+are a uniform ceiling when set. Omitting `maxSequentialPerPlugin` inherits `maxSequential`. Config is
+snapshotted when plugins load. Restart the gateway after changing it
+(Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
 
-The per-plugin analysis caps bound **concurrency**, not spend. Daily spend ceilings live in the consuming plugin's own config:
+The timeout bounds the whole run: model resolution, credential resolution (including OAuth
+refresh and Copilot token exchange), and the provider call. Analysis runs execute in the shared
+analysis command lane, so they do not compete with the active user turn.
 
-- Learning Core consolidation: `plugins.entries.learning-core.config.consolidation.maxCallsPerAgentPerDay` (default `8`).
-- Dream Cycle contemplation: `plugins.entries.dream-cycle.config.contemplation.maxCallsPerCycle` (default `3`).
+## Plugin hook timeouts
 
-A host with many plugins doing background analysis can still see steady provider traffic within these caps - each plugin gets its own 4-job window.
+Every plugin hook defaults to 30 seconds. A hung handler is killed and logged instead of
+blocking the gateway. Override per hook name (or set `default`) with:
 
-## What to monitor
+```json5
+{
+  plugins: {
+    hookTimeouts: {
+      default: 30000,
+      "context.collect": 60000,
+    },
+    // Deprecated fallback for context.collect / context.project / context.prune only.
+    // Used when hookTimeouts does not cover that hook.
+    // contextHookTimeoutMs: 30000,
+  },
+}
+```
 
-- `queue-full` rejections in plugin or gateway logs are the saturation signal. Recurring rejections for one plugin mean it is producing background work faster than 4 concurrent jobs drain - check its own budget settings before assuming a gateway problem.
-- Analysis runs are logged by the `plugins/runtime/analysis` subsystem (`run started` / `run completed` with duration and status). Slow or timing-out runs show as `timeout` statuses with durations pinned at the effective timeout.
-- Memory-tool analysis is restricted to the read-only `memory_search` and `memory_get` tools; anything else in an analysis allow-list is rejected before running. There is nothing to configure here - it is a fixed property of the lane.
+Cascade: `api.on(..., { timeoutMs })` then `plugins.hookTimeouts` then plugin manifest
+`hookTimeouts` then 30 s. Restart required. See [Configuration reference](/gateway/configuration-reference#plugins).
 
-## Troubleshooting
+## Observability
 
-**A plugin's background features lag or miss entries.** Check for `queue-full` rejections from that plugin. Lower its production rate (its own budget keys) rather than expecting a queue to absorb bursts.
+- Every analysis run emits `run.started` and `run.completed` diagnostic events. Direct-path runs
+  carry `metadata.analysisTransport: "direct"` so dashboards can split them from embedded agent
+  runs. `run.completed` reports `durationMs` and `exitStatus` (`ok` | `error`).
+- Logs use the `plugins/runtime/analysis` subsystem. Successful and empty runs log at `info`;
+  failures and timeouts log at `warn` with the error text, provider, model, purpose, and plugin id.
+  Concurrency rejects log `analysis run rejected` at `info` with
+  `error: "analysis concurrency limit exceeded"` and `admissionBoundary`
+  (`plugin-queue` | `global-queue` | `plugin-active` | `global-active`).
+  Zero overflow caps never emit the queue tokens.
+- Results report token usage (`input`, `output`, `cacheRead`, `cacheWrite`, `total`) when the
+  provider returns it, so per-plugin analysis cost is attributable from diagnostics consumers
+  (e.g. the OTel exporter).
 
-**`timeout` statuses in logs.** The run exceeded its timeout (the plugin's own `timeoutMs`, else the 15 s default). Either the provider is slow for that prompt size or the prompt is too broad - both are plugin-side fixes.
+## Failure modes
 
-**An awaited hook analysis is rejected while a background job runs.** Expected: awaited work does not wait behind background jobs. The retry happens naturally on the next trigger.
+- `rejected` — invalid request (empty purpose/input, provider without model, disallowed tool) or
+  the hierarchical budget is full. Invalid requests reject before any credential or provider work.
+  Budget rejects use `error: "analysis concurrency limit exceeded"` and the `admissionBoundary`
+  log field above.
+- `timeout` — the run exceeded its clamped `timeoutMs`; the provider call is aborted, not
+  abandoned.
+- `error` — credential resolution failed, the provider returned an error, or JSON output failed
+  to parse (model text is preserved in the result for the parse case).
 
-## Related
-
-- [Analysis runtime (developers)](/developers/analysis-runtime) - the `api.runtime.analysis` API, parameters, and result statuses
-- [Learning Core](/admin/learning) and [Dream Cycle](/admin/dream-cycle) - the main analysis consumers
-- [Logging](/admin/gateway/logging) - subsystem log configuration
+Analysis transcripts are transient: they are not synced to session storage, and analysis runs
+skip sandbox startup, workspace cwd changes, and global hook dispatch.
