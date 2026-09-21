@@ -318,6 +318,50 @@ Security note: `openclaw plugins install` installs plugin dependencies with
 `npm install --ignore-scripts` (no lifecycle scripts). Keep plugin dependency
 trees "pure JS/TS" and avoid packages that require `postinstall` builds.
 
+### npm 12 and git-protocol dependencies
+
+npm 12 disables fetching git-protocol dependencies by default (`allow-git` is
+`none`). A plugin whose dependency tree still pulls a package over
+`git+https://...` fails during `wednesdayai plugins install` with npm's own
+error, including:
+
+```text
+npm error code EALLOWGIT
+npm error Fetching packages of type "git" have been disabled
+```
+
+The installer runs `npm install --omit=dev --loglevel=error --ignore-scripts`
+and appends npm's stderr (or stdout if stderr is empty) to
+`npm install failed: ...`, so that `EALLOWGIT` text reaches the operator.
+Earlier installs used `--silent`, which hid the cause behind a bare
+`npm install failed:`.
+
+The WhatsApp channel — the installable plugin that carries runtime dependencies —
+pins `@whiskeysockets/baileys` `7.0.0-rc14`, which depends on the registry package
+`libsignal` instead of a git-protocol `libsignal`, so it installs cleanly on npm 12.
+
+One bundled extension still declares a git dependency: `extensions/tlon` pins
+`@tloncorp/api` with a `github:` spec. It is not offered by `wednesdayai plugins
+install`, and bundled copies ship without installed runtime dependencies, so the
+default install paths are unaffected — but installing it by hand on npm 12 fails
+with `EALLOWGIT` unless the override below is used.
+
+The right fix is to ask the plugin author to depend on a registry release.
+
+If you must install a plugin whose dependency graph you have reviewed and trust,
+scope the override to that one command rather than changing your user-wide npm
+config:
+
+```bash
+NPM_CONFIG_ALLOW_GIT=all wednesdayai plugins install <plugin>
+```
+
+Prefer this over `npm config set allow-git all`, which persists and re-enables
+git fetching for every later install. Note that `allow-git=root` only permits
+git specs declared directly in the package being installed, so it does not help
+when the git dependency is transitive (the common case). WednesdayAI never sets
+this for you; git fetching stays disabled by default.
+
 ### Channel catalog metadata
 
 Channel plugins can advertise onboarding metadata via `openclaw.channel` and

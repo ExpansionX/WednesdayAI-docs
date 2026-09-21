@@ -7,6 +7,7 @@ title: "Logging"
 audience: admin
 sources:
   - src/logging/logger.ts
+  - src/logging/subsystem.ts
   - src/logging/file-log-writer.ts
   - src/config/types.base.ts
   - src/config/zod-schema.ts
@@ -174,6 +175,26 @@ Behavior:
 - **Sub-loggers by subsystem** (auto prefix + structured field `{ subsystem }`)
 - **`logRaw()`** for QR/UX output (no prefix, no formatting)
 - **Console styles** (e.g. `pretty | compact | json`)
+- **Structured metadata** on `pretty` and `compact` (and therefore on journald, which
+  captures the same stdout/stderr stream): a call such as
+  `log.warn("recovery incident", { incidentKey: "session-restart:abc", kind: "restart", reasonCode: 2 })`
+  prints the message followed by a dimmed `key=value` suffix, for example
+  `[gateway] recovery incident incidentKey=session-restart:abc kind=restart reasonCode=2`.
+  Bare-looking string values (letters, digits, `_`, `.`, `/`, `:`, `@`, `+`, `-`) print
+  unquoted; anything else is JSON-quoted (for example `detail="two words"`). `undefined`,
+  functions, and symbols are omitted, matching the `json` console style and the JSONL
+  file log. A value that cannot be serialized prints as `"[unserializable]"`. Hostile
+  metadata (throwing getters or Proxy traps) degrades to `[meta unavailable]` rather than
+  throwing. Long values are truncated per key and across the whole suffix without splitting
+  a UTF-16 surrogate pair.
+
+  Treat structured metadata as operator-visible. The `json` console style and the JSONL file
+  log already carried these fields, but `pretty` and `compact` are the default styles, so on
+  those the fields now reach stdout/stderr and therefore journald. Nothing redacts them: the
+  renderer writes the values it is given, and the tool-summary redaction described in
+  [Tool summary redaction](#tool-summary-redaction) covers tool output, not log metadata. Do
+  not put secrets, tokens, or raw credentials in a log call's metadata object; hash or
+  truncate identifiers before logging them.
 - **Console log level** separate from file log level (file keeps full detail when `logging.level` is set to `debug`/`trace`)
 - **WhatsApp message bodies** are logged at `debug` (use `--verbose` to see them)
 

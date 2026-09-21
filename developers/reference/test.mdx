@@ -11,12 +11,11 @@ title: "Tests"
 
 - `pnpm test:force`: Kills any lingering gateway process holding the default control port, then runs the full Vitest suite with an isolated gateway port so server tests don’t collide with a running instance. Use this when a prior gateway run left port 18789 occupied.
 - `pnpm test:coverage`: Runs the unit suite with V8 coverage (via `vitest.unit.config.ts`). Global thresholds are 70% lines/branches/functions/statements. Coverage excludes integration-heavy entrypoints (CLI wiring, gateway/telegram bridges, webchat static server) to keep the target focused on unit-testable logic.
+- `pnpm test` runs two stages: first `pnpm test:scripts` (`node --test "scripts/**/*.test.mjs"`, the release/CI policy suites), and only if that passes, `node scripts/test-parallel.mjs`. A `test:scripts` failure short-circuits the `&&` and no Vitest lane runs at all.
+- `scripts/test-parallel.mjs` then runs the enabled lanes in two groups. **Parallel**: unit, core, channels, extensions, and gateway (gateway is serial unless `OPENCLAW_TEST_PARALLEL_GATEWAY=1` or a high-memory local host). **Serial, after the parallel group**: e2e, plus gateway when it is not parallelized. Every lane is default-on; set `OPENCLAW_TEST_INCLUDE_CORE=0`, `OPENCLAW_TEST_INCLUDE_CHANNELS=0`, `OPENCLAW_TEST_INCLUDE_EXTENSIONS=0`, `OPENCLAW_TEST_INCLUDE_GATEWAY=0`, or `OPENCLAW_TEST_INCLUDE_E2E=0` to skip one. The parallel lanes all run to completion, then the runner exits with the first nonzero lane code **before starting the serial group**. So a failing run with no e2e output either failed `test:scripts` before any lane started, or failed in the parallel group — e2e was never reached, not skipped.
+- Dedicated commands still exist for a single lane: `pnpm test:channels`, `pnpm test:extensions`, `pnpm test:gateway`, `pnpm test:e2e`.
+- `pnpm test:e2e` (also the serial e2e lane inside `pnpm test`): gateway end-to-end smoke (multi-instance WS/HTTP/node pairing). `vitest.e2e.config.ts` uses `pool: "forks"` — not `vmForks`, because vmForks leaked the `vi.mock` module registry across files in a shared worker — with 1 worker locally and at most 2 in CI, silent unless `OPENCLAW_E2E_VERBOSE=1`. Tune with `OPENCLAW_E2E_WORKERS=<n>` (capped at 16). Files come from `test/**`, `src/**`, and `extensions/**` matching `*.e2e.test.ts`.
 - `pnpm test` on Node 24+: OpenClaw auto-disables Vitest `vmForks` and uses `forks` to avoid `ERR_VM_MODULE_LINK_FAILURE` / `module is already linked`. You can force behavior with `OPENCLAW_TEST_VM_FORKS=0|1`.
-- `pnpm test`: runs the fast core unit lane by default for quick local feedback.
-- `pnpm test:channels`: runs channel-heavy suites.
-- `pnpm test:extensions`: runs extension/plugin suites.
-- Gateway integration: opt-in via `OPENCLAW_TEST_INCLUDE_GATEWAY=1 pnpm test` or `pnpm test:gateway`.
-- `pnpm test:e2e`: Runs gateway end-to-end smoke tests (multi-instance WS/HTTP/node pairing). Defaults to `vmForks` + adaptive workers in `vitest.e2e.config.ts`; tune with `OPENCLAW_E2E_WORKERS=<n>` and set `OPENCLAW_E2E_VERBOSE=1` for verbose logs.
 - `pnpm test:live`: Runs provider live tests (minimax/zai). Requires API keys and `LIVE=1` (or provider-specific `*_LIVE_TEST=1`) to unskip.
 
 ## Local PR gate
