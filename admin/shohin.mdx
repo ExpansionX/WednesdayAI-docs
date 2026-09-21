@@ -1,0 +1,53 @@
+---
+title: "Shohin administration"
+description: "Administer Shohin: user approval and revocation, session invalidation, organization-scoped settings, and the user migration tool."
+audience: admin
+---
+
+# Shohin administration
+
+Shohin is a freelance business management app (clients, projects,
+invoicing, bookkeeping) with per-user data isolation and
+organization-shared configuration.
+
+## Accounts and approval
+
+1. A user registers with email and password and receives a verification
+   email (token valid for 24 hours).
+2. After verifying, an administrator must approve the account before
+   sign-in works. The first registered user is auto-approved as admin.
+3. Revoking a user (clearing approval) takes effect on their next
+   request: sessions are re-validated against the database on every
+   token refresh, and revoking also revokes all of that user's active
+   MCP API tokens atomically.
+
+## Session invalidation
+
+Roles and approval state are never trusted from a stale token: demoted
+admins lose admin rights and revoked users lose access on their next
+request. The browser cookie itself is cleared when the client next
+calls `/api/auth/session`; until then every request fails closed with
+401.
+
+## Organization-scoped settings
+
+Tags, custom fields, holidays, tax rates, and rate cards are shared
+within an organization and isolated across organizations: an ID from
+another organization returns 404 and changes nothing. Bank details
+shown to organization members are masked; payment gateway secrets are
+never returned by any API.
+
+## User migration (`scripts/migrate-users.ts`)
+
+One-off migration of pre-auth users into the verification flow. The
+script fails fast:
+
+- requires `MAILGUN_API_KEY` and `MAILGUN_DOMAIN` (no development
+  fallback);
+- requires `NEXT_PUBLIC_APP_URL` to be a public `http(s)` URL —
+  malformed, non-http, `localhost`, or loopback values abort before any
+  database write;
+- a failed email send restores that user's pre-migration row and exits
+  non-zero. Verification tokens are never logged.
+
+Run with `npx tsx scripts/migrate-users.ts`.
