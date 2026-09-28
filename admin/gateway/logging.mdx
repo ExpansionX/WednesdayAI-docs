@@ -7,11 +7,12 @@ title: "Logging"
 audience: admin
 sources:
   - src/logging/logger.ts
-  - src/logging/subsystem.ts
+  - src/logging/levels.ts
   - src/logging/file-log-writer.ts
+  - src/logging/subsystem.ts
   - src/config/types.base.ts
   - src/config/zod-schema.ts
-generated: 2026-06-16
+generated: 2026-07-30
 ---
 
 # Logging
@@ -36,10 +37,12 @@ OpenClaw has two log “surfaces”:
 The file format is one JSON object per line.
 
 The Control UI Logs tab tails this file via the gateway (`logs.tail`).
-CLI can do the same:
+The CLI follows the same file (directly when local, via `logs.tail` with `--rpc` or in remote
+mode):
 
 ```bash
 openclaw logs --follow
+wednesdayai-logs          # lightweight local follower
 ```
 
 **Verbose vs. log levels**
@@ -49,6 +52,11 @@ openclaw logs --follow
   raise the file log level.
 - To capture verbose-only details in file logs, set `logging.level` to `debug` or
   `trace`.
+- Accepted values, least to most verbose: `silent`, `fatal`, `error`, `warn`, `info`
+  (default), `debug`, `trace`. Each level includes everything less verbose than it.
+- Releases up to and including 0.4.10 applied the levels above `info` inverted, so
+  `debug` behaved as `warn` and `trace` as `error`. Raising `logging.level` on those
+  builds silently _reduced_ file detail; upgrade if `debug` appears to do nothing.
 
 ## Rotation and resource controls
 
@@ -183,18 +191,17 @@ Behavior:
   Bare-looking string values (letters, digits, `_`, `.`, `/`, `:`, `@`, `+`, `-`) print
   unquoted; anything else is JSON-quoted (for example `detail="two words"`). `undefined`,
   functions, and symbols are omitted, matching the `json` console style and the JSONL
-  file log. A value that cannot be serialized prints as `"[unserializable]"`. Hostile
-  metadata (throwing getters or Proxy traps) degrades to `[meta unavailable]` rather than
-  throwing. Long values are truncated per key and across the whole suffix without splitting
-  a UTF-16 surrogate pair.
+  file log. A value that cannot be serialized prints as `"[unserializable]"`. Long values
+  are truncated per key and across the whole suffix without splitting a UTF-16 surrogate
+  pair.
 
   Treat structured metadata as operator-visible. The `json` console style and the JSONL file
   log already carried these fields, but `pretty` and `compact` are the default styles, so on
   those the fields now reach stdout/stderr and therefore journald. Nothing redacts them: the
   renderer writes the values it is given, and the tool-summary redaction described in
-  [Tool summary redaction](#tool-summary-redaction) covers tool output, not log metadata. Do
-  not put secrets, tokens, or raw credentials in a log call's metadata object; hash or
-  truncate identifiers before logging them.
+  [Logging](/logging) covers tool output, not log metadata. Do not put secrets, tokens, or raw
+  credentials in a log call's metadata object; hash or truncate identifiers before logging them.
+
 - **Console log level** separate from file log level (file keeps full detail when `logging.level` is set to `debug`/`trace`)
 - **WhatsApp message bodies** are logged at `debug` (use `--verbose` to see them)
 
