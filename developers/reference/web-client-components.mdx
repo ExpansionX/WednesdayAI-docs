@@ -1,0 +1,192 @@
+---
+summary: "Conventions for the apps/web component layer: cl- classes, DisabledControl, session vocabulary, state and provider seams, and the ADR 0077 allowlist"
+read_when:
+  - You are adding or changing a component under apps/web/src/ui
+  - You are adding a control whose backing feature ships in a later phase
+  - You need to know where the web client keeps state and how it talks to the gateway
+title: "Web client components"
+audience: developer
+---
+
+# Web client components
+
+`apps/web` is the end-user web client (client id `openclaw-user-client`). Its view layer is a small
+native React component layer under `apps/web/src/ui/`, styled over the shared
+[Brand tokens](/reference/brand-tokens). This page is the contract for changing it. For hosting and
+configuration see [Web client hosting](/web/user-client).
+
+## Layout
+
+```text
+apps/web/src/
+  app/         App (boot phases), AppShell (connected shell), onboarding and config-error views
+  ui/          the component layer: Shell, Sidebar, TopBar, Thread, Composer, ... + client.css
+  state/       chat.ts (zustand store), types.ts
+  providers/   gateway and events seams, WebClientRuntime, theme, attachments, preferences
+  runs/        RunsController and the projection behind the Runs panel
+  gateway/     connection, device identity, setup-code parsing
+```
+
+The components in `ui/` are `Shell`, `Sidebar`, `TopBar`, `AccountMenu`, `Thread`,
+`AssistantMessage`, `UserMessage`, `EmptyState`, `Composer`, `RightPanel`, `DisabledControl`,
+`Icon` and `markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile breakpoint at 860px,
+sidebar open and collapsed state) so `AppShell` supplies data, not chrome.
+
+## Styling conventions
+
+- Every class in `apps/web/src/ui/client.css` is prefixed `cl-` (`cl-sidebar`, `cl-composer`,
+  `cl-msg`). There is no shadow DOM and no CSS-in-JS. Boot views (loading, pairing, configuration
+  error) live in `app/app.css` with a `boot-` prefix.
+- Colours, spacing, radii, motion and fonts come from `brand-tokens` custom properties. Never
+  hard-code a colour or font family. Text on an accent fill uses `--accent-foreground`.
+- A token only this app needs (`--personalise-subtle`, `--composer`, `--shadow-md`) is declared at
+  the top of `client.css`, not in the shared package.
+- Icons are inline SVG paths in `ui/Icon.tsx` (Lucide-style, ISC notice in `apps/web/NOTICE`). Add a
+  glyph to `IconName` rather than an icon-library dependency.
+- Markdown replies render under a `.prose` wrapper. Style prose elements under `.prose`, not by
+  element selector on the page.
+- Honour `prefers-reduced-motion`: entrance animation is disabled under it.
+- Tests and e2e suites select by `data-testid` and `data-role`, never by `cl-` class. Keep an
+  existing hook stable when you restyle; rename it in the same change as the suites that use it.
+
+## DisabledControl and the phase contract
+
+A control whose backing feature ships later renders through `DisabledControl`
+(`apps/web/src/ui/DisabledControl.tsx`), visible but inert:
+
+```ts
+type DisabledPhase = "P2" | "P3" | "P3a" | "P3b" | "P4";
+
+type DisabledControlProps = {
+  label: string;
+  icon?: IconName;
+  className?: string;
+  testId?: string;
+  dataAttrs?: Record<string, string>;
+  children?: ReactNode;
+} & (
+  | { phase: DisabledPhase; finding?: never } // tooltip: "<label> - coming in phase <phase>"
+  | { phase?: never; finding: string } // tooltip: "<label> - coming with the extension panel SDK (<finding>)"
+);
+```
+
+The contract:
+
+- It renders a `<button type="button" aria-disabled="true">` with a `title` tooltip. It uses
+  `aria-disabled`, not the `disabled` attribute, so it stays focusable and the tooltip is reachable
+  from the keyboard.
+- The click handler only calls `preventDefault()`. A disabled control must never reach a gateway
+  RPC, whatever capability flag is set. `features.voice` does not enable Dictate or Voice mode.
+- The props are a union: pass **either** `phase` **or** `finding`, never both. Use `phase` for work
+  on the client roadmap phases (`dev-docs/workstreams/client-chat-v3/strategy/`; P2 assistants and chat controls, P3a dictation, P3b
+  voice mode, P4 widgets and Canvas). Use `finding` for controls that wait on a roadmap finding
+  rather than a phase; Calendar, Memory and Add extension cite `"F1, GitHub #634"`.
+- Give it a `testId`. The brand e2e asserts that each disabled control has `aria-disabled="true"`,
+  a tooltip naming its phase, and sends no gateway frame when activated.
+
+```tsx
+// Do this: visible, inert, and honest about when it lands
+<DisabledControl phase="P2" label="Search chats" icon="search" testId="sidebar-search" />
+
+// Not this: a live-looking button with a handler that reaches for an RPC the client may not call
+<button onClick={() => gateway.request("sessions.patch", {})}>Search chats</button>
+```
+
+To enable a control when its phase ships, replace the `DisabledControl` with a real element, update
+the allowlist ADR if it needs a new method, and update the disabled-control e2e in the same change.
+
+## Session vocabulary
+
+The UI says **chat**; the code says **session**. The gateway's `sessions.*` rows are what the user
+sees as chats.
+
+| User-facing         | Code                                                                           |
+| ------------------- | ------------------------------------------------------------------------------ |
+| Chat, Chats         | `ChatSession`, `sessions`, `activeSessionKey`                                  |
+| New chat            | `createSession(label)`, `sidebar-new-chat`; labels "New chat", "New chat 2"... |
+| Switch chat         | `switchSession(key)`, `sidebar-session` rows with `data-session-key`           |
+| Chat list limit     | `SESSIONS_LIST_LIMIT` (100), `sidebar-sessions-truncated`                      |
+| Source tag on a row | `deriveSourceTag(key)` in `ui/session-key-shape.ts`                            |
+
+Do not reintroduce "Space" or "Spaces" in UI copy or identifiers; that word is reserved for a
+possible external Spaces extension, and the brand e2e asserts the rendered page contains neither. Session keys
+look like `agent:<id>:<rest>`; `session-key-shape.ts` parses them client-side without importing core
+code, and `ui/recency.ts` groups rows into Today, Yesterday and Earlier by local midnight.
+
+## State and provider seams
+
+Data flows in one direction.
+
+```text
+GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zustand store --> ui/*
+                    ^                |
+                    +--- requests ---+  (gateway seam: sendMessage, createSession, ...)
+```
+
+- `providers/web-client-runtime.ts` (`WebClientRuntime`) owns the connection and implements both
+  seams: the `GatewayContextValue` (`providers/gateway.tsx`, request-style calls such as
+  `sendMessage`, `switchSession`, `createSession`, `uploadFile`, `abortMessage`) and the
+  `EventsContextValue` (`providers/events.tsx`, subscriptions such as `onChatChunk`,
+  `onSessionChanged`, `onSessionsList`, `onConnectionStatus`).
+- `app/AppShell.tsx` subscribes to the events seam once per runtime and writes into the store
+  (`state/chat.ts`, `useChatStore`). Components read the store or receive props; they do not
+  subscribe to the connection themselves.
+- The seam interfaces are kept in the shape of their upstream Saturday origin, including members
+  the web client no-ops (desktop context, accessibility). Provenance is in `apps/web/NOTICE`.
+- Runs live in `runs/` behind `RunsController`. Its `start()` and `stop()` are one boolean, so
+  components take a **reference-counted lease** with `useRunsLease(controller)`
+  (`ui/use-runs-lease.ts`); the Sidebar holds one for the live badge and the `RightPanel` holds
+  another while open.
+
+```ts
+// Do this: the sidebar badge and the panel each hold a lease
+useRunsLease(runsController); // Sidebar: badge stays live with the panel closed
+useRunsLease(controller, true); // RightPanel: refresh on join
+
+// Not this: closing the panel would stop the controller and freeze the badge
+useEffect(() => {
+  controller.start();
+  return () => controller.stop();
+}, []);
+```
+
+- `Thread` does not scroll itself. The scrolling element is the `.cl-scroll` wrapper `AppShell`
+  places around it, so scroll code must drive that element. Auto-follow applies only while the
+  reader is within 80px of the bottom.
+
+## Stay inside the ADR 0077 allowlist
+
+The client connects with only `operator.sessions.read` and `operator.sessions.write`, and the
+gateway admits a fixed method and event set for them (listed under
+[narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist) and
+[event allowlist](/gateway/protocol#narrow-scope-event-allowlist); ADR 0077 records the decision; the
+sources of truth are `NARROW_SESSION_READ_METHODS` and `NARROW_SESSION_WRITE_METHODS` in
+`src/gateway/method-scopes.ts` and `NARROW_SESSION_EVENT_ALLOWLIST` in
+`src/gateway/server-broadcast.ts`).
+
+- Methods: reads such as `agents.list`, `sessions.list`, `chat.history`, `sessions.runs.*` and
+  `tasks.runs.*`; writes `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
+  `sessions.abort`, `sessions.runs.cancel` and `sessions.runs.continue`.
+- Events: `chat`, `sessions.changed`, `runs.invalidated`, `tick`, `heartbeat`.
+- Not admitted: `talk.*`, `sessions.patch`, `config.*`, `logs.*`, `cron.*`, `node.*`, `send`, and
+  anything not listed. A method outside the list is refused by the gateway, so a feature that needs
+  one is an ADR amendment, not a client-only change.
+
+Before you add an RPC call, check it against the list. The brand e2e records every frame the
+browser sends and fails if one is outside the allowlist, which catches a stray call even when a
+unit test with a mocked runtime passes.
+
+## Test at the real entry point
+
+Unit tests under `apps/web/src/**` (`pnpm test:web`) prove components in jsdom. They cannot see
+scrolling, fonts, `color-scheme` or gateway frames. For a behaviour change, also drive the built
+bundle in real Chromium against a real gateway using the harness in
+`test/helpers/user-client-web-harness.ts`; see
+[Testing](/help/testing#web-client-and-brand-e2e-suites) for the suites and their caveats.
+
+## Related
+
+- [Brand tokens](/reference/brand-tokens) - the shared tokens and fonts under `client.css`
+- [Web client hosting](/web/user-client) - deployment, origins, `config.json`
+- [Using the web client](/web/using-the-web-client) - what users see
+- [Gateway protocol](/gateway/protocol) - client identity and scopes
