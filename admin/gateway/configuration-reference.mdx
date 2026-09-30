@@ -1395,6 +1395,7 @@ scripts/sandbox-browser-setup.sh   # optional browser image
           theme: "helpful sloth",
           emoji: "🦥",
           avatar: "avatars/samantha.png",
+          color: "lime", // optional; web client assistant colour, see agents.list[].identity.color
         },
         groupChat: { mentionPatterns: ["@openclaw"] },
         sandbox: { mode: "off" },
@@ -1434,6 +1435,8 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 - `model`: string form overrides `primary` only; object form `{ primary, fallbacks }` overrides both (`[]` disables global fallbacks). Cron jobs that only override `primary` still inherit default fallbacks unless you set `fallbacks: []`.
 - `params`: per-agent stream params merged over the selected model entry in `agents.defaults.models`. Use this for agent-specific overrides like `cacheRetention`, `temperature`, or `maxTokens` without duplicating the whole model catalog.
 - `identity.avatar`: workspace-relative path, `http(s)` URL, or `data:` URI.
+- `identity.color`: optional web client assistant colour. See
+  [`agents.list[].identity.color`](#agentslistidentitycolor) below.
 - `identity` derives defaults: `ackReaction` from `emoji`, `mentionPatterns` from `name`/`emoji`.
 - `subagents.allowAgents`: per-agent allowlist of agent ids for `sessions_spawn`'s `agentId` parameter (`["*"]` = any; default: same agent only). Allowlist-only — no deny-list for target agent IDs. See [Sub-agent access control](/tools/subagents#sub-agent-access-control-which-agents-which-tools).
 - `subagents.model`: per-agent default model for spawned sub-agents (overrides `agents.defaults.subagents.model`).
@@ -1441,6 +1444,33 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 - `subagents.completionDelivery`: per-agent delivery mode for top-level sub-agent completions (`"parent"` or `"direct"`; overrides `agents.defaults.subagents.completionDelivery`). See [Completion delivery](/tools/subagents#completion-delivery).
 - `systemPrompt`: per-agent prompt shape override. Merges over `agents.defaults.systemPrompt` by section key. When `projectContext.files` is set, that list replaces the default entirely (not merged). See [`agents.defaults.systemPrompt`](#agentsdefaultssystemprompt) for the full field reference.
 - Sandbox inheritance guard: if the requester session is sandboxed, `sessions_spawn` rejects targets that would run unsandboxed.
+
+### `agents.list[].identity.color`
+
+```json5
+{
+  agents: {
+    list: [{ id: "main", identity: { color: "lime" } }],
+    defaults: { models: { "anthropic/claude-opus-4-6": {} } }, // bounds the web client's model switcher, see below
+  },
+}
+```
+
+- One of a closed palette: `indigo`, `violet`, `pink`, `rose`, `amber`, `lime`, `teal`, `sky`. Any
+  other value fails config validation with the allowed values listed in the error. Optional; an
+  assistant with no configured colour still gets a stable colour in the web client, hashed from its
+  agent id (`packages/brand-tokens` guarantees 3:1 contrast against the background and 4.5:1 on the
+  foreground for every colour in dark, light and high-contrast themes).
+- Set it here only: `IDENTITY.md` does not carry a colour.
+- Also carried on `agents.list` (the gateway RPC method) as `identity.color`, so a colour set here
+  is what the [web client](/web/user-client) shows for this assistant - the assistant picker, the
+  sidebar, the top bar and each of its replies.
+- **If you expose the web client**, also set `agents.defaults.models` to a real, bounded catalog.
+  The model menu (`models.list`) lists the catalog entries named there, and `sessions.patch` and
+  `sessions.create`'s optional `model` field (client-chat-v3 P2, ADR 0081/0082) accept those plus
+  the agent's own default model. `agents.list[].model` fallbacks do not widen or narrow either.
+  Leaving `agents.defaults.models` empty lists the whole model catalog and admits any
+  `provider/model` reference that parses, not just the ones you intend end users to pick from.
 
 ### `agents.list[].workspaceLanes`
 
@@ -2682,6 +2712,12 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
       // allowInsecureAuth: false,
       // dangerouslyDisableDeviceAuth: false,
     },
+    webClient: {
+      // allowedOrigins: ["https://chat.example.com"], // required for the WednesdayAI web client
+      // enabled: false, // serve the web client bundle from this gateway (default off)
+      // basePath: "/v2/client", // default; override to remount, must not collide with gateway.controlUi.basePath
+      // root: "/srv/wednesdayai-web", // optional; defaults to the packaged dist/web-client
+    },
     remote: {
       url: "ws://gateway.tailnet:18789",
       transport: "ssh", // ssh | direct
@@ -2711,6 +2747,7 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - **Auth**: required by default. Non-loopback binds require a shared token/password. Onboarding wizard generates a token by default.
 - `gateway.auth.mode: "none"`: explicit no-auth mode. Use only for trusted local loopback setups; this is intentionally not offered by onboarding prompts.
 - `gateway.auth.mode: "trusted-proxy"`: delegate auth to an identity-aware reverse proxy and trust identity headers from `gateway.trustedProxies` (see [Trusted Proxy Auth](/gateway/trusted-proxy-auth)).
+- The `openclaw-user-client` web client is exempt from every ambient auth mode: under `none`, `trusted-proxy` and Tailscale identity auth it is still refused (`CLIENT_DEVICE_CREDENTIAL_REQUIRED`) unless it presents its bounded device token or redeems its bounded bootstrap token. Hosting it behind a reverse proxy keeps working; the proxy identity just never replaces the device credential. Other client ids are unaffected. See [Protocol](/gateway/protocol) for the full rule.
 - `gateway.auth.allowTailscale`: when `true`, Tailscale Serve identity headers can satisfy Control UI/WebSocket auth (verified via `tailscale whois`); HTTP API endpoints still require token/password auth. This tokenless flow assumes the gateway host is trusted. Defaults to `true` when `tailscale.mode = "serve"`.
 - `gateway.auth.rateLimit`: optional failed-auth limiter. Applies per client IP and per auth scope (shared-secret and device-token are tracked independently). Blocked attempts return `429` + `Retry-After`.
   - `gateway.auth.rateLimit.exemptLoopback` defaults to `true`; set `false` when you intentionally want localhost traffic rate-limited too (for test setups or strict proxy deployments).
@@ -2718,6 +2755,10 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `tailscale.mode`: `serve` (tailnet only, loopback bind) or `funnel` (public, requires auth).
 - `controlUi.allowedOrigins`: explicit browser-origin allowlist for Gateway WebSocket connects. Required when browser clients are expected from non-loopback origins.
 - `controlUi.dangerouslyAllowHostHeaderOriginFallback`: dangerous mode that enables Host-header origin fallback for deployments that intentionally rely on Host-header origin policy.
+- `webClient.allowedOrigins`: exact browser origins allowed to open a websocket as the `openclaw-user-client` web client. This check always runs for that client id, even when reverse-proxy headers are present, and `controlUi.allowedOrigins` never admits it. Default empty, which admits nothing. See [Protocol](/gateway/protocol) for the client identity rules.
+- `webClient.enabled`: serve the built web client bundle from this gateway, same-origin, at `webClient.basePath`. Default `false`: the client is normally hosted separately (`wednesdayai web serve`, a CDN, or the container image). Enabling it does not admit the client - the origin allowlist above still applies, so add the gateway's own origin. See [Web client hosting](/web/user-client).
+- `webClient.basePath`: public path the gateway-served client is mounted under. Default `/v2/client`. It may not equal, contain, or be contained by `gateway.controlUi.basePath`; a collision is rejected when the config loads. Earlier builds defaulted to `/client`; on a deployment that never set `basePath`, an old `/client/` bookmark no longer reaches the client (there is no redirect), and with the Control UI at the gateway root that path is answered by the Control UI. Set `basePath: "/client"` to keep the old address. `gateway.*` changes need a gateway restart. See [Web client hosting](/web/user-client#gateway-route).
+- `webClient.root`: directory holding the built bundle (`index.html` plus `assets/`). Optional: with `webClient.enabled` true and no `root`, the gateway serves the bundle packaged with this install (`dist/web-client`), and answers `503` naming the build command only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason rather than silently falling back.
 - `remote.transport`: `ssh` (default) or `direct` (ws/wss). For `direct`, `remote.url` must be `ws://` or `wss://`.
 - `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`: client-side break-glass override that allows plaintext `ws://` to trusted private-network IPs; default remains loopback-only for plaintext.
 - `gateway.remote.token` / `.password` are remote-client credential fields. They do not configure gateway auth by themselves.
@@ -2730,6 +2771,22 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `gateway.nodes.browser.node`: pin browser routing to a specific node id or name (optional).
 
 </Accordion>
+
+### Session steering defaults
+
+- `gateway.sessions.steer.defaultMode`: mode the `sessions.steer` RPC applies when the caller omits
+  `mode`. One of `"inject"` (default), `"interrupt"`, `"queue"`. Deliberately independent of the
+  session or channel queue mode: a client asking to steer never inherits collect or followup
+  semantics from the channel.
+- `gateway.sessions.steer.settleTimeoutMs`: how long `sessions.steer` with `mode: "interrupt"` waits
+  for the aborted run to reach a terminal state before failing the call. Integer, `0` or more;
+  default `15000`. The replacement turn is never started past this point, so a session cannot end
+  up with two concurrent runs.
+
+The web client always sends an explicit `mode` (`queue` for a message queued behind a streaming
+reply, `inject` for Send now) and never `interrupt`, so neither key changes what it does.
+
+See [Gateway protocol](/gateway/protocol) for the full `sessions.steer` request and response shape.
 
 ### OpenAI-compatible endpoints
 
@@ -3170,6 +3227,7 @@ Metadata written by CLI wizards (`onboard`, `configure`, `doctor`):
           theme: "helpful sloth",
           emoji: "🦥",
           avatar: "avatars/samantha.png",
+          color: "lime",
         },
       },
     ],
@@ -3182,6 +3240,9 @@ Written by the macOS onboarding assistant. Derives defaults:
 - `messages.ackReaction` from `identity.emoji` (falls back to 👀)
 - `mentionPatterns` from `identity.name`/`identity.emoji`
 - `avatar` accepts: workspace-relative path, `http(s)` URL, or `data:` URI
+- `color` is optional and only affects the [web client](/web/user-client); see
+  [`agents.list[].identity.color`](#agentslistidentitycolor) for the palette and the
+  `agents.defaults.models` advice
 
 ---
 

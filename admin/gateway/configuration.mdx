@@ -204,8 +204,9 @@ When validation fails:
   </Accordion>
 
   <Accordion title="Configure session storage backend">
-    By default, session transcripts are stored as local JSONL files. For durable or shared storage,
-    set `session.storage.backend`:
+    By default, session transcripts are stored in a local SQLite database at
+    `<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`). Set `session.storage.backend`
+    to switch backends or override the SQLite path:
 
     ```json5
     {
@@ -213,7 +214,7 @@ When validation fails:
         storage: {
           backend: "sqlite", // fs-jsonl | sqlite | postgres
           mode: "primary",   // primary | mirror
-          sqlitePath: "~/.openclaw/agents/{agentId}/sessions/session.db",
+          sqlitePath: "/var/lib/openclaw/sessions.db", // optional override; defaults to <state-dir>/sessions.db
           fallbackToJsonlOnError: false,
           migration: { validateOnStart: true },
         },
@@ -247,6 +248,12 @@ When validation fails:
       single write. This preserves availability but splits state; use with caution.
     - `migration.validateOnStart`: when `true`, the gateway validates schema and may backfill legacy
       JSONL content on first startup. Set to `false` for a clean database cut-over.
+    - With `backend: "postgres"` (or `sqlite`), the gateway converges the database schema on every
+      startup: tables and indexes are created with `IF NOT EXISTS`, and columns added in newer
+      versions are added idempotently — PostgreSQL emits `ALTER TABLE ... ADD COLUMN IF NOT
+      EXISTS`, while SQLite checks `PRAGMA table_info` and issues a plain `ALTER TABLE ... ADD
+      COLUMN` when the column is missing. Convergence is additive only; existing columns and data
+      are never dropped, renamed, or re-typed, and no manual SQL is required.
     - SQLite options under `storage.sqlite`: `wal`, `busyTimeoutMs`, `walAutocheckpointPages`.
     - Redis options under `storage.redis`: `keyPrefix`, `ttlSeconds`.
 
@@ -438,6 +445,15 @@ Most fields hot-apply without downtime. In `hybrid` mode, restart-required chang
 `gateway.reload` and `gateway.remote` are exceptions — changing them does **not** trigger a restart.
 </Note>
 
+<Note>
+**Per-agent entries are an exception to the `agents` row.** `agents.defaults.heartbeat` and
+`agents.defaults.model` are applied in process (they trigger a `restart-heartbeat` action), but
+edits under `agents.list[]` — including `agents.list[].heartbeat.*` — collapse to the single
+`agents.list` path, which is treated as a no-op. They are neither applied in process nor flagged
+as needing a restart, so the heartbeat runner keeps its startup snapshot. Restart the gateway
+after editing a per-agent heartbeat.
+</Note>
+
 ## Config RPC (programmatic updates)
 
 <Note>
@@ -449,13 +465,14 @@ Control-plane write RPCs (`config.apply`, `config.patch`, `update.run`) are rate
     Validates + writes the full config and restarts the Gateway in one step.
 
     <Warning>
-    `config.apply` replaces the **entire config**. Use `config.patch` for partial updates, or `openclaw config set` for single keys.
+    `config.apply` replaces the **entire config**. Use `config.patch` for partial updates, or `openclaw config set` for single keys. A document that drops top-level keys without listing them in `allowTopLevelKeyRemoval` is refused (`INVALID_REQUEST`, `details.code: CONFIG_WRITE_REFUSED`) and the on-disk file is left unchanged. Agents cannot call `config.apply` unless you opt in. See [Config writes](/gateway/config-writes).
     </Warning>
 
     Params:
 
     - `raw` (string) — JSON5 payload for the entire config
     - `baseHash` (optional) — config hash from `config.get` (required when config exists)
+    - `allowTopLevelKeyRemoval` (optional string[]) — top-level keys this write may delete; omitted means none. Payload diffs do not grant removals.
     - `sessionKey` (optional) — session key for the post-restart wake-up ping
     - `note` (optional) — note for the restart sentinel
     - `restartDelayMs` (optional) — delay before restart (default 2000)
@@ -484,6 +501,7 @@ Control-plane write RPCs (`config.apply`, `config.patch`, `update.run`) are rate
 
     - `raw` (string) — JSON5 with just the keys to change
     - `baseHash` (required) — config hash from `config.get`
+    - `allowTopLevelKeyRemoval` (optional string[]) — same as `config.apply`; required only if the patch removes a top-level key (for example `null` at the top level)
     - `sessionKey`, `note`, `restartDelayMs` — same as `config.apply`
 
     Restart behavior matches `config.apply`: coalesced pending restarts plus a 30-second cooldown between restart cycles.
@@ -595,4 +613,4 @@ For the complete field-by-field reference, see **[Configuration Reference](/gate
 
 ---
 
-_Related: [Configuration Examples](/gateway/configuration-examples) · [Configuration Reference](/gateway/configuration-reference) · [Doctor](/gateway/doctor)_
+_Related: [Configuration Examples](/gateway/configuration-examples) · [Configuration Reference](/gateway/configuration-reference) · [Config writes](/gateway/config-writes) · [Doctor](/gateway/doctor)_
