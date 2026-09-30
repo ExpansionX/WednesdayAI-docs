@@ -1,0 +1,212 @@
+---
+summary: "Operator runbook for the out-of-band validation surface: activation, the deployed validator run across the operator restart, stuck-run recovery, and deactivation"
+read_when:
+  - Running the post-deployment validation window against a deployed gateway
+  - A validation run exited restart-required, or was refused part-way through
+  - Confirming which RPC methods the validation surface adds and when they exist
+title: "Production validation"
+---
+
+# Production validation
+
+The `wednesdayai validation` command group (`openclaw` alias) drives one bounded control plane on a deployed gateway: thirteen `validation.*` RPC methods that exist only while a local activation sentinel is present on the gateway host. There is no generic pass-through method, and no verb takes a method name or an arbitrary payload, so the whole remote surface is enumerable. See ADR 0069 for the boundary itself.
+
+Nothing changes on the gateway until `wednesdayai validation activate` is run locally on that host.
+
+## Before you start
+
+**Durable session storage.** `session.storage.backend` must be `sqlite` or `postgres`. The validation store has no JSONL fallback: the owner-fence barrier, the session state machine and the at-most-once operation ledger are database-enforced invariants, so any other backend resolves to no store at all and the gateway refuses to register the surface.
+
+```json5
+{
+  session: {
+    storage: { backend: "sqlite" },
+  },
+}
+```
+
+**Per-sender session scope.** `session.scope` must not be `global`. A global-scope deployment collapses every session onto one key, so the heartbeat probe cannot get an isolated session and is refused with `HEARTBEAT_PROBE_ISOLATION_UNAVAILABLE`.
+
+**Isolated heartbeat on the probed agent.** The agent named by `--agent` needs `heartbeat.isolatedSession: true`, set either on the agent or on `agents.defaults`:
+
+```json5
+{
+  agents: {
+    defaults: {
+      heartbeat: { isolatedSession: true, target: "none" },
+    },
+  },
+}
+```
+
+That agent's heartbeat delivery must also _resolve_ to `none`. The probe judges the delivery resolver's output, not the raw config value, and refuses three separate ways: a resolved channel other than `none`, a degrade to `none` through fallback routing, and a raw `target` that is not literally `"none"` (an unrecognised target is normalised to `none`, so it is refused by name). One guard implements that rule, and the cron and resolved-config probes reuse it, so all three refuse the ambient `last` target, fallback routing, wildcard destinations and any explicit destination alike.
+
+**The allowlisted test destination.** The only destination a probe run may reach is the verification sink, and it is provisioned by the storage backend above rather than by you. The sink is local and workstream-owned: a delivery is one row written to the `verification_receipts` table, and the validator reads that row back. There is no URL, no egress and no caller-supplied target of any kind, and idempotency is the table's `UNIQUE(work_id)` constraint rather than a process-local memo. The run's preflight only reads the sink to confirm it exists; it never provisions one. No claim is made about deduplication on ordinary channels.
+
+**Loopback and scope.** Every `validation.*` method is classified `operator.admin`, and authentication additionally requires direct loopback provenance captured by the server when the connection is accepted. A caller-supplied claim is never trusted, so run the CLI on the gateway host.
+
+## The command group
+
+| Command                                  | What it does                                                                              |
+| ---------------------------------------- | ----------------------------------------------------------------------------------------- |
+| `validation activate --operator <label>` | Writes the local activation sentinel that makes the RPC namespace exist                   |
+| `validation record-deployment`           | Asks the gateway to attest its own installed build, opening a soak window                 |
+| `validation run --agent <id>`            | Runs the deployed validator and emits the nonce-bound evidence bundle on a full pass only |
+| `validation abort`                       | Ends a half-finished run: cancel the session, or discard only the local record            |
+| `validation deactivate`                  | Removes the sentinel, so the RPC namespace stops existing                                 |
+
+`run`, `abort` and `record-deployment` also accept `--url`, `--token`, `--password`, `--timeout <ms>` and `--json`.
+
+Two files under the state directory carry this surface (`stateDir` is `OPENCLAW_STATE_DIR`, or `~/.openclaw` when unset). Both are written `0600`, and neither ever contains the session capability:
+
+- `${stateDir}/validation-activation.json` — the activation sentinel: an operator label and a timestamp, nothing else.
+- `${stateDir}/validation-resume.json` — the client-side resume record: session id, run nonce, the leg reached, and the admission boot the resumed process must match.
+
+Do not edit or delete either file by hand. Every state they can reach has a supported command, and [stuck runs](#when-a-run-cannot-finish) covers the awkward ones.
+
+## Running the validation
+
+### 1. Activate
+
+```bash
+wednesdayai validation activate --operator "ops-oncall"
+```
+
+The methods become dispatchable immediately. No gateway restart is required: presence of the sentinel is re-checked on every request.
+
+### 2. Record the deployment
+
+```bash
+wednesdayai validation record-deployment
+```
+
+This opens the soak window. The commit, version and timestamp all come from the gateway's own installed build; the command sends no build identity and no clock of its own. It creates a short-lived session for the write and cancels it again, so it leaves nothing active behind.
+
+### 3. Wait out the soak window
+
+The window is 168 uninterrupted hours at that one build. Until it completes, `validation run` is refused at the soak gate:
+
+| Refusal                                | Meaning                                                                          |
+| -------------------------------------- | -------------------------------------------------------------------------------- |
+| `SOAK_NO_ATTESTATION`                  | Step 2 has not been run against this gateway                                     |
+| `SOAK_BUILD_MISMATCH`                  | The running build is not the attested one, so the window was reset to this build |
+| `SOAK_WINDOW_INCOMPLETE`               | The 168 hours have not elapsed yet                                               |
+| `SOAK_NO_NON_VERIFICATION_OBSERVATION` | The window recorded no ordinary, non-verification work                           |
+
+Redeploying, rebuilding or reinstalling during the window resets it.
+
+### 4. First run
+
+```bash
+wednesdayai validation run \
+  --agent <agent id> \
+  --config-agent <config agent id 1> \
+  --config-agent <config agent id 2> \
+  --nonce <run nonce> \
+  --emit-bundle /var/tmp/validation-bundle.json
+```
+
+Pass `--nonce` explicitly. The run can only be resumed under the same nonce, and an omitted one is generated. `--config-agent` (repeatable) is **required at least twice, with two distinct agent ids**: SC3 requires proof that resolved config was projected correctly for two different named agents, not just one, so the run refuses before contacting the gateway at all if fewer than two distinct values are given.
+
+The moment the session is created, the capability for that session is written to **stderr**, once:
+
+```text
+Validation session <id> created. Its capability is shown ONCE — here, now, and never again:
+
+    <capability>
+```
+
+Record it. It is required to resume the run after the restart in step 5, and to cancel the session with `validation abort`. It is never written to stdout (which carries `--json`), to the command line, to the environment, to a log line, to the resume record or to any other file: the gateway keeps only its SHA-256 hash, so nothing can show it to you a second time.
+
+The run then walks the soak gate, the heartbeat probe, the cron probe and the resolved-config probe, arms the durable work-ID barrier, and exits **75** with `VALIDATION RESTART-REQUIRED`. The barrier is holding real work for the next gateway boot; the run is paused, not finished.
+
+### 5. Restart the gateway yourself
+
+The `restart-required` exit prints the platform-correct command for this host, taken verbatim from the restart adapters:
+
+- Linux: `systemctl --user restart <gateway unit>`
+- macOS: `launchctl kickstart -k gui/<uid>/<launchd label>`
+
+The validator never runs it. A gateway that restarts itself to satisfy its own verification is a rejected design, so the command goes to a human and stops there.
+
+Use the service manager, and nothing else. A rebuild, redeploy or reinstall helper replaces the build, which resets the soak window and sends you back to step 2.
+
+### 6. Re-run and resume
+
+```bash
+wednesdayai validation run \
+  --agent <agent id> \
+  --config-agent <config agent id 1> \
+  --config-agent <config agent id 2> \
+  --nonce <the same run nonce> \
+  --emit-bundle /var/tmp/validation-bundle.json
+```
+
+A hidden prompt asks for the capability from step 4; the input is not echoed. The gateway checks it against the stored hash, the barrier lease is confirmed to belong to the successor boot, the held work is released, the soak window is re-checked one last time, and the run composes the nonce-bound evidence bundle, acknowledges cleanup and exits **0**. The bundle is written only on that full pass, and only to the `--emit-bundle` path.
+
+The soak re-check immediately before emission is why a redeploy in the middle of a run fails it: a bundle is never composed over a window that no longer holds.
+
+A mistyped capability is refused at `resume.capability` and the resume record is **kept**, so you can simply try again.
+
+### Exit codes
+
+| Code | Verdict          | Meaning                                                                       |
+| ---- | ---------------- | ----------------------------------------------------------------------------- |
+| `0`  | passed           | Full pass, including the post-acknowledgement accounting read. Bundle written |
+| `75` | restart-required | The barrier is armed. Restart the gateway and re-run the same command         |
+| `1`  | failed           | A named gate refused. No bundle is written                                    |
+
+Every failure names the gate it refused at (`soak`, `probe`, `barrier.arm`, `evidence.stale`, `cleanup.ack` and so on) plus the gateway's stable error code, so a refusal is never just "not eligible".
+
+## When a run cannot finish
+
+A session is created before the first gate is evaluated, so a refusal part-way through can leave a session on the gateway. There is a supported command for every version of that. You never need to delete a state file.
+
+**A refusal before the barrier was armed cleans up after itself.** Such a run could not be usefully resumed, so it cancels its own session, clears the local resume record and acknowledges its client-owned row. The message says so, and the next run is unblocked immediately.
+
+**A refusal after the barrier was armed deliberately leaves the session alone.** That run is the half paused across the restart, and cancelling it would destroy the held work the restart exists to prove. Resume it (step 6), or end it with `abort`.
+
+**End a run you still hold the capability for:**
+
+```bash
+wednesdayai validation abort
+```
+
+It reads the session id from the local resume record (or pass `--session <id>`), prompts for the capability, cancels the session, removes the local record and acknowledges the client-owned manifest row. The session reaches a durable terminal and leaves no unreconciled rows behind, so the next run can start at once.
+
+**End a run whose capability is lost:**
+
+```bash
+wednesdayai validation abort --discard-record --yes
+```
+
+This contacts no gateway. It deletes only the local resume record, and `--yes` is required because it cannot do more than that. Without the capability there is no way to authorise cancelling the server session, so that session terminalises on its own TTL deadline (two hours from creation), which the gateway records the next time it starts. Until then, `validation run` is refused `ACTIVE_SESSION_EXISTS`, and that refusal names both the deadline and the abort command.
+
+**A resume record from a different run** is refused at `resume.stale`, naming the nonce it belongs to. Re-run with that nonce to continue it, or end it with `abort`.
+
+## Deactivate
+
+```bash
+wednesdayai validation deactivate
+```
+
+The sentinel is removed and the methods stop dispatching on the very next request. No gateway restart is required, and there is no grace window.
+
+While deactivated the namespace is **absent**, not merely guarded. None of the thirteen names belongs to the base method set or to the core gateway handlers; they enter dispatch only through the resolver that checks for the sentinel. A caller asking for one gets `unknown method: validation.<name>`, exactly as it would for a name the gateway has never had. The validator treats that answer as the activation gate rather than as a defect of the leg that asked.
+
+Deactivating does not remove the soak attestation, so reactivating later does not restart the window.
+
+## Troubleshooting
+
+- **Every method answers `unknown method: validation.…`:** the sentinel is absent. Run `validation activate` on the gateway host.
+- **`VALIDATION_STORE_UNAVAILABLE` or `VALIDATION_RUNTIME_UNAVAILABLE`:** the session storage backend is not `sqlite` or `postgres`, or the runtime has not finished coming up. The validator reports these at the `control.unavailable` gate.
+- **`ACTIVE_SESSION_EXISTS`:** an earlier run is still held. End it with `validation abort`, or wait for the deadline the refusal names.
+- **The heartbeat probe refuses with `HEARTBEAT_PROBE_ISOLATION_UNAVAILABLE`:** the agent lacks `heartbeat.isolatedSession: true`, or `session.scope` is `global`.
+- **A probe refuses the delivery target:** the agent's heartbeat resolves to a real channel, or reaches `none` only through fallback routing. Set `heartbeat.target: "none"` on the probed agent and re-check the resolved value.
+
+## Related
+
+- [Restart recovery](/gateway/restart-recovery)
+- [Session storage recovery](/gateway/session-storage-recovery)
+- [Heartbeat](/gateway/heartbeat)
+- [Health and readiness](/gateway/health)
