@@ -110,8 +110,8 @@ valid in both packaged installs and source checkouts.
       dmPolicy: "pairing", // pairing | allowlist | open | disabled
       allowFrom: ["+15555550123", "+447700900123"],
       textChunkLimit: 4000,
-      chunkMode: "length", // length | newline
-      chunkNewlinePacking: true, // for newline mode (default: true)
+      chunkMode: "length", // length | newline | paragraph
+      chunkNewlinePacking: true, // deprecated; only applies with chunkMode "newline" (false then ≡ paragraph)
       mediaMaxMb: 50,
       sendReadReceipts: true, // blue ticks (false in self-chat mode)
       groups: {
@@ -173,7 +173,7 @@ valid in both packaged installs and source checkouts.
       groups: {
         "*": { requireMention: true },
         "-1001234567890": {
-          allowFrom: ["@admin"],
+          allowFrom: ["987654321"],
           systemPrompt: "Keep answers brief.",
           topics: {
             "99": {
@@ -274,8 +274,8 @@ valid in both packaged installs and source checkouts.
       },
       historyLimit: 20,
       textChunkLimit: 2000,
-      chunkMode: "length", // length | newline
-      chunkNewlinePacking: true, // for newline mode (default: true)
+      chunkMode: "length", // length | newline | paragraph
+      chunkNewlinePacking: true, // deprecated; only applies with chunkMode "newline" (false then ≡ paragraph)
       streaming: "off", // off | partial | block | progress (progress maps to partial on Discord)
       maxLinesPerMessage: 17,
       ui: {
@@ -416,8 +416,8 @@ valid in both packaged installs and source checkouts.
         ephemeral: true,
       },
       textChunkLimit: 4000,
-      chunkMode: "length",
-      chunkNewlinePacking: true, // for newline mode (default: true)
+      chunkMode: "length", // length | newline | paragraph
+      chunkNewlinePacking: true, // deprecated; only applies with chunkMode "newline" (false then ≡ paragraph)
       streaming: "partial", // off | partial | block | progress (preview mode)
       nativeStreaming: true, // use Slack native streaming API when streaming=partial
       mediaMaxMb: 20,
@@ -460,8 +460,8 @@ Mattermost ships as a plugin: `openclaw plugins install @openclaw/mattermost`.
       chatmode: "oncall", // oncall | onmessage | onchar
       oncharPrefixes: [">", "!"],
       textChunkLimit: 4000,
-      chunkMode: "length",
-      chunkNewlinePacking: true, // for newline mode (default: true)
+      chunkMode: "length", // length | newline | paragraph
+      chunkNewlinePacking: true, // deprecated; only applies with chunkMode "newline" (false then ≡ paragraph)
     },
   },
 }
@@ -996,6 +996,15 @@ Time format in system prompt. Default: `auto` (OS preference).
 - `maxConcurrent`: max parallel main-lane agent runs across sessions (each session still serialized). Default: 4.
 - `nested.maxConcurrent`: max parallel nested coordination runs for agent-to-agent and nested subagent orchestration. Default: 2.
 - `subagents.maxConcurrent`: max parallel spawned sub-agent runs on the subagent lane. Default: 8.
+- `subagents.maxSpawnDepth`: max nesting depth for `sessions_spawn` chains (default: 1, range 1–5). Depth 2 enables the orchestrator pattern (main → orchestrator → workers).
+- `subagents.maxChildrenPerAgent`: max active children per requester session (default: 5, range 1–20).
+- `subagents.archiveAfterMinutes`: auto-archive finished sub-agent sessions after N minutes (default: 60).
+- `subagents.model`: default model selection for spawned sub-agents (string or `{ primary, fallbacks }`). Overridden per-agent by `agents.list[].subagents.model`.
+- `subagents.thinking`: default thinking level for spawned sub-agents (e.g. `"off"`, `"low"`, `"medium"`, `"high"`). Overridden per-agent by `agents.list[].subagents.thinking`.
+- `subagents.runTimeoutSeconds`: default run timeout for spawned sub-agents in seconds (0 = no timeout). Does not auto-archive; only stops the run.
+- `subagents.announceTimeoutMs`: gateway timeout for sub-agent announce delivery calls (default: 60000).
+- `subagents.completionDelivery`: default delivery mode for top-level sub-agent completions: `"parent"` (default; the completion is passed to the parent as an internal event and the parent authors the user-facing reply on a durable agent turn) or `"direct"` (legacy verbatim send to the requester channel, suppressed while sibling runs are pending). Cron routes, and bound-session or hook routes on session-mode spawns, always deliver directly, regardless of this setting. Overridden per-agent by `agents.list[].subagents.completionDelivery` and per-spawn by the `sessions_spawn` `completionDelivery` parameter. See [Completion delivery](/tools/subagents#completion-delivery).
+- `subagents.announceFanInCoalesce`: deprecated, no effect. Accepted for backward compatibility; sibling completion fan-in is always coalesced into one parent turn on the durable agent-turn announce path.
 
 **Built-in alias shorthands** (only apply when the model is in `agents.defaults.models`):
 
@@ -1067,6 +1076,11 @@ Periodic heartbeat runs.
         prompt: "Read HEARTBEAT.md if it exists...",
         ackMaxChars: 300,
         suppressToolErrorWarnings: false,
+        skipWhenBusy: false,
+        isolatedSession: false,
+        // wakeGate: { kind: "command", command: "..." } — see Heartbeat
+        // activeHours: { start: "08:00", end: "22:00", timezone: "..." }
+        lightContext: false,
       },
     },
   },
@@ -1074,8 +1088,14 @@ Periodic heartbeat runs.
 ```
 
 - `every`: duration string (ms/s/m/h). Default: `30m`.
+- `skipWhenBusy`: when true, heartbeat ticks that find the main lane busy are skipped instead of enqueued.
+- `isolatedSession`: when true, each heartbeat enqueues an `agent.turn` (`kind` heartbeat) that runs in a fresh `:heartbeat` sibling session with no prior transcript; a positive `wakeGate` also nudges the main session (`kind` nudge). See [Heartbeat](/gateway/heartbeat).
+- `wakeGate`: optional command/model gate checked before the heartbeat turn; on a positive gate the isolated heartbeat turn is enqueued and the main session is additionally nudged (`kind` nudge). Default `timeoutMs` is 30000. Gates the heartbeat producer only.
+- `activeHours`: optional window (`start`/`end`/`timezone`) — heartbeat ticks outside the window are skipped.
+- `lightContext`: when true, runs the heartbeat turn with a reduced context payload.
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
+- `identity`: optional `session.identityLinks` key (matched case-insensitively). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`); unmatched values leave runs unattributed. Honoured per-agent via `agents.list[].heartbeat.identity`.
 - Per-agent: set `agents.list[].heartbeat`. When any agent defines `heartbeat`, **only those agents** run heartbeats.
 - Heartbeats run full agent turns — shorter intervals burn more tokens.
 
@@ -1415,7 +1435,10 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 - `params`: per-agent stream params merged over the selected model entry in `agents.defaults.models`. Use this for agent-specific overrides like `cacheRetention`, `temperature`, or `maxTokens` without duplicating the whole model catalog.
 - `identity.avatar`: workspace-relative path, `http(s)` URL, or `data:` URI.
 - `identity` derives defaults: `ackReaction` from `emoji`, `mentionPatterns` from `name`/`emoji`.
-- `subagents.allowAgents`: allowlist of agent ids for `sessions_spawn` (`["*"]` = any; default: same agent only).
+- `subagents.allowAgents`: per-agent allowlist of agent ids for `sessions_spawn`'s `agentId` parameter (`["*"]` = any; default: same agent only). Allowlist-only — no deny-list for target agent IDs. See [Sub-agent access control](/tools/subagents#sub-agent-access-control-which-agents-which-tools).
+- `subagents.model`: per-agent default model for spawned sub-agents (overrides `agents.defaults.subagents.model`).
+- `subagents.thinking`: per-agent default thinking level for spawned sub-agents (overrides `agents.defaults.subagents.thinking`).
+- `subagents.completionDelivery`: per-agent delivery mode for top-level sub-agent completions (`"parent"` or `"direct"`; overrides `agents.defaults.subagents.completionDelivery`). See [Completion delivery](/tools/subagents#completion-delivery).
 - `systemPrompt`: per-agent prompt shape override. Merges over `agents.defaults.systemPrompt` by section key. When `projectContext.files` is set, that list replaces the default entirely (not merged). See [`agents.defaults.systemPrompt`](#agentsdefaultssystemprompt) for the full field reference.
 - Sandbox inheritance guard: if the requester session is sandboxed, `sessions_spawn` rejects targets that would run unsandboxed.
 
@@ -1658,7 +1681,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - `per-peer`: isolate by sender id across channels.
   - `per-channel-peer`: isolate per channel + sender (recommended for multi-user inboxes).
   - `per-account-channel-peer`: isolate per account + channel + sender (recommended for multi-account).
-- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing.
+- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity).
 - **`reset`**: primary reset policy. `daily` resets at `atHour` local time; `idle` resets after `idleMinutes`. When both configured, whichever expires first wins.
 - **`resetByType`**: per-type overrides (`direct`, `group`, `thread`). Legacy `dm` accepted as alias for `direct`.
 - **`parentForkMaxTokens`**: max parent-session `totalTokens` allowed when creating a forked thread session (default `100000`).
@@ -1859,6 +1882,8 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 
 Global tool allow/deny policy (deny wins). Case-insensitive, supports `*` wildcards. Applied even when Docker sandbox is off.
 
+The `gateway` tool also accepts action tokens (`gateway.config_apply`, `gateway.config_patch`, `gateway.config_get`, `gateway.config_schema`, `gateway.restart`, `gateway.update_run`). For non-sandbox agents, `gateway.config_apply` is denied by default. Re-enable with `tools.allow`, `tools.alsoAllow`, or `agents.list[].tools.alsoAllow` (see [Config writes](/gateway/config-writes)). Bare `*` does not waive that default-deny.
+
 ```json5
 {
   tools: { deny: ["browser", "canvas"] },
@@ -1984,7 +2009,10 @@ Settings can be defined globally in `tools.loopDetection` and overridden per-age
 
 ### `tools.media`
 
-Configures inbound media understanding (image/audio/video):
+Configures inbound media understanding (image/audio/video). The vendor providers referenced by
+`provider` below (openai, google, etc.) ship as plugin extensions and are **disabled by default**
+— enable each one with `plugins.entries.<vendor>.enabled: true` (see
+[Media Understanding](/nodes/media-understanding#provider-extensions)):
 
 ```json5
 {
@@ -2033,6 +2061,9 @@ Configures inbound media understanding (image/audio/video):
 - Failures fall back to the next entry.
 
 Provider auth follows standard order: `auth-profiles.json` → env vars → `models.providers.*.apiKey`.
+The env var step checks the variable core maps for that provider id, then any variable the provider
+extension declares for itself (`envVars`). A provider whose credential resolves nowhere is skipped
+during auto-detection rather than attempted.
 
 </Accordion>
 
@@ -2105,24 +2136,30 @@ Notes:
 
 ### `tools.subagents`
 
+Tool-policy defaults for spawned sub-agents. Controls which **tools** sub-agents can use — not which agent IDs can be spawned (that's `agents.list[].subagents.allowAgents`).
+
 ```json5
 {
-  agents: {
-    defaults: {
-      subagents: {
-        model: "minimax/MiniMax-M2.5",
-        maxConcurrent: 1,
-        runTimeoutSeconds: 900,
-        archiveAfterMinutes: 60,
+  tools: {
+    subagents: {
+      model: "minimax/MiniMax-M2.5", // default model (also settable via agents.defaults.subagents.model)
+      tools: {
+        allow: ["read", "exec", "process"], // if set, becomes allow-only (deny still wins)
+        alsoAllow: ["browser"], // merge into allow / default sub-agent denylist
+        deny: ["gateway", "cron"], // deny wins over allow
       },
     },
   },
 }
 ```
 
-- `model`: default model for spawned sub-agents. If omitted, sub-agents inherit the caller's model.
-- `runTimeoutSeconds`: default timeout (seconds) for `sessions_spawn` when the tool call omits `runTimeoutSeconds`. `0` means no timeout.
-- Per-subagent tool policy: `tools.subagents.tools.allow` / `tools.subagents.tools.deny`.
+- `model`: default model for spawned sub-agents. If omitted, sub-agents inherit the caller's model. Overridden per-agent by `agents.list[].subagents.model` and globally by `agents.defaults.subagents.model`.
+- `tools.allow`: if set, becomes allow-only (deny still wins).
+- `tools.alsoAllow`: additional allowlist entries merged into allow and/or default sub-agent denylist.
+- `tools.deny`: denied tools (deny wins over allow).
+- Sub-agents always start with all tools except session tools (`sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
+
+For runtime tuning (depth, concurrency, timeouts, archive), see `agents.defaults.subagents.*` above.
 
 ---
 
@@ -2456,6 +2493,16 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
         version: "0.4.4",
       },
     },
+    hookTimeouts: {
+      default: 30000,
+      "context.collect": 60000,
+    },
+    analysisConcurrency: {
+      maxParallel: 2,
+      maxSequential: 0,
+      maxParallelPerPlugin: 1,
+      // omit maxSequentialPerPlugin to inherit maxSequential
+    },
     entries: {
       "voice-call": {
         enabled: true,
@@ -2473,6 +2520,14 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
 - `plugins.entries.<id>.env`: plugin-scoped env var map.
 - `plugins.entries.<id>.config`: plugin-defined config object (validated by plugin schema).
 - `plugins.slots.memory`: pick the active memory plugin id, or `"none"` to disable memory plugins.
+- `plugins.hookTimeouts`: per-hook timeout in milliseconds. Keys are hook names or `default`.
+  Unset hooks use 30000 ms. Registration `api.on(..., { timeoutMs })` still wins. Restart required.
+- `plugins.analysisConcurrency.maxParallel`: concurrent awaited `analysis.run()` slots (default 2). Most-permissive across winning enabled manifests unless the operator sets this field.
+- `plugins.analysisConcurrency.maxSequential`: global awaited-overflow queue for calls blocked by either the global or per-plugin active boundary, not only after global parallel slots fill (default 0).
+- `plugins.analysisConcurrency.maxParallelPerPlugin`: concurrent awaited slots for one plugin (default 1, clamped to maxParallel). Attaches to plugin identity from the winning enabled manifest. Operator value is a uniform ceiling when set.
+- `plugins.analysisConcurrency.maxSequentialPerPlugin`: per-plugin overflow queue (inherits maxSequential when omitted, clamped to maxSequential), including when global active capacity remains. Operator value is a uniform ceiling when set.
+- `plugins.contextHookTimeoutMs`: deprecated fallback for `context.*` hooks only, used when
+  `hookTimeouts` does not cover that hook. Restart required.
 - `plugins.installs`: CLI-managed install metadata used by `openclaw plugins update`.
   - `source` is one of `npm`, `archive`, `path`, or `bundled`.
   - `source: "bundled"` means the plugin is loaded from the bundled extension copy that shipped with the current WednesdayAI package. `sourcePath` must match that current bundled source path.
@@ -3010,7 +3065,7 @@ Notes:
 ```json5
 {
   logging: {
-    level: "info",
+    level: "info", // silent | fatal | error | warn | info | debug | trace
     file: "/tmp/openclaw/openclaw.log",
     maxFileBytes: 10485760,
     maxBackups: 5,
@@ -3151,6 +3206,15 @@ Current builds no longer include the TCP bridge. Nodes connect over the Gateway 
 ```
 
 </Accordion>
+
+---
+
+## Tasks
+
+The background task pipeline (`tasks.*`: `enabled`, `dispatchConcurrency`,
+`preemptionCeiling`, `budget`, `restartLoop`, `idle`, `schedule`) is documented with defaults
+on [Task operations](/gateway/tasks). The `tasks.idle` and `tasks.schedule` keys drive the
+idle monitor consumed by plugins such as [Dream Cycle](/plugins/dream-cycle).
 
 ---
 

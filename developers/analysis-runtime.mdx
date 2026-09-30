@@ -1,16 +1,27 @@
 ---
-title: "Analysis runtime"
-description: "Run focused, plugin-owned LLM analysis through api.runtime.analysis without importing core internals."
+summary: "Run focused plugin-owned LLM analysis through configured providers"
+read_when:
+  - You are building memory recall, extraction, topic detection, or shadow-brain style plugins
+  - You need an extension to call an LLM without importing core internals
+title: "Plugin Analysis Runtime"
 audience: developer
+sources:
+  - src/plugins/runtime/types-analysis.ts
+  - src/plugins/runtime/runtime-analysis.ts
+  - src/plugins/runtime/runtime-analysis-direct.ts
+  - src/plugins/runtime/types-core.ts
+  - src/plugins/runtime/analysis-limits.ts
+  - src/plugins/loader.ts
+generated: 2026-09-21
 ---
 
-# Analysis runtime
+# Plugin analysis runtime
 
-`api.runtime.analysis` lets a plugin run focused LLM analysis through the same provider, model, auth-profile, and timeout plumbing WednesdayAI uses for agent turns — without importing core internals. Use it for memory recall, fact extraction, topic detection, or background-classification style plugins.
+`api.runtime.analysis` lets plugins run focused LLM analysis through the same
+provider, model, auth profile, and timeout plumbing that WednesdayAI already uses for
+agent turns.
 
-## `run(...)` — await the result
-
-Use `run(...)` when the current turn should wait for the analysis result:
+Use `run(...)` when the current turn should wait for the result:
 
 ```ts
 const result = await api.runtime.analysis.run({
@@ -30,9 +41,8 @@ if (result.status === "ok" && result.json) {
 }
 ```
 
-## `enqueue(...)` — fire and forget
-
-Use `enqueue(...)` when the current turn should not wait — for example memory extraction or background indexing. An optional completion callback runs after the analysis lane is released:
+Use `enqueue(...)` when the current turn should not wait, such as memory extraction or
+background indexing:
 
 ```ts
 api.runtime.analysis.enqueue(
@@ -42,6 +52,9 @@ api.runtime.analysis.enqueue(
     input: event.cleanUserMessage.content,
     responseFormat: "json",
     timeoutMs: 30_000,
+    identity: ctx.runtimeIdentity,
+    turn: ctx.turn,
+    cacheKey: ctx.runtimeIdentity?.providerConversationId,
   },
   async (result) => {
     if (result.status === "ok") {
@@ -51,48 +64,77 @@ api.runtime.analysis.enqueue(
 );
 ```
 
-## Parameters
+## Correlation metadata
 
-`AnalysisRunParams` — `purpose` and `input` are required:
+Analysis calls can carry the same SDK identity and turn objects that hooks receive:
 
-| Field | Type | Notes |
-| ----- | ---- | ----- |
-| `purpose` | `string` | Required. Short label for the analysis. |
-| `input` | `string` | Required. The text to analyse. |
-| `systemPrompt` | `string` | Optional system prompt. |
-| `responseFormat` | `"text" \| "json"` | Output format. |
-| `provider` / `model` | `string` | Override the provider/model — **both** must be set together. |
-| `authProfileId` | `string` | Auth profile to use. |
-| `sessionKey` | `string` | Pass when using memory tools, so memory scope rules evaluate against the source chat. |
-| `timeoutMs` | `number` | Per-run timeout. |
-| `toolsAllow` | `string[]` | Tool allow-list (see below). |
-| `maxOutputTokens` / `temperature` | `number` | Generation controls. |
+```ts
+await api.runtime.analysis.run({
+  purpose: "turn-classification",
+  input: event.cleanUserMessage.content,
+  responseFormat: {
+    type: "json_schema",
+    schema: {
+      type: "object",
+      properties: { label: { type: "string" } },
+      required: ["label"],
+    },
+  },
+  identity: ctx.runtimeIdentity,
+  turn: ctx.turn,
+  cacheKey: ctx.runtimeIdentity?.providerConversationId,
+  metadata: { sourceHook: "context.collect" },
+});
+```
 
-### Prompt role mapping
+These fields are additive. Existing callers that pass only `purpose`, `input`,
+model options, and timeouts continue to work. `enqueue(...)` carries `identity`,
+`turn`, `cacheKey`, and `responseFormat` into the queued in-process job payload
+so completion handlers and telemetry can correlate background work with the
+originating turn.
 
-Analysis prompts map onto a two-role request. Your `systemPrompt` becomes the system message; when omitted, a neutral default system prompt is used instead. With `responseFormat: "json"` (or a `json_schema` object), `"Return valid JSON only."` is appended to the system prompt. Your `input` is sent as a single `user` message — there is no assistant prefill and no multi-turn history.
+Use the typed `identity` and `turn` params for correlation. Do not copy raw
+`identityLinks`, raw sender ids that are not already exposed by the hook context,
+or provider hash preimages into `metadata`; reserved correlation keys in arbitrary
+`metadata` are stripped and replaced by the typed fields.
 
-### Correlation metadata
+`cacheKey` is caller-supplied correlation metadata for analysis work. It is not a
+request to expose or recompute raw session identity. When available, use the
+opaque `ctx.runtimeIdentity.providerConversationId` or a plugin-owned derived key.
 
-`AnalysisRunParams` accepts correlation fields that ride along with the run: `runId`, `identity` (`PluginRuntimeIdentity`), `turn` (`PluginTurnIdentity`), `cacheKey`, and a free-form `metadata` object. The runtime sanitizes them before attaching them to the run's execution metadata: `identity` is allow-list filtered to known fields, and the reserved keys `identity`, `turn`, `cacheKey`, `responseFormat`, and `identityLinks` are stripped from caller-supplied `metadata`. `AnalysisResult` returns `jobId`, `provider`, `model`, `usage`, and `elapsedMs` so completions can be correlated back to the originating request.
+Analysis runs do not rewrite the raw user message. If a plugin wants analysis to affect
+the active turn, it should contribute context through normal hook returns, such as a
+`PromptContribution` from `context.collect`.
 
-## Result
+`api.runtime.analysis` is deliberately bounded to analysis, classification,
+extraction, and summarisation. It is not a general subagent runtime. For full
+agent delegation, expose a tool or use the documented agent/subagent workflows
+instead of trying to run a multi-turn agent through analysis.
 
-`AnalysisResult` carries a `status` you should branch on first:
+## Prompt role mapping
 
-| `status` | Meaning |
-| -------- | ------- |
-| `ok` | Success. Read `text` or `json`. |
-| `empty` | The model returned nothing usable. |
-| `timeout` | The run exceeded `timeoutMs`. |
-| `error` | A system-level failure — read `error`. For a JSON-parse failure, `text` still holds the raw model output. |
-| `rejected` | The request was rejected before running (invalid params). |
+Tool-less analysis runs (no `toolsAllow`) execute as a single direct provider completion:
 
-System-level failures populate `result.error` only and leave `result.text` undefined. The `text` field is reserved for actual model output (including the case where the model returned text that failed JSON parsing). Branch on `status` first; read `text` only for `ok` and JSON-parse `error` outcomes.
+- `systemPrompt` is sent verbatim as the wire system role for non-JSON requests. When omitted,
+  core sends a minimal neutral analysis prompt instead. Nothing else is added on this path: no
+  host-agent system prompt, no wrapper text, no `INPUT:` scaffolding.
+- `input` is sent verbatim as the sole user message.
+- JSON modes are the one documented exception to the verbatim guarantee: when `responseFormat`
+  is `"json"` or a `json_schema` object, core appends `Return valid JSON only.` to the system
+  role. The user message stays verbatim.
+- `provider` and `model`, `maxOutputTokens`, and `temperature` are applied to the wire request.
+  `authProfileId` selects the credential profile.
+- `metadata`, `identity`, `turn`, and `cacheKey` are correlation-only fields. They are never
+  forwarded to the provider on this path.
 
-## Memory tools in analysis
+Tool-enabled runs (`toolsAllow` set) still execute through the embedded agent runner, which
+builds its own agent system prompt; on that path `systemPrompt` is folded into the user message.
+This divergence is intentional. Keep tool-enabled analysis prompts self-contained and treat the
+tool-less path as the one with strict payload guarantees.
 
-By default, analysis runs are LLM-only. To grant read-only memory access, pass an explicit allow-list:
+By default, analysis runs are LLM-only. The v1 runtime only supports read-only memory
+tools in analysis runs. If a plugin needs memory access, pass a small explicit tool
+allow-list:
 
 ```ts
 await api.runtime.analysis.run({
@@ -104,25 +146,120 @@ await api.runtime.analysis.run({
 });
 ```
 
-Only `memory_search` and `memory_get` are accepted in analysis allow-lists. Pass the originating `sessionKey` so memory scope rules evaluate against the source channel or direct chat.
+Only `memory_search` and `memory_get` are accepted in analysis allow-lists. Analysis runs
+use a dedicated command lane so awaited hook-time analysis does not queue behind the active
+user turn.
 
-## Lanes, admission, and bounds
+Concurrency is two-tier:
 
-- Analysis runs use a dedicated command lane, so awaited hook-time analysis does not queue behind the active user turn. The lane runs **one** analysis at a time.
-- Background (`enqueue`) analysis is queued behind a small per-plugin cap. It yields to awaited work, and returns `accepted: false` with `reason: "queue-full"` when that plugin is saturated.
-- If background analysis is already running, a new awaited `run(...)` is rejected immediately rather than waiting behind the job.
-- Both `run(...)` and `enqueue(...)` validate params synchronously before claiming the lane or a quota. Invalid requests (empty `purpose`, empty `input`, a `provider` without a `model`, or a tool outside the allow-list) are rejected immediately — `run(...)` returns `status: "rejected"`; `enqueue(...)` returns `accepted: false` with `reason: "invalid"`.
+- Global `maxParallel` (default 2) concurrent `run(...)` slots across plugins.
+  Set `plugins.analysisConcurrency.maxParallel` or a plugin manifest
+  `analysisConcurrency.maxParallel` field. Operator global values win when
+  set; otherwise WednesdayAI keeps the most permissive value among winning
+  enabled manifests.
+- Global `maxSequential` (default 0) is the overflow queue for calls blocked by
+  either the global or per-plugin active boundary. With the default of 0, extra
+  awaited runs are rejected rather than queued.
+- Per plugin, inner bounds attach to that plugin's winning enabled manifest.
+  Default `maxParallelPerPlugin` is 1 (clamped to `maxParallel`).
+  `maxSequentialPerPlugin` inherits `maxSequential` when omitted (clamped to
+  `maxSequential`). Operator `maxParallelPerPlugin` / `maxSequentialPerPlugin`
+  are a uniform ceiling for every plugin when set. A disabled workspace winner
+  does not let a bundled same-id duplicate contribute. Overflow uses one
+  eligibility-aware queue; queued awaited runs occupy ordinary global parallel
+  slots when started. Background `enqueue(...)` stays 4 active jobs per plugin.
+  Saturated background work returns `accepted: false` with `reason: "queue-full"`.
 
-## Constraints to keep in mind
+Awaited `run(...)` can occupy a free parallel slot even when a background job is already
+running. Nested `run(...)` from inside an analysis run is rejected.
 
-- Analysis runs do **not** rewrite the raw user message. To affect the active turn, contribute context through normal hook returns (for example a `PromptContribution` from `context.collect`).
-- Analysis is **text-only** in v1: prompt text that looks like a local image path is not auto-loaded.
-- Provider overrides must include **both** `provider` and `model` — a provider-only override is rejected so a plugin cannot accidentally pair one provider with another's default model id.
-- Transient analysis runs skip workspace cwd changes, skill environment overrides, sandbox startup, bootstrap context loading, and global hook dispatch. The transcript uses a transient internal session key and is not synced back to session storage.
-- Keep prompts narrow, set a timeout, and prefer `enqueue(...)` for work that updates plugin-owned state for future turns. Completion callbacks still run inside the plugin host process — keep them bounded.
+What not to do: do not assume a second same-plugin `run(...)` starts immediately,
+and do not assume another plugin's larger inner budget applies to yours.
+Without raising this plugin's `maxParallelPerPlugin` (and having a free global
+slot), the second call is queued or rejected. Zero overflow caps never queue.
 
-## What's next
+Default timeout is 15 s for `run(...)` and 30 s for background jobs. Caller-supplied
+`timeoutMs` is clamped to 250 ms through 120 s. The timeout bounds the whole run,
+including credential resolution, not just the provider call. Keep analysis prompts narrow,
+set a timeout, and prefer `enqueue(...)` for work that can update plugin-owned state for
+future turns. The completion callback runs after the analysis lane is released; keep
+callback work bounded anyway, because it still runs inside the plugin host process.
 
-- [Plugin SDK reference](/developers/sdk)
-- [Hooks](/developers/hooks) — where `context.collect` and the other lifecycle hooks live
-- [Agent signals](/developers/agent-signals)
+If you call `run(...)` from a plugin hook (especially `context.collect`), the hook itself
+also has a 30 s default timeout. Raise it with `api.on(name, handler, { timeoutMs })` or
+ask the operator to set `plugins.hookTimeouts`. See [Plugins](/tools/plugin#typed-hook-registration-apion).
+
+### Correlating by lane
+
+`providerConversationId` is the opaque provider/cache **session** identity derived from
+`agentId + (sessionKey || sessionId)`. It is NOT lane-specific: in a multi-user group agent with
+workspace lanes, several lane users can share one `providerConversationId`. To partition correctly
+per lane, consumers (e.g. brain/background/cache systems) should dedupe on the composite key:
+
+```text
+providerConversationId + (laneId ?? canonicalIdentity ?? hashedUserId ?? sessionKey) + turnId + (entryId ?? cursor.entryId ?? rawSha256)
+```
+
+`laneId` is the opaque `lane-<hash>` digest, present only for an allowed multi-lane turn and
+`undefined` for single-user and denied resolutions. Never correlate on raw `identityLinks` or a
+lane hash preimage — they are intentionally stripped from runtime metadata.
+
+Both `run(...)` and `enqueue(...)` validate the requested params synchronously before
+claiming the lane or the per-plugin background quota. Invalid requests (empty `purpose`,
+empty `input`, a `provider` without a `model`, or a tool that is not in the analysis
+allow-list) are rejected immediately — `run(...)` returns `status: "rejected"` with a
+descriptive `error`, and `enqueue(...)` returns `accepted: false` with
+`reason: "invalid"` — so a misconfigured caller cannot starve the awaited slot or
+consume background-queue slots.
+
+## Troubleshooting
+
+- Symptom: `run(...)` returns `status: "rejected"` with
+  `error: "analysis concurrency limit exceeded"`.
+  Cause: no free global or per-plugin active slot, and no remaining queue
+  capacity. Reject logs on subsystem `plugins/runtime/analysis` include
+  `admissionBoundary`: `plugin-queue`, `global-queue`, `plugin-active`, or
+  `global-active` (zero overflow caps never emit the queue tokens).
+  Fix: raise the matching `plugins.analysisConcurrency` field, or `enqueue(...)`
+  work that can wait. Restart the gateway after config changes.
+
+System-level failures (timeouts, context overflow, image-size errors, auth/role-ordering
+problems) populate `result.error` only and leave `result.text` undefined. The `text`
+field is reserved for actual model output, including the case where the model returned
+text that failed JSON parsing. Callers should branch on `result.status` first and read
+`result.text` only for `"ok"` and JSON-parse `"error"` outcomes.
+
+## Result and job fields
+
+`run(...)` resolves to an `AnalysisResult`:
+
+| Field       | Type                                                   | Notes                                                                                              |
+| ----------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------- |
+| `status`    | `string`                                               | One of: `ok`, `empty`, `timeout`, `error`, `rejected`. Branch on this before reading model output. |
+| `text`      | `string`                                               | Model text output. Undefined for system-level failures.                                            |
+| `json`      | `unknown`                                              | Parsed output when `responseFormat` is `"json"` or `json_schema`.                                  |
+| `error`     | `string`                                               | Rejection, timeout, provider, parse, or runtime error detail.                                      |
+| `provider`  | `string`                                               | Provider used for the analysis run, when known.                                                    |
+| `model`     | `string`                                               | Model used for the analysis run, when known.                                                       |
+| `usage`     | `{ input?, output?, cacheRead?, cacheWrite?, total? }` | Token/cache accounting reported by the provider path, when available.                              |
+| `elapsedMs` | `number`                                               | Wall-clock runtime for the analysis attempt.                                                       |
+| `jobId`     | `string`                                               | Present for queued jobs and generated runs where correlation needs it.                             |
+
+`enqueue(...)` returns an `AnalysisJob` immediately:
+
+| Field      | Type      | Notes                                                                                        |
+| ---------- | --------- | -------------------------------------------------------------------------------------------- |
+| `jobId`    | `string`  | Opaque id for the accepted or rejected queued analysis request.                              |
+| `accepted` | `boolean` | `true` when the job was accepted into the in-process queue.                                  |
+| `reason`   | `string`  | One of: `invalid`, `rejected`, `queue-full`, `shutdown`. Present when `accepted` is `false`. |
+
+When using memory tools, pass the originating session key so memory scope rules evaluate
+against the source channel or direct chat. The analysis transcript still uses a transient
+internal session key and is not synced back to session storage. Analysis is text-only in
+v1: prompt text that looks like a local image path is not auto-loaded into the model.
+Transient analysis runs also skip workspace cwd changes, skill environment overrides,
+sandbox startup, bootstrap context loading, and global hook dispatch.
+
+Provider overrides must include both `provider` and `model`. A provider-only override is
+rejected so extensions do not accidentally pair one provider with another provider's
+default model id.
