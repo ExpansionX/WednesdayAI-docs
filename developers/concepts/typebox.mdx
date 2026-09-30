@@ -7,7 +7,7 @@ title: "TypeBox"
 
 # TypeBox as protocol source of truth
 
-Last updated: 2026-01-10
+Last updated: 2026-09-30
 
 TypeBox is a TypeScript-first schema library. We use it to define the **Gateway
 WebSocket protocol** (handshake, request/response, server events). Those schemas
@@ -42,25 +42,29 @@ Client                    Gateway
 
 Common methods + events:
 
-| Category  | Examples                                                  | Notes                              |
-| --------- | --------------------------------------------------------- | ---------------------------------- |
-| Core      | `connect`, `health`, `status`                             | `connect` must be first            |
-| Messaging | `send`, `poll`, `agent`, `agent.wait`                     | side-effects need `idempotencyKey` |
-| Chat      | `chat.history`, `chat.send`, `chat.abort`, `chat.inject`  | WebChat uses these                 |
-| Sessions  | `sessions.list`, `sessions.patch`, `sessions.delete`      | session admin                      |
-| Nodes     | `node.list`, `node.invoke`, `node.pair.*`                 | Gateway WS + node actions          |
-| Events    | `tick`, `presence`, `agent`, `chat`, `health`, `shutdown` | server push                        |
+| Category  | Examples                                                  | Notes                                                                   |
+| --------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Core      | `connect`, `health`, `status`                             | `connect` must be first                                                 |
+| Messaging | `send`, `poll`, `agent`, `agent.wait`                     | side-effects need `idempotencyKey`                                      |
+| Chat      | `chat.history`, `chat.send`, `chat.abort`, `chat.inject`  | WebChat uses these                                                      |
+| Sessions  | `sessions.list`, `sessions.patch`, `sessions.delete`      | scope varies by method/params (ADR 0081); `sessions.delete` needs admin |
+| Nodes     | `node.list`, `node.invoke`, `node.pair.*`                 | Gateway WS + node actions                                               |
+| Events    | `tick`, `presence`, `agent`, `chat`, `health`, `shutdown` | server push                                                             |
 
-Authoritative list lives in `src/gateway/server.ts` (`METHODS`, `EVENTS`).
+Authoritative lists live in `src/gateway/server-methods-list.ts` (`listGatewayMethods()` and
+`GATEWAY_EVENTS`).
 
 ## Where the schemas live
 
-- Source: `src/gateway/protocol/schema.ts`
+- Source: `src/gateway/protocol/schema.ts`, which re-exports the per-area files in
+  `src/gateway/protocol/schema/` (the registry is `schema/protocol-schemas.ts`)
 - Runtime validators (AJV): `src/gateway/protocol/index.ts`
-- Server handshake + method dispatch: `src/gateway/server.ts`
+- Server handshake: `src/gateway/server/ws-connection/message-handler.ts`; method dispatch and
+  scope checks: `src/gateway/server-methods.ts`
 - Node client: `src/gateway/client.ts`
 - Generated JSON Schema: `dist/protocol.schema.json`
-- Generated Swift models: `apps/macos/Sources/OpenClawProtocol/GatewayModels.swift`
+- Generated Swift models: the two `GatewayModels.swift` copies listed in
+  `scripts/protocol-swift-outputs.ts` (`apps/macos` and `apps/shared/OpenClawKit`)
 
 ## Current pipeline
 
@@ -90,8 +94,8 @@ Connect (first message):
   "id": "c1",
   "method": "connect",
   "params": {
-    "minProtocol": 2,
-    "maxProtocol": 2,
+    "minProtocol": 3,
+    "maxProtocol": 3,
     "client": {
       "id": "openclaw-macos",
       "displayName": "macos",
@@ -113,7 +117,7 @@ Hello-ok response:
   "ok": true,
   "payload": {
     "type": "hello-ok",
-    "protocol": 2,
+    "protocol": 3,
     "server": { "version": "dev", "connId": "ws-1" },
     "features": { "methods": ["health"], "events": ["tick"] },
     "snapshot": {
@@ -191,7 +195,8 @@ Example: add a new `system.echo` request that returns `{ ok: true, text }`.
 
 1. **Schema (source of truth)**
 
-Add to `src/gateway/protocol/schema.ts`:
+Add to a schema file under `src/gateway/protocol/schema/` (here a new `system-echo.ts`, re-exported
+from `src/gateway/protocol/schema.ts`):
 
 ```ts
 export const SystemEchoParamsSchema = Type.Object(
@@ -205,7 +210,7 @@ export const SystemEchoResultSchema = Type.Object(
 );
 ```
 
-Add both to `ProtocolSchemas` and export types:
+Add both to `ProtocolSchemas` in `schema/protocol-schemas.ts` and export types:
 
 ```ts
   SystemEchoParams: SystemEchoParamsSchema,
@@ -238,8 +243,13 @@ export const systemHandlers: GatewayRequestHandlers = {
 };
 ```
 
-Register it in `src/gateway/server-methods.ts` (already merges `systemHandlers`),
-then add `"system.echo"` to `METHODS` in `src/gateway/server.ts`.
+Register it in `src/gateway/server-methods.ts` (already merges `systemHandlers`), add
+`"system.echo"` to `BASE_METHODS` in `src/gateway/server-methods-list.ts`, and classify it in
+`src/gateway/method-scopes.ts` (`METHOD_SCOPE_GROUPS`). A method with no scope needs
+`operator.admin`, and a test fails if an advertised method is unclassified. The narrow
+`operator.sessions.*` web client can call a method only if it is also listed in
+`NARROW_SESSION_READ_METHODS` or `NARROW_SESSION_WRITE_METHODS`, which is an ADR 0077 amendment; a
+rule that depends on the call's params (like the `sessions.patch` field guard) is ADR 0081.
 
 4. **Regenerate**
 
@@ -263,7 +273,8 @@ Unknown frame types are preserved as raw payloads for forward compatibility.
 
 ## Versioning + compatibility
 
-- `PROTOCOL_VERSION` lives in `src/gateway/protocol/schema.ts`.
+- `PROTOCOL_VERSION` is defined in `src/gateway/protocol/schema/protocol-schemas.ts` and exported
+  from `src/gateway/protocol/schema.ts`.
 - Clients send `minProtocol` + `maxProtocol`; the server rejects mismatches.
 - The Swift models keep unknown frame types to avoid breaking older clients.
 
