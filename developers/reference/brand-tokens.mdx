@@ -1,0 +1,173 @@
+---
+summary: "The shared brand-tokens package: theme contract, consumers, import order, and how to add a token or font safely"
+read_when:
+  - You are changing a colour, font, or theme in the Control UI or the web client
+  - You are adding a design token or a font face
+  - A contrast or console-parity test failed and you need to know what it guards
+title: "Brand tokens"
+audience: developer
+---
+
+# Brand tokens
+
+`packages/brand-tokens` is the single source of colour, spacing, motion and font tokens for both
+WednesdayAI browser apps: the operator Control UI (`ui/`) and the end-user web client
+(`apps/web`, see [Web client hosting](/web/user-client)). It holds CSS only - no JavaScript - and
+is bundled into each app at build time.
+
+## Package layout
+
+```text
+packages/brand-tokens/
+  package.json    private, version 0.0.0, exports the three subpaths below
+  tokens.css      --wai-* primitives + product tokens for dark, light, high-contrast
+  fonts.css       @font-face rules with relative url() to ./fonts/*.woff2
+  fonts/          Inter 400/500/600, Space Grotesk 500/600, JetBrains Mono 400/500 (woff2)
+  OFL.txt         licence for the bundled fonts (OFL-1.1)
+```
+
+Consumers import by subpath: `brand-tokens/tokens.css`, `brand-tokens/fonts.css`. Both apps list
+`"brand-tokens": "workspace:*"` in `dependencies`; those apps are private and never published, so the
+plugin rule against `workspace:*` in `dependencies` does not apply here.
+
+The package is private and **exempt from `pnpm version:sync`**: it is not listed in
+`scripts/sync-versions.ts` or the npm publish candidate list, and its `0.0.0` version never
+changes (ADR 0080). If the version guard ever flags it, exempt private internal packages rather
+than stamping this one.
+
+## The theme contract
+
+`tokens.css` declares tokens in three blocks. The selectors are part of the contract:
+
+| Selector                            | Theme          | `color-scheme` |
+| ----------------------------------- | -------------- | -------------- |
+| `:root`                             | dark (default) | `dark`         |
+| `:root[data-theme="light"]`         | light          | `light`        |
+| `:root[data-theme="high-contrast"]` | high contrast  | `dark`         |
+
+Rules an app must follow:
+
+- **A theme mode is not the attribute value.** The web client stores a mode
+  (`auto | dark | light | high-contrast`) but writes only the resolved theme
+  (`dark | light | high-contrast`) to `document.documentElement`'s `data-theme`. `auto` never
+  appears on the attribute; it resolves through `prefers-color-scheme` and `prefers-contrast: more`.
+  The Control UI resolves only `dark | light`, so it never reaches the high-contrast block.
+- **`color-scheme` comes from the token blocks.** Each block sets `color-scheme` so native scroll
+  bars and form controls follow the chosen theme rather than the operating system. Do not override
+  it with a hard-coded value in an app stylesheet, and give any new theme block its own value. The
+  Control UI also sets `style.colorScheme` inline to the same resolved value.
+- **Dark is the fallback.** With no `data-theme` attribute the `:root` block applies, so a page that
+  has not resolved a theme yet renders dark rather than unstyled.
+
+### Token groups
+
+| Group          | Tokens                                                                                                     |
+| -------------- | ---------------------------------------------------------------------------------------------------------- |
+| Brand          | `--wai-*` primitives (indigo, violet, pink, slate scale, gradients) and `--personalise`; theme-independent |
+| Surfaces       | `--bg`, `--bg-accent`, `--bg-elevated`, `--bg-hover`, `--card`, `--popover`                                |
+| Lines and text | `--border`, `--border-strong`, `--border-hover`, `--text`, `--text-strong`, `--muted`                      |
+| Accent         | `--accent`, `--accent-hover`, `--accent-subtle`, `--accent-foreground`                                     |
+| Status         | `--ok`, `--warn`, `--danger`                                                                               |
+| Shape and flow | `--radius*`, `--space-1`..`--space-8`, `--ease-out`, `--duration-*`                                        |
+| Type           | `--font-display` (Space Grotesk), `--font-body` (Inter), `--mono` (JetBrains Mono)                         |
+
+### The accent-foreground token
+
+`--accent-foreground` is the text or icon colour for content that sits **on** an `--accent` fill: the
+Runs badge, the send button, the active theme segment. It is `#ffffff` in dark and light. In high
+contrast the accent is a light indigo (`#818cf8`), so white text would fall below WCAG AA and the
+block sets `--accent-foreground: #0a0712` instead (6.69:1 on the accent).
+
+```css
+/* Do this: pair a fill with its foreground token */
+.cl-badge {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+
+/* Not this: a hard-coded white that fails contrast in high-contrast */
+.cl-badge {
+  background: var(--accent);
+  color: #fff;
+}
+```
+
+## How the apps consume it
+
+Order matters in both apps because later rules win.
+
+`apps/web/src/main.tsx`:
+
+```ts
+import "brand-tokens/fonts.css";
+import "brand-tokens/tokens.css";
+import "./app/app.css";
+import "./ui/client.css";
+```
+
+`ui/src/styles.css` imports `brand-tokens/fonts.css`, then `brand-tokens/tokens.css`, then the
+console's own stylesheets, and `./styles/brand-theme.css` **last**. `brand-theme.css` keeps only
+console-only overrides and remaps; it still restates some dark and light values (identical to the
+package today), so a shared value that changes must be checked against it and against the
+console-parity test below.
+
+Font URLs in `fonts.css` are **relative** (`url("./fonts/inter-400.woff2")`). Each app's Vite build
+hashes and bundles the files under its own base path, which is what lets the web client run under
+`/v2/client/`, `/`, or any `gateway.webClient.basePath`.
+
+```css
+/* Do this */
+src: url("./fonts/inter-400.woff2") format("woff2");
+
+/* Not this: resolves against the host root and 404s under any base path */
+src: url("/fonts/inter-400.woff2") format("woff2");
+```
+
+Tokens that only one app needs stay in that app. The web client keeps `--personalise-subtle`,
+`--composer` and `--shadow-md` in `apps/web/src/ui/client.css`. Move a token into the package only
+when both apps need it.
+
+## Add a token safely
+
+1. Add the property to the `:root` block. If its value differs by theme, add it to the
+   `light` and `high-contrast` blocks too; a token missing from a block silently inherits the dark
+   value.
+2. Use only six-digit hex for colours the contrast test reads (`#rrggbb`).
+3. Keep the block formatting: the test finds blocks by the literal text `<selector> {` and reads one
+   `--name: value;` declaration per line up to the first `\n}`.
+4. If the token is a text or border colour that sits on another token, add an assertion to
+   `test/brand-tokens-contrast.test.ts` for the pair.
+5. Run the guards below, then `pnpm --dir ui test` and `pnpm test:web`.
+
+Do not edit a shipped dark or light value to fix a client-only look; override it in `client.css`
+instead. Those values are the Control UI's shipped brand and the parity test pins them.
+
+## Add or change a font safely
+
+1. Confirm the licence allows redistribution and record it beside `OFL.txt`.
+2. Add the woff2 (latin subset) under `packages/brand-tokens/fonts/`.
+3. Declare it in `fonts.css` with a relative `url()` and `font-display: swap`. The package `files`
+   list already covers the `fonts` directory.
+4. Update the tokens that name the family (`--font-body`, `--font-display`, `--mono`).
+5. Update the brand e2e (`test/user-client-web-brand.e2e.test.ts`): the font test counts the
+   declared faces and requires each to load with a `200` response. If the weight has no always-rendered
+   use, also add it to `REQUIRED_WARM_FONTS` in `apps/web/src/providers/font-warm.ts`, because
+   browsers load `@font-face` lazily.
+
+## Guard tests
+
+| Test                                     | What it pins                                                                                                                                                                                                                                                                 |
+| ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/brand-tokens-contrast.test.ts`     | High-contrast text is `#ffffff`; borders reach 3:1 and accent, hover accent 4.5:1 against `--bg`; `--accent-foreground` reaches 4.5:1 on `--accent`; each block's `color-scheme`; white foreground kept in dark and light. Fast, no browser.                                 |
+| `test/user-client-web-brand.e2e.test.ts` | Real Chromium against a real gateway: tokens reach the served stylesheet, all declared font faces load with `200` under the base path, no request to a host-root `/fonts/`.                                                                                                  |
+| `test/console-brand-parity.e2e.test.ts`  | Builds `ui/` at a pinned base commit and at your branch, serves both, and asserts `--bg`, `--accent`, `--text` and `--personalise` match in dark and light and that Inter and Space Grotesk load in both. Slow (up to 10 minutes) and needs the base commit to be fetchable. |
+
+Run the contrast test on its own with `pnpm exec vitest run test/brand-tokens-contrast.test.ts`.
+The two e2e suites need `pnpm build` first and follow the guidance in
+[Testing](/help/testing#web-client-and-brand-e2e-suites).
+
+## Related
+
+- [Web client components](/reference/web-client-components) - how `apps/web` builds on these tokens
+- [Web client hosting](/web/user-client#themes-and-appearance) - what operators and users see
+- [Control UI](/web/control-ui) - the other consumer

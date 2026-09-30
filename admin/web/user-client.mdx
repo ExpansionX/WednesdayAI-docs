@@ -1,0 +1,289 @@
+---
+summary: "Deploy and host the WednesdayAI web client (static bundle, container, or gateway route)"
+read_when:
+  - You want to host the WednesdayAI web client for end users
+  - You are deciding between a CDN, a container, and the gateway route
+  - You need the allowedOrigins, HTTPS/wss, or config.json rules
+title: "Web Client Hosting"
+---
+
+# Web client hosting
+
+The WednesdayAI web client is a **static bundle**. It contains no gateway address, no credentials
+and no server code: everything environment-specific arrives at runtime from a small `config.json`
+served next to `index.html`. One build therefore serves every deployment - a CDN, a static host, a
+container, or the gateway itself.
+
+The client talks to the gateway over the WebSocket RPC protocol only. It authenticates with a
+bounded device credential it mints and redeems itself during onboarding, so the host that serves the
+files never handles a secret. See [Protocol](/gateway/protocol) for the client identity rules.
+
+## The bundle ships with WednesdayAI
+
+A published install already contains the built client at `<install>/dist/web-client`, packaged
+next to the Control UI. Nothing has to be built or downloaded first:
+
+```bash
+wednesdayai web serve --gateway-url wss://gateway.example.com
+```
+
+That is the default for both hosting shapes WednesdayAI runs itself: `wednesdayai web serve`
+without `--root` and the gateway route without `gateway.webClient.root` both serve the packaged
+bundle. Pointing either at your own directory always wins over the packaged one.
+
+From a **source checkout** the packaged bundle does not exist until you build it, and `pnpm build`
+empties `dist/`, so build it after:
+
+```bash
+pnpm web:build:packaged        # writes dist/web-client (the packaged location)
+pnpm --dir apps/web build      # writes apps/web/dist (for a CDN or your own host)
+```
+
+Without either, `web serve` exits non-zero and the gateway route answers `503` - both naming
+`pnpm web:build:packaged`.
+
+## Choose a deployment
+
+| Shape              | Use when                                               | How                                                                                                               |
+| ------------------ | ------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Standalone server  | You want one small process next to your other services | `wednesdayai web serve`                                                                                           |
+| Gateway route      | Single origin, one process, no CDN                     | `gateway.webClient.enabled`                                                                                       |
+| Static host or CDN | You already run object storage or a CDN                | Upload `apps/web/dist` plus your own `config.json`; see [Rules the host must follow](#rules-the-host-must-follow) |
+| Container          | You deploy images                                      | `apps/web/Dockerfile`                                                                                             |
+
+The first two use the packaged bundle by default; the last two host a copy you deploy yourself.
+Every shape needs the same two things: the browser origin in
+`gateway.webClient.allowedOrigins`, and a `config.json` naming the gateway.
+
+## Standalone server
+
+```bash
+wednesdayai web serve \
+  --port 8787 \
+  --gateway-url wss://gateway.example.com
+```
+
+This starts **no gateway** and keeps no state, so you can run as many instances behind a load
+balancer as you like. Flags win over environment variables, which win over defaults, and the
+packaged `dist/web-client` bundle is the default root. Add `--root apps/web/dist` (or any other
+directory) to serve a bundle of your own.
+
+| Flag                      | Environment variable          | Default                | Meaning                                  |
+| ------------------------- | ----------------------------- | ---------------------- | ---------------------------------------- |
+| `--root <dir>`            | `OPENCLAW_WEB_ROOT`           | packaged bundle        | Directory holding the built bundle       |
+| `--gateway-url <url>`     | `OPENCLAW_WEB_GATEWAY_URL`    | required               | Absolute `ws://` or `wss://` gateway URL |
+| `--port <port>`           | `OPENCLAW_WEB_PORT`           | `8787`                 | TCP port                                 |
+| `--host <host>`           | `OPENCLAW_WEB_HOST`           | `127.0.0.1`            | Bind host                                |
+| `--base-path <path>`      | `OPENCLAW_WEB_BASE_PATH`      | `/`                    | Public path the bundle is mounted under  |
+| `--client-id <id>`        | `OPENCLAW_WEB_CLIENT_ID`      | `openclaw-user-client` | Gateway client id                        |
+| `--assistant-name <name>` | `OPENCLAW_WEB_ASSISTANT_NAME` | unset                  | Name the client displays                 |
+
+`http://` and `https://` gateway URLs are accepted and upgraded to `ws://` and `wss://`. Anything
+else - a relative URL, a query string, an unknown scheme, a missing bundle, a port outside
+0-65535 - exits non-zero before the socket binds, with a message naming the flag and its
+environment variable. A source checkout with no packaged bundle and no `--root` is refused the same
+way, naming `pnpm web:build:packaged`.
+
+`GET /healthz` answers `200 {"status":"ok","service":"openclaw-user-client"}` for load balancer
+probes.
+
+### Serving under a subpath
+
+`--base-path /client` (any prefix works; this one is just an example) mounts everything under that
+prefix: `/client/`, `/client/config.json`, `/client/assets/...`. A request for the bare `/client`
+redirects to `/client/`, and paths outside the prefix are not handled at all. The bundle uses
+relative asset URLs, so no rebuild is needed.
+
+## Container
+
+The image builds the bundle and runs the standalone server. Build from the **repository root**, not
+from `apps/web`: the build needs the shared `packages/brand-tokens` package (colours and fonts) in
+its context, and `apps/web/Dockerfile.dockerignore` already limits the context to the files the
+build uses.
+
+```bash
+docker build -f apps/web/Dockerfile -t wednesdayai-web-client .
+
+docker run --rm -p 8787:8787 \
+  -e OPENCLAW_WEB_GATEWAY_URL=wss://gateway.example.com \
+  -e OPENCLAW_WEB_ASSISTANT_NAME=WednesdayAI \
+  wednesdayai-web-client
+```
+
+The image contains only the static files and a dependency-free Node server. It holds no secrets and
+no state, runs as an unprivileged user, exposes `8787`, and declares a `HEALTHCHECK` against
+`/healthz`. `OPENCLAW_WEB_GATEWAY_URL` is not baked in; supply it (and any other
+`OPENCLAW_WEB_*` variable from the table above) at run time.
+
+## Gateway route
+
+For single-origin deployments the gateway can serve the bundle itself. This is **off by default**.
+
+```jsonc
+{
+  "gateway": {
+    "webClient": {
+      "enabled": true,
+      "allowedOrigins": ["https://gateway.example.com"],
+      // "basePath": "/chat",  // optional override; omit to serve at the default /v2/client/
+      // "root": "/srv/wednesdayai-web",  // optional: defaults to the packaged dist/web-client
+    },
+  },
+}
+```
+
+With this config the client is at `https://gateway.example.com/v2/client/`, beside the Control UI at
+the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
+`systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+- `config.json` is synthesized per request: `gatewayUrl` is the gateway's own origin, so the client
+  connects back to where it was loaded from.
+- `basePath` defaults to `/v2/client` (the default in the sample above) and may not collide with `gateway.controlUi.basePath`. A base
+  path of `/` while the Control UI is enabled, or base paths that contain one another, are rejected
+  when the config loads. With a distinct base path the Control UI is unaffected.
+- `root` is optional. Unset, the gateway serves the packaged `dist/web-client` bundle and logs
+  which directory it picked. Set, it always wins - including when it is broken, which answers `503`
+  with that reason rather than silently falling back. When neither resolves, the route answers
+  `503` naming `pnpm web:build:packaged` and the gateway logs a warning at startup.
+- The origin allowlist still applies: add the gateway's own origin to
+  `gateway.webClient.allowedOrigins`, or the websocket connect is refused.
+
+<Note>
+**Upgrading from an earlier build.** The default `basePath` used to be `/client`. On a deployment
+that never set `basePath`, the client now lives at `/v2/client/` and a saved `/client/` bookmark no
+longer reaches it. There is no redirect. With the Control UI at the gateway root (the default),
+`/client/` is now answered by the Control UI; with the Control UI disabled it is a plain `404`.
+Tell your users the new address, or pin the old one explicitly with `"basePath": "/client"`.
+Deployments that already set `basePath` are unaffected, and so is `wednesdayai web serve`, whose
+default stays `/`.
+</Note>
+
+## Origins, HTTPS and secure context
+
+- **`gateway.webClient.allowedOrigins` is mandatory.** The gateway refuses an
+  `openclaw-user-client` websocket from any origin not listed there, under every
+  `gateway.auth.mode` and even behind a reverse proxy. `gateway.controlUi.allowedOrigins` never
+  admits this client. List exact origins (`scheme://host[:port]`), for example
+  `https://chat.example.com`. The default is empty, which admits nothing.
+- **Use HTTPS and `wss://` outside loopback.** The client stores its device credential in browser
+  storage and signs each connect with WebCrypto, which browsers expose only in a
+  [secure context](https://developer.mozilla.org/docs/Web/Security/Secure_Contexts): HTTPS, or
+  `http://localhost` / `http://127.0.0.1` for development. A plain `http://` page on a LAN address
+  cannot mint a device identity.
+- **Do not mix schemes.** An HTTPS page cannot open a `ws://` socket. Serve the client over HTTPS
+  and point `gatewayUrl` at `wss://`.
+- The client sends a browser `Origin` header on connect; a mismatch closes the socket with code
+  `1008`. Pair the client with `wednesdayai qr --client openclaw-user-client`, which prints the
+  configuration key to fix if the origin is not yet allowed.
+
+## config.json
+
+Fields, all public by construction - never put a token or any per-user value here:
+
+| Field           | Required | Meaning                                                        |
+| --------------- | -------- | -------------------------------------------------------------- |
+| `schemaVersion` | yes      | Must be `1`                                                    |
+| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment |
+| `clientId`      | yes      | Must be `openclaw-user-client`                                 |
+| `basePath`      | yes      | Public path the bundle is served under, with a trailing slash  |
+| `assistantName` | no       | Name shown in the client                                       |
+| `features`      | no       | Feature flags; currently `voice` only, which is off            |
+
+Leave `features.voice` unset. Voice and dictation are not available in this release: the client
+always renders the **Dictate** and **Voice mode** controls disabled, whatever the flag says, so
+setting it changes nothing users can see. The voice surface would need the `talk.session.*` methods,
+and those are deliberately not on the narrow `operator.sessions.write` allowlist the user client
+connects with (ADR 0077), so the gateway would refuse them. Voice is tracked in GitHub #650; a
+release note will say when it ships.
+
+The Runs panel likewise depends on gateway configuration outside `config.json`: it needs SQLite
+or Postgres session storage (`session.storage.backend`). On the default JSONL backend the panel
+shows an explanatory unavailable message instead of live data - see
+[Using the web client](/web/using-the-web-client#check-on-runs).
+
+Example:
+
+```json
+{
+  "schemaVersion": 1,
+  "gatewayUrl": "wss://gateway.example.com",
+  "clientId": "openclaw-user-client",
+  "basePath": "/",
+  "assistantName": "WednesdayAI"
+}
+```
+
+Unknown keys are rejected, not ignored: the client shows a configuration error instead of starting
+half-configured.
+
+## Themes and appearance
+
+The client has four theme modes, chosen by each user from the account menu at the bottom of the
+sidebar. You do not configure them; there is no `config.json` or gateway setting for the theme.
+
+| Mode              | Behaviour                                                                                                                                  |
+| ----------------- | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Auto**          | Follows the browser's `prefers-color-scheme` (dark/light), or `prefers-contrast: more` when the operating system requests higher contrast. |
+| **Dark**          | Always dark, regardless of the operating system setting.                                                                                   |
+| **Light**         | Always light, regardless of the operating system setting.                                                                                  |
+| **High contrast** | Maximum-contrast palette (WCAG AA or better) for low-vision or bright-environment use.                                                     |
+
+- The choice is stored per browser (`localStorage`, key `openclaw.web.theme`) and applies
+  immediately, with no reload. The default is Auto.
+- A browser that stored the retired `black` or `white` mode is migrated on first load: `black`
+  becomes `dark`, `white` becomes `light`, and the migrated value is written back.
+- The theme also sets the browser's native colours for scroll bars and form controls
+  (`color-scheme`), so they follow the chosen theme instead of the operating system. In high
+  contrast, text on accent-coloured fills switches to dark for legibility.
+- Entrance animation is skipped when the browser's `prefers-reduced-motion` is set.
+- Colours and fonts (Inter, Space Grotesk and JetBrains Mono) are bundled with the client and
+  served from the same base path, so a deployment needs no font CDN or extra CSP entry. They come
+  from the same shared token package as the [Control UI](/web/control-ui); developers see
+  [Brand tokens](/reference/brand-tokens).
+
+## What users see that is not live yet
+
+Some controls are drawn but switched off, with a tooltip naming the release phase that enables them
+(for example "Canvas - coming in phase P4"). Selecting one sends nothing to the gateway. They are:
+the model menu, **Canvas**, **Search chats**, other assistants and **Browse assistants**, **Search**
+and **Think** in the message box, **Dictate**, **Voice mode**, **Settings**, **Keyboard shortcuts**,
+and the **Read aloud**, **Feedback** and **Regenerate** actions on replies. **Calendar**, **Memory**
+and **Add extension** cite the extension panel roadmap item (GitHub #634) instead of a phase.
+
+They are not gated by any setting, so there is nothing to enable. If users ask, point them at
+[Using the web client](/web/using-the-web-client#controls-that-are-not-available-yet).
+
+## Rules the host must follow
+
+If you serve the bundle yourself (CDN, nginx, object storage), reproduce what
+`wednesdayai web serve` does:
+
+| Path                            | Response                                                       |
+| ------------------------------- | -------------------------------------------------------------- |
+| `/config.json`                  | your generated config, `Cache-Control: no-store`               |
+| `/index.html` and SPA routes    | `index.html`, `Cache-Control: no-cache`                        |
+| `/assets/*` (hashed filenames)  | the file, `Cache-Control: public, max-age=31536000, immutable` |
+| `/assets/*` that does not exist | `404` - never the SPA shell                                    |
+| any other unknown path          | `index.html`, so the client router can handle it               |
+
+Send these headers on every response:
+
+- `Content-Security-Policy` with `frame-ancestors 'none'`, `script-src 'self'`, `font-src 'self'`
+  (the bundled fonts load from the same origin), and `connect-src` listing `'self'` plus the
+  gateway origin with its `ws:`/`wss:` scheme
+- `X-Frame-Options: DENY`
+- `X-Content-Type-Options: nosniff`
+- `Referrer-Policy: no-referrer`
+
+Caching `config.json` is the most common deployment mistake: a stale copy silently points the
+client at the previous gateway.
+
+## Related
+
+- [Using the web client](/web/using-the-web-client) - what your users see: pairing, chat, and runs
+- [Control UI](/web/control-ui) - the operator console, a separate app with its own route
+- [Brand tokens](/reference/brand-tokens) - the shared colour and font package (developers)
+- [Web client components](/reference/web-client-components) - how the client UI is built (developers)
+- [Gateway protocol](/gateway/protocol) - client identity, scopes and the connect handshake
+- [Configuration reference](/gateway/configuration-reference) - every `gateway.webClient` key
+- [Pairing QR and setup codes](/cli/qr) - onboarding a browser with `--client openclaw-user-client`
