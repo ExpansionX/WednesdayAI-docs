@@ -73,7 +73,7 @@ Gateway → Client:
   "type": "res",
   "id": "…",
   "ok": true,
-  "payload": { "type": "hello-ok", "protocol": 3, "policy": { "tickIntervalMs": 15000 } }
+  "payload": { "type": "hello-ok", "protocol": 3, "policy": { "tickIntervalMs": 30000 } }
 }
 ```
 
@@ -149,6 +149,142 @@ Common scopes:
 - `operator.approvals`
 - `operator.pairing`
 
+Narrow session scopes, for bounded chat clients (ADR 0077):
+
+- `operator.sessions.read`
+- `operator.sessions.write`
+
+#### Scope implication
+
+A requested scope is satisfied by any scope in its row. Read downward only: the narrow session
+scopes never imply anything broader.
+
+| Requested                 | Satisfied by                                                                                             |
+| ------------------------- | -------------------------------------------------------------------------------------------------------- |
+| `operator.admin`          | `operator.admin`                                                                                         |
+| `operator.read`           | `operator.read`, `operator.write`, `operator.admin`                                                      |
+| `operator.write`          | `operator.write`, `operator.admin`                                                                       |
+| `operator.sessions.read`  | `operator.sessions.read`, `operator.sessions.write`, `operator.read`, `operator.write`, `operator.admin` |
+| `operator.sessions.write` | `operator.sessions.write`, `operator.write`, `operator.admin`                                            |
+| `operator.approvals`      | `operator.approvals`, `operator.admin`                                                                   |
+| `operator.pairing`        | `operator.pairing`, `operator.admin`                                                                     |
+
+The same table governs method admission, event delivery, and the device-token subset check at
+connect, so an operator device may request only the narrow scopes and connect normally.
+
+#### Narrow scope method allowlist
+
+A narrow session scope admits a method only when the method is on its allowlist. Anything else in
+the `operator.read` or `operator.write` groups, and every `operator.admin`, `operator.approvals` and
+`operator.pairing` method, is refused with `missing scope: <group scope>`. Methods added to the
+read or write groups later are refused until they are allowlisted.
+
+- `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
+  `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
+  `sessions.resolve`, `sessions.subscribe`, `chat.history`, `sessions.runs.list`,
+  `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
+  `tasks.runs.events`.
+- `operator.sessions.write`: `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
+  `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch` and
+  `sessions.title.prepare`. The last two joined the list with client-chat-v3 P2 (ADR 0081):
+  `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no guard because it
+  changes no session state.
+
+`sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
+scope it needs.
+
+| Fields in the call besides `key`                                                                  | Admitted for                                                              |
+| ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
+| only `label`, `model`, `thinkingLevel` and `reasoningLevel` (any subset)                          | `operator.write`, `operator.admin`, or a narrow `operator.sessions.write` |
+| any other field (for example `execHost`, `sendPolicy`, `verboseLevel`), alone or mixed with those | `operator.admin` only                                                     |
+
+A field counts when it is present, whatever its value, so `{ "execHost": null }` still needs admin,
+and a call without a params object resolves to `operator.admin`. A narrow or write-only connection
+that sends any other field is refused with `missing scope: operator.admin` before the handler runs,
+and the stored entry is unchanged. The write and narrow field sets are two separate lists
+(`SESSIONS_PATCH_WRITE_FIELDS` and `NARROW_SESSION_PATCH_FIELDS` in `src/gateway/method-scopes.ts`),
+so widening one never widens the other, and a field added to the schema later needs
+`operator.admin` until an ADR admits it. Before ADR 0081 the whole method needed `operator.admin`;
+a write-only integration can now change these four settings on any session key it names.
+
+`health` and `status` return the existing non-admin redacted projection for these scopes, and
+`health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
+is an operator diagnostic. No `talk.*` method is allowlisted.
+
+#### Narrow scope event allowlist
+
+A connection that either carries a narrow session scope, or presents the bounded
+`openclaw-user-client` id, and in either case does not satisfy `operator.read`, receives only these
+events:
+
+| Event              | Requires                 |
+| ------------------ | ------------------------ |
+| `chat`             | `operator.sessions.read` |
+| `sessions.changed` | `operator.sessions.read` |
+| `runs.invalidated` | `operator.sessions.read` |
+| `tick`             | none                     |
+| `heartbeat`        | none                     |
+
+Everything else, including `presence`, `health`, `cron`, `exec.approval.*`, `device.pair.*`,
+`node.pair.*`, `node.invoke.request`, `talk.mode`, `talk.event`, `agent`, `sessions.runsUpdate` and
+any event registered later, is not delivered. Operator connections are unaffected.
+
+Chat events are not filtered per session owner: every session stays visible to every operator-role
+connection on a gateway.
+
+### Client identity
+
+`connect.params.client.id` is a closed enum. It is identity and audit metadata, not authorization:
+the v3 signature proves the device signed the id it declared, so altering the id after signing (or
+replaying a signature produced for another id) fails signature verification.
+
+Two client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
+at pairing time:
+
+| Client id               | Roles              | Scopes                                                                           |
+| ----------------------- | ------------------ | -------------------------------------------------------------------------------- |
+| `openclaw-even-g2-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
+| `openclaw-user-client`  | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
+
+Rules that apply to bootstrap redemption:
+
+- **Exact profile binding.** The stored profile of the bootstrap token must equal the connecting
+  client's declared profile (same role set, same scope set). A cross-profile redemption is refused
+  with `details.code = bootstrap_profile_violation` in both directions, and the token is neither
+  consumed nor device-bound by the refusal. The human-readable `error.message` and the websocket
+  close reason state the setup-code cause ("setup code was issued for a different client profile"),
+  not a shared-token cause; every other bootstrap reason (`bootstrap_token_invalid`,
+  `bootstrap_token_expired`, `bootstrap_token_consumed`, `bootstrap_token_device_mismatch`) names
+  the setup code the same way.
+- **No widening.** The minted device token is approved for exactly the profile's scopes. A later
+  connect requesting anything outside that set is refused; `details.code` is
+  `AUTH_DEVICE_TOKEN_MISMATCH` with the additive `details.deviceTokenReason = "scope-mismatch"`.
+  A subset of the approved scopes connects normally.
+
+`openclaw-user-client` carries two further admission rules:
+
+- **No shared credentials.** A connect declaring `openclaw-user-client` with
+  `auth.token` or `auth.password` is refused with `details.code = CLIENT_SHARED_AUTH_NOT_ALLOWED`.
+  It must use its bounded bootstrap token or the device token minted from it. Operator client ids
+  are unaffected.
+- **A bounded device credential under every auth mode.** Admission for this client id requires a
+  device identity plus a verified bounded device token, or a bootstrap redemption that mints one.
+  This holds under every `gateway.auth.mode`: `token`, `password`, `none`, `trusted-proxy` and
+  `tailscale` authenticate the transport or the deployment, not the device, so none of them admits
+  this client id on its own. A connect with no device block or no device credential is refused with
+  `details.code = CLIENT_DEVICE_CREDENTIAL_REQUIRED` and websocket close `1008` before any scope is
+  granted, no matter what `role` or `scopes` it declared. Behind a reverse proxy the client connects
+  normally with its bounded device token, and the device token is verified there exactly as it is
+  under `token` mode (an over-scoped request still fails with `AUTH_DEVICE_TOKEN_MISMATCH` and
+  `details.deviceTokenReason = "scope-mismatch"`). Other client ids keep the auth mode's behavior
+  unchanged - a `trusted-proxy` deployment still admits an operator console with no device identity.
+- **Always-on browser origin check.** The websocket `Origin` is checked against
+  `gateway.webClient.allowedOrigins` on every connect, including when reverse-proxy headers are
+  present. A missing `Origin`, a loopback `Origin`, or an origin that only appears in
+  `gateway.controlUi.allowedOrigins` is refused with `details.code =
+WEB_CLIENT_ORIGIN_NOT_ALLOWED` and websocket close `1008 origin not allowed`. Control UI origin
+  behavior is unchanged.
+
 ### Caps/commands/permissions (node)
 
 Nodes declare capability claims at connect time:
@@ -178,10 +314,378 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   - `pluginId`: plugin owner when `source="plugin"`
   - `optional`: whether a plugin tool is optional
 - Operators may call `agent.nudge` (`operator.admin`) to inject non-user context into an agent's
-  main session and request a targeted heartbeat wake. The request schema is `AgentNudgeParams`:
+  main session by enqueuing a dedicated `agent.turn` with `kind=nudge` (claimed and executed
+  directly; it is not a heartbeat wake). The request schema is `AgentNudgeParams`:
   `text` is required; optional fields are `data`, `agentId`, `sessionKey`, `reason`, `source`,
-  `dedupeKey`, `ttlMs`, `priority`, and `requiresIdle`. Extra fields are rejected. A successful
-  response is `AgentNudgeResult` with `{ "ok": true, "sessionKey": "...", "signalId": "..." }`.
+  `dedupeKey`, `ttlMs`, `priority`, and `requiresIdle`. Extra fields are rejected. `reason`,
+  `source`, `ttlMs`, `priority`, and `requiresIdle` are accepted for compatibility and ignored.
+  A successful response is `AgentNudgeResult` with `{ "ok": true, "sessionKey": "...", "signalId": "..." }`.
+
+- Operators may call `sessions.describe` (`operator.read`; narrow-admitted) with
+  `{key, includeDerivedTitles?, includeLastMessage?}` to fetch a single gateway session row:
+  `{ "ok": true, "key": "...", "session": <row> }`, where `key` is the session's canonical key and
+  `<row>` has the same fields as that key's `sessions.list` row (including the resolved `model` and
+  `modelProvider`, and `thinkingLevel` and `reasoningLevel` when the session overrides them). The
+  two flags behave as they do on `sessions.list`. An unknown key returns `INVALID_REQUEST` with
+  `details.reason = "session_not_found"` and `details.key` set to the key that was asked for.
+- Operators may call `sessions.compaction.list` (`operator.read`) with `{key}` to list a session's
+  durable compaction checkpoints, newest first:
+  `{ "ok": true, "key": "...", "checkpoints": [{ "id": "...", "createdAt": "<ISO-8601>", "tokensBefore": 0, "firstKeptEntryId": "..." }] }`.
+  The checkpoints come from the session transcript, so an empty array means the transcript has no
+  compaction entries.
+- Operators may call `models.authStatus` (`operator.read`) with no params to list configured auth
+  profiles per provider:
+  `{ "providers": [{ "provider": "...", "profiles": [{ "id": "...", "type": "api_key|oauth|token", "lastGood": true }] }] }`.
+  The response never contains key, token, access, or refresh material.
+- Operators may call `chat.abort` (`operator.write`; narrow-admitted) with `{sessionKey, runId?}`
+  and `sessions.abort` (`operator.write`; narrow-admitted) with `{key, runId?}`. `sessions.abort` is
+  an additive alias of `chat.abort` with session-shaped params and identical semantics. Both answer
+  `{ "ok": true, "aborted": true|false, "runIds": ["..."] }`. Without `runId` every
+  gateway-tracked run of the session is aborted. With `runId` only that run is: an id that is not
+  running (unknown, or already finished) answers `aborted: false` with an empty `runIds`, and an id
+  that belongs to a different session is refused with `INVALID_REQUEST`
+  (`runId does not match sessionKey`). An aborted run keeps the assistant text it had streamed
+  (persisted to the transcript) and ends with a `chat` event whose `state` is `aborted`; if that
+  text cannot be persisted the call returns `UNAVAILABLE`.
+- Operators may call `sessions.steer` (`operator.write`) with
+  `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?}` to deliver
+  a message to a session that may already be running a turn. `mode` is `inject` (default),
+  `interrupt` or `queue`; legacy queue names such as `steer`, `steer-backlog`, `followup` and
+  `collect` are rejected. When `mode` is omitted the gateway default
+  `gateway.sessions.steer.defaultMode` applies (itself defaulting to `inject`); the session's own
+  queue mode is never used for this method.
+  - `inject` delivers the message into the active run at its next tool-batch boundary and answers
+    `{mode, outcome: "injected", runId, targetRunId}`, both ids being the active run (omitted when
+    the gateway tracks no run for the session). It is text only: a call whose `attachments` array
+    holds at least one entry returns `INVALID_REQUEST` with
+    `details.reason = "attachments_not_supported_with_inject"`, whatever the entry looks like.
+  - `interrupt` aborts the active run, waits for it to reach a terminal state, then starts the new
+    turn and answers `{mode, outcome: "interrupted", runId, targetRunId}`. If the old run does not
+    settle within `gateway.sessions.steer.settleTimeoutMs` (default 15000 ms) the call returns
+    `CONFLICT` with `retryable: true` and `details.reason = "steer_settle_timeout"`, and no new turn
+    is started.
+  - `queue` leaves the active run alone and runs the message as one follow-up turn afterwards,
+    answering `{mode, outcome: "queued", runId, targetRunId}`; `targetRunId` names the run it waits
+    behind and is omitted when the gateway tracks none.
+  - With no active run every mode answers `{mode, outcome: "started", runId}`.
+  - When `mode` is `inject` but the active run cannot be steered, `fallback` decides: `queue`
+    (default) answers `outcome: "queued"` with `reason: "fallback_queue"`, and `reject` answers
+    `outcome: "rejected"` with `reason: "run_not_steerable"` and dispatches nothing. A message the
+    session's own queue policy drops after admission also answers `outcome: "rejected"`, with
+    `reason: "dropped_by_queue_policy"`.
+  - Reusing an `idempotencyKey` replays the first response and starts no second run; a second call
+    while the first is still in flight returns `CONFLICT` with
+    `details.reason = "duplicate_in_flight"`.
+  - Attachments are inline only. For `queue` and `interrupt`, an attachment without base64
+    `content` returns `INVALID_REQUEST` with `details.reason = "attachment_content_required"`
+    rather than being dropped on the way to the agent.
+  - A `message` that is blank once trimmed returns `INVALID_REQUEST`, as does a session whose send
+    policy denies the send. `sessions.steer` has no `replyToId` and no `expectedLeafEntryId`: a
+    steered or queued message carries neither a reply reference nor a leaf guard.
+  - `runId` and `targetRunId` always name a real run, never an id the gateway minted for a call
+    that started no run. For `injected`, `started` and `interrupted` the id is a live gateway run:
+    it can be passed to `sessions.abort` and is reported by `sessions.runs.list`. For `queued` it is
+    the id the follow-up turn carries once it starts, not a run that exists yet. A message that
+    joined another run never gets an id of its own, so steering repeatedly into one run reports that
+    same run's id every time.
+  - Once a `queued` follow-up's run actually starts, its id converges with the other outcomes: from
+    that point it can be passed to `chat.abort` / `sessions.abort` and `sessions.runs.list` reports
+    it, on both the sqlite and `fs-jsonl` session-storage backends (`sessions.runs.list` merges the
+    live streaming run alongside the durable store, so the `fs-jsonl` backend, which has no durable
+    store at all, still lists it; `sessions.runs.get` reads the durable store only). This supersedes
+    ADR 0072's original "not abortable while the follow-up runs" consequence (ADR 0082 section 7,
+    ADR 0083 M6).
+- Operators may call `sessions.runs.list` (`operator.read`) with
+  `{sessionKey?, agentId?, statuses?, updatedAfter?, limit?, cursor?}` to page the session runs:
+  `{ "runs": [<SessionRunRecord>], "nextCursor": "..." }`. The durable part of the page orders
+  `(createdAt DESC, sessionRunId DESC)` regardless of a row's mutable `updatedAt` (ADR 0074). On
+  the first page (no `cursor`) the handler also merges the live in-flight gateway runs from
+  `context.chatAbortControllers` - any run whose agent run has started, including a
+  `sessions.steer`-queued follow-up once its run has started and a `chat.send`-started run - deduped
+  by `runId` against the durable rows, merged newest first and cut to `limit`; later pages walk the
+  durable store only. A live run with no durable row is reported as a synthetic record
+  (`sessionRunId: "live:<runId>"`, `kind: "chat"`, `status: "running"`, `recoveryMode: "off"`) and
+  only matches a `statuses` filter that is empty or includes `running`. So without a configured
+  session-run store (SQLite or Postgres) the result is `{ "runs": [] }` only while no run is
+  streaming, and `{ "runs": [<live records>] }` otherwise, even on the default `fs-jsonl` backend,
+  which has no durable session-run store at all (ADR 0082 section 7, ADR 0083 M6). Unlike
+  `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
+  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
+- Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
+  run: `{ "record": <SessionRunRecord> }`, or `{ "record": null }` for an unknown id or an
+  unconfigured store - this method never errors on a missing id. It reads the durable store only,
+  so it never returns the synthetic `live:` records that `sessions.runs.list` adds.
+- Operators may call `sessions.runs.events` (`operator.read`) with `{sessionRunId}` for that
+  run's full event history, unpaged: `{ "events": [<SessionRunEvent>] }` (empty without a
+  configured store). Unlike `tasks.runs.events`, each event's raw `payloadJson` is included, not
+  stripped.
+- Operators may call `tasks.runs.list` (`operator.read`) with
+  `{view, status?, taskId?, limit, cursor?}` to read the run/task projection. Params are strict:
+  an unknown field, a `limit` outside `1..200`, an unknown `view` or an unknown `status` is
+  rejected.
+  - `view: "queued"` lists bus work that is enqueued and not currently claimed, over the
+    REGISTERED task topics only (`task.<pass id>` for every registered task pass, core passes
+    included). Rows are exactly
+    `{ "workId": "...", "topic": "task....", "state": "queued", "changedAt": "<ISO-8601>" }`. A row
+    waiting out a retry backoff is still queued. Arbitrary non-task bus work never appears, and a
+    row never carries payload, access context, privacy context, lease owner or attempt counts. A
+    `taskId` filters this view too, intersecting the registered topic set with `task.<taskId>`; an
+    unknown or non-allowlisted `taskId` returns an empty page, not an error.
+  - `view: "history"` pages durable task runs as
+    `{ "taskRunId": "...", "taskId": "...", "status": "...", "mode": "normal|dry_run", "attempts": 0, "createdAt": "<ISO-8601>", "updatedAt": "<ISO-8601>", "startedAt": "...", "completedAt": "...", "durationMs": 0 }`
+    where the last three are optional. `status` and `taskId` filter the page.
+  - `status` is history-only. `view: "queued"` combined with `status` returns `INVALID_REQUEST`
+    with `details.reason = "status_is_history_only"` rather than ignoring the filter.
+  - Paging is keyset, not offset: pass the response's `nextCursor` back as `cursor`. The queued
+    view walks `(changedAt DESC, numeric workId DESC)` and the history view walks the immutable
+    `(createdAt DESC, taskRunId DESC)`, so a run whose status changes mid-walk is neither
+    duplicated nor skipped. `nextCursor` is absent on the last page. Cursors are view-tagged: a
+    cursor from one view used on the other, or any undecodable cursor, returns `INVALID_REQUEST`
+    with `details.reason = "invalid_cursor"`.
+  - A row claimed into a task run leaves the queued view and appears once in the history view.
+    Work returned to the queue after a failed, deferred or preempted attempt is listed as queued
+    again while its earlier attempt stays in history.
+- Operators may call `tasks.runs.get` (`operator.read`) with `{taskRunId}`. The response is the
+  history summary above plus optional `stage`, and nothing else - never the event list. An unknown
+  id returns `INVALID_REQUEST` with `details.reason = "task_run_not_found"`.
+- Operators may call `tasks.runs.events` (`operator.read`) with `{taskRunId, limit, cursor?}` for a
+  bounded per-run event page: `{ "events": [{ "eventId": "...", "eventType": "...", "createdAt": "<ISO-8601>" }], "nextCursor": "..." }`,
+  ordered `(createdAt DESC, eventId DESC)`. Event payloads are never exposed.
+- Without a configured session-run store (SQLite or Postgres) all three `tasks.runs.*` methods
+  return `UNAVAILABLE` with `"session storage runtime not available"` rather than an empty page;
+  on the default `fs-jsonl` backend the run/task projection does not exist, so a client should
+  treat `UNAVAILABLE` from these methods as "configure `session.storage.backend`", not as a
+  transient failure.
+- None of the three read methods exposes `lastError`, `evidencePointer`, `scopeKind`, `scopeKey`,
+  `gatewayInstanceId`, `ownerPluginId`, `retryPolicy`, `budgetDenials`, `preemptionCount`,
+  `costClass`, `triggerSource` or the raw work id. The join and the redaction run on the server;
+  `tasks.status` is unchanged and no `tasks.*` mutation was added.
+- `chat.history` (`operator.read`; narrow-admitted) takes `{sessionKey, limit?, maxChars?, before?}`
+  and pages backward through the transcript, oldest message first within a page. `limit` is
+  1..1000 (default 200). `before` is the opaque `cursor` of an earlier response; without it the call
+  returns the newest page. The response carries `sessionKey`, `sessionId`, `messages`,
+  `thinkingLevel`, `verboseLevel` and `hasMore`, plus `cursor` when `hasMore` is true: pass that
+  value back as `before` to fetch the next older page. When the gateway's response size budget
+  drops older rows from a page, `hasMore` is forced true and `cursor` points at the oldest row that
+  was kept, so the next `before` call resumes exactly at the first dropped message. `maxChars`
+  (1..500000) is applied last, to the finished page: it keeps the newest messages whose text fits
+  and drops older ones whole (the newest message is always kept), and it does not move `cursor`, so
+  messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
+  different session store backend, returns `INVALID_REQUEST` with
+  `details.reason = "invalid_cursor"`. The leaf and reply fields that client-chat-v3 P2 added are
+  described below.
+
+### client-chat-v3 P2 additions (ADR 0081, ADR 0082, ADR 0083)
+
+These shipped with the `/v2/client` chat controls. Every new param is optional and every new result
+field is additive, so existing callers are unchanged; the one rule change is how `sessions.patch`
+is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlist)).
+
+- `sessions.list` (`operator.read`) accepts `offset` (integer, minimum 0, default 0), applied after
+  every filter and after the `updatedAt`-descending sort, before `limit`. The result gains
+  `totalCount` (the filtered total, before offset/limit), `limitApplied` (the limit actually applied,
+  when the caller passed one), `offset` (echoed back when non-zero; omitted, like upstream, when
+  offset is 0), `nextOffset` (the offset of the next page, or `null` when there is no more) and
+  `hasMore: boolean` (always present; true exactly when rows exist past `offset + sessions.length`).
+  `count` keeps its existing meaning (rows returned in this page). The web client's chat filter and
+  search use two existing params: `agentId` keeps the sessions of one agent (by the agent id in the
+  session key), and `search` keeps rows whose display name, label, subject, session id or key
+  contains the text, ignoring case - it does not match a title derived from the first message.
+- `sessions.create` (`operator.write`; narrow-admitted) takes
+  `{parentSessionKey?, label?, agentId?, model?}` and answers `{ key, sessionKey, sessionId }`;
+  `key` and `sessionKey` are the same new `agent:<agentId>:dashboard:<uuid>` key. The agent is
+  `agentId`, else the parent session's agent, else the default agent. `label` is 1..512 characters,
+  trimmed, and no other session in the store may hold it. `model` is resolved through the same
+  `resolveAllowedModelRef` check `sessions.patch` uses, before the session is created, and applied
+  to the new session; `agents.defaults.models` bounds the allowed set the same way it bounds
+  `sessions.patch` (see
+  [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor)). A refusal
+  writes nothing and returns `INVALID_REQUEST`: an unknown agent, an `agentId` that differs from the
+  parent's agent, a parent session that does not exist, an empty, over-long or already-used `label`
+  (`label already in use: <label>`), or an unresolvable or disallowed `model` (`invalid model: ...`,
+  `model not allowed: ...`). The call returns `UNAVAILABLE` when the model catalog cannot be loaded
+  (`model catalog unavailable`) or the session cannot be written (`failed to create session`). A
+  `sessions.changed` event with reason `create` follows, to connections that called
+  `sessions.subscribe`.
+- `sessions.patch` (scope per call, see above) answers
+  `{ ok: true, path?, key, entry, resolved: { modelProvider, model } }`: the stored entry after the
+  patch and the model the session now resolves to. A field set to `null` is cleared (`model: null`
+  returns the session to the agent's default model). `label` must not be held by another session
+  (`label already in use: <label>`), and `model` goes through the same allowlist as
+  `sessions.create`; both refusals are `INVALID_REQUEST`, and a missing model catalog is
+  `UNAVAILABLE`. A `sessions.changed` event with reason `patch` follows. For a connection that
+  carries a narrow session scope the echo is redacted: `path` (the gateway's session-store path) is
+  omitted, and `execHost`, `execNode`, `execSecurity`, `execAsk`, `sendPolicy`, `spawnedBy`,
+  `spawnDepth`, `elevatedLevel`, `verboseLevel`, `responseUsage` and `groupActivation` are removed
+  from `entry`, even when the call set only an allowed field, because the stored entry can hold
+  values another caller set. Connections without a narrow scope (admin, or `operator.write` only)
+  get the full entry. The redaction covers this response only: `sessions.list` and
+  `sessions.describe` rows still carry `verboseLevel`, `elevatedLevel`, `sendPolicy` and
+  `responseUsage` for every scope (ADR 0081).
+- `chat.history` messages each carry `__openclaw.id` (the transcript entry id) when the entry has
+  one. The result gains `leafEntryId: string | null` - the id of the newest `message`-type
+  transcript entry that has an id, or `null` when there is none - plus the identical value at
+  `sessionInfo.activeLeafEntryId` (upstream's name for it). On the newest page it is read from the
+  same transcript rows the page is built from, with the exact rule `chat.send` compares against, so
+  it never disagrees with the send-side check; a `before`-paged request reports `null` for both
+  because an older page says nothing about the current leaf. Only message entries move the leaf: a
+  model-change entry, a custom entry (including the reply-reference entry below) or a compaction
+  divider never moves it, so none of those ever causes a false conflict.
+- A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
+  plus the same reference under upstream's field names, `__openclaw.replyToId` and
+  `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
+  `sender` (the quoted message's author) at most 200; both are absent on an id-only reference. The
+  reference is stored as a custom transcript entry written just before the user turn, so it never
+  enters the model context.
+- `chat.send` (`operator.write`; narrow-admitted) takes
+  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?}`
+  and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
+  running). P2 added the last two params:
+  - `replyToId` is the entry id of the message being replied to (the `__openclaw.id` of a
+    `chat.history` message). The gateway looks it up in this session's own transcript and gives the
+    turn's prompt the quoted message as reply context: its text (at most 2000 characters) and its
+    sender (the assistant's name for an assistant message, otherwise the connecting client's
+    `displayName` or `User`). It also persists the reference beside the user turn, which is how
+    `chat.history` later reports `__openclaw.replyTo`; when a run is already active for the
+    session, that write waits until this turn's own run starts. An id that does not resolve in this
+    session (unknown, or from another session) keeps an id-only reference - no body or sender - and
+    logs a warning; the message still sends. The reference is persisted only when the session
+    already has a stored session id.
+  - `expectedLeafEntryId` (string or `null`) refuses the send when the chat has moved on since the
+    caller last read it. It is compared for exact equality with the leaf `chat.history` reports
+    (`leafEntryId`). A mismatch is refused with `INVALID_REQUEST`, message
+    `active branch changed; review and retry`, and `details.reason = "active-leaf-changed"`; no run
+    starts, nothing is written and no attachment is parsed or stored. `null` asserts an empty
+    transcript (it also matches a session with no stored transcript yet), and omitting the field
+    skips the check. The check runs after the send-policy check and after idempotent-replay
+    handling, so a retry of an earlier `idempotencyKey` (cached or still in flight) is answered as
+    before instead of being re-checked against a leaf that may have advanced; a `/stop` message is
+    not checked. The guard narrows the race between two devices. It is not a lock: two sends that
+    arrive together can both pass.
+- A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
+  starts, from run start to run end (never from the moment it was merely enqueued). From then it
+  is exactly as abortable and listable as a run started any other way - see the `queued` outcome
+  bullet in the `sessions.steer` section above (ADR 0082 section 7, ADR 0083 M6).
+- `sessions.title.prepare` (`operator.write`; narrow-admitted; behind the web client's "Suggest a
+  title" button) takes `{ agentId, message, model?, catalogId?, incognito? }` - `message` is
+  0..1000 characters - and answers `{ title: string (1..60) | null }`. It is one completion call,
+  never an agent run, and persists nothing; applying a suggestion is a separate
+  `sessions.patch { label }` call.
+  - It answers `{ title: null }` without a model call for `incognito: true`, for a message that is
+    blank once trimmed, and for a message that starts with `/`. It also answers `{ title: null }`
+    when the completion times out (15 seconds), the provider returns an error, or no model or
+    credential resolves for the agent.
+  - The model is `model` when given, resolved through the same allowlist as `sessions.patch`
+    (past the fast paths above, an unresolvable or disallowed model is `INVALID_REQUEST`),
+    otherwise the agent's default model, using that agent's own credentials. `catalogId` is
+    accepted for wire compatibility with upstream and is inert on its own (this fork has no
+    model-catalog create targets); `model` and `catalogId` together are refused with
+    `INVALID_REQUEST`, even for a message the fast paths would have answered.
+  - Rate limit: its own control-plane bucket of 3 calls per 60 seconds per `deviceId+clientIp`,
+    independent of the shared budget for `config.apply`, `config.patch` and `update.run` (see
+    [Config writes](/gateway/config-writes)), and not configurable. A call is counted as soon as it
+    passes authorization, before validation and before the fast paths above, so one that answers
+    `{ title: null }` without a model call still uses budget. The next call in the window is
+    refused with `UNAVAILABLE`, `retryable: true`, `retryAfterMs` and
+    `details: { method: "sessions.title.prepare", limit: "3 per 60s" }`; the message is
+    `rate limit exceeded for sessions.title.prepare; retry after <seconds>s`.
+- `agents.list` (`operator.read`; narrow-admitted) rows gain `identity.color` when the agent sets
+  `agents.list[].identity.color` in config: one of `indigo`, `violet`, `pink`, `rose`, `amber`,
+  `lime`, `teal` or `sky` (see
+  [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor)). The key is
+  absent when no colour is configured, and the web client then derives a stable colour from the
+  agent id. `agent.identity.get` does not carry it.
+
+### The runs.invalidated event
+
+`runs.invalidated` tells a subscribed client that something it may be showing has changed. It
+carries identity only, never content: no payload, no access or privacy context, no scope key, no
+error text. Delivery requires `operator.read`, the same bar as the read methods it invalidates, so
+a node-role connection and an operator connection without a read scope never receive it.
+
+The payload is a strict discriminated union on `scope`. Each shape is closed: an unknown field
+makes it match nothing.
+
+| Scope     | Payload                                                         | Emitted after                                        |
+| --------- | --------------------------------------------------------------- | ---------------------------------------------------- |
+| `work`    | `{scope, workId, topic, state: "queued"\|"removed", changedAt}` | a bus-work row entered or left the queued projection |
+| `task`    | `{scope, taskRunId, status, updatedAt}`                         | a task-run status write committed                    |
+| `session` | `{scope, sessionRunId, status, updatedAt}`                      | a session-run status write committed                 |
+
+- Every event is emitted **after** the transition is persisted. Re-query the matching read method
+  the instant an event lands and you see the new state: a `task` event reports the `status` and
+  `updatedAt` that `tasks.runs.get` already returns, and a `session` event reports what
+  `sessions.runs.get` already returns.
+- `workId` is the raw bus-work id, the same value `tasks.runs.list` reports, never the internal
+  claim handle.
+- `state: "queued"` follows an enqueue that really inserted a row (an idempotent enqueue that
+  inserts nothing emits nothing) and a released claim. `state: "removed"` follows the claim that
+  co-commits the task run.
+- Only registered task topics (`task.<pass id>`) produce `work` events. Arbitrary bus work never
+  does, in either direction.
+- Delivery is best effort. There is no replay, no per-client buffering and no ordering guarantee
+  between scopes, and a client that is not connected misses the event entirely.
+
+### Reconciling a client view
+
+Correctness never depends on receiving an event. Treat `runs.invalidated` purely as a hint to
+refresh:
+
+1. On an event, re-query the view it touches: `tasks.runs.list` for `work`, `tasks.runs.get` or
+   `tasks.runs.list` for `task`, `sessions.runs.get` or `sessions.runs.list` for `session`. A
+   `task` event can also change queued membership, so a client showing both views refreshes both.
+2. On reconnect, re-query before trusting anything cached. A run that reached a terminal state
+   while the socket was down is read back in full from `sessions.runs.get` / `tasks.runs.get`.
+3. Keep a bounded periodic refresh (a slow poll of the visible page, not a tight loop) as the
+   backstop for a dropped event. Keyset pages stay stable for rows whose membership is unchanged,
+   so a refresh at the current cursor is cheap.
+
+### Agent one-shot and session-effect fields
+
+`agent` (`operator.write`) accepts four additive, optional fields that control how much of a turn
+becomes durable. All four are strict: an unknown value is rejected, never accepted and ignored.
+The full rationale lives in the repo at `dev-docs/adr/0073-client-contract-rpc-additions.md`.
+
+| Field                       | Type                          | Scope            |
+| --------------------------- | ----------------------------- | ---------------- |
+| `promptMode`                | `full` \| `minimal` \| `none` | `operator.write` |
+| `modelRun`                  | boolean                       | `operator.write` |
+| `sessionEffects`            | `visible` \| `internal`       | `operator.admin` |
+| `suppressPromptPersistence` | boolean                       | `operator.admin` |
+
+- `promptMode` picks how much of the assembled system prompt the turn gets. `full` is the default
+  for a normal session key, `minimal` drops the conversational sections (reply tags, silent
+  replies, heartbeats, voice, docs, model aliases, user identity), and `none` sends the bare
+  identity line with no sections at all. Omitting it keeps today's behavior, where the mode is
+  derived from the session key (subagent keys already run `minimal`).
+- `promptMode: "none"` requires `modelRun: true`. Without it the call is rejected with
+  `INVALID_REQUEST` and `details.reason = "prompt_mode_none_requires_model_run"`, because a raw
+  prompt must not be able to mutate a durable session.
+- `modelRun: true` is a one-shot run. It reads the session's history but writes nothing back: the
+  transcript and the session store are byte-identical afterwards, no `sessions.changed` is emitted,
+  no `chat` events are broadcast, and nothing is delivered. It is allowed for `operator.write`
+  because it is strictly less effectful than a normal turn.
+- `sessionEffects` defaults to `visible` (today's behavior). `internal` runs the turn with no
+  user-visible session side effect: no outbound delivery, no `sessions.changed`, no `chat` events to
+  other subscribers, and no change to the stored session row (`updatedAt`, tokens, model). The
+  prompt message is not persisted, but the assistant reply is, so the session can resume. The
+  transcript-derived fields `lastMessagePreview` and `derivedTitle` follow that persisted reply;
+  they are read from the transcript, not stored on the row.
+- `suppressPromptPersistence: true` runs the turn without writing the prompt (user) message to the
+  transcript. The assistant reply is persisted as usual unless `sessionEffects` is `internal`.
+- `modelRun: true` with `sessionEffects: "visible"` is rejected
+  (`details.reason = "model_run_requires_internal_session_effects"`); a one-shot run is internal by
+  definition.
+- `sessionEffects: "internal"` or `suppressPromptPersistence: true` from a connection without
+  `operator.admin` is rejected with `INVALID_REQUEST` and
+  `details.reason = "internal_session_effects_reserved"`, and no run is started. Declaring client
+  `mode: "backend"` does not help: client mode is self-asserted on the connect frame, so the scope
+  is the authority.
+- Any of these combined with `deliver: true` is rejected with
+  `details.reason = "delivery_not_allowed_for_internal_session_effects"` rather than silently
+  dropping the delivery.
+- CLI-backed providers own their own transcript, so a turn that would need one of these
+  suppressions on a CLI provider fails the run instead of persisting anyway.
 
 ## Exec approvals
 
