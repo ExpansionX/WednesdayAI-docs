@@ -8,11 +8,12 @@ title: "Logging"
 audience: user
 sources:
   - src/logging/logger.ts
+  - src/logging/levels.ts
   - src/logging/file-log-writer.ts
   - src/config/types.base.ts
   - src/config/zod-schema.ts
   - src/agents/model-payload-log.ts
-generated: 2026-06-20
+generated: 2026-07-30
 ---
 
 # Logging
@@ -49,11 +50,17 @@ You can override this in `~/.openclaw/openclaw.json`:
 
 ### CLI: live tail (recommended)
 
-Use the CLI to tail the gateway log file via RPC:
+Use the CLI to tail the gateway log file:
 
 ```bash
 openclaw logs --follow
 ```
+
+When the Gateway runs on this machine, `--follow` reads the log file directly and keeps
+following across rotation and Gateway restarts. With `gateway.mode: "remote"`, `--url`, or
+`--rpc` it keeps one persistent Gateway RPC session instead. For a long-running terminal tail,
+the lightweight `wednesdayai-logs` bin does the same local follow with a small, flat memory
+footprint. See [`openclaw logs`](/cli/logs).
 
 Output modes:
 
@@ -65,12 +72,12 @@ Output modes:
 
 In JSON mode, the CLI emits `type`-tagged objects:
 
-- `meta`: stream metadata (file, cursor, size)
+- `meta`: stream metadata (file, cursor, size, and `source`: `file` or `gateway`)
 - `log`: parsed log entry
 - `notice`: truncation / rotation hints
 - `raw`: unparsed log line
 
-If the Gateway is unreachable, the CLI prints a short hint to run:
+If the Gateway is unreachable (single fetch or `--rpc`), the CLI prints a short hint to run:
 
 ```bash
 openclaw doctor
@@ -148,6 +155,14 @@ All logging configuration lives under `logging` in `~/.openclaw/openclaw.json`.
 - `logging.level`: **file logs** (JSONL) level.
 - `logging.consoleLevel`: **console** verbosity level.
 
+Both accept one of seven values, least to most verbose:
+
+`silent` → `fatal` → `error` → `warn` → `info` (default) → `debug` → `trace`
+
+Setting a level records that level **and everything less verbose than it**, so `debug` also
+records `info`, `warn`, `error` and `fatal`. `silent` disables the sink entirely. Invalid values
+are ignored with a warning and the default is kept.
+
 You can override both via the **`OPENCLAW_LOG_LEVEL`** environment variable (e.g. `OPENCLAW_LOG_LEVEL=debug`). The env var takes precedence over the config file, so you can raise verbosity for a single run without editing `openclaw.json`. You can also pass the global CLI option **`--log-level <level>`** (for example, `openclaw --log-level debug gateway run`), which overrides the environment variable for that command.
 
 `--verbose` only affects console output; it does not change file log levels.
@@ -209,27 +224,15 @@ compression, queue, and line-retention fields instead.
 - `compact`: tighter output (best for long sessions).
 - `json`: JSON per line (for log processors).
 
-On `pretty` and `compact` (the defaults), structured metadata passed with a log
-call is appended as a dimmed `key=value` suffix after the message, so it reaches
-stdout/stderr and journald — for example
-`[gateway] recovery incident incidentKey=session-restart:abc kind=restart reasonCode=2`.
-Bare-looking strings print unquoted; anything else is JSON-quoted
-(`detail="two words"`). `undefined`, functions, and symbols are omitted. An
-unserializable value prints `"[unserializable]"`. Hostile metadata degrades to
-`[meta unavailable]` rather than throwing. Long values are truncated per key and
-across the whole suffix without splitting a UTF-16 surrogate pair.
+On `pretty` and `compact`, structured metadata passed with a log call is appended as a
+dimmed `key=value` suffix after the message (the same fields the `json` style and JSONL
+file log already include). Operators who read console or journald output can see those
+fields without switching styles. Formatting rules, truncation, and omitted values are
+documented in [Gateway logging](/gateway/logging).
 
-The `json` console style and the JSONL file log already emitted these fields. On
-`json`, each line is one object carrying `time`, `level`, `subsystem`, and
-`message` alongside the metadata fields, and those four envelope fields always
-win: metadata using the same key cannot overwrite what a log shipper routes on.
-Formatting details are also in [Gateway logging](/admin/gateway/logging).
-
-<Warning>
-These fields are now operator-visible on the default styles. Nothing redacts
-them, and the tool-summary redaction below covers tool output, not log metadata.
-Do not put secrets, tokens, or raw credentials in a log call's metadata.
-</Warning>
+On `json`, each line is one object carrying `time`, `level`, `subsystem`, and `message`
+alongside the metadata fields. Those four envelope fields always win: metadata using the
+same key cannot overwrite what a log shipper routes on.
 
 ### Redaction
 
@@ -333,6 +336,28 @@ Queue + session:
 - `session.stuck`: session stuck warning + age.
 - `run.attempt`: run retry/attempt metadata.
 - `diagnostic.heartbeat`: aggregate counters (webhooks/queue/session).
+
+Storage:
+
+- `sqlite_ctx_worker.restart`: SQLite session-storage worker crash, respawn, or give-up
+  (`reason`: `crash` | `respawn` | `give_up`, plus `message`). In-process `onDiagnosticEvent`
+  listeners (plugin SDK) receive this event; the bundled `diagnostics-otel` exporter records it as
+  the `openclaw.sqlite_ctx_worker.restart` counter, tagged with `reason`.
+
+Task pipeline + dream cycle (typed families; builders `taskDiagnostic` / `dreamDiagnostic`):
+
+- `task.started` / `task.completed` / `task.failed` / `task.preempted`
+- `task.budget_deferred` / `task.budget_ceiling_reached` / `task.preemption_ceiling_reached`
+- `task.boundary_violation` / `task.pipeline_disabled` / `task.idle_monitor_disabled`
+- `task.plugin_pass_rejected` / `task.runlog_retention`
+- `task.recovery_exhausted` — boot recovery moved a run to `dlq` (attempt exhaust or age stall)
+- `dream.cycle_started` / `dream.cycle_completed` / `dream.pass_completed` / `dream.stage_skipped`
+- `dream.contemplation_unconfigured` / `dream.contemplation_skipped` / `dream.contemplation_failed`
+- `dream.rate_capped` / `dream.jsonl_parse_skipped` / `dream.fetch_failed`
+- `dream.crystallisation_candidate`
+
+OTel span names and attributes: [Task and dream spans](/diagnostics/otel-langfuse#task-and-dream-spans).
+Recovery ceiling: [Task pipeline](/concepts/tasks#recovery-and-retention).
 
 ### Enable diagnostics (no exporter)
 
@@ -482,6 +507,14 @@ Queues + sessions:
 - `openclaw.session.stuck`
   - `openclaw.state`, `openclaw.ageMs`, `openclaw.queueDepth`,
     `openclaw.sessionKey`, `openclaw.sessionId`
+- `openclaw.task.*` / `openclaw.dream.*` (one span per diagnostic type)
+  - Task: `openclaw.task.action`, `.id`, `.run_id`, `.stage`, `.attempts`,
+    `.reason`, `.error`, `.duration_ms`
+  - Dream: `openclaw.dream.action`, `.cycle_fingerprint`, `.stage`, `.pass_id`,
+    `.reason`, `.cap`
+  - Error status on `task.failed`, `task.recovery_exhausted`,
+    `task.boundary_violation`, `dream.contemplation_failed`, `dream.fetch_failed`
+  - Full tables: [Task and dream spans](/diagnostics/otel-langfuse#task-and-dream-spans)
 
 ### Sampling + flushing
 
@@ -516,3 +549,7 @@ Queues + sessions:
 - **Logs empty?** Check that the Gateway is running and writing to the file path
   in `logging.file`.
 - **Need more detail?** Set `logging.level` to `debug` or `trace` and retry.
+- **Set `debug` but the file log looks no more detailed?** Upgrade to the latest release. In
+  releases up to and including 0.4.10 the levels more verbose than `info` were applied inverted, so
+  `debug` behaved as `warn` and `trace` as `error`, and the extra records were discarded on the way
+  to the file. `info` was unaffected, which is why the default always looked correct.

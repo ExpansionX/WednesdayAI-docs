@@ -1,5 +1,5 @@
 ---
-summary: "CLI reference for `openclaw logs` (tail gateway logs via RPC)"
+summary: "CLI reference for `openclaw logs` (tails the local file by default when following; `--rpc` forces the Gateway)"
 read_when:
   - You need to tail Gateway logs remotely (without SSH)
   - You want JSON log lines for tooling
@@ -8,7 +8,22 @@ title: "logs"
 
 # `openclaw logs`
 
-Tail Gateway file logs over RPC (works in remote mode).
+Tail Gateway file logs. A single fetch (no `--follow`) always goes over the Gateway RPC.
+
+`--follow` reads the local log file directly when the Gateway runs on this machine, so it
+doesn't touch Gateway/config state on every poll. It falls back to a persistent Gateway RPC
+session when the local file isn't readable here, `gateway.mode` is `"remote"`, `--url` (or
+`OPENCLAW_GATEWAY_URL`/`CLAWDBOT_GATEWAY_URL`) points elsewhere, or `--rpc` is passed. A
+Gateway restart during `--follow --rpc` doesn't stop the tail: failed polls back off (1s,
+doubling up to 30s) and retry on the same session.
+
+If the config fails to load, `--follow` still tails the local log file (it only needs the
+`logging` section); the non-follow fetch and `--rpc` still report the config error.
+
+Piping a follow into a command that exits early (for example `| head -5`) stops the tail as
+soon as a write reports the closed pipe, even while the log is idle. If the reader exits after
+the last line written, the follower only notices on its next write, the same as `tail -f`
+without poll support.
 
 Related:
 
@@ -19,6 +34,7 @@ Related:
 ```bash
 openclaw logs
 openclaw logs --follow
+openclaw logs --follow --rpc
 openclaw logs --json
 openclaw logs --limit 500
 openclaw logs --local-time
@@ -26,3 +42,25 @@ openclaw logs --follow --local-time
 ```
 
 Use `--local-time` to render timestamps in your local timezone.
+Use `--rpc` to force `--follow` through the Gateway even when the local log file is readable.
+
+## `wednesdayai-logs` (lightweight bin)
+
+`wednesdayai-logs` is a separate, minimal binary for following the local log file. It skips
+the full CLI (no `commander`, no plugin/config validation, no Gateway RPC stack) and reads only
+the `logging` section of your config to find the file. Its memory stays flat over long-running
+sessions, and it keeps following across Gateway restarts and log rotation. Use it in place of a
+`while true; do openclaw logs --follow; done` wrapper loop.
+
+```bash
+wednesdayai-logs
+wednesdayai-logs --file ~/.openclaw/logs/gateway.log
+wednesdayai-logs --json
+wednesdayai-logs --plain --interval 500
+ssh user@gateway-host tail -F ~/.openclaw/logs/gateway.log | wednesdayai-logs --stdin
+```
+
+Flags: `--file <path>`, `--interval <ms>`, `--limit <n>`, `--max-bytes <n>`, `--json`, `--plain`,
+`--no-color`, `--local-time`, `--stdin`, `--profile <name>`. There's no `--rpc`/`--follow` (it
+always follows the local file) and no gateway fallback; run `openclaw logs --follow` instead
+when the log file isn't local or isn't readable.
