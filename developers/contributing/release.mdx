@@ -91,12 +91,12 @@ Do **not** touch `appcast.xml` version here — that is updated in step 5 (macOS
 The npm rail is `.github/workflows/npm-publish.yml` (trusted publishing through the `npm-publish` GitHub environment; npm ≥ 11.15.0 staged publishing for stable).
 
 - [ ] On release creation, the `dispatch-stable-stage` job in `release-please.yml` automatically dispatches npm-publish stable staging with `release_tag` and `source_sha` resolved from the final tag SHA (release-please may heal derived versions and move the tag before this runs). No human dispatch is needed for the normal flow.
-- [ ] Run `npm stage list` to find the stage IDs for the release versions of `@wednesdayai/whatsapp` and `wednesdayai`. Approve each separately with `npm stage approve <stage-id>` (2FA required). This approval gate is intentionally human.
-- [ ] After approval, dispatch verification: `gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha> -f verify_approved=yes`.
+- [ ] Run `npm stage list` to find the stage IDs for the release versions of `@wednesdayai/whatsapp` and `wednesdayai`. Approve only packages for which staging created a stage, each separately with `npm stage approve <stage-id>` (2FA required). Skip approval for a package already live. This approval gate is intentionally human.
+- [ ] After all created stages are approved, dispatch verification: `gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha> -f verify_approved=yes`. Verification checks both packages, including any skipped package, against the recorded pack integrities and installed pair.
 - [ ] Verify the registry: `npm view wednesdayai version`, `npm view wednesdayai dist-tags`, `npm view @wednesdayai/whatsapp version`, `npm view @wednesdayai/whatsapp dist-tags`, and `npx -y wednesdayai@X.Y.Z --version` (or `--help`).
 - [ ] The scheduled `npm-parity` watchdog backstops this list: it opens or updates a tracking issue when a release tag has no registry counterpart or the dev rail stalls. Treat its issue as release debt, not noise.
 
-Stable publication stages `@wednesdayai/whatsapp` and then `wednesdayai` with `npm stage publish` in the same `stable` job (a package already live at that version is skipped), then stops for maintainer approval of both stages. Dev publication publishes WhatsApp, then core, directly to the `dev` dist-tag. Registry mutations name an exact sealed tarball — automation never publishes a working directory and never administers stages or dist-tags through OIDC.
+Stable publication stages `@wednesdayai/whatsapp` and then `wednesdayai` with `npm stage publish` in the same `stable` job (a package already live at that version is skipped), then stops for maintainer approval of any created stages. Dev publication publishes WhatsApp, then core, directly to the `dev` dist-tag. Registry mutations name an exact sealed tarball — automation never publishes a working directory and never administers stages or dist-tags through OIDC.
 
 ### Missed release (tag exists, registry does not)
 
@@ -104,9 +104,11 @@ If a release tag was created but the stable publish never landed (for example `v
 
 ```bash
 gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha>
-# maintainer: find the release's stage IDs, then approve each staged package
+# maintainer: approve only packages for which staging created a stage
 npm stage list
+# If the WhatsApp stage exists:
 npm stage approve <whatsapp-stage-id>
+# If the core stage exists:
 npm stage approve <core-stage-id>
 gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha> -f verify_approved=yes
 npm view wednesdayai@X.Y.Z version && npm view @wednesdayai/whatsapp@X.Y.Z version
