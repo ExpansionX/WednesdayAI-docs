@@ -1,115 +1,136 @@
 ---
 title: "Contributing"
-description: "How to contribute to WednesdayAI: setup, checks, PR workflow, and maintainer guidelines."
+description: "How to contribute to WednesdayAI: workflow, dev setup, and the PR gate."
 audience: developer
 ---
 
-# Contributing
+Welcome! WednesdayAI is a hard fork of OpenClaw at `v2026.3.2`, maintained by [ExpansionX Partners](https://www.expansionx.com.au) and the open-source community. The fork exists because we needed a **stable foundation** to build on — one where breaking changes stay out of core and extensions are how you add power.
 
-WednesdayAI welcomes contributions — bug fixes, new plugins, channel adapters, hook packs, and documentation.
+## Quick Links
 
-## Before you start
+- **GitHub:** https://github.com/ExpansionX/WednesdayAI-core
+- **Docs:** https://docs.wednesdayai.dev
+- **Discord:** https://discord.gg/wednesdayai
+- **Vision, roadmap, architecture:** `VISION.md`, `ROADMAP.md`, `ARCHITECTURE.md` (repo root)
+- **Domain vocabulary:** `CONTEXT.md`
+- **Brand guidelines:** `docs/brand/BRAND-GUIDELINES.md`
 
-Read [CONTRIBUTING.md](https://github.com/ExpansionX/WednesdayAI-core/blob/main/CONTRIBUTING.md) for the full guide. Key points:
+## Maintainers
 
-- **Fork philosophy:** lean core, highly extensible. If it can be a plugin, it should be.
-- **Stability over features:** we prefer a stable, well-tested core over feature parity with upstream openclaw.
-- **Extension scope:** new extensions use `@wednesdayai/*`, not `@openclaw/*`.
-- **Plugin version pinning:** bundled extensions carry **no** `openclaw` peer dependency — fork-base compatibility is expressed by our SemVer version and the `forkBase` marker in `dist/build-info.json` (ADR 0005). Third-party plugins target our published SemVer, never an upstream `2026.x` range.
+- **David Rudduck** — ExpansionX Partners, project lead
+  - GitHub: [@davidrudduck](https://github.com/davidrudduck) · Email: [hello@expansionx.com.au](mailto:hello@expansionx.com.au)
 
-## Setup
+We're a small team. If you want to take on a maintenance role, see [Becoming a Maintainer](#becoming-a-maintainer) below.
+
+## Fork Philosophy
+
+WednesdayAI does not track upstream OpenClaw wholesale: upstream is a read-only reference, changes are cherry-picked on their merits, and stability beats feature parity. The reasoning lives in `VISION.md`.
+
+**Naming:** use **WednesdayAI** in docs, headings, and user-facing text. The npm package, CLI binary, and plugin SDK import (`wednesdayai/plugin-sdk`) are `wednesdayai`; `openclaw` remains a permanent backward-compatible alias for all of them. Config keys, `OPENCLAW_*` environment variables, and internal code identifiers stay `openclaw`. The decision is recorded in ADR 0030 (`dev-docs/adr/0030-wednesdayai-namespace-primary.md`).
+
+## Development Principles
+
+These apply to every change, human- or agent-authored.
+
+1. **Reuse before you build.** If a maintained package already solves the problem, use it, especially if it's already in the stack. Check `package.json` first. Don't hand-roll parsers, protocol clients, date or URL handling, retry logic, and similar. Adding a new dependency needs a reason (maintenance, license, size, security surface); reusing an existing one needs none.
+2. **Fix the class, not the instance.** If the same component produces a second bug of the same kind, stop patching cases and replace the approach. Regex over structured formats (Markdown, HTML, YAML, shell) is the usual culprit: use a real parser.
+3. **Tests assert causes, not guesses.** Assert on signals that prove behavior (state, emitted events, attributes the app already exposes, controlled timers), not on heuristics such as request shape, timing windows, or sleeps.
+4. **Scope serves the outcome.** A change delivers its stated goal plus anything needed for a working build. Adjacent improvements and findings that don't affect correctness, security, or the build go into tracked follow-up issues, not the same PR.
+5. **Reviews block on in-scope correctness and security.** Style, polish, and out-of-scope edge cases are non-blocking comments or follow-ups. Approve a change once it improves the codebase; don't hold it for perfection.
+6. **Prefer boring and small.** Simplest design that meets the requirement. Less code and fewer moving parts beat clever generality.
+
+## Current Priorities
+
+What we are working on now is tracked in `ROADMAP.md` (see its current-focus section). Check [GitHub Issues](https://github.com/ExpansionX/WednesdayAI-core/issues) for `good first issue` labels.
+
+## How to Contribute
+
+1. **Bugs and small fixes** → open a PR directly
+2. **New features or architecture changes** → open a [GitHub Discussion](https://github.com/ExpansionX/WednesdayAI-core/discussions) or ask in Discord first
+3. **Plugin / extension work** → follow the plugin SDK contract in `src/plugin-sdk/`; see the extension rules in `extensions/AGENTS.md`
+4. **Questions** → [Discord](https://discord.gg/wednesdayai)
+
+## Set up a dev environment
+
+Requires Node.js ≥ 24 and pnpm.
 
 ```bash
 git clone https://github.com/ExpansionX/WednesdayAI-core.git
 cd WednesdayAI-core
+
 pnpm install
+pnpm ui:build
 pnpm build
-pnpm test:fast    # verify baseline passes
+
+pnpm openclaw onboard --install-daemon
+
+# Dev loop (auto-reload on TS changes)
+pnpm gateway:watch
 ```
 
-## Development workflow
+`pnpm openclaw` runs the CLI from source through `scripts/run-node.mjs`. Per-topic guides:
 
-<Steps>
-  <Step title="Create a branch from main">
-    Branch first — do not work directly on `main`.
-  </Step>
-  <Step title="Write tests first">
-    TDD is preferred. Colocate `*.test.ts` next to the source.
-  </Step>
-  <Step title="Implement the change">
-    Keep changes scoped; do not bundle unrelated refactors.
-  </Step>
-  <Step title="Run checks before committing">
-    ```bash
-    pnpm tsgo          # native TypeScript checker — must exit 0
-    pnpm check         # format check + tsgo + lint
-    pnpm test:fast     # unit tests
-    pnpm build         # full build
-    ```
-  </Step>
-  <Step title="Commit with the committer script">
-    ```bash
-    scripts/committer "feat(plugin-sdk): add ToolContext type" src/plugin-sdk/types.ts
-    ```
-    Use Conventional Commit format: `type(scope): description`.
-  </Step>
-  <Step title="Open a PR">
-    Use the template in `.github/pull_request_template.md`.
-  </Step>
-</Steps>
+- [Coding style](/developers/contributing/coding-style)
+- [Testing](/developers/contributing/testing)
+- [Secure development](/developers/contributing/secure-development)
+- [Performance](/developers/contributing/performance)
+- [Documentation](/developers/contributing/documentation)
+- [Release](/developers/contributing/release)
 
-<Warning>
-  `pnpm tsgo` **must exit 0** before you commit. The native checker is the source of truth
-  for type correctness; a green editor is not sufficient.
-</Warning>
+## Before you PR
 
-## Documentation requirements
+Run the full local gate:
 
-WednesdayAI tracks completed work in two places. Both are required **for new features** and committed with the PR branch:
+```bash
+pnpm check        # format, type-check, lint, custom lint scripts
+pnpm build
+pnpm test
+pnpm check:docs   # docs format, lint, and link audit
+```
 
-- **Dev log** — create `dev-docs/logs/YYYY-MM-DD-<feature-slug>.md` (Summary / Goal / Changes / Impact / Benefits / References). The logs are flat and dated; see `dev-docs/STRUCTURE.md` in the core repo for the format.
-- **CHANGELOG entry** — add a pointer record to `dev-docs/CHANGELOG.md` (the narrative index) linking to the dev log. The release `CHANGELOG.md` is generated by release-please from Conventional Commits — do not hand-edit it.
+Keep PRs focused — one concern per PR; do not mix unrelated refactors. Describe **what** changed and **why**. Fill in the PR template (`.github/pull_request_template.md`).
 
-Bugfix-only PRs need only a CHANGELOG entry (no dev log required unless the fix is complex).
+For commits, use the `scripts/committer` helper and Conventional Commit messages:
 
-## PR checklist
+```sql
+feat(channels): add IRC reconnect backoff
+fix(gateway): correct token persistence on CLI override
+docs(contributing): update fork identity
+```
 
-Before opening a PR, verify:
+## Extension Development
 
-- [ ] `pnpm tsgo` exits 0
-- [ ] `pnpm build && pnpm check && pnpm test` pass
-- [ ] Fork philosophy: lean core, stable contracts, correct naming
-- [ ] If new extension: `@wednesdayai/*` scope, plugin-sdk contract, no `openclaw` peer pin (ADR 0005), no `workspace:*` in `dependencies`
-- [ ] If touching plugin-sdk exports: no `any`, no breaking changes without a migration path
-- [ ] User-facing changes described in commit messages (release-please generates `CHANGELOG.md`)
-- [ ] Dev log created for new features at `dev-docs/logs/YYYY-MM-DD-<slug>.md` (pointer added to `dev-docs/CHANGELOG.md`)
-- [ ] AI-assisted PRs marked as such in the title or description
+Bundled extensions follow the rules in `extensions/AGENTS.md`.
 
-## Review criteria
+## AI-Assisted PRs Welcome
 
-PRs are evaluated against the **fork philosophy**:
+Built with Claude, Codex, or other AI tools? Great — just mark it.
 
-1. **Lean core** — does this add to core, or could it be a plugin/hook/SDK extension?
-2. **Stable contracts** — does this change public plugin-sdk, hook, or gateway API? If so, is there a migration path?
-3. **Naming** — user-facing text uses `WednesdayAI`; code/config/imports use `openclaw`.
-4. **Extension scope** — new WednesdayAI-native extensions use `@wednesdayai/*`.
+Please include in your PR:
 
-## Cherry-picks from upstream openclaw
+- [ ] Mark as AI-assisted in the PR title or description
+- [ ] Note the degree of testing (untested / lightly tested / fully tested)
+- [ ] Include prompts or session logs if useful
+- [ ] Confirm you understand what the code does
 
-We selectively adopt changes from upstream openclaw. The bar:
+AI PRs are first-class citizens here. We ask for transparency so reviewers know what to look for.
 
-1. Does it improve **stability** or **extensibility**?
-2. Does it touch core contracts (plugin-sdk, hooks, gateway, routing)? If so, a detailed stability rationale is required.
-3. Does it add platform-specific dependencies that belong in a transport integration?
+## Becoming a Maintainer
 
-Propose a cherry-pick in an issue before opening a PR. We decline wholesale upstream rewrites.
+We're selectively expanding the maintainer team. If you're an experienced contributor who wants to help shape WednesdayAI's direction — through code, docs, or community — we'd like to hear from you.
 
-## Reporting security issues
+Being a maintainer is a responsibility, not an honorary title. We expect active, consistent involvement: triaging issues, reviewing PRs, and helping move the project forward.
 
-Report security vulnerabilities via [GitHub Security Advisories](https://github.com/ExpansionX/WednesdayAI-core/security/advisories) or email `security@expansionx.com.au`. Do not post publicly before a fix is ready. See [SECURITY.md](https://github.com/ExpansionX/WednesdayAI-core/blob/main/SECURITY.md) for the trust model and what qualifies as a vulnerability.
+Email [hello@expansionx.com.au](mailto:hello@expansionx.com.au) with:
 
-## Getting help
+- Links to your PRs on WednesdayAI (if you don't have any yet, start there first)
+- Links to open source projects you maintain or actively contribute to
+- Your GitHub and Discord handles
+- A brief intro: background, experience, and areas of interest
+- How much time you can realistically commit
 
-- **Issues:** [github.com/ExpansionX/WednesdayAI-core/issues](https://github.com/ExpansionX/WednesdayAI-core/issues)
-- **Discussions:** GitHub Discussions on the repo
-- **Contact:** hello@expansionx.com.au for maintainer discussions
+We review every application carefully and add maintainers slowly and deliberately. Please allow a few weeks for a response.
+
+## Report a Vulnerability
+
+Report vulnerabilities privately via GitHub Security Advisories or email [security@expansionx.com.au](mailto:security@expansionx.com.au). Reporting requirements and the trust model are in `SECURITY.md`.

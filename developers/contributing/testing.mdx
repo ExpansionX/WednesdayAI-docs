@@ -1,0 +1,63 @@
+---
+description: "Testing policy: frameworks, coverage thresholds, which suite to run, and how to add regressions"
+summary: "Testing policy: frameworks, coverage thresholds, which suite to run, and how to add regressions"
+read_when:
+  - Writing or changing tests
+  - Deciding which suite or command to run
+  - Fixing a bug and adding a regression test
+title: "Testing policy"
+audience: developer
+---
+
+# Testing policy
+
+This guide owns the testing policy. For lanes, worker settings and environment variables, see [Tests](/developers/reference/test). For the live, Docker and provider test kit, see [Testing kit](/users/help/testing).
+
+## Policy
+
+- **Framework**: Vitest 4 with V8 coverage.
+- **Naming**: `*.test.ts` colocated with the source. End-to-end tests use `*.e2e.test.ts`.
+- **Thresholds**: `vitest.config.ts` sets global coverage thresholds of 70% for lines, functions and statements, and 55% for branches.
+- **Coverage run**: `pnpm test:coverage` runs `vitest.unit.config.ts` with coverage, so only the unit suite counts toward the thresholds.
+- **Stubs**: prefer per-instance stubs over `SomeClass.prototype.method = ...` unless you document why.
+- **Environment**: use `vi.stubEnv()` scoped per test.
+- **Workers**: do not set the worker count above 16. It has been tried.
+- **Reachability over isolation**: a test that mocks past the dispatch or routing seam, by calling the changed function directly, proves the unit. It does not prove the unit is reached on the real path. For any bugfix or behavior change, add at least one test that drives the real entry point, and assert the original symptom (for example, "N completions to 1 turn") rather than only an internal return value. An isolation-only green suite once hid a dead-code feature (ADR 0006).
+
+## Commands
+
+| Command                | What it runs                                                                                  |
+| ---------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm test`            | Script policy suites, then every default-on lane through `scripts/test-parallel.mjs`          |
+| `pnpm test:fast`       | Unit suite only (`vitest.unit.config.ts`)                                                      |
+| `pnpm test:coverage`   | Unit suite with V8 coverage                                                                    |
+| `pnpm test:e2e`        | Gateway end-to-end smoke (needs `pnpm build` first)                                            |
+| `pnpm test:live`       | Live provider tests. The script sets `OPENCLAW_LIVE_TEST=1` and `CLAWDBOT_LIVE_TEST=1` itself |
+
+On memory-constrained hosts, run `OPENCLAW_TEST_PROFILE=low OPENCLAW_TEST_SERIAL_GATEWAY=1 pnpm test`.
+
+Docker runners: `pnpm test:docker:live-models`, `pnpm test:docker:live-gateway`, and the onboarding end-to-end run `pnpm test:docker:onboard`. See [Testing kit](/users/help/testing) for details.
+
+## Which suite should I run?
+
+- Editing logic or tests: run `pnpm test`, and `pnpm test:coverage` if you changed a lot. That already includes core, channels, extensions, gateway and e2e unless you opt a lane out.
+- Debugging a single e2e file: run `pnpm test:e2e` or pass a path. Do not treat a missing e2e section in a failed `pnpm test` log as proof that e2e was skipped. The runner may have aborted after an earlier lane.
+- Debugging "my bot is down", provider-specific failures, or tool calling: run a narrowed `pnpm test:live`.
+
+If `pnpm test` flakes on a loaded host, rerun once before treating it as a regression, then isolate with `pnpm vitest run <path/to/test>`.
+
+## Adding regressions
+
+When you fix a provider or model issue discovered in live:
+
+- Add a CI-safe regression if possible. Use a mock or stub provider, or capture the exact request-shape transformation.
+- If the issue is inherently live-only (rate limits, auth policies), keep the live test narrow and opt-in through environment variables.
+- Prefer the smallest layer that catches the bug:
+  - Provider request conversion or replay bug: a direct models test.
+  - Gateway session, history or tool pipeline bug: a gateway live smoke or a CI-safe gateway mock test.
+
+## Related
+
+- [Tests](/developers/reference/test)
+- [Testing kit](/users/help/testing)
+- [Coding style](/developers/contributing/coding-style)

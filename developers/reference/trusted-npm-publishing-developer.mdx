@@ -1,0 +1,126 @@
+---
+audience: developer
+component: release/trusted-npm-publishing
+sources:
+  - package.json
+  - scripts/release-check.ts
+  - scripts/npm-publish/invocation.ts
+  - scripts/npm-publish/candidate-state.ts
+  - docs/superpowers/specs/2026-08-21-npm-trusted-publishing.md
+generated: 2026-08-26
+title: "Trusted npm publishing for contributors"
+summary: "Contracts for the deterministic npm publish rail, release-check, and what not to add"
+---
+
+# Trusted npm publishing for contributors
+
+The trusted-publishing rail lives under `scripts/npm-publish/` and ships as `.github/workflows/npm-publish.yml`: dev publishes on every eligible push to `main` (pushes touching only `docs/**`, `dev-docs/**`, or root-level `*.md` files are skipped by the workflow's paths-ignore); stable staging runs on `workflow_dispatch` and is auto-dispatched on release creation by the `dispatch-stable-stage` job in `release-please.yml` (the `npm stage approve` step stays human). Do not add a second publish path.
+
+Compatibility target: Node.js `>=24.0.0`. Planned publication jobs also require npm `>=11.15.0`. Current package version is `0.4.11` from `package.json`.
+
+## Publication contract
+
+```ts
+export type InvocationContext = Readonly<{
+  repository: "ExpansionX/WednesdayAI-core";
+  workflow: "npm-publish.yml";
+  environment: "npm-publish";
+  registry: "https://registry.npmjs.org/";
+  ref: "refs/heads/main";
+  sourceSha: string;
+  mode: "stable" | "dev" | "recover";
+  packages: readonly ["@wednesdayai/whatsapp", "wednesdayai"];
+}>;
+```
+
+`validateInvocation()` accepts only that identity. Forks, pull requests, arbitrary branches, caller-selected package names, OTP inputs, and registry substitution fail before candidate work.
+
+Package order is fixed:
+
+| Direction               | Order                                       |
+| ----------------------- | ------------------------------------------- |
+| Forward publish / stage | `@wednesdayai/whatsapp`, then `wednesdayai` |
+| Rollback                | `wednesdayai`, then `@wednesdayai/whatsapp` |
+
+Stable states are `sealed` → `whatsapp-staged` → `whatsapp-published` → `core-staged` → `core-published` → `verified` → `github-promoted`. Automation stages WhatsApp and stops. A maintainer approves the npm stage interactively. Core may be staged only after WhatsApp is published and verified.
+
+## release-check
+
+`pnpm release:check` maps to `scripts/release-check.ts`.
+
+| Invocation                                            | What it checks                                                                                                                        | What it must not do          |
+| ----------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------- |
+| no arguments                                          | root identity (`wednesdayai` bins `wednesdayai` + `openclaw`), plugin versions, Sparkle floors, plugin-sdk exports, WhatsApp metadata | run `npm pack`               |
+| `--sealed-inventory <path> --sealed-inventory <path>` | two sealed pack inventories (core then WhatsApp file lists, names, versions)                                                          | invent a third argument form |
+
+WhatsApp metadata required by the static check:
+
+- name `@wednesdayai/whatsapp`
+- not `private`
+- repository `git+https://github.com/ExpansionX/WednesdayAI-core.git`
+- extension entry `./dist/index.js`
+- runtime deps `@whiskeysockets/baileys` and `qrcode-terminal`
+
+## Identifiers and versions
+
+Shared identifier grammar is `/^[a-z0-9][a-z0-9._-]{0,127}$/` plus a bounded colon campaign form. Dev versions use `git describe --abbrev=40`. Do not invent a shorter abbrev or a second grammar.
+
+Baseline verification is two-layer and nonrecursive: a semantic checksum plus separately downloaded durable metadata (Release ID, logical/physical asset names, physical SHA-256). Embedded self-hash `durable` is rejected.
+
+Artifact retrieval, hash verification of downloaded bytes, and receipt append belong to Task 025 / the CLI router. Do not add them to Task 013 or to `release-check`.
+
+## What not to do
+
+```ts
+// Do not restore pack to the no-argument release check.
+export function main(argv = process.argv.slice(2)) {
+  if (argv.length === 0) {
+    runNpmPack(); // rejected: Task 002 is static-only
+  }
+}
+```
+
+```ts
+// Do this instead: no-argument path stays static.
+export function main(argv = process.argv.slice(2)) {
+  if (argv.length === 0) {
+    checkPackageIdentity();
+    checkPluginVersions();
+    checkAppcastSparkleVersions();
+    checkPluginSdkExports();
+    return;
+  }
+}
+```
+
+Avoid:
+
+- Adding `npm publish` or `npm stage publish` outside `npm-publish.yml`.
+- Publishing a working directory instead of an exact sealed tarball.
+- Administering stages or dist-tags through OIDC.
+- Moving or reusing a release tag.
+- Treating `NPM_TOKEN` as the long-term publisher. Traditional credentials remain only until live canaries pass.
+
+## Deployment artifact parity and vendoring
+
+Every deployment must reference a reproducible artifact: either a published immutable registry version, or a vendored tarball with a recorded provenance manifest. A bare source build with no record is not a parity-pinable deployment.
+
+1. **Prefer registry artifacts.** For stable deployments, install `wednesdayai@<X.Y.Z>` (immutable once published). For main-adjacent commits, install the `dev` dist-tag and confirm the artifact was built from the intended commit: `tar -xOf wednesdayai-<v>.tgz package/dist/build-info.json` and check `commit` equals the full SHA you expect.
+2. **Otherwise vendor from the exact deployment commit.** When no registry artifact matches (branch-built deployments), build at the pinned commit and record provenance:
+
+   ```bash
+   git checkout <full-sha>
+   pnpm install --frozen-lockfile
+   OPENCLAW_BUILD_CHANNEL=<stable|dev> pnpm build
+   npm pack --json
+   ```
+
+   Record a provenance manifest: package name, canonical version, full source SHA, channel, tarball filename, `integrity` (sha512 from `npm pack --json`), size, and `builtAt` from `dist/build-info.json`. Pin downstream via the tarball path/URL plus its integrity — `npm install <tarball>` records the integrity in the lockfile, giving downstream pins the same immutability as a registry version. Docker source builds must pass `GIT_COMMIT` and `OPENCLAW_BUILD_CHANNEL` explicitly (`.dockerignore` excludes `.git`; an unset commit breaks provenance).
+
+3. **Contract.** The `npm-parity` scheduled watchdog flags tags without registry counterparts and a stalled dev rail, but it cannot see untracked hand-built deployments — the vendoring manifest above is the only sanctioned form for those.
+
+## Related
+
+- [Release checklist](/developers/contributing/release)
+- [How WednesdayAI updates reach you](/admin/install/trusted-npm-publishing-user)
+- [Release channels](/admin/install/development-channels)
