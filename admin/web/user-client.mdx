@@ -196,9 +196,11 @@ and those are deliberately not on the narrow `operator.sessions.write` allowlist
 connects with (ADR 0077), so the gateway would refuse them. Voice is tracked in GitHub #650; a
 release note will say when it ships.
 
-The Runs panel likewise depends on gateway configuration outside `config.json`: it needs SQLite
-or Postgres session storage (`session.storage.backend`). On the default JSONL backend the panel
-shows an explanatory unavailable message instead of live data - see
+The Runs panel likewise depends on gateway configuration outside `config.json`: its queued and task
+lists need SQLite or Postgres session storage (`session.storage.backend`). On the default JSONL
+backend those lists show an explanatory unavailable message. The session runs list still shows the
+chats that are streaming a reply right now (the gateway merges live runs into `sessions.runs.list`,
+see [Protocol](/gateway/protocol)), but keeps no history - see
 [Using the web client](/web/using-the-web-client#check-on-runs).
 
 Example:
@@ -215,6 +217,59 @@ Example:
 
 Unknown keys are rejected, not ignored: the client shows a configuration error instead of starting
 half-configured.
+
+## What the client needs from the gateway
+
+The client connects with exactly two scopes, `operator.sessions.read` and `operator.sessions.write`,
+which its setup code mints and its device token is bound to (see
+[Protocol](/gateway/protocol#client-identity)). It never holds `operator.read`, `operator.write` or
+`operator.admin`, so the gateway refuses every method outside the two allowlists below with
+`missing scope`. The sources of truth are `NARROW_SESSION_READ_METHODS` and
+`NARROW_SESSION_WRITE_METHODS` in `src/gateway/method-scopes.ts`; see
+[Narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist) for the full lists.
+
+Methods the client calls with `operator.sessions.read`:
+
+| Method                                                                                              | What it powers                                                                                                                |
+| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `status`, `models.authStatus`                                                                       | Start-up checks: the connection is alive, and the gateway has a model provider credential                                     |
+| `agents.list`                                                                                       | The assistant picker, the sidebar's assistants and their colours                                                              |
+| `models.list`                                                                                       | The model menu, the new chat picker's model choice, and whether Think is available for the chat's model                       |
+| `sessions.list`                                                                                     | The chat list, with the assistant filter, search and paging                                                                   |
+| `sessions.describe`                                                                                 | The open chat's own row: title, model and Think level                                                                         |
+| `sessions.subscribe`                                                                                | Live `sessions.changed` events, so the list refreshes when another device changes a chat                                      |
+| `chat.history`                                                                                      | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere |
+| `sessions.runs.list`, `sessions.runs.get`, `tasks.runs.list`, `tasks.runs.get`, `tasks.runs.events` | The Runs panel                                                                                                                |
+
+Methods the client calls with `operator.sessions.write`:
+
+| Method                   | What it powers                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.send`              | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`) |
+| `chat.abort`             | Stop                                                                                                                                              |
+| `sessions.create`        | New chat, for the chosen assistant and optionally a model                                                                                         |
+| `sessions.steer`         | Queueing a message behind a streaming reply (`queue`) and Send now (`inject`)                                                                     |
+| `sessions.patch`         | Rename, model, Think and Show reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
+| `sessions.title.prepare` | Suggest a title                                                                                                                                   |
+
+Gateway settings that decide what users can do with those methods:
+
+- **Models.** `agents.defaults.models` bounds the model menu and what `sessions.patch` and
+  `sessions.create` accept. Set it before you expose the client: left empty, the menu lists the whole
+  catalog and any `provider/model` reference that parses is accepted. See
+  [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor).
+- **Assistants.** The picker lists the agents the gateway's `agents.list` method returns: every
+  `agents.list` entry in config plus the default agent, or, with none configured, the default agent
+  plus each agent directory under the gateway state directory. `identity.name` and `identity.color`
+  set how each one looks; an assistant with no colour gets a stable one derived from its id.
+- **Suggest a title.** Each use sends the chat's first message (up to 1000 characters) to the
+  assistant's default model - the agent's configured model, not the model picked for the chat. The
+  limit is 3 calls per 60 seconds per device and address, and it cannot be changed.
+- **Reach.** A paired client can read, send to and change the four `sessions.patch` settings of any
+  session on the gateway, including channel and sub-agent sessions; per-session ownership does not
+  exist yet (ADR 0077 section 5, ADR 0081). Pair only people who should have that reach.
+
+Queueing, Send now, replies and the notice that a chat changed elsewhere need no gateway setting.
 
 ## Themes and appearance
 
@@ -237,18 +292,24 @@ sidebar. You do not configure them; there is no `config.json` or gateway setting
   contrast, text on accent-coloured fills switches to dark for legibility.
 - Entrance animation is skipped when the browser's `prefers-reduced-motion` is set.
 - Colours and fonts (Inter, Space Grotesk and JetBrains Mono) are bundled with the client and
-  served from the same base path, so a deployment needs no font CDN or extra CSP entry. They come
-  from the same shared token package as the [Control UI](/web/control-ui); developers see
-  [Brand tokens](/reference/brand-tokens).
+  served from the same base path, so a deployment needs no font CDN. The host's
+  `Content-Security-Policy` still has to allow them: `font-src 'self'` is enough (see
+  [Rules the host must follow](#rules-the-host-must-follow)). They come from the same shared token
+  package as the [Control UI](/web/control-ui); developers see [Brand tokens](/reference/brand-tokens).
 
 ## What users see that is not live yet
 
-Some controls are drawn but switched off, with a tooltip naming the release phase that enables them
-(for example "Canvas - coming in phase P4"). Selecting one sends nothing to the gateway. They are:
-the model menu, **Canvas**, **Search chats**, other assistants and **Browse assistants**, **Search**
-and **Think** in the message box, **Dictate**, **Voice mode**, **Settings**, **Keyboard shortcuts**,
-and the **Read aloud**, **Feedback** and **Regenerate** actions on replies. **Calendar**, **Memory**
-and **Add extension** cite the extension panel roadmap item (GitHub #634) instead of a phase.
+Some controls are drawn but switched off, with a tooltip naming the release phase (or a tracked
+finding) that enables them (for example "Canvas — coming in phase P4"). Selecting one sends nothing
+to the gateway. They are: **Canvas** in the top bar; **Search**, **Dictate** and **Voice mode** in
+the message box; the **Read aloud**, **Feedback** and **Regenerate** actions on replies; **Settings**
+and **Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and **Add extension** cite
+the extension panel roadmap item (GitHub #634) instead of a phase; **Feedback**, **Regenerate**,
+**Settings**, **Keyboard shortcuts** and the message-box **Search** cite their own tracked finding
+(GitHub #696-#700) instead. The assistant picker, per-assistant colour, chat filter and search,
+paging past the first page, the model switcher and Think, queue/steer while a reply streams,
+rename and Suggest, and replying to a message are live (client-chat-v3 P2); see
+[Using the web client](/web/using-the-web-client) for what users see.
 
 They are not gated by any setting, so there is nothing to enable. If users ask, point them at
 [Using the web client](/web/using-the-web-client#controls-that-are-not-available-yet).
