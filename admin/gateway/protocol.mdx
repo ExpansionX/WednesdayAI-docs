@@ -4,13 +4,23 @@ read_when:
   - Implementing or updating gateway WS clients
   - Debugging protocol mismatches or connect failures
   - Regenerating protocol schema/models
-title: "Gateway Protocol"
+title: "Gateway protocol (WebSocket)"
+description: "Reference for the Gateway WebSocket handshake, request and event frames, session controls, and protocol compatibility."
+audience: developer
+component: gateway-protocol
+sources:
+  - src/gateway/protocol/index.ts
+  - src/gateway/protocol/schema.ts
+  - src/gateway/protocol/schema/sessions.ts
+  - src/gateway/session-utils.ts
+  - src/shared/session-visibility.ts
+generated: 2026-10-02
 ---
 
 # Gateway protocol (WebSocket)
 
 The Gateway WS protocol is the **single control plane + node transport** for
-OpenClaw. All clients (CLI, web UI, macOS app, iOS/Android nodes, headless
+WednesdayAI. All clients (CLI, web UI, macOS app, iOS/Android nodes, headless
 nodes) connect over WebSocket and declare their **role** + **scope** at
 handshake time.
 
@@ -186,7 +196,7 @@ read or write groups later are refused until they are allowlisted.
   `tasks.runs.events`.
 - `operator.sessions.write`: `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch` and
-  `sessions.title.prepare`. The last two joined the list with client-chat-v3 P2 (ADR 0081):
+  `sessions.title.prepare`. The last two joined the list with client-chat-v3 P2 (ADR 0083):
   `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no guard because it
   changes no session state.
 
@@ -204,7 +214,7 @@ that sends any other field is refused with `missing scope: operator.admin` befor
 and the stored entry is unchanged. The write and narrow field sets are two separate lists
 (`SESSIONS_PATCH_WRITE_FIELDS` and `NARROW_SESSION_PATCH_FIELDS` in `src/gateway/method-scopes.ts`),
 so widening one never widens the other, and a field added to the schema later needs
-`operator.admin` until an ADR admits it. Before ADR 0081 the whole method needed `operator.admin`;
+`operator.admin` until an ADR admits it. Before ADR 0083 the whole method needed `operator.admin`;
 a write-only integration can now change these four settings on any session key it names.
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
@@ -345,8 +355,14 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   running (unknown, or already finished) answers `aborted: false` with an empty `runIds`, and an id
   that belongs to a different session is refused with `INVALID_REQUEST`
   (`runId does not match sessionKey`). An aborted run keeps the assistant text it had streamed
-  (persisted to the transcript) and ends with a `chat` event whose `state` is `aborted`; if that
-  text cannot be persisted the call returns `UNAVAILABLE`.
+  (persisted to the transcript) and ends with a `chat` event whose `state` is `aborted`. That
+  event, and the answer to the call, come only once the run's reply is in the transcript, so a
+  client that re-reads `chat.history` when it sees the event gets the final transcript. The run
+  saves its own reply while it stops; the gateway waits for that for up to 10 seconds and then
+  announces the stop regardless, so a stuck run never leaves a client waiting. When the gateway
+  has to save the text itself and cannot, the event is still sent and the call returns
+  `UNAVAILABLE`. A run the gateway expires on its own timer is announced at once (`stopReason`
+  `timeout`) and saves nothing.
 - Operators may call `sessions.steer` (`operator.write`) with
   `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?}` to deliver
   a message to a session that may already be running a turn. `mode` is `inject` (default),
@@ -393,8 +409,8 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
     it, on both the sqlite and `fs-jsonl` session-storage backends (`sessions.runs.list` merges the
     live streaming run alongside the durable store, so the `fs-jsonl` backend, which has no durable
     store at all, still lists it; `sessions.runs.get` reads the durable store only). This supersedes
-    ADR 0072's original "not abortable while the follow-up runs" consequence (ADR 0082 section 7,
-    ADR 0083 M6).
+    ADR 0072's original "not abortable while the follow-up runs" consequence (ADR 0084 section 7,
+    ADR 0085 M6).
 - Operators may call `sessions.runs.list` (`operator.read`) with
   `{sessionKey?, agentId?, statuses?, updatedAfter?, limit?, cursor?}` to page the session runs:
   `{ "runs": [<SessionRunRecord>], "nextCursor": "..." }`. The durable part of the page orders
@@ -408,7 +424,7 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   only matches a `statuses` filter that is empty or includes `running`. So without a configured
   session-run store (SQLite or Postgres) the result is `{ "runs": [] }` only while no run is
   streaming, and `{ "runs": [<live records>] }` otherwise, even on the default `fs-jsonl` backend,
-  which has no durable session-run store at all (ADR 0082 section 7, ADR 0083 M6). Unlike
+  which has no durable session-run store at all (ADR 0084 section 7, ADR 0085 M6). Unlike
   `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
   `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
 - Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
@@ -472,25 +488,115 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   and drops older ones whole (the newest message is always kept), and it does not move `cursor`, so
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
-  `details.reason = "invalid_cursor"`. The leaf and reply fields that client-chat-v3 P2 added are
-  described below.
+  `details.reason = "invalid_cursor"`. While a freshly started gateway's sqlite or postgres session
+  storage is still starting, the call waits for it for up to 10 seconds, then returns `UNAVAILABLE`
+  with `retryable: true` and `retryAfterMs` rather than an empty page (see
+  [Restart recovery](/gateway/restart-recovery)). The leaf and reply fields that client-chat-v3 P2
+  added are described below.
 
-### client-chat-v3 P2 additions (ADR 0081, ADR 0082, ADR 0083)
+### client-chat-v3 P2 additions (ADR 0083, ADR 0084, ADR 0085)
 
 These shipped with the `/v2/client` chat controls. Every new param is optional and every new result
 field is additive, so existing callers are unchanged; the one rule change is how `sessions.patch`
 is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlist)).
 
-- `sessions.list` (`operator.read`) accepts `offset` (integer, minimum 0, default 0), applied after
-  every filter and after the `updatedAt`-descending sort, before `limit`. The result gains
-  `totalCount` (the filtered total, before offset/limit), `limitApplied` (the limit actually applied,
-  when the caller passed one), `offset` (echoed back when non-zero; omitted, like upstream, when
-  offset is 0), `nextOffset` (the offset of the next page, or `null` when there is no more) and
-  `hasMore: boolean` (always present; true exactly when rows exist past `offset + sessions.length`).
-  `count` keeps its existing meaning (rows returned in this page). The web client's chat filter and
-  search use two existing params: `agentId` keeps the sessions of one agent (by the agent id in the
-  session key), and `search` keeps rows whose display name, label, subject, session id or key
-  contains the text, ignoring case - it does not match a title derived from the first message.
+#### sessions.list sorting, agent activity, and visibility
+
+`sessions.list` (`operator.read`) accepts the following request parameters. All are optional.
+
+| Parameter              | Type and default                                         | Effect                                                                                                                                                                                               |
+| ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                         |
+| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                 |
+| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                  |
+| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                      |
+| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows. Reads the first 8 KB; titles are capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. |
+| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                            |
+| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                        |
+| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                          |
+| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                    |
+| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                |
+| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                    |
+| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                 |
+| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                |
+| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                       |
+| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                      |
+| `includeLastMessage`   | boolean; default `false`                                 | Reads the last 16 KB of each returned transcript for its latest message preview. Use `limit` to bound reads.                                                                                         |
+
+`includeInternal` is a tristate, not a simple default-false flag:
+
+- Omitted (`undefined`) preserves legacy operator behavior and filters only cron run keys recognized
+  by `isCronRunSessionKey`.
+- `false` hides any key for which `isUserFacingSessionKey(key)` is false, plus persisted isolated
+  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`,
+  `heartbeat`, and `subagent` as internal. It also hides `main:heartbeat`,
+  `dashboard:*:heartbeat`, and keys matching the persisted `heartbeatIsolatedBaseSessionKey`.
+  Unknown key shapes remain visible.
+- `true` includes internal cron, ACP, heartbeat, and subagent sessions.
+
+When `includeAgentActivity` is true, the result initializes every agent returned by
+`listAgentsForGateway(cfg)` to `null`. It then maps each normalized agent id to the newest non-null
+`updatedAt` timestamp among all surviving agent-keyed sessions. Non-agent keys such as `global` and
+`unknown` are ignored. This aggregation happens before the `agentId`, `spawnedBy`, `label`,
+`search`, `activeMinutes`, `offset`, and `limit` narrowing, so an assistant's activity does not
+disappear merely because the current query or page excludes its newest session.
+
+Activity values are Unix timestamps in milliseconds, or `null` when no eligible activity exists.
+Unless `configuredAgentsOnly` is true, activity may also contain unconfigured agent IDs found in
+surviving session keys.
+
+The operation applies work in this exact order:
+
+1. Apply the `includeInternal` visibility rule, then the `includeGlobal` and `includeUnknown`
+   non-agent-key filters.
+2. Apply `configuredAgentsOnly` to agent-keyed sessions.
+3. If requested, aggregate `agentActivity` across all surviving agent sessions.
+4. Apply `agentId`, `spawnedBy`, `label`, `search`, and `activeMinutes` query filters.
+5. For `sortBy: "title"`, enrich every unlabelled surviving session before paging. Work runs in
+   batches of 16 (`TITLE_ENRICHMENT_BATCH_SIZE`) and yields to the event loop between batches. A
+   label becomes the lowercase sort key; otherwise the key is the derived title, then
+   `displayName`, then the session key, lowercased.
+6. Sort the complete filtered set. `updatedAt` compares
+   `(a.updatedAt ?? 0) - (b.updatedAt ?? 0)`, while `title` and `key` use `localeCompare`; the
+   selected direction multiplies that primary comparison. A zero primary comparison always uses
+   `a.key.localeCompare(b.key)` in ascending order as the deterministic tie-breaker.
+7. Compute `totalCount` before paging.
+8. Apply `offset` with `enrichedSessions.slice(offset)`.
+9. Apply `limit` with `enrichedSessions.slice(0, limit)`.
+10. If `includeDerivedTitles` or `includeLastMessage` is true, read transcripts only for rows in
+    the sliced page and add the requested title or preview fields.
+
+The result also reports `limitApplied` when the caller supplied a limit; non-zero `offset`;
+`nextOffset` (or `null` at the end); and `hasMore`. `count` is the number of rows in the returned
+page, while `totalCount` is the filtered count before `offset` and `limit`.
+
+For example, these are complete RPC `params` objects; they require no imports:
+
+```json
+{
+  "includeInternal": false,
+  "includeAgentActivity": true,
+  "sortBy": "title",
+  "sortOrder": "asc",
+  "includeDerivedTitles": true,
+  "offset": 0,
+  "limit": 50
+}
+```
+
+```json
+{
+  "agentId": "main",
+  "search": "incident",
+  "activeMinutes": 240,
+  "sortBy": "updatedAt",
+  "sortOrder": "desc",
+  "includeInternal": true,
+  "offset": 50,
+  "limit": 50
+}
+```
+
 - `sessions.create` (`operator.write`; narrow-admitted) takes
   `{parentSessionKey?, label?, agentId?, model?}` and answers `{ key, sessionKey, sessionId }`;
   `key` and `sessionKey` are the same new `agent:<agentId>:dashboard:<uuid>` key. The agent is
@@ -521,7 +627,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   values another caller set. Connections without a narrow scope (admin, or `operator.write` only)
   get the full entry. The redaction covers this response only: `sessions.list` and
   `sessions.describe` rows still carry `verboseLevel`, `elevatedLevel`, `sendPolicy` and
-  `responseUsage` for every scope (ADR 0081).
+  `responseUsage` for every scope (ADR 0083).
 - `chat.history` messages each carry `__openclaw.id` (the transcript entry id) when the entry has
   one. The result gains `leafEntryId: string | null` - the id of the newest `message`-type
   transcript entry that has an id, or `null` when there is none - plus the identical value at
@@ -565,7 +671,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 - A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
   starts, from run start to run end (never from the moment it was merely enqueued). From then it
   is exactly as abortable and listable as a run started any other way - see the `queued` outcome
-  bullet in the `sessions.steer` section above (ADR 0082 section 7, ADR 0083 M6).
+  bullet in the `sessions.steer` section above (ADR 0084 section 7, ADR 0085 M6).
 - `sessions.title.prepare` (`operator.write`; narrow-admitted; behind the web client's "Suggest a
   title" button) takes `{ agentId, message, model?, catalogId?, incognito? }` - `message` is
   0..1000 characters - and answers `{ title: string (1..60) | null }`. It is one completion call,
