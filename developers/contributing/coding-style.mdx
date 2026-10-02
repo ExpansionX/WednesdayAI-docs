@@ -1,0 +1,117 @@
+---
+description: "Coding style, toolchain, logging, TypeBox tool schema rules, shared helpers and Control UI decorators"
+summary: "Coding style, toolchain, logging, TypeBox tool schema rules, shared helpers and Control UI decorators"
+read_when:
+  - Writing or reviewing TypeScript in core, extensions, or the Control UI
+  - Adding a tool input schema, a log line, or terminal output
+  - Wondering which tool, version, or helper the project standardizes on
+title: "Coding style"
+audience: developer
+---
+
+# Coding style
+
+This guide owns the coding conventions for WednesdayAI core. For the PR gate and contribution workflow, see [Contributing](/developers/contributing). For test conventions, see [Testing](/developers/contributing/testing).
+
+## Principles
+
+Follow the Development Principles in [Contributing](/developers/contributing). In short:
+
+- Reuse maintained packages already in the stack instead of building from scratch.
+- Fix bug classes rather than instances. Use real parsers, not regex, for structured formats.
+- Assert causes in tests.
+- Keep scope to the goal.
+- Block reviews only on in-scope correctness and security.
+
+## Language and structure
+
+- **Language**: TypeScript ESM with `strict: true`. No `@ts-nocheck`. Do not disable `no-explicit-any`; fix the root cause.
+- **Style**: functional and module pattern dominant. Use classes for channel adapters and stateful lifecycle managers.
+- **Dependency injection**: `createDefaultDeps()` in `src/cli/deps.ts` returns a plain dependency object. Commands receive it as a parameter. There is no IoC framework.
+- **No prototype mutation**: never use `applyPrototypeMixins`, `Object.defineProperty` on `.prototype`, or `Class.prototype` exports. Use explicit inheritance or composition. Get explicit approval first.
+- **Comments**: write them only for non-obvious logic such as hidden constraints, workarounds, and subtle invariants. Do not write docblocks that restate what the code does.
+- **File size**: keep files under 500 lines of code. `pnpm check:loc` runs `scripts/check-ts-max-loc.ts --max 500`. Split or refactor when it aids clarity or testability.
+- **Formatting**: run `pnpm check` before committing. Resolve formatting-only diffs without asking.
+- **Naming**: use WednesdayAI in user-facing docs and headings. `wednesdayai` is the primary binary name and `openclaw` is a permanent backward-compatible alias. Config keys and internal identifiers stay `openclaw`.
+- **Imports**: use the `.js` extension for relative ESM imports, `import type { X }` for type-only imports, and import directly from the original module. Do not create files that only re-export another file.
+
+## Do not duplicate helpers
+
+Before writing a formatter, utility, or helper, search for an existing implementation and import it. If a function already exists, do not create a copy in another file.
+
+| Need                                                  | Use                                                                                    |
+| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
+| Time, age, duration formatting                        | The centralized modules in `src/infra/` (for example `format-time`)                    |
+| Status tables                                         | `renderTable` in `src/terminal/table.ts`                                               |
+| Colors in terminal output                             | `theme` from `src/terminal/theme.ts` (`theme.success`, `theme.muted`, and so on)       |
+| Spinners and progress bars                            | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`); never hand-roll spinners  |
+| CLI option wiring and commands                        | `src/cli/` and `src/commands/`                                                         |
+
+Never create local `formatAge`, `formatDuration`, or `formatElapsedTime` functions.
+
+## Colors and terminal output
+
+Two modules split the work. `src/terminal/palette.ts` holds the color tokens. `src/terminal/theme.ts` wraps chalk around those tokens and exposes the semantic helpers. Use `theme` for output and never hardcode ANSI escapes.
+
+## Logging
+
+Create one subsystem logger at module top and use it instead of `console.log` in production code:
+
+```ts
+const log = createSubsystemLogger("module/name");
+
+log.info("action description", { key: value });
+log.warn("unexpected state", { context });
+log.error("failed to do X", { error, accountId });
+```
+
+## Tool input schemas (TypeBox)
+
+Tool input schemas use `@sinclair/typebox`. Several model providers reject schema constructs that TypeBox can produce, so keep schemas flat:
+
+- No `Type.Union`, and no `anyOf`, `oneOf`, or `allOf` in tool input schemas.
+- Use `stringEnum` and `optionalStringEnum` (a `Type.Unsafe` enum, in `src/agents/schema/typebox.ts`) for string enumerations.
+- Use `Type.Optional(...)` instead of `... | null`.
+- Never use `format` as a raw property name. Some validators reject it.
+
+## Toolchain
+
+| Layer                  | Tool and version                                                                                      |
+| ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| Runtime                | Node.js 24 or newer (ESM)                                                                              |
+| Package manager        | pnpm 10.23.0 (lockfile: `pnpm-lock.yaml`)                                                              |
+| Language               | TypeScript 5.9, strict, ESM (`"type": "module"`), `moduleResolution: NodeNext`, target `es2023`       |
+| CLI framework          | `commander` v15                                                                                        |
+| Build                  | `tsdown` plus post-build scripts run through `tsx`; `pnpm build`                                       |
+| Type checker           | `pnpm tsgo`, using `@typescript/native-preview` (the native TypeScript checker)                        |
+| Linter                 | Oxlint 1 (`--type-aware`); plugins: unicorn, typescript, oxc                                           |
+| Formatter              | Oxfmt 0.35 (`pnpm format:fix` runs `oxfmt --write`)                                                    |
+| Tests                  | Vitest 4 with V8 coverage; several config variants per subsystem                                       |
+| Web UI (control panel) | Lit 3 with `@lit/context` and `@lit-labs/signals`, in `ui/`                                            |
+| Validation             | `@sinclair/typebox` 0.34.52 (pinned: no `^` or `~`); `zod` v4                                          |
+| Logging                | `tslog` with the `src/logging/subsystem.ts` wrapper                                                    |
+| CLI UI                 | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`)                                            |
+| Mobile and macOS apps  | Swift 6; SwiftFormat and SwiftLint; `@Observable` and `@Bindable` (not `ObservableObject`)             |
+
+Notes:
+
+- `extensions/` is excluded from Oxlint (`ignorePatterns`). Extensions manage their own lint.
+- `pnpm build` does not type-check. Run `pnpm tsgo` for that.
+- `pnpm check` runs format check, `tsgo`, `tsgo:web`, Oxlint, several custom lint scripts, and the Swift host environment policy check.
+
+## Control UI decorators
+
+The Control UI uses Lit with legacy decorators. The current Rollup parsing does not support the `accessor` fields that standard decorators require. When you add reactive fields, keep the legacy style:
+
+```ts
+@state() foo = "bar";
+@property({ type: Number }) count = 0;
+```
+
+The root `tsconfig.json` sets `experimentalDecorators: true` and `useDefineForClassFields: false`. Do not change either unless you also update the UI build tooling to support standard decorators.
+
+## Related
+
+- [Testing](/developers/contributing/testing)
+- [Secure development](/developers/contributing/secure-development)
+- [Contributing](/developers/contributing)

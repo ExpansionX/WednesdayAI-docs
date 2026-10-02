@@ -1,0 +1,62 @@
+---
+description: "Where docs live, doc rules, i18n, docs sync, the coverage lifecycle, and the link strategy"
+summary: "Where docs live, doc rules, i18n, docs sync, the coverage lifecycle, and the link strategy"
+read_when:
+  - Adding or editing a docs page
+  - Deciding which kind of link a file may contain
+  - Working on docs-surface.yaml or docs sync
+title: "Documentation"
+audience: developer
+---
+
+# Documentation
+
+This guide owns docs placement, the doc rules, i18n, docs sync, the coverage lifecycle and the link strategy.
+
+## Placement and rules
+
+- English source lives in `docs/`. `docs/zh-CN/**` and `docs/ja-JP/**` are generated; do not edit them directly.
+- i18n pipeline: update the English page, adjust `docs/.i18n/glossary.zh-CN.json`, then run `scripts/docs-i18n`.
+- Internal doc links are root-relative with no `.md` or `.mdx` extension, for example `[Config](/admin/gateway/configuration)`. When a page is mapped to a different site route, use its absolute `https://docs.wednesdayai.dev/...` URL so unchanged sync output targets the published page.
+- Headings avoid em dashes and apostrophes, because they break anchor generation.
+- Content must be generic: no personal device names, hostnames, or paths. Use placeholders such as `user@gateway-host`.
+- Store screenshots under `docs/.screenshots/` (gitignored). Never commit screenshots or leave them at the repo root.
+- Frontmatter uses `title`, `summary` and `read_when`. Developer pages add `audience: developer`.
+- After editing docs, run `pnpm check:docs` (format, docs lint and the link audit). `pnpm docs:list` lists docs for a quick sanity check.
+
+## Docs sync
+
+`scripts/docs-sync.sh` copies English core docs to the docs site repository, and `scripts/docs-drift.mjs` reports which site pages are likely stale. Both map a core path to a site path, and the two maps must stay identical:
+
+- `docs/contributing/*` maps to `developers/contributing/*`.
+- `CONTRIBUTING.md` maps to the single page `developers/contributing`, with site frontmatter prepended.
+- Other prefixes follow the persona rules in the scripts (`gateway/` to `admin/gateway/`, and so on).
+
+Run `scripts/docs-sync.sh --dry-run` to see the mapping before a real sync.
+
+## Docs coverage lifecycle
+
+- **Source of truth**: `docs-surface.yaml` at the repo root maps every documentable surface (hook, SDK export, config key, channel, provider, CLI command, concept) to its expected docs page. It is the single mapping; the docs repository never holds a second copy.
+- **Two tiers**:
+  1. A cheap deterministic gate runs on every PR through `scripts/docs-surface-check.mjs`. `--mode=source` (core CI) checks that each `source` path still exists. `--mode=pages --docs-root=<docs checkout>` (docs CI) checks that each `docs_page`, plus optional `#anchor`, resolves.
+  2. A periodic deep audit (`/wai:surface-audit`, plugin-owned) enumerates real surfaces and finds new undocumented ones the cheap gate cannot see.
+- **Advisory only**: branch protection is unavailable on the free-plan private repo, so the check never hard-fails a merge. It exits `0` and emits GitHub `::warning::` annotations. `--strict` gives a non-zero exit for local use.
+- **Cadence**: the cheap gate runs per PR. Run the deep audit each release cycle and after large surface changes.
+- **Follow-ups**: a detected gap becomes a tracked follow-up, keyed by the surface `id` so it is idempotent: a GitHub issue (label `docs-coverage`) and/or a `/wai` ledger item. Entries with `coverage: gap` or `wrong` carry the known-bad baseline until a docs PR flips them to `documented`.
+
+## Link strategy
+
+The core repository is private. A link resolves only if the reader can reach its target.
+
+| File class                                                                                                                                            | Readers                    | Allowed links                                                                                                                                                                  |
+| ----------------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| npm-shipped (`README.md`)                                                                                                                             | npm, public GitHub mirrors | Absolute `https://docs.wednesdayai.dev/...` URLs, Discord, `mailto:`. Images by absolute public URL. An npm version badge, not private CI badges                               |
+| Published to the site (`docs/**`, the `CONTRIBUTING.md` rendering)                                                                                    | Public                     | `docs/**`: root-relative, no `.md`, or absolute site URLs for mapped routes. `CONTRIBUTING.md`: absolute site URLs. Repo-only files are named as code paths, never hyperlinked |
+| Repo-only (`AGENTS.md`, `ARCHITECTURE.md`, `ROADMAP.md`, `VISION.md`, `SECURITY.md`, `SUPPORT.md`, `CODE_OF_CONDUCT.md`, `dev-docs/**`, `.agents/**`) | People with repo access    | Repo-relative paths, and site URLs for published topics                                                                                                                        |
+
+`SUPPORT.md` and the `CONTRIBUTING.md` rendering state the security contact (`security@expansionx.com.au`) inline, so the public path never depends on reading `SECURITY.md`.
+
+## Related
+
+- [Coding style](/developers/contributing/coding-style)
+- [Release](/developers/contributing/release)

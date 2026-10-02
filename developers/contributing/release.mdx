@@ -1,0 +1,196 @@
+---
+description: "Step-by-step release checklist for npm + macOS app"
+audience: developer
+component: release/trusted-npm-publishing
+sources:
+  - package.json
+  - scripts/release-check.ts
+  - scripts/npm-publish/invocation.ts
+  - docs/superpowers/specs/2026-08-21-npm-trusted-publishing.md
+generated: 2026-08-26
+title: "Release Checklist"
+summary: "Step-by-step release checklist for npm + macOS app"
+read_when:
+  - Cutting a new npm release
+  - Cutting a new macOS app release
+  - Verifying metadata before publishing
+---
+
+# Release Checklist (npm + macOS)
+
+Use `pnpm` (Node 24+) from the repo root. Keep the working tree clean before tagging/publishing.
+
+## Operator trigger
+
+When the operator says "release", immediately do this preflight (no extra questions unless blocked):
+
+- Read this doc and [macOS release](/admin/platforms/mac/release).
+- Confirm `SPARKLE_PRIVATE_KEY_FILE` and App Store Connect vars are set in the operator environment.
+- Keep Sparkle private keys outside the repo. Use the operator backup location configured for this host.
+
+1. **Version & metadata**
+
+Do not hand-edit release versions. `package.json` is the single source of truth and release-please
+owns the bump. Derived version files are synchronized by `pnpm version:sync` in CI and by the
+release workflow.
+
+- [ ] Confirm the release-please PR contains the intended `package.json` version bump.
+- [ ] Confirm the release-please sync commit ran `pnpm version:sync` and updated derived version files.
+- [ ] Confirm extension package versions match the root version when they are part of the workspace release.
+- [ ] Do not edit `docs/install/updating.md` for a pinned npm version; it intentionally installs `wednesdayai@latest`.
+- [ ] Peekaboo and Swabble version independently; bump them only when that specific release requires it.
+
+Do **not** touch `appcast.xml` version here — that is updated in step 5 (macOS Sparkle release).
+
+- [ ] Confirm package metadata: root package name is `wednesdayai` (currently `0.4.11`), `bin` exposes both `wednesdayai` and the compatibility `openclaw` command, and WhatsApp package name is `@wednesdayai/whatsapp`.
+- [ ] Publication runs only from `.github/workflows/npm-publish.yml` using the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). There is no second publish path.
+- [ ] If dependencies changed, run `pnpm install` so `pnpm-lock.yaml` is current.
+
+2. **Build & artifacts**
+
+- [ ] If A2UI inputs changed, run `pnpm canvas:a2ui:bundle` and commit any updated `src/canvas-host/a2ui/a2ui.bundle.js`.
+- [ ] `pnpm run build` (regenerates `dist/`).
+- [ ] Verify npm package `files` includes all required `dist/*` folders (notably `dist/node-host/**` and `dist/acp/**` for headless node + ACP CLI).
+- [ ] Confirm the packed tarball ships no `docs/` content outside `docs/reference/templates/` (full user/admin/developer docs live at `docs.wednesdayai.dev` and on GitHub, not in the install). When validating sealed package inventories, pass both `--sealed-inventory` inputs to `pnpm release:check`; `scripts/release-check.ts` then rejects any other `docs/` path and requires `docs/reference/templates/AGENTS.md` and `BOOTSTRAP.md`. A plain `pnpm release:check` does not inspect a packed tarball.
+- [ ] Confirm `dist/build-info.json` exists and includes the expected `commit` hash (CLI banner uses this for npm installs).
+- [ ] Optional: `npm pack --pack-destination /tmp` after the build; inspect the tarball contents and keep it handy for the GitHub release (do **not** commit it).
+
+3. **Changelog & docs**
+
+- [ ] Do not hand-edit root `CHANGELOG.md`; release-please generates it from Conventional Commits.
+- [ ] Add or update a dated `dev-docs/logs/YYYY-MM-DD-*.md` entry for the engineering record when the release contains feature work.
+- [ ] Update `dev-docs/CHANGELOG.md` only as the narrative index to that dev log.
+- [ ] Ensure README examples/flags match current CLI behavior (notably new commands or options).
+
+4. **Validation**
+
+- [ ] `pnpm build`
+- [ ] `pnpm check`
+- [ ] `pnpm test` (or `pnpm test:coverage` if you need coverage output)
+- [ ] `pnpm release:check` (static only: package identity, plugin versions, Sparkle floors, plugin-sdk exports. It does not run `npm pack`. Use two `--sealed-inventory <path>` arguments only when validating a sealed candidate.)
+- [ ] `OPENCLAW_INSTALL_SMOKE_SKIP_NONROOT=1 pnpm test:install:smoke` (Docker install smoke test, fast path; required before release)
+  - If the immediate previous npm release is known broken, set `OPENCLAW_INSTALL_SMOKE_PREVIOUS=<last-good-version>` or `OPENCLAW_INSTALL_SMOKE_SKIP_PREVIOUS=1` for the preinstall step.
+- [ ] (Optional) Full installer smoke (adds non-root + CLI coverage): `pnpm test:install:smoke`
+- [ ] (Optional) Installer E2E (Docker, runs the WednesdayAI install script, onboards, then runs real tool calls):
+  - `pnpm test:install:e2e:openai` (requires `OPENAI_API_KEY`)
+  - `pnpm test:install:e2e:anthropic` (requires `ANTHROPIC_API_KEY`)
+  - `pnpm test:install:e2e` (requires both keys; runs both providers)
+- [ ] (Optional) Spot-check the web gateway if your changes affect send/receive paths.
+
+5. **macOS app (Sparkle)**
+
+- [ ] Build + sign the macOS app, then zip it for distribution.
+- [ ] Generate the Sparkle appcast (HTML notes via `scripts/make_appcast.sh`) and update `appcast.xml`.
+- [ ] Keep the app zip (and optional dSYM zip) ready to attach to the GitHub release.
+- [ ] Follow [macOS release](/admin/platforms/mac/release) for the exact commands and required env vars.
+  - `APP_BUILD` must be numeric + monotonic (no `-beta`) so Sparkle compares versions correctly.
+  - If notarizing, use the `openclaw-notary` keychain profile created from App Store Connect API env vars (see [macOS release](/admin/platforms/mac/release)).
+
+6. **Publish (npm)**
+
+The npm rail is `.github/workflows/npm-publish.yml` (trusted publishing through the `npm-publish` GitHub environment; npm ≥ 11.15.0 staged publishing for stable).
+
+- [ ] On release creation, the `dispatch-stable-stage` job in `release-please.yml` automatically dispatches npm-publish stable staging with `release_tag` and `source_sha` resolved from the final tag SHA (release-please may heal derived versions and move the tag before this runs). No human dispatch is needed for the normal flow.
+- [ ] Run `npm stage list` to find the stage IDs for the release versions of `@wednesdayai/whatsapp` and `wednesdayai`. Approve only packages for which staging created a stage, each separately with `npm stage approve <stage-id>` (2FA required). Skip approval for a package already live. This approval gate is intentionally human.
+- [ ] After all created stages are approved, dispatch verification: `gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha> -f verify_approved=yes`. Verification checks both packages, including any skipped package, against the recorded pack integrities and installed pair.
+- [ ] Verify the registry: `npm view wednesdayai version`, `npm view wednesdayai dist-tags`, `npm view @wednesdayai/whatsapp version`, `npm view @wednesdayai/whatsapp dist-tags`, and `npx -y wednesdayai@X.Y.Z --version` (or `--help`).
+- [ ] The scheduled `npm-parity` watchdog backstops this list: it opens or updates a tracking issue when a release tag has no registry counterpart or the dev rail stalls. Treat its issue as release debt, not noise.
+
+Stable publication stages `@wednesdayai/whatsapp` and then `wednesdayai` with `npm stage publish` in the same `stable` job (a package already live at that version is skipped), then stops for maintainer approval of any created stages. Dev publication publishes WhatsApp, then core, directly to the `dev` dist-tag. Registry mutations name an exact sealed tarball — automation never publishes a working directory and never administers stages or dist-tags through OIDC.
+
+### Missed release (tag exists, registry does not)
+
+If a release tag was created but the stable publish never landed (for example `v0.4.11` after the old token-auth `EOTP` failure), retro-publish from the tag once the identity preconditions hold (`source_sha` is the full tag commit SHA, the GitHub Release `targetCommitish` equals that SHA, both `package.json` and `extensions/whatsapp/package.json` at that commit have the version in the tag name, and the tag is an ancestor of `main`):
+
+```bash
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha>
+# maintainer: approve only packages for which staging created a stage
+npm stage list
+# If the WhatsApp stage exists:
+npm stage approve <whatsapp-stage-id>
+# If the core stage exists:
+npm stage approve <core-stage-id>
+gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<40-hex tag sha> -f verify_approved=yes
+npm view wednesdayai@X.Y.Z version && npm view @wednesdayai/whatsapp@X.Y.Z version
+```
+
+This restores tag↔registry parity so downstream lockfiles can pin the release immutably. It is not a substitute for the vendoring recipe when the deployed artifact came from a branch build — see [Deployment artifact parity and vendoring](/developers/reference/trusted-npm-publishing-developer#deployment-artifact-parity-and-vendoring).
+
+### Troubleshooting
+
+- **npm pack/publish hangs or produces huge tarball**: the macOS app bundle in `dist/OpenClaw.app` (and release zips) get swept into the package. Fix by whitelisting publish contents via `package.json` `files` (include dist subdirs, `docs/reference/templates`, skills; exclude app bundles and any other `docs/` path). Confirm with `npm pack --dry-run` that `dist/OpenClaw.app` is not listed.
+- **npm auth web loop for dist-tags**: use legacy auth to get an OTP prompt:
+  - `NPM_CONFIG_AUTH_TYPE=legacy npm dist-tag add wednesdayai@X.Y.Z latest`
+  - `NPM_CONFIG_AUTH_TYPE=legacy npm dist-tag add @wednesdayai/whatsapp@X.Y.Z latest`
+- **`npx` verification fails with `ECOMPROMISED: Lock compromised`**: retry with a fresh cache:
+  - `NPM_CONFIG_CACHE=/tmp/npm-cache-$(date +%s) npx -y wednesdayai@X.Y.Z --version`
+- **Tag must not be moved after a late fix**: release tags are immutable. Cut a new patch version instead of running `git tag -f`.
+
+7. **GitHub release + appcast**
+
+- [ ] Release-please owns tag creation and push for normal releases. Manual `git tag vX.Y.Z && git push origin vX.Y.Z` (or `git push --tags`) is only for exceptional flows — release tags are immutable once published (see Troubleshooting).
+- [ ] Create/refresh the GitHub release for `vX.Y.Z` with **title `openclaw X.Y.Z`** (not just the tag); body should include the **full** changelog section for that version (Highlights + Changes + Fixes), inline (no bare links), and **must not repeat the title inside the body**.
+- [ ] Attach artifacts: `npm pack` tarball (optional), `OpenClaw-X.Y.Z.zip`, and `OpenClaw-X.Y.Z.dSYM.zip` (if generated).
+- [ ] Commit the updated `appcast.xml` and push it (Sparkle feeds from main).
+- [ ] From a clean temp directory (no `package.json`), run `npx -y wednesdayai@X.Y.Z send --help` to confirm install/CLI entrypoints work.
+- [ ] Announce/share release notes.
+
+## Trusted npm publishing
+
+Publication runs only from `.github/workflows/npm-publish.yml` through the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). Step 6 above is the operator flow. For the architecture and the vendoring recipe, see [Trusted npm publishing for contributors](/developers/reference/trusted-npm-publishing-developer).
+
+## Version locations
+
+`package.json` `version` is the single source of truth. Only the release-please Release PR bumps it; never hand-edit it (CI `version:guard` rejects hand edits). All other locations are derived by `pnpm version:sync`; never edit them directly:
+
+- `apps/android/app/build.gradle.kts` (`versionName` and `versionCode`)
+- `apps/ios/project.yml` (the xcodegen source of truth for the app plus the Share and Watch extensions) and the generated `apps/ios/**/Info.plist` files (Sources, Tests, ShareExtension, WatchApp, WatchExtension), all `CFBundleShortVersionString` and `CFBundleVersion`. A `sync-versions` meta-test fails if any version-bearing iOS file is left unstamped.
+- `apps/macos/Sources/OpenClaw/Resources/Info.plist` (`CFBundleShortVersionString` and `CFBundleVersion`)
+- `packages/clawdbot/package.json` and `packages/moltbot/package.json` (shim `version`)
+- every `extensions/*/package.json` `version` field
+
+Notes:
+
+- Mobile build numbers derive deterministically from the SemVer components (`major*10000+minor*100+patch`), not from the commit count.
+- `docs/install/updating.md` is not derived. It installs `@latest` and pins no version.
+- Peekaboo and Swabble are not auto-stamped. They version independently of the npm package; bump them by hand if a release requires it.
+- Do not touch `appcast.xml` unless cutting a new macOS Sparkle release.
+
+## Changelog ownership
+
+The release `CHANGELOG.md` is generated by release-please from Conventional Commits. Do not hand-edit it (ADR 0005). Record narrative history in a dated dev log under `dev-docs/logs/` and add a pointer to `dev-docs/CHANGELOG.md`, the narrative index. Build provenance (version, channel, commit, fork base) lives in `dist/build-info.json`; the bare `wednesdayai --version` stays a single SemVer line.
+
+## Deprecation policy
+
+Config keys, CLI flags, and SDK exports are never removed immediately when renamed or replaced. Ship a deprecated alias for at least one release cycle, then remove it in a later release with an explicit announcement.
+
+- A rename plus alias is backward-compatible, so use a `feat:` or `fix:` commit, not `BREAKING CHANGE`.
+- Reserve `BREAKING CHANGE` or `!` for hard removals and incompatibilities with no migration path.
+- The `openclaw` to `wednesdayai` rename is the canonical example. The old name remains a permanent alias, so that refactor was never a breaking change.
+
+## Plugin publish scope (npm)
+
+WednesdayAI extensions use the `@wednesdayai` npm organization for new first-party plugin
+packages:
+
+- **`@wednesdayai/*`** — WednesdayAI-native extensions built for this fork (new additions go here).
+- **`@openclaw/*`** — inherited extensions from the fork base. Publish only if the package is already on npm under that scope; do not add new extensions under `@openclaw/` — use `@wednesdayai/` instead.
+
+Bundled plugins that are not on npm stay **disk-tree only** (still shipped in `extensions/**`).
+`@wednesdayai/whatsapp` is the first dependency-bearing first-party plugin on the npm rail.
+
+Process to derive future publish candidates:
+
+1. Start from plugin ids under `extensions/*`.
+2. Compare with `extensions/*/package.json` names.
+3. Publish new WednesdayAI-native packages under `@wednesdayai/<plugin-id>` only after the package has built JavaScript entries and runtime dependency validation.
+4. Keep inherited `@openclaw/*` packages compatibility-only unless a package is known to target this fork.
+
+Release notes must also call out **new optional bundled plugins** that are **not on by default** (example: `tlon`).
+
+## Related
+
+- [Trusted npm publishing for contributors](/developers/reference/trusted-npm-publishing-developer)
+- [How WednesdayAI updates reach you](/admin/install/trusted-npm-publishing-user)
+- [Release channels](/admin/install/development-channels)
+- [macOS release](/admin/platforms/mac/release)
