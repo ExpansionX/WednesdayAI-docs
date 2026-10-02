@@ -4,7 +4,24 @@ read_when:
   - You want to host the WednesdayAI web client for end users
   - You are deciding between a CDN, a container, and the gateway route
   - You need the allowedOrigins, HTTPS/wss, or config.json rules
-title: "Web Client Hosting"
+title: "Web client hosting"
+description: "Deploy and host the WednesdayAI web client (static bundle, container, or gateway route) with administrator operational controls"
+audience: admin
+component: web-user-client
+sources:
+  - src/user-client/static-server.ts
+  - src/config/gateway-web-client.ts
+  - src/config/types.gateway.ts
+  - src/gateway/web-client-route.ts
+  - src/gateway/protocol/schema/sessions.ts
+  - src/gateway/session-utils.ts
+  - src/shared/session-visibility.ts
+  - apps/web/src/providers/navigation-preferences.ts
+  - apps/web/src/ui/DisplayMenu.tsx
+  - apps/web/src/ui/NavigationMenus.tsx
+  - apps/web/src/providers/session-list-runtime.ts
+  - apps/web/src/state/types.ts
+generated: 2026-10-02
 ---
 
 # Web client hosting
@@ -119,12 +136,12 @@ no state, runs as an unprivileged user, exposes `8787`, and declares a `HEALTHCH
 
 For single-origin deployments the gateway can serve the bundle itself. This is **off by default**.
 
-```jsonc
+```json5
 {
-  "gateway": {
-    "webClient": {
-      "enabled": true,
-      "allowedOrigins": ["https://gateway.example.com"],
+  gateway: {
+    webClient: {
+      enabled: true,
+      allowedOrigins: ["https://gateway.example.com"],
       // "basePath": "/chat",  // optional override; omit to serve at the default /v2/client/
       // "root": "/srv/wednesdayai-web",  // optional: defaults to the packaged dist/web-client
     },
@@ -249,7 +266,7 @@ Methods the client calls with `operator.sessions.write`:
 | `chat.abort`             | Stop                                                                                                                                              |
 | `sessions.create`        | New chat, for the chosen assistant and optionally a model                                                                                         |
 | `sessions.steer`         | Queueing a message behind a streaming reply (`queue`) and Send now (`inject`)                                                                     |
-| `sessions.patch`         | Rename, model, Think and Show reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
+| `sessions.patch`         | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
 | `sessions.title.prepare` | Suggest a title                                                                                                                                   |
 
 Gateway settings that decide what users can do with those methods:
@@ -267,7 +284,7 @@ Gateway settings that decide what users can do with those methods:
   limit is 3 calls per 60 seconds per device and address, and it cannot be changed.
 - **Reach.** A paired client can read, send to and change the four `sessions.patch` settings of any
   session on the gateway, including channel and sub-agent sessions; per-session ownership does not
-  exist yet (ADR 0077 section 5, ADR 0081). Pair only people who should have that reach.
+  exist yet (ADR 0077 section 5, ADR 0083). Pair only people who should have that reach.
 
 Queueing, Send now, replies and the notice that a chat changed elsewhere need no gateway setting.
 
@@ -296,6 +313,68 @@ sidebar. You do not configure them; there is no `config.json` or gateway setting
   `Content-Security-Policy` still has to allow them: `font-src 'self'` is enough (see
   [Rules the host must follow](#rules-the-host-must-follow)). They come from the same shared token
   package as the [Control UI](/web/control-ui); developers see [Brand tokens](/reference/brand-tokens).
+
+## Navigation and transcript preferences
+
+Navigation and transcript display settings are client-side, browser-local state. They are not
+stored in gateway configuration or `config.json`, and changing them does not require a gateway
+restart, page reload, or bundle rebuild.
+
+The browser stores navigation preferences separately for each gateway URL and client ID under
+`openclaw.web.navigation:<encodedGatewayUrl>:<clientId>`. Transcript display preferences use the
+`openclaw.web.transcript-display.v1` key, which contains a record keyed by
+`<gatewayUrl>|<clientId>`. Missing, invalid, or unreadable saved preferences load defaults.
+If a storage write fails, the new choice still applies in memory while the page is open, but
+a reload can restore the older saved value or a default. Navigation and chat remain usable.
+
+The defaults and available choices are:
+
+| Preference                | Default                                 | Options                                                    |
+| ------------------------- | --------------------------------------- | ---------------------------------------------------------- |
+| Assistant sort            | `newest`                                | `name-asc`, `name-desc`, `newest`, `oldest`                |
+| Assistant activity window | `4` hours (`activityWindowHours: 4`)    | `1`, `2`, `4`, `8`, `16`, `24`, or `null` for all activity |
+| Show internal sessions    | `false` (`includeInternal: false`)      | `true`, `false`                                            |
+| Chat sort field           | `updatedAt` (`chatSortBy: "updatedAt"`) | `updatedAt`, `title`, `key`                                |
+| Chat sort order           | `desc` (`chatSortOrder: "desc"`)        | `asc`, `desc`                                              |
+| Show reasoning            | `false` (`showReasoning: false`)        | `true`, `false`                                            |
+| Tool details              | `minimal` (`tools: "minimal"`)          | `hide`, `minimal`, `full`                                  |
+
+<Warning>
+Navigation filters are not authorization boundaries. Hiding internal sessions or filtering the UI
+by recency or assistant changes only what the browser displays; it does not change RPC
+authorization. Enforce access through gateway authentication and permission policy, not these
+client-side preferences.
+</Warning>
+
+For `sessions.list`, the client sends `includeInternal`, `sortBy`, `sortOrder`, and
+`includeAgentActivity: true`. When `includeInternal` is `false`, the gateway applies the shared
+`isUserFacingSessionKey` rules: session keys whose root segment is `acp`, `cron`, `heartbeat`, or
+`subagent` are excluded, as are isolated heartbeat keys such as `main:heartbeat` and
+`dashboard:*:heartbeat`.
+
+Deploy matching web client and gateway versions together. A newer bundle can send
+`includeInternal`, `sortBy`, `sortOrder`, and `includeAgentActivity` to `sessions.list`; an older
+gateway with strict schema validation could reject fields it does not recognize. Older web client
+versions do not send these fields.
+
+### Diagnose missing chats
+
+Check these display filters before investigating gateway storage:
+
+1. **Time window:** The assistant activity window defaults to 4 hours and narrows the assistant
+   list, not the age of chats. Select **All** to include inactive assistants, or **All assistants**
+   to search chats without an assistant filter.
+2. **Internal sessions:** Heartbeats, cron runs, subagents, and other background sessions are hidden
+   by default. Enable **Show internal** (`includeInternal: true`) in the chats menu.
+3. **Selected assistant:** The chat list follows the active assistant. Check whether the chat was
+   created under a different assistant ID.
+
+### Diagnose missing reasoning or thought transcripts
+
+Reasoning is collapsed by default (`showReasoning: false`). Enable **Show reasoning** in the
+**Display** menu or chat display preferences to inspect thinking blocks. If the model or gateway
+did not produce reasoning blocks, enabling the preference shows nothing because the transcript has
+no reasoning content to display.
 
 ## What users see that is not live yet
 
