@@ -13,6 +13,7 @@ sources:
   - src/gateway/protocol/schema.ts
   - src/gateway/protocol/schema/sessions.ts
   - src/gateway/session-utils.ts
+  - src/gateway/session-utils.fs.ts
   - src/shared/session-visibility.ts
 generated: 2026-10-02
 ---
@@ -504,24 +505,35 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 
 `sessions.list` (`operator.read`) accepts the following request parameters. All are optional.
 
-| Parameter              | Type and default                                         | Effect                                                                                                                                                                                               |
-| ---------------------- | -------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                         |
-| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                 |
-| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                  |
-| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                      |
-| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows. Reads the first 8 KB; titles are capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. |
-| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                            |
-| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                        |
-| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                          |
-| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                    |
-| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                |
-| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                    |
-| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                 |
-| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                |
-| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                       |
-| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                      |
-| `includeLastMessage`   | boolean; default `false`                                 | Reads the last 16 KB of each returned transcript for its latest message preview. Use `limit` to bound reads.                                                                                         |
+| Parameter              | Type and default                                         | Effect                                                                                                                                                                                                                              |
+| ---------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                                                        |
+| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                                                |
+| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                                                 |
+| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                                                     |
+| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows, capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. Read windows depend on the storage backend, as described below. |
+| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                                                           |
+| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                                                       |
+| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                                                         |
+| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                                                   |
+| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                                               |
+| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                                                   |
+| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                                                |
+| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                                               |
+| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                                                      |
+| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                                                     |
+| `includeLastMessage`   | boolean; default `false`                                 | Adds the latest usable message preview for returned rows. Read windows depend on the storage backend; use `limit` to bound the number of rows enriched.                                                                             |
+
+Transcript enrichment uses backend-specific read windows:
+
+- **`fs-jsonl`:** titles scan at most the first 8,192 bytes and first 10 transcript lines.
+  Previews read at most the last 16,384 bytes and scan the last 20 nonblank lines for a usable
+  user or assistant message.
+- **Other configured session backends:** titles query the oldest 20 stored entries; previews
+  query the newest 20 stored messages. These are entry limits, not byte caps.
+
+A bounded window can miss a usable message outside it. Title sorting still uses its documented
+fallbacks, and an unavailable preview is omitted; these flags do not request a full transcript scan.
 
 `includeInternal` is a tristate, not a simple default-false flag:
 
