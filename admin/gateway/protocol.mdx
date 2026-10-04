@@ -4,24 +4,14 @@ read_when:
   - Implementing or updating gateway WS clients
   - Debugging protocol mismatches or connect failures
   - Regenerating protocol schema/models
-title: "Gateway protocol (WebSocket)"
-description: "Reference for the Gateway WebSocket handshake, request and event frames, session controls, and protocol compatibility."
+title: "Gateway Protocol"
 audience: developer
-component: gateway-protocol
-sources:
-  - src/gateway/protocol/index.ts
-  - src/gateway/protocol/schema.ts
-  - src/gateway/protocol/schema/sessions.ts
-  - src/gateway/session-utils.ts
-  - src/gateway/session-utils.fs.ts
-  - src/shared/session-visibility.ts
-generated: 2026-10-02
 ---
 
 # Gateway protocol (WebSocket)
 
 The Gateway WS protocol is the **single control plane + node transport** for
-WednesdayAI. All clients (CLI, web UI, macOS app, iOS/Android nodes, headless
+OpenClaw. All clients (CLI, web UI, macOS app, iOS/Android nodes, headless
 nodes) connect over WebSocket and declare their **role** + **scope** at
 handshake time.
 
@@ -194,12 +184,24 @@ read or write groups later are refused until they are allowlisted.
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
   `sessions.resolve`, `sessions.subscribe`, `chat.history`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
-  `tasks.runs.events`.
+  `tasks.runs.events`, `talk.catalog`. `talk.catalog` joined the list with ADR 0086 (cascaded
+  voice admission) so a narrow client can render Dictate/Voice as available or disabled; it
+  reports provider/gate state only, never a secret.
 - `operator.sessions.write`: `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
-  `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch` and
-  `sessions.title.prepare`. The last two joined the list with client-chat-v3 P2 (ADR 0083):
-  `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no guard because it
-  changes no session state.
+  `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
+  `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
+  `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark` and
+  `talk.session.bargeIn`. `sessions.patch`/`sessions.title.prepare` joined with client-chat-v3 P2
+  (ADR 0083): `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no
+  guard because it changes no session state. The six `talk.session.*` methods joined with ADR
+  0086/0087/0088 (cascaded voice admission): they let a narrow client run the `stt-tts` and
+  `transcription` Talk session modes Dictate and Voice mode use. Admission is independent of
+  `talk.conversation.enabled`. That gate is checked inside `talk.session.create`, not by this
+  table: `mode: "stt-tts"` is refused `UNAVAILABLE` (`voice conversation disabled`) for every
+  caller while the gate is off, and a narrow connection is refused the same way for
+  `mode: "transcription"` too. An operator-scope `transcription` create is not gated. Request
+  and event shapes are under [Talk sessions](#talk-sessions). `talk.realtime.*`, `talk.config`
+  and `talk.mode` stay operator-only.
 
 `sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
 scope it needs.
@@ -220,7 +222,12 @@ a write-only integration can now change these four settings on any session key i
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
-is an operator diagnostic. No `talk.*` method is allowlisted.
+is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods above are the only
+`talk.*` methods allowlisted; every other `talk.*` method (`talk.realtime.*`, `talk.config`,
+`talk.mode`, `talk.metrics`) stays refused with `missing scope: operator.read` or
+`missing scope: operator.write`. Behaviour of the admitted methods is in
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation); the frames are under
+[Talk sessions](#talk-sessions).
 
 #### Narrow scope event allowlist
 
@@ -233,12 +240,16 @@ events:
 | `chat`             | `operator.sessions.read` |
 | `sessions.changed` | `operator.sessions.read` |
 | `runs.invalidated` | `operator.sessions.read` |
+| `talk.event`       | `operator.sessions.read` |
 | `tick`             | none                     |
 | `heartbeat`        | none                     |
 
+`talk.event` joined this table with ADR 0086/0088: a narrow connection receives it only for its own
+Talk sessions, never another connection's.
+
 Everything else, including `presence`, `health`, `cron`, `exec.approval.*`, `device.pair.*`,
-`node.pair.*`, `node.invoke.request`, `talk.mode`, `talk.event`, `agent`, `sessions.runsUpdate` and
-any event registered later, is not delivered. Operator connections are unaffected.
+`node.pair.*`, `node.invoke.request`, `talk.mode`, `agent`, `sessions.runsUpdate` and any event
+registered later, is not delivered. Operator connections are unaffected.
 
 Chat events are not filtered per session owner: every session stays visible to every operator-role
 connection on a gateway.
@@ -501,114 +512,16 @@ These shipped with the `/v2/client` chat controls. Every new param is optional a
 field is additive, so existing callers are unchanged; the one rule change is how `sessions.patch`
 is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlist)).
 
-#### sessions.list sorting, agent activity, and visibility
-
-`sessions.list` (`operator.read`) accepts the following request parameters. All are optional.
-
-| Parameter              | Type and default                                         | Effect                                                                                                                                                                                                                              |
-| ---------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                                                        |
-| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                                                |
-| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                                                 |
-| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                                                     |
-| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows, capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. Read windows depend on the storage backend, as described below. |
-| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                                                           |
-| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                                                       |
-| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                                                         |
-| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                                                   |
-| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                                               |
-| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                                                   |
-| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                                                |
-| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                                               |
-| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                                                      |
-| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                                                     |
-| `includeLastMessage`   | boolean; default `false`                                 | Adds the latest usable message preview for returned rows. Read windows depend on the storage backend; use `limit` to bound the number of rows enriched.                                                                             |
-
-Transcript enrichment uses backend-specific read windows:
-
-- **`fs-jsonl`:** titles scan at most the first 8,192 bytes and first 10 transcript lines.
-  Previews read at most the last 16,384 bytes and scan the last 20 nonblank lines for a usable
-  user or assistant message.
-- **Other configured session backends:** titles query the oldest 20 stored entries; previews
-  query the newest 20 stored messages. These are entry limits, not byte caps.
-
-A bounded window can miss a usable message outside it. Title sorting still uses its documented
-fallbacks, and an unavailable preview is omitted; these flags do not request a full transcript scan.
-
-`includeInternal` is a tristate, not a simple default-false flag:
-
-- Omitted (`undefined`) preserves legacy operator behavior and filters only cron run keys recognized
-  by `isCronRunSessionKey`.
-- `false` hides any key for which `isUserFacingSessionKey(key)` is false, plus persisted isolated
-  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`,
-  `heartbeat`, and `subagent` as internal. It also hides `main:heartbeat`,
-  `dashboard:*:heartbeat`, and keys matching the persisted `heartbeatIsolatedBaseSessionKey`.
-  Unknown key shapes remain visible.
-- `true` includes internal cron, ACP, heartbeat, and subagent sessions.
-
-When `includeAgentActivity` is true, the result initializes every agent returned by
-`listAgentsForGateway(cfg)` to `null`. It then maps each normalized agent id to the newest non-null
-`updatedAt` timestamp among all surviving agent-keyed sessions. Non-agent keys such as `global` and
-`unknown` are ignored. This aggregation happens before the `agentId`, `spawnedBy`, `label`,
-`search`, `activeMinutes`, `offset`, and `limit` narrowing, so an assistant's activity does not
-disappear merely because the current query or page excludes its newest session.
-
-Activity values are Unix timestamps in milliseconds, or `null` when no eligible activity exists.
-Unless `configuredAgentsOnly` is true, activity may also contain unconfigured agent IDs found in
-surviving session keys.
-
-The operation applies work in this exact order:
-
-1. Apply the `includeInternal` visibility rule, then the `includeGlobal` and `includeUnknown`
-   non-agent-key filters.
-2. Apply `configuredAgentsOnly` to agent-keyed sessions.
-3. If requested, aggregate `agentActivity` across all surviving agent sessions.
-4. Apply `agentId`, `spawnedBy`, `label`, `search`, and `activeMinutes` query filters.
-5. For `sortBy: "title"`, enrich every unlabelled surviving session before paging. Work runs in
-   batches of 16 (`TITLE_ENRICHMENT_BATCH_SIZE`) and yields to the event loop between batches. A
-   label becomes the lowercase sort key; otherwise the key is the derived title, then
-   `displayName`, then the session key, lowercased.
-6. Sort the complete filtered set. `updatedAt` compares
-   `(a.updatedAt ?? 0) - (b.updatedAt ?? 0)`, while `title` and `key` use `localeCompare`; the
-   selected direction multiplies that primary comparison. A zero primary comparison always uses
-   `a.key.localeCompare(b.key)` in ascending order as the deterministic tie-breaker.
-7. Compute `totalCount` before paging.
-8. Apply `offset` with `enrichedSessions.slice(offset)`.
-9. Apply `limit` with `enrichedSessions.slice(0, limit)`.
-10. If `includeDerivedTitles` or `includeLastMessage` is true, read transcripts only for rows in
-    the sliced page and add the requested title or preview fields.
-
-The result also reports `limitApplied` when the caller supplied a limit; non-zero `offset`;
-`nextOffset` (or `null` at the end); and `hasMore`. `count` is the number of rows in the returned
-page, while `totalCount` is the filtered count before `offset` and `limit`.
-
-For example, these are complete RPC `params` objects; they require no imports:
-
-```json
-{
-  "includeInternal": false,
-  "includeAgentActivity": true,
-  "sortBy": "title",
-  "sortOrder": "asc",
-  "includeDerivedTitles": true,
-  "offset": 0,
-  "limit": 50
-}
-```
-
-```json
-{
-  "agentId": "main",
-  "search": "incident",
-  "activeMinutes": 240,
-  "sortBy": "updatedAt",
-  "sortOrder": "desc",
-  "includeInternal": true,
-  "offset": 50,
-  "limit": 50
-}
-```
-
+- `sessions.list` (`operator.read`) accepts `offset` (integer, minimum 0, default 0), applied after
+  every filter and after the `updatedAt`-descending sort, before `limit`. The result gains
+  `totalCount` (the filtered total, before offset/limit), `limitApplied` (the limit actually applied,
+  when the caller passed one), `offset` (echoed back when non-zero; omitted, like upstream, when
+  offset is 0), `nextOffset` (the offset of the next page, or `null` when there is no more) and
+  `hasMore: boolean` (always present; true exactly when rows exist past `offset + sessions.length`).
+  `count` keeps its existing meaning (rows returned in this page). The web client's chat filter and
+  search use two existing params: `agentId` keeps the sessions of one agent (by the agent id in the
+  session key), and `search` keeps rows whose display name, label, subject, session id or key
+  contains the text, ignoring case - it does not match a title derived from the first message.
 - `sessions.create` (`operator.write`; narrow-admitted) takes
   `{parentSessionKey?, label?, agentId?, model?}` and answers `{ key, sessionKey, sessionId }`;
   `key` and `sessionKey` are the same new `agent:<agentId>:dashboard:<uuid>` key. The agent is
@@ -804,6 +717,174 @@ The full rationale lives in the repo at `dev-docs/adr/0073-client-contract-rpc-a
   dropping the delivery.
 - CLI-backed providers own their own transcript, so a turn that would need one of these
   suppressions on a CLI provider fails the run instead of persisting anyway.
+
+## Talk sessions
+
+`talk.session.*` (`operator.write`; narrow-admitted) and `talk.catalog` (`operator.read`;
+narrow-admitted) are the cascaded Dictate and Voice surface. `talk.metrics` is `operator.read`
+and is not narrow-admitted. Unknown fields are rejected. A call for a session this connection
+does not own is `INVALID_REQUEST`.
+
+`talk.event` frames on the wire are `{type, sessionId, seq, turnId?, final?, payload?}`. `payload`
+is omitted when it is empty, including `turn.started`, `turn.ended`, and `session.ready`.
+Turn-scoped types always carry `turnId`. Do not treat a missing `payload` as a zero-filled object.
+
+### `talk.session.create`
+
+Params (all required except `provider`):
+
+| Field        | Type                             | Required |
+| ------------ | -------------------------------- | -------- |
+| `sessionKey` | string, min length 1             | yes      |
+| `mode`       | `"transcription"` or `"stt-tts"` | yes      |
+| `transport`  | `"gateway-relay"`                | yes      |
+| `brain`      | `"none"`                         | yes      |
+| `provider`   | string                           | no       |
+
+`brain` stays `"none"` on this method. Voice still runs an agent turn; that pairing is handler
+logic, not a second enum value on create.
+
+Result: `{sessionId, audio: {inputEncoding: "pcm16", inputSampleRateHz: 16000, channels: 1}}`.
+The response is written before `session.ready`. Audio appended before `session.ready` is dropped,
+not rejected. Input is base64 PCM16 mono at 16 kHz. Output audio events are PCM16 mono at 24 kHz.
+
+Gate and provider errors are `UNAVAILABLE`:
+
+- `voice conversation disabled` — gate off, for every `stt-tts` caller and for every narrow
+  caller.
+- `stt-tts requires a configured STT and TTS provider` — Voice has no configured streaming
+  transcription row and streaming speech row (including a speech `voiceId`).
+
+Voice opens STT with `providerConfig.commitStrategy: "vad"` and
+`providerConfig.endOfTurnSilenceMs` from `talk.conversation.endOfTurnSilenceMs`. Keys already set
+on `talk.providers.<id>` win. Dictate does not inject those defaults.
+
+### `talk.session.appendAudio`, `close`, `cancelTurn`
+
+| Method                     | Params                                                              | Result |
+| -------------------------- | ------------------------------------------------------------------- | ------ |
+| `talk.session.appendAudio` | `sessionId` (string), `audioBase64` (string), `timestamp?` (number) | empty  |
+| `talk.session.close`       | `sessionId` (string, min length 1)                                  | `{}`   |
+| `talk.session.cancelTurn`  | `sessionId` (string, min length 1), `reason` (`"client-cancelled"`) | `{}`   |
+
+`appendAudio` is `INVALID_REQUEST` when the base64 text is longer than 512 KiB, is not canonical
+base64, or decodes to an odd byte count (PCM16 samples are 2 bytes). `close` answers before the
+drain emits terminal events.
+
+### `talk.session.mark`
+
+Params: `sessionId` (string, min length 1), `markName` (string, min length 1), `timestamp`
+(number, minimum 0). Result: `{}`.
+
+For `stt-tts` speech marks, `timestamp` is milliseconds of audio played for that turn, 0 at the
+turn's first speech sample — the same domain as the alignment timeline. It is not
+`performance.now()`, and it is not the realtime relay's media clock. A `performance.now()` value
+is past every alignment entry, so a mid-turn ack would persist text whose audio was still
+buffered. Attach the speech mark when the chunk is enqueued and report the offset when that
+chunk's playback barrier is reached. A mark sent after `turn.ended` is too late: the relay has
+retired the turn. Barge-in timestamps below stay on the `performance.now()` clock and must not be
+mixed with mark timestamps.
+
+### `talk.session.bargeIn`
+
+Params: `sessionId` (string, min length 1), `speechDetectedAt?` (number, minimum 0),
+`playbackPausedAt?` (number, minimum 0). Result: `{}`. Both timestamps are client-local monotonic
+milliseconds (`performance.now()`). When both are present, `playbackPausedAt - speechDetectedAt`
+must be in `[0, 10000]` or the call is `INVALID_REQUEST`. Omitting either is accepted and the
+stop-latency sample is unmeasured. The call is a no-op when the session is idle or the active turn
+has not yet played reply speech. Server handling does not arm on filler or ack; the web client
+arms its detector only while `kind: "speech"` is playing.
+
+### `talk.event` types
+
+Canonical names, in order: `session.started`, `session.ready`, `session.closed`, `session.error`,
+`session.replaced`, `turn.started`, `turn.ended`, `turn.cancelled`, `capture.started`,
+`capture.stopped`, `capture.cancelled`, `capture.once`, `input.audio.delta`,
+`input.audio.committed`, `transcript.delta`, `transcript.done`, `output.text.delta`,
+`output.text.done`, `output.audio.started`, `output.audio.delta`, `output.audio.done`,
+`output.audio.resumed`, `output.audio.cleared`, `tool.call`, `tool.progress`, `tool.result`,
+`tool.error`, `usage.metrics`, `latency.metrics`, `health.changed`.
+
+`transcript.delta` `payload.text` is the cumulative text of the in-progress segment. Replace the
+stored caption; do not append.
+
+`output.audio.started`, `output.audio.delta`, and `output.audio.done` carry `markName` and
+`kind` (`"speech"`, `"filler"`, or `"ack"`). `output.audio.delta` also carries `audioBase64`,
+`sampleRateHz` (`24000`), and `sequence` (1-based, monotonic per `markName`). Filler and ack do
+not count toward `stopToFirstAudioMs`. `output.audio.resumed` is `{markName}` only — a resume
+continues the in-flight speech stream. `output.audio.cleared` is `{markName, reason: "barge-in"}`.
+
+`turn.started` and `turn.ended` have an empty payload. `turn.ended` means the TTS stream drained.
+It does not mean the session entry or the transcript has been written. Those writes land after
+the event and are not awaited, so a disk write cannot block the next turn. Wait for the `chat`
+final event, or poll `chat.history`, before reading the turn back. A confirmed barge-in persists
+only the heard prefix plus an `[interrupted]` marker; zero heard characters append no assistant
+message. On the JSONL backend the rewrite truncates the file and writes the loaded transcript
+back, so earlier entries stay.
+
+`turn.cancelled` payload is `{reason}`. Reasons you must handle include `client-cancelled` (the
+cancel RPC), `agent-error` (the agent run failed to start; the turn is cancelled rather than left
+open), `tts-stall` (the speech stream sat silent for 30 seconds after `end()`, or a `ready` or
+backpressure promise stayed unsettled that long; audio that is still arriving resets that wait;
+waiting on the model is not a stall), `tts-error`, `barge-in`, `turn-resumed`, and the session
+close reasons below when they cancel the active turn (`session-closed` when the close reason was
+`completed`).
+
+`session.ready` is emitted once, when the first STT connect succeeds. That includes the one
+allowed reconnect after an initial connect failure. A later reconnect of an already-ready session
+does not emit `session.ready` again. A second STT fault emits `session.error` (empty payload) and
+then `session.closed`. For `stt-tts`, `session.closed` payload is
+`{reason: "completed" | "error" | "cancelled" | "session-minutes-exceeded" | "turn-seconds-exceeded"}`.
+Other session kinds still omit an empty `session.closed` payload.
+
+`latency.metrics` payload: `turnId`, `provider: {stt, tts}`, optional stage fields
+`endOfTurnMs`, `preModelMs`, `modelFirstTokenMs`, `ttsFirstByteMs`, `gatewayAddedMs`,
+`stopToFirstAudioMs`, `bargeInStopMs` (each a number, minimum 0; omitted, never a fabricated 0,
+when the turn did not reach that stage), and booleans `recallDeadlineExceeded`, `fillerPlayed`,
+`toolAckPlayed`.
+
+### `talk.catalog`
+
+Params: `{}`. Result fields: required `transcription` (`activeProvider` string or null, `rows`,
+and `providers` — the same rows: `{id, label, configured, modes: ["transcription"], transports: ["gateway-relay"], brains: ["none"]}`), optional `streamingTranscription`, `speech`,
+`realtime`, and `conversationEnabled`. Streaming transcription and speech rows are
+`{id, label, configured, diagnostic?, modes, transports}` plus `brains: ["agent-consult"]` on
+streaming transcription only. `modes` is `["streaming"]`. `transports` is `["gateway-relay"]`.
+`diagnostic`, present only when `configured` is false and a cause is known, is
+`"missing-api-key"`, `"secret-ref-unresolved"`, or `"provider-error"`. Realtime rows use
+`modes: ["realtime"]` and `transports` of `"provider-websocket"` and/or `"webrtc"`. The catalog
+never includes a secret.
+
+### `talk.metrics`
+
+Params: `{}`. Not narrow-admitted (`missing scope: operator.read`). Result:
+
+```json
+{
+  "providerPairs": [
+    {
+      "sttProvider": "elevenlabs",
+      "ttsProvider": "elevenlabs",
+      "count": 12,
+      "p50": { "endOfTurnMs": 480 },
+      "p95": { "endOfTurnMs": 900, "stopToFirstAudioMs": 1100 },
+      "falseInterruptions": 1,
+      "confirmedInterruptions": 1,
+      "interruptionCandidates": 3,
+      "falseInterruptionRate": 0.5
+    }
+  ]
+}
+```
+
+`p50` and `p95` use the same optional stage fields as `latency.metrics`, including
+`bargeInStopMs`. `falseInterruptionRate` is `falseInterruptions / (falseInterruptions + confirmedInterruptions)`
+and is omitted when that denominator is 0. The window is 500 turns per provider pair, in memory
+only. The same samples are the `talk.turn.timing` diagnostic event. With the diagnostics OpenTelemetry
+plugin enabled they export as `openclaw.talk.turn.end_of_turn_ms`, `pre_model_ms`,
+`model_first_token_ms`, `tts_first_byte_ms`, `gateway_added_ms`, `stop_to_first_audio_ms`, and
+`barge_in_stop_ms` histograms, plus counters `openclaw.talk.turn.false_interruption`,
+`confirmed_interruption`, and `interruption_candidate`.
 
 ## Exec approvals
 
