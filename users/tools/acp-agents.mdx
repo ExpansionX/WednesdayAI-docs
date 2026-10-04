@@ -334,7 +334,7 @@ Then verify backend health:
 By default, the acpx plugin (published as `@openclaw/acpx`) uses the plugin-local pinned binary:
 
 1. Command defaults to `extensions/acpx/node_modules/.bin/acpx`.
-2. Expected version defaults to the extension pin.
+2. Expected version defaults to the exact `acpx` version in the plugin's `package.json` (`dependencies.acpx`).
 3. Startup registers ACP backend immediately as not-ready.
 4. A background ensure job verifies `acpx --version`.
 5. If the plugin-local binary is missing or mismatched, it runs:
@@ -364,7 +364,17 @@ Notes:
 - Relative paths resolve from OpenClaw workspace directory.
 - `expectedVersion: "any"` disables strict version matching.
 - When `command` points to a custom binary/path, plugin-local auto-install is disabled.
-- OpenClaw startup remains non-blocking while the backend health check runs.
+- WednesdayAI startup remains non-blocking while the backend health check runs.
+
+At gateway startup, ACP sessions whose identity is still pending are re-resolved once the backend reports healthy; the gateway waits up to 30 seconds (polling every 250 ms) for the backend to finish starting, then retries each pending session once. If the backend does not become healthy in that window, the reconcile logs a warning and the sessions are not lost: each one re-resolves on its next use.
+
+### Upgrading from acpx 0.1.x
+
+- Persistent ACP sessions created under 0.1.x start a new acpx session on their next use, and the agent's earlier conversation history is not carried over. acpx matches sessions by their exact adapter command, and the default adapters changed (codex → `@agentclientprotocol/codex-acp`, claude → `@agentclientprotocol/claude-agent-acp`, gemini → `gemini --acp`). WednesdayAI re-resolves the session identities automatically at gateway startup.
+- Claude sessions no longer load user-level Claude settings (`~/.claude/settings.json`). To restore them, set `ACPX_CLAUDE_INCLUDE_USER_SETTINGS=1` in the gateway's environment; spawned acpx processes inherit it.
+- ACP adapter authentication no longer picks up ambient API keys such as `OPENAI_API_KEY`. Set `ACPX_AUTH_<METHOD_ID>` (for example `ACPX_AUTH_OPENAI_API_KEY`) when an adapter needs ACP-level auth.
+- Session status reports `idle`, not `dead`, for a resumable session with no running process.
+- The first prompt after the upgrade downloads the new adapter through `npx`, so it takes noticeably longer.
 
 See [Plugins](/tools/plugin).
 
