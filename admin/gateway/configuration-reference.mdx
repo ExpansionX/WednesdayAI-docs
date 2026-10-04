@@ -1467,7 +1467,7 @@ scripts/sandbox-browser-setup.sh   # optional browser image
   sidebar, the top bar and each of its replies.
 - **If you expose the web client**, also set `agents.defaults.models` to a real, bounded catalog.
   The model menu (`models.list`) lists the catalog entries named there, and `sessions.patch` and
-  `sessions.create`'s optional `model` field (client-chat-v3 P2, ADR 0081/0082) accept those plus
+  `sessions.create`'s optional `model` field (client-chat-v3 P2, ADR 0083/0084) accept those plus
   the agent's own default model. `agents.list[].model` fallbacks do not widen or narrow either.
   Leaving `agents.defaults.models` empty lists the whole model catalog and admits any
   `provider/model` reference that parses, not just the ones you intend end users to pick from.
@@ -1872,9 +1872,66 @@ Defaults for Talk mode (macOS/iOS/Android).
 ```
 
 - Voice IDs fall back to `ELEVENLABS_VOICE_ID` or `SAG_VOICE_ID`.
-- `apiKey` and `providers.*.apiKey` accept plaintext strings or SecretRef objects.
+- `apiKey` and `providers.*.apiKey` accept plaintext strings or SecretRef objects. Both are best-effort: an unresolvable ref warns (`SECRETS_REF_OPTIONAL_UNRESOLVED`) and does not fail gateway startup. `talk.catalog` then reports that provider unavailable with `diagnostic: "secret-ref-unresolved"`. A CLI command that falls back to local secret resolution still hydrates a resolvable Talk ref instead of treating it as absent.
 - `ELEVENLABS_API_KEY` fallback applies only when no Talk API key is configured.
 - `voiceAliases` lets Talk directives use friendly names.
+- Cascaded Voice mode reuses `talk.providers.<id>.modelId` when set. When it is unset, Voice mode falls back to `eleven_flash_v2_5`, not the legacy Talk-command default `eleven_v3` shown above.
+
+### `talk.conversation`
+
+Settings for the cascaded `stt-tts` voice conversation loop behind the `/v2/client` web client's
+Dictate and Voice mode controls. See
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation) for the full behavior;
+text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block only
+configures the STT seam, turn-taking thresholds, session limits, and filler/acknowledgement
+phrases.
+
+```json5
+{
+  talk: {
+    conversation: {
+      enabled: false,
+      sttProvider: "elevenlabs",
+      sttModel: "scribe_v2_realtime",
+      endOfTurnSilenceMs: 500,
+      recallDeadlineMs: 250,
+      fillerAfterMs: 1200,
+      falseInterruptionMs: 700,
+      locale: "en",
+      backchannels: {
+        en: ["mm-hmm", "uh-huh", "yeah", "right", "okay", "ok", "sure", "got it", "i see"],
+      },
+      fillerPhrases: { en: ["One moment.", "Let me check.", "Just a sec."] },
+      ackPhrases: { en: ["Working on that.", "Looking that up.", "On it."] },
+      maxSessionMinutes: 30,
+      maxTurnSeconds: 60,
+    },
+  },
+}
+```
+
+| Field                 | Default                | Meaning                                                                                                                         |
+| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every `stt-tts`/streaming-`transcription` session while this is `false`.             |
+| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                    |
+| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                   |
+| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                             |
+| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.           |
+| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                              |
+| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.              |
+| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                         |
+| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                             |
+| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                |
+| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`. |
+| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. Closes with `session.closed { reason: "session-minutes-exceeded" }`.                             |
+| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.            |
+
+Numeric fields (`endOfTurnSilenceMs`, `recallDeadlineMs`, `fillerAfterMs`, `falseInterruptionMs`, `maxSessionMinutes`, `maxTurnSeconds`) must be positive integers. `0`, negatives, and non-integers fail config validation.
+
+Voice mode injects `commitStrategy: "vad"` and this block's `endOfTurnSilenceMs` into the STT provider config. An explicit `talk.providers.<id>.commitStrategy` (`"vad"` or `"manual"`) or `talk.providers.<id>.endOfTurnSilenceMs` wins, because those provider keys are spread last. Dictate does not receive that injection and commits only when the user stops.
+
+Changes under `talk.conversation.*` apply without a gateway restart to new sessions; existing
+sessions keep the configuration resolved when they started.
 
 ---
 
