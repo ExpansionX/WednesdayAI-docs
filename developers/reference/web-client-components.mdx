@@ -5,22 +5,7 @@ read_when:
   - You are adding a control whose backing feature ships in a later phase
   - You need to know where the web client keeps state and how it talks to the gateway
 title: "Web client components"
-description: "Developer contracts for WednesdayAI web-client components, chat history reconciliation, session lists, and transcript display."
 audience: developer
-component: web-client-components
-sources:
-  - apps/web/src/app/AppShell.tsx
-  - apps/web/src/state/types.ts
-  - apps/web/src/ui/DisabledControl.tsx
-  - apps/web/src/providers/web-client-runtime.ts
-  - apps/web/src/app/completed-history-boundary.ts
-  - apps/web/src/app/use-chat-history.ts
-  - apps/web/src/providers/session-list-runtime.ts
-  - apps/web/src/providers/navigation-preferences.ts
-  - apps/web/src/ui/DisplayMenu.tsx
-  - apps/web/src/ui/ToolDisplay.tsx
-  - src/gateway/session-utils.ts
-generated: 2026-10-02
 ---
 
 # Web client components
@@ -42,10 +27,9 @@ apps/web/src/
   gateway/     connection, device identity, setup-code parsing
 ```
 
-The components in `ui/` are `Shell`, `Sidebar`, `NavigationMenus`, `TopBar`, `ModelMenu`, `ThinkMenu`,
-`DisplayMenu`, `ToolDisplay`, `NewChatPicker`, `AccountMenu`, `Thread`, `AssistantMessage`,
-`UserMessage`, `EmptyState`, `Composer`, `RightPanel`, `DisabledControl`, `Icon` and
-`markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile
+The components in `ui/` are `Shell`, `Sidebar`, `TopBar`, `ModelMenu`, `ThinkMenu`, `NewChatPicker`,
+`AccountMenu`, `Thread`, `AssistantMessage`, `UserMessage`, `EmptyState`, `Composer`, `RightPanel`,
+`DisabledControl`, `Icon` and `markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile
 breakpoint at 860px, sidebar open and collapsed state) so `AppShell` supplies data, not chrome. The
 assistant and chat controls client-chat-v3 P2 made live (model, Think, assistant picker, queue,
 reply, rename) are covered under [Chat controls and hooks](#chat-controls-and-hooks).
@@ -94,7 +78,11 @@ The contract:
   `aria-disabled`, not the `disabled` attribute, so it stays focusable and the tooltip is reachable
   from the keyboard.
 - The click handler only calls `preventDefault()`. A disabled control must never reach a gateway
-  RPC, whatever capability flag is set. `features.voice` does not enable Dictate or Voice mode.
+  RPC, whatever capability flag is set. `features.voice` is deprecated and ignored: it never
+  enabled Dictate or Voice mode, and now has no reader at all — both controls' live/disabled state
+  is `talk.catalog`-driven (ADR 0088 item 12, amended): Dictate needs a configured streaming
+  transcription provider and the gate on, Voice additionally needs a configured streaming speech
+  provider.
 - The props are a union: pass **either** `phase` **or** `finding`, never both. Use `phase` for work
   on the client roadmap phases (`dev-docs/workstreams/client-chat-v3/strategy/`; P3 read aloud, P3a
   dictation, P3b voice mode, P4 widgets and Canvas). Use `finding` for controls that wait on a
@@ -110,8 +98,8 @@ The contract:
 // Do this: visible, inert, and honest about when it lands
 <DisabledControl phase="P4" label="Canvas" icon="canvas" testId="top-bar-canvas" />
 
-// Not this: a live-looking button with a handler that reaches for an RPC the client may not call
-<button onClick={() => gateway.request("talk.session.create", {})}>Voice mode</button>
+// Not this: a live-looking button that calls a method this client is refused
+<button onClick={() => gateway.request("talk.metrics", {})}>Metrics</button>
 ```
 
 To enable a control when its phase ships, replace the `DisabledControl` with a real element, update
@@ -130,8 +118,7 @@ sees as chats.
 | Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                |
 | Source tag on a row          | `deriveSourceTag(key)` in `ui/session-key-shape.ts`                                                                             |
 | Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `new-chat-picker-option`                |
-| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel` |
-| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimal / full`                        |
+| Model, Think, Show reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel` |
 | Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                     |
 | Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                    |
 | Queue, Send now              | `handleQueue`, `handleSendNow` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                 |
@@ -194,122 +181,20 @@ useEffect(() => {
 client-chat-v3 P2 made the assistant and chat controls live and split `AppShell.tsx` into one hook or
 provider module per concern, each testable without a gateway connection.
 
-| Concern                          | Code                                                                                            | Gateway calls                                                                                              |
-| -------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Assistant picker, new chat       | `ui/NewChatPicker.tsx`, `app/use-session-creation.ts`                                           | `agents.list`, `models.list`, `sessions.create`                                                            |
-| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                  | `models.list`, `sessions.patch {model}`                                                                    |
-| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                  | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
-| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                     | none; browser-local preferences                                                                            |
-| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                     | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
-| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`      | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort`                                                 |
-| Queue, Send now                  | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts` | `sessions.steer`, `sessions.runs.list`                                                                     |
-| History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                         | `chat.history {before}`                                                                                    |
-| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                      | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
-| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                                                                             |
-| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                    | none                                                                                                       |
-
-### Completed history boundary and transcript controls
-
-These contracts keep completed runs, session-list responses, and browser-local presentation state
-from overwriting newer or connection-specific state.
-
-```ts
-type CompletedRunOutcome = "final" | "aborted";
-
-declare function resolveCompletedHistoryBoundary(
-  current: ChatMessage[],
-  loaded: ChatMessage[],
-  currentMatches: ReadonlyMap<number, number>,
-  completedRunId: string,
-  outcome: CompletedRunOutcome,
-): {
-  loadedBoundary: number;
-  completedAssistantAdopted: boolean;
-  hasCompletedMatch: boolean;
-};
-```
-
-`ChatMessage` is the client-owned message type in `state/types.ts`; the map relates current row
-indexes to loaded row indexes. This is an internal client contract, not a plugin SDK export.
-
-`resolveCompletedHistoryBoundary` accepts a terminal `outcome` of `"final"` or `"aborted"`. It
-finds the last loaded row matched to the completed run. When there is no completed-run match, it
-falls back to the loaded row matched to the user message that preceded that run's assistant turn.
-If the completed assistant was not adopted, the outcomes diverge:
-
-- For `"final"`, the resolver advances `loadedBoundary` through subsequent loaded rows until the
-  next user turn. This admits the server's completed assistant output into the loaded boundary.
-- For `"aborted"`, it stops at the existing `loadedBoundary` and does not scan forward. The merge
-  therefore preserves the stopped text observed in local state instead of adopting a durable
-  server suffix that was ahead of the stream when the abort landed.
-
-```ts
-const boundary = resolveCompletedHistoryBoundary(
-  currentMessages,
-  loadedMessages,
-  currentMatches,
-  completedRunId,
-  "aborted",
-);
-```
-
-`SessionListRuntime` tags each request with a monotonically increasing `seq`. A response is applied
-only while its captured `mySeq` equals the current sequence; otherwise it is silently dropped as
-stale after a newer filter, search, sort, or page request. `dispose()` clears the pending 250 ms
-search debounce and increments `seq`, preventing an in-flight Gateway response from landing on a
-torn-down component. On `sessions.changed`, `refetchLoadedWindow()` starts at offset 0 and uses
-`limit = Math.max(sessions.length, pageSize)`, preserving every page the user already loaded.
-
-Navigation and transcript preferences are per connection:
-
-- Navigation uses
-  `openclaw.web.navigation:<encodedGatewayUrl>:<clientId>`, where the storage scope contains both
-  `gatewayUrl` and `clientId`. Defaults are `assistantSort: "newest"`, `activityWindowHours: 4`,
-  `includeInternal: false`, `chatSortBy: "updatedAt"`, `chatSortOrder: "desc"`,
-  `selectedAgentId: null`, and `lastChatByAgent: {}`.
-- Transcript display uses the `openclaw.web.transcript-display.v1` object, keyed within that object
-  by `<gatewayUrl>|<clientId>`. Defaults are `showReasoning: false` and `tools: "minimal"`.
-
-Display is not delivery. `showReasoning` and `tools: "hide" | "minimal" | "full"` are strictly
-browser-local presentation state in `DisplayMenu`; they do not alter Gateway execution or the
-session's `reasoningLevel`. Tool failures remain visible even in `"hide"` mode:
-
-```tsx
-<div className="cl-tool-error" role="alert">
-  {result.error}
-</div>
-```
-
-A wholly hidden tool call renders `null`, so a tool-only assistant turn must not leave an empty
-assistant bubble.
-
-Web-client-specific footguns and their safe patterns:
-
-- Do not apply a late session-list response after a filter or sort changes, or after unmount. Keep
-  the `mySeq === seq` guard and invalidate the sequence in `dispose()`.
-- Do not refetch only `pageSize` rows on `sessions.changed`; doing so drops an already loaded second
-  or later page. Refetch the full loaded window from offset 0.
-- Do not treat aborted and final reconciliation as equivalent. Advancing an aborted boundary can
-  replace the exact stopped text the user saw with a durable suffix they never observed.
-- Do not persist navigation or display preferences under an unscoped key. The same browser can
-  connect to multiple gateways or client identities.
-- Do not mutate the active row optimistically for model, thinking, reasoning, or label changes.
-  Wait for the patch and refreshed session row; otherwise a refusal can leak one chat's pending
-  state into another.
-- Do not hide tool errors with ordinary tool details. Error output is an alert even when tool
-  display is hidden.
-
-```ts
-// Do this: preserve the loaded window and invalidate work during teardown.
-runtime.refetchLoadedWindow();
-return () => runtime.dispose();
-```
-
-```ts
-// Not this: a one-page refresh drops loaded rows, and an empty cleanup admits stale responses.
-runtime.reload();
-return () => {};
-```
+| Concern                          | Code                                                                                            | Gateway calls                                              |
+| -------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------- |
+| Assistant picker, new chat       | `ui/NewChatPicker.tsx`, `app/use-session-creation.ts`                                           | `agents.list`, `models.list`, `sessions.create`            |
+| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                  | `models.list`, `sessions.patch {model}`                    |
+| Think menu, Show reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                  | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`    |
+| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                     | `sessions.patch {label}`, `sessions.title.prepare`         |
+| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`      | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort` |
+| Queue, Send now                  | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts` | `sessions.steer`, `sessions.runs.list`                     |
+| History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                         | `chat.history {before}`                                    |
+| Chat list filter, search, paging | `providers/session-list-runtime.ts`                                                             | `sessions.list {agentId, search, offset, limit}`           |
+| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                             |
+| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`                                    | `talk.catalog`, `talk.session.*` mode `transcription`      |
+| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `app/use-voice.ts`                                        | `talk.catalog`, `talk.session.*` mode `stt-tts`            |
+| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                    | none                                                       |
 
 Contracts worth keeping when you change them:
 
@@ -318,7 +203,7 @@ Contracts worth keeping when you change them:
   refreshed on every `sessions.changed` for it). A refused patch therefore needs no rollback:
   nothing on screen changed, and the control shows the gateway's message (`chat-controls-error`).
   "Assistant default" in the model menu sends `model: null`; Think sends `off`, `low`, `medium` or
-  `high`; Send reasoning sends `reasoningLevel` `on` or `off`. `ThinkMenu` is inert (`aria-disabled`,
+  `high`; Show reasoning sends `reasoningLevel` `on` or `off`. `ThinkMenu` is inert (`aria-disabled`,
   a tooltip naming the model, no frame sent) when `models.list` reports `reasoning: false` for the
   chat's model.
 - **Suggest never saves.** `rename-suggest` sends `sessions.title.prepare` with the chat's assistant
@@ -362,53 +247,8 @@ Contracts worth keeping when you change them:
   Every request carries a sequence number and a superseded response is dropped. The open chat's own
   row is fetched separately, so the top bar stays live when a filter or search hides the chat from
   the list.
-  Rows show the exact session key instead of a message preview; the client no longer requests
-  unused last-message previews. Internal sessions are hidden by default (`includeInternal: false`).
-  Gateway sorting precedes pagination; title sort uses labels before derived titles. Global title
-  enrichment caps transcript reads at 16 at a time and yields between batches; normalized sort keys
-  are computed once and are not returned. `includeDerivedTitles` remains opt-in: callers displaying
-  the effective sorted titles should request it explicitly.
-  `agentActivity` aggregates the newest eligible session timestamp before
-  assistant, search, activity-window and pagination narrowing. The assistant list defaults to a
-  4-hour window, pins the selected assistant, and refreshes its cutoff once per minute.
-- **Assistant navigation.** Clicking an assistant scopes Chats and restores its last explicitly
-  selected eligible chat, independently of the loaded page. Otherwise it opens the newest
-  user-facing chat or clears the runtime selection without creating a chat. Explicit creation and
-  first-send creation remember the new chat too. Every actual activation invalidates older
-  restoration callbacks, so delayed startup lookups cannot replace a newly created or selected chat.
-  The selection is visible during lookup; the draft remains editable, but submission waits for
-  lookup to finish or be superseded. Changing visibility only refilters a settled chat; an already
-  pending assistant lookup restarts with the new eligibility rules. Creation revisions reject late
-  creation replies. Separate send-navigation revisions invalidate leaf-gated sends on genuine
-  navigation, but not on `All assistants`, the already-selected assistant, or the same open chat.
-  `All assistants` explicitly clears the scope. Navigation preferences and remembered selections
-  are scoped by gateway URL and client ID in browser storage; malformed remembered entries are discarded.
-- **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimal"`
-  by default, separately from `reasoningLevel`. `extractTranscriptBlocks` preserves ordered text,
-  thinking, tool calls, results and media; `Thread` pairs tools by call ID across loaded pages.
-  Legacy `tool` roles and snake_case result metadata remain tools, not assistant prose.
-  Hidden tool details retain errors, and wholly hidden execution turns leave no empty assistant
-  row. Local final/aborted turns trigger a `completed-turn` reconciliation after the leaf settles,
-  even while a newer local or queued run exists. The completed run ID and terminal outcome bound
-  that snapshot: a final replaces its stale partial, while an aborted run keeps the observed stopped
-  text rather than an ahead-of-stream durable suffix. `completed-history-boundary.ts` excludes newer
-  assistant/execution data but admits matched newer durable users. Those rows keep their client IDs
-  and run ownership; the queued marker clears on the runtime's start event, not on storage adoption.
-  The merge retains newer partials, optimistic users, queued turns, older pages and errors without
-  advancing the leaf guard. Legacy identity-less matches are one-to-one FIFO within durable-entry
-  anchor intervals, so identical distinct turns remain distinct. Scoped loaded-history and
-  older-page IDs distinguish replaceable heads from optimistic rows and preserve imported legacy
-  entries. Superseded older-page responses cannot splice into a replacement load.
-  Events received before `chat.send` acknowledges its run are buffered for exact attribution.
-  A rejected send recovers the foreign question/reply through the non-destructive merge, including
-  first-send-created chats, without deleting its own optimistic question or refusal. A durable foreign
-  terminal event clears the fresh-empty-chat skip guard just like a local completion.
-  Send failures belong to their original optimistic turn: an obsolete rejection cannot rewrite a
-  newer chat or foreign reply. Distinct assistant message IDs remain distinct even with identical text.
-  Media links and derived attachments share `normalizeMediaUrl`: HTTP(S) and inline raster
-  images/WAV are allowed; unsupported schemes and data types remain non-interactive metadata.
-- **Colours.** `ui/assistant-color.ts` maintains a browser-safe palette identical, in order, to
-  `ASSISTANT_IDENTITY_COLORS` in
+- **Colours.** `ui/assistant-color.ts` imports nothing from `src/` (the browser bundle cannot), so
+  its palette must stay identical, in order, to `ASSISTANT_IDENTITY_COLORS` in
   `src/shared/assistant-identity-values.ts`. A configured `identity.color` wins; otherwise FNV-1a
   32-bit of the agent id modulo 8 picks one, so an unconfigured assistant keeps its colour across
   reloads and devices. The `--wai-assistant-<name>` and `-fg` tokens are in
@@ -416,6 +256,50 @@ Contracts worth keeping when you change them:
 - **Menus.** `useDismissibleMenu` closes a menu on an outside mousedown and on Escape, returning
   focus to its trigger. `ModelMenu`, `ThinkMenu` and the Composer send menu all use it; do not copy
   its body into a new menu.
+
+## Dictate and Voice
+
+Dictate and Voice mode are Composer controls, not later-phase placeholders, once `talk.catalog`
+says they are live. Both stay a `DisabledControl` (`phase="P3a"` for Dictate, `phase="P3b"` for
+Voice mode, test ids `composer-dictate` and `composer-voice`) until then. `features.voice` is
+ignored.
+
+Availability comes from `talk.catalog`, and updates on reconnect:
+
+- Dictate is live when `conversationEnabled` is true and `streamingTranscription` has a
+  `configured: true` row.
+- Voice is live only when Dictate's conditions hold and `speech` also has a configured row.
+
+`useDictate` returns `status` `unavailable | idle | recording | error`, a live `partialText`
+caption while recording, and `errorMessage` (mic denied or no input device). Stopping fills the
+composer with the final transcript, including an empty one. A capture failure leaves the control
+recoverable: the next click retries. `partialText` is a replacement caption, not an append.
+
+`useVoice` returns `status` `unavailable | idle | listening | speaking | error`. Voice does not
+fill the composer. Toggle starts or stops the cascaded session. A start rejection is swallowed
+here; the seam's `error` status is what the button shows.
+
+Playback and barge-in come from the `talk-client` package (`createTalkAudioPlayback`,
+`createBargeInDetector`), not from `wednesdayai/plugin-sdk`. Call playback with `preRollMs: 40`
+and `echoSafeSink: true` for Voice. Both options default off (`preRollMs` 0, `echoSafeSink` false),
+which is what the operator console keeps. `preRollMs` delays only the first chunk of a fresh burst.
+`echoSafeSink` routes through a `MediaStreamAudioDestinationNode`
+into an `<audio>` element so echo cancellation has a real media element.
+
+The barge-in detector stays disarmed except while `kind: "speech"` audio is playing. Do not arm it
+for `filler` or `ack`. Re-arm it on `output.audio.resumed` while speech is still active, and do
+not disarm it in the gap between speech chunks. Voice uses a 150 ms minimum burst (the package
+default is 250 ms) at the package's −45 dBFS threshold. On detection, pause playback locally
+before `talk.session.bargeIn`. Those two timestamps are `performance.now()`. Speech
+`talk.session.mark` timestamps are played-audio milliseconds on the turn timeline (0 at the first
+speech sample), attached when the chunk is enqueued, not at `turn.ended`.
+
+If the gateway socket drops, stop the microphone immediately and return Voice to `idle`, including
+when the drop happens while start is still in flight. Do not wait on `talk.session.close`: that
+RPC blocks until the socket is ready again. Dictate stops capture the same way, without waiting
+for a transcript that can no longer arrive.
+
+Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
 
 ## Stay inside the ADR 0077 allowlist
 
@@ -427,19 +311,23 @@ sources of truth are `NARROW_SESSION_READ_METHODS` and `NARROW_SESSION_WRITE_MET
 `src/gateway/method-scopes.ts` and `NARROW_SESSION_EVENT_ALLOWLIST` in
 `src/gateway/server-broadcast.ts`).
 
-- Methods: reads such as `agents.list`, `sessions.list`, `chat.history`, `sessions.runs.*` and
-  `tasks.runs.*`; writes `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
-  `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch` and
-  `sessions.title.prepare` (ADR 0083). `sessions.patch` is field-guarded even for this narrow
+- Methods: reads such as `agents.list`, `sessions.list`, `chat.history`, `sessions.runs.*`,
+  `tasks.runs.*`, and `talk.catalog`; writes `chat.send`, `chat.abort`, `sessions.create`,
+  `sessions.steer`, `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`,
+  `sessions.patch`, `sessions.title.prepare` (ADR 0083), and `talk.session.create`,
+  `talk.session.appendAudio`, `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
+  and `talk.session.bargeIn` (ADR 0086). `sessions.patch` is field-guarded even for this narrow
   client: only `label`, `model`, `thinkingLevel` and `reasoningLevel` are admitted
   (`NARROW_SESSION_PATCH_FIELDS`); every other field still needs `operator.admin` and is refused
   with `missing scope: operator.admin`, the same shape as a fully unlisted method. The patch
   response is redacted for this client (no `path`, none of the admin-only entry fields), so never
   read those from a patch result.
-- Events: `chat`, `sessions.changed`, `runs.invalidated`, `tick`, `heartbeat`.
-- Not admitted: `talk.*`, `config.*`, `logs.*`, `cron.*`, `node.*`, `send`, and anything not listed.
-  A method outside the list is refused by the gateway, so a feature that needs one is an ADR
-  amendment, not a client-only change.
+- Events: `chat`, `sessions.changed`, `runs.invalidated`, `talk.event` (this connection's own Talk
+  sessions only), `tick`, `heartbeat`.
+- Not admitted: `talk.realtime.*`, `talk.config`, `talk.mode`, `talk.metrics`, `config.*`,
+  `logs.*`, `cron.*`, `node.*`, `send`, and anything not listed. A method outside the list is
+  refused by the gateway, so a feature that needs one is an ADR amendment, not a client-only
+  change.
 
 Before you add an RPC call, check it against the list. The brand e2e records every frame the
 browser sends and fails if one is outside the allowlist, which catches a stray call even when a
