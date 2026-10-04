@@ -1,4 +1,6 @@
 ---
+title: "Realtime Voice Provider API"
+description: "Implement a realtime voice provider with correct playback, interruption, lifecycle, and tool-call behavior."
 audience: developer
 component: talk/realtime-voice-api
 sources:
@@ -7,15 +9,29 @@ sources:
   - src/talk/provider-registry.ts
   - src/plugin-sdk/realtime-voice.ts
   - src/talk/agent-consult-tool.ts
-  - extensions/talk-voice/src/fake-bridge.ts
+  - src/talk/agent-consult-runtime.ts
+  - src/gateway/server-methods/talk.ts
+  - src/gateway/talk-realtime-relay.ts
   - extensions/openai-realtime/src/provider.ts
-generated: 2026-06-26
+  - extensions/openai-realtime/src/openai-bridge.ts
+  - extensions/openai-realtime/src/playback-mark-tracker.ts
+generated: 2026-08-26
 ---
 
-# Realtime Voice — Provider API
+# Realtime Voice Provider API
 
 Reference for authors implementing a `RealtimeVoiceProviderPlugin` — the contract
 the Gateway uses to bridge client audio to a voice backend.
+
+<Note>
+Building a streaming speech-to-text or streaming text-to-speech provider for the cascaded
+`stt-tts`/Dictate conversation loop instead? Those use two different plugin SDK contracts,
+`RealtimeTranscriptionProviderPlugin` and `StreamingSpeechProviderPlugin` — see
+[Register realtime voice, STT and TTS providers](/tools/plugin#register-realtime-voice-stt-and-tts-providers)
+and [Cascaded voice conversation sessions](/talk/realtime-voice-conversation). All three provider
+kinds, plus media-understanding providers, share one id-registrar diagnostic for duplicate and
+missing ids (`src/plugins/registry.ts`).
+</Note>
 
 ## Plugin registration
 
@@ -25,10 +41,13 @@ Register your provider in the plugin entry file:
 import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
 import { myProvider } from "./my-provider.js";
 
-export default async function register(api: OpenClawPluginApi) {
+export default function register(api: OpenClawPluginApi): void {
   api.registerRealtimeVoiceProvider(myProvider);
 }
 ```
+
+Registration is synchronous. Do not perform blocking I/O in `register()`. Resolve remote
+credentials and open provider connections later in `resolveConfig()` or `connect()`.
 
 The provider object must implement `RealtimeVoiceProviderPlugin`:
 
@@ -63,7 +82,7 @@ export const myProvider: RealtimeVoiceProviderPlugin = {
 
 ## SDK imports
 
-All types and helpers export from `openclaw/plugin-sdk`:
+All types and helpers export from `wednesdayai/plugin-sdk` (`openclaw/plugin-sdk` is the same surface):
 
 ```typescript
 import type {
@@ -71,41 +90,100 @@ import type {
   RealtimeVoiceBridge,
   RealtimeVoiceBridgeCreateRequest,
   RealtimeVoiceBridgeCallbacks,
+  RealtimeVoiceAudioClearReason,
   RealtimeVoiceCloseReason,
+  RealtimeVoiceRole,
   RealtimeVoiceTool,
   RealtimeVoiceToolCallEvent,
   RealtimeVoiceToolResultOptions,
   RealtimeVoiceBargeInOptions,
+  RealtimeVoiceBridgeEvent,
   RealtimeVoiceProviderCapabilities,
   RealtimeVoiceAudioFormat,
-} from "openclaw/plugin-sdk";
+  RealtimeVoiceTranscriptMetadata,
+} from "wednesdayai/plugin-sdk";
 ```
+
+## `RealtimeVoiceBridgeCallbacks`
+
+The exact exported contract your bridge invokes (`onAudio` and `onClearAudio` are
+required; everything else is optional):
+
+```typescript
+type RealtimeVoiceBridgeCallbacks = {
+  onAudio: (audio: Buffer) => void;
+  onClearAudio: (reason?: RealtimeVoiceAudioClearReason) => void;
+  onMark?: (markName: string) => void;
+  onTranscript?: (
+    role: RealtimeVoiceRole,
+    text: string,
+    isFinal: boolean,
+    metadata?: RealtimeVoiceTranscriptMetadata,
+  ) => void;
+  onEvent?: (event: RealtimeVoiceBridgeEvent) => void;
+  onToolCall?: (event: RealtimeVoiceToolCallEvent) => void | Promise<void>;
+  onReady?: () => void;
+  onError?: (error: Error) => void;
+  onClose?: (reason: RealtimeVoiceCloseReason) => void;
+  onVadBargeIn?: () => void;
+};
+```
+
+`RealtimeVoiceAudioClearReason` is currently just `"barge-in"` — pass it when the clear
+is caused by an accepted interruption, or omit it for any other buffer clear.
+`onToolCall` may return `void` or a `Promise<void>`. `onTranscript`'s `metadata`
+(`itemId`, `responseId`, `contentIndex`, `itemOrder`, `status`) lets the relay stitch
+together partial/final transcript ordering across concurrent response items — omit
+fields you cannot supply rather than guessing.
+
+**`onError` is treated as terminal by the current gateway relay.** Firing it broadcasts
+a `talk.realtime.relay` `error` event to the client and then always closes the session
+with reason `"error"` (see [Close reasons](#close-reasons) and
+[Relay events](/talk/realtime-voice#relay-events)).
+There is no path in the shipped relay where firing `onError` leaves the session open.
+The gateway relay (`src/gateway/talk-realtime-relay.ts`) also does not wire `onEvent`
+through to anything client-visible for gateway-relay sessions, so it is not a working
+substitute either — the shipped relay currently has no non-terminal, session-continuing
+error channel for providers.
+
+All callbacks must be deferred until after `createBridge()` returns (see
+[Callback timing invariant](#callback-timing-invariant) below) — this applies to every
+callback in this contract, including `onError`.
 
 ## `RealtimeVoiceBridgeCreateRequest`
 
 The argument to `createBridge()`:
 
-| Field                           | Type                                  | Description                                     |
-| ------------------------------- | ------------------------------------- | ----------------------------------------------- |
-| `providerConfig`                | `Record<string, unknown>`             | Resolved provider config (from `resolveConfig`) |
-| `cfg`                           | `OpenClawConfig` (optional)           | Full gateway config snapshot                    |
-| `audioFormat`                   | `RealtimeVoiceAudioFormat` (optional) | Input audio encoding (default: pcm16 24 kHz)    |
-| `instructions`                  | `string` (optional)                   | System prompt / session instructions            |
-| `model`                         | `string` (optional)                   | Model ID requested by client                    |
-| `voice`                         | `string` (optional)                   | Voice ID requested by client                    |
-| `tools`                         | `RealtimeVoiceTool[]` (optional)      | Tools declared by client for this session       |
-| `autoRespondToAudio`            | `boolean` (optional)                  | Provider hint                                   |
-| `interruptResponseOnInputAudio` | `boolean` (optional)                  | Provider hint                                   |
-| `onAudio`                       | callback                              | Required — send PCM16 audio to client           |
-| `onClearAudio`                  | callback                              | Required — ask client to clear its buffer       |
-| `onMark`                        | callback                              | Optional — playback mark                        |
-| `onTranscript`                  | callback                              | Optional — partial/final transcript             |
-| `onToolCall`                    | callback                              | Optional — provider tool call event             |
-| `onReady`                       | callback                              | Optional — bridge connected and ready           |
-| `onError`                       | callback                              | Optional — non-fatal error                      |
-| `onClose`                       | callback                              | Optional — session ended                        |
-| `onVadBargeIn`                  | callback                              | Optional — server-VAD detected speech start     |
-| `onEvent`                       | callback                              | Optional — raw bridge event (for debugging)     |
+| Field                           | Type                                  | Description                                                                                                                                  |
+| ------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `providerConfig`                | `Record<string, unknown>`             | Resolved provider config (from `resolveConfig`)                                                                                              |
+| `cfg`                           | `OpenClawConfig` (optional)           | Full gateway config snapshot                                                                                                                 |
+| `audioFormat`                   | `RealtimeVoiceAudioFormat` (optional) | Input audio encoding (default: pcm16 24 kHz)                                                                                                 |
+| `instructions`                  | `string` (optional)                   | System prompt / session instructions                                                                                                         |
+| `model`                         | `string` (optional)                   | Model ID requested by client                                                                                                                 |
+| `voice`                         | `string` (optional)                   | Voice ID requested by client                                                                                                                 |
+| `tools`                         | `RealtimeVoiceTool[]` (optional)      | Tools declared by client for this session                                                                                                    |
+| `autoRespondToAudio`            | `boolean` (optional)                  | Provider hint                                                                                                                                |
+| `interruptResponseOnInputAudio` | `boolean` (optional)                  | Provider hint                                                                                                                                |
+| `onAudio`                       | callback                              | Required — send PCM16 audio to client                                                                                                        |
+| `onClearAudio`                  | callback                              | Required — ask client to clear its buffer                                                                                                    |
+| `onMark`                        | callback                              | Optional — playback mark                                                                                                                     |
+| `onTranscript`                  | callback                              | Optional — partial/final transcript                                                                                                          |
+| `onToolCall`                    | callback                              | Optional — provider tool call event                                                                                                          |
+| `onReady`                       | callback                              | Optional — bridge connected and ready                                                                                                        |
+| `onError`                       | callback                              | Optional — see [`RealtimeVoiceBridgeCallbacks`](#realtimevoicebridgecallbacks); the current relay always closes the session after this fires |
+| `onClose`                       | callback                              | Optional — session ended                                                                                                                     |
+| `onVadBargeIn`                  | callback                              | Optional — server-VAD detected speech start                                                                                                  |
+| `onEvent`                       | callback                              | Optional — raw bridge event (for debugging)                                                                                                  |
+
+See [`RealtimeVoiceBridgeCallbacks`](#realtimevoicebridgecallbacks) above for the exact
+signature of every callback field in this table.
+
+`cfg` is not currently populated on this `createBridge()` request for gateway-relay sessions
+(`src/talk/session-runtime.ts` omits it) — treat it as `undefined` in `createBridge()`. It **is**
+supplied to `isConfigured()` and `resolveConfig()` (`src/talk/provider-resolver.ts`) and to
+`createBrowserSession()` (`src/gateway/server-methods/talk.ts`), so read the full config there
+instead if your provider needs it.
 
 ## `RealtimeVoiceBridge` interface
 
@@ -118,16 +196,54 @@ interface RealtimeVoiceBridge {
   sendAudio(audio: Buffer): void; // Incoming PCM16 from client
   setMediaTimestamp(ts: number): void;
   submitToolResult(callId: string, result: unknown, options?: RealtimeVoiceToolResultOptions): void;
-  acknowledgeMark(): void;
+  acknowledgeMark(markName?: string, playbackTimestamp?: number): void;
   close(reason?: RealtimeVoiceCloseReason): void;
   isConnected(): boolean;
 
   // Optional
+  readonly kind?: TalkMode;
   sendUserMessage?(text: string): void;
   triggerGreeting?(instructions?: string): void;
   handleBargeIn?(options?: RealtimeVoiceBargeInOptions): void;
   supportsToolResultContinuation?: boolean;
+  commitInput?(): Promise<void>;
+  cancelTurn?(reason?: string): void;
 }
+```
+
+`acknowledgeMark` is called when the client confirms a playback mark you emitted via `onMark`.
+`markName` echoes the opaque name of the mark being acknowledged. For a gateway-relay realtime
+session, `playbackTimestamp`, when provided, must be a finite, nonnegative, non-regressing integer
+on the client's media clock. That clock is not the cascaded `stt-tts` mark clock: `talk.session.mark`
+`timestamp` is milliseconds of audio played for that turn (0 at the first speech sample). Do not
+pass `performance.now()` as an `stt-tts` speech-mark timestamp. See
+[Talk sessions](/gateway/protocol#talk-sessions).
+
+`RealtimeVoiceBargeInOptions` is `{ audioPlaybackActive?: boolean; force?: boolean; speechDetectedAt?: number; playbackPausedAt?: number }`.
+The last two are client-local `performance.now()` milliseconds from `talk.session.bargeIn` and are
+only passed for `stt-tts` sessions. A realtime bridge can ignore them. `force` bypasses the normal
+duration, acknowledgement, and echo guards.
+
+### Playback acknowledgement contract
+
+New clients must acknowledge a named mark only after all audio through that mark has drained
+to audible playback. Never acknowledge when audio is merely received, decoded, or scheduled.
+Treat mark names as opaque: echo the exact value and never parse or synthesize one.
+
+The bundled OpenAI bridge treats named acknowledgements as cumulative boundaries through the
+matching outstanding mark. An unnamed acknowledgement consumes one FIFO boundary and exists
+for legacy compatibility only. Unknown, old-generation, cleared, duplicate, fractional, or
+regressing acknowledgements are inert. The bridge computes truncation from acknowledged PCM16
+bytes at 48 bytes per millisecond, not from the client timestamp. It fails closed after 256
+outstanding marks.
+
+```typescript
+// WRONG: acknowledgement means “received,” not “audibly played.”
+socket.on("mark", ({ markName }) => acknowledgeMark(markName, audioContext.currentTime));
+
+// CORRECT: acknowledge only after the corresponding playback barrier drains.
+await playbackQueue.waitUntilDrained(markName);
+acknowledgeMark(markName, Math.floor(mediaClockMs));
 ```
 
 ## Callback timing invariant
@@ -146,19 +262,81 @@ createBridge(req) {
 }
 
 // CORRECT — defer to connect()
-async connect() {
+async connect(): Promise<void> {
   await this.openWebSocket();
   this.callbacks.onReady?.();  // ← fires after bridge is assigned
 }
 ```
 
+## Lifecycle and async safety
+
+- `connect()` may resolve before the backend is ready. Fire `onReady` only when the bridge
+  can accept audio; clients gate audio on that callback.
+- `close()` must be idempotent. After it begins, no callback may fire, including callbacks
+  retained by an in-flight promise or socket listener.
+- A rejected `onToolCall` promise is terminal: the session runtime reports an error and closes
+  the bridge.
+- Provider callbacks run on the shared Node.js event loop. Avoid synchronous blocking I/O and
+  serialize state transitions that can race with `close()`.
+
+```typescript
+// WRONG: emits after close if the request settles late.
+const text = await backend.transcribe(audio);
+this.callbacks.onTranscript?.("user", text, true);
+
+// CORRECT: guard every post-await callback and make close idempotent.
+const text = await backend.transcribe(audio);
+if (!this.closed) this.callbacks.onTranscript?.("user", text, true);
+```
+
+### Error hygiene
+
+The relay forwards `error.message` to the authenticated client before closing. Pass a bounded,
+user-safe message to `onError`; never include credentials, raw audio frames, full prompts, or
+private backend diagnostics. Write private details to a redacted subsystem log instead.
+
+## Exact-once interruption contract
+
+Manual and server-VAD interruption signals must enter one shared state transition. An
+interruption is accepted only when the bridge emits exactly one `onClearAudio("barge-in")`.
+Intent alone is not acceptance.
+
+For the bundled OpenAI behavior, the shared transition must:
+
+1. Require an assistant output item to have started. Normal interruption also requires an
+   acknowledged playback snapshot of at least 250 ms; `force` bypasses the duration,
+   acknowledgement, and echo guards.
+2. Install the output-generation fence and clear tracker evidence before outbound cancel,
+   truncate, or client clear side effects.
+3. Cancel only while a response is active, but truncate queued acknowledged playback even after
+   `response.done`.
+4. Emit one reasoned clear and suppress late audio, marks, and stale completion from the old
+   generation.
+5. Lift the fence only for a genuinely new response after interruption settlement.
+6. Stop immediately at a re-entrant `close()` boundary.
+
+```typescript
+// WRONG: two paths can cancel and clear twice.
+onVadBargeIn() { cancelForVad(); }
+handleBargeIn() { cancelForManualRequest(); }
+
+// CORRECT: both signals enter the same exact-once transition.
+onVadBargeIn() { interrupt({ source: "vad" }); }
+handleBargeIn(options) { interrupt({ source: "manual", ...options }); }
+```
+
+Do not clear the client before installing the generation fence. Otherwise late predecessor
+audio can refill the queue after the clear.
+
 ## Close reasons
 
-| Reason        | When                                                 |
-| ------------- | ---------------------------------------------------- |
-| `"completed"` | Session ended normally (TTL expired, stop requested) |
-| `"error"`     | Fatal provider error                                 |
-| `"cancelled"` | Client disconnected before session completed         |
+| Reason                       | When                                                                 |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `"completed"`                | Session ended normally (TTL expired, stop requested)                 |
+| `"error"`                    | Fatal provider or connect error                                      |
+| `"cancelled"`                | Client disconnected or cancelled before the session completed        |
+| `"session-minutes-exceeded"` | Cascaded session hit `talk.conversation.maxSessionMinutes`           |
+| `"turn-seconds-exceeded"`    | Cascaded session hit `talk.conversation.maxTurnSeconds` of one burst |
 
 ## Tool calls
 
@@ -179,6 +357,12 @@ The client executes the function and sends back `talk.realtime.toolResult`. The 
 - `willContinue: boolean` — whether the client will send another tool result before expecting a response
 - `suppressResponse: boolean` — submit without asking the provider for a new assistant response
 
+`supportsToolResultContinuation` is a provider capability hint; the current relay does not
+enforce it. `willContinue` keeps the call ID in the client-owned set so the client can submit
+another result. The bundled OpenAI bridge ignores continuation support and expects exactly
+one function-call output per call ID. Do not submit interim and final outputs for the same
+OpenAI call.
+
 ## Audio formats
 
 Two format constants are exported from `openclaw/plugin-sdk`:
@@ -188,7 +372,11 @@ Two format constants are exported from `openclaw/plugin-sdk`:
 | `REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ`    | `pcm16`     | 24 kHz | Gateway relay (default)         |
 | `REALTIME_VOICE_AUDIO_FORMAT_G711_ULAW_8KHZ` | `g711_ulaw` | 8 kHz  | Telephony / low-bandwidth paths |
 
-The Gateway relay always uses `REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ`. Emit `onAudio` buffers at 24 kHz PCM16. If your backend uses a different rate, negotiate it in `connect()` and resample — the relay contract is fixed. Declare both formats in `capabilities.inputAudioFormats` / `capabilities.outputAudioFormats` if your provider supports them.
+The Gateway relay always uses `REALTIME_VOICE_AUDIO_FORMAT_PCM16_24KHZ`: signed,
+little-endian, interleaved mono samples at 24 kHz. Emit `onAudio` buffers in that exact layout.
+If your backend uses a different rate, negotiate it in `connect()` and resample; the relay
+contract is fixed. Declare both formats in `capabilities.inputAudioFormats` and
+`capabilities.outputAudioFormats` if your provider supports them.
 
 ## Browser sessions (optional)
 
@@ -196,12 +384,15 @@ For WebRTC / provider-websocket / managed-room transports, implement `createBrow
 
 ```typescript
 async createBrowserSession(req: RealtimeVoiceBrowserSessionCreateRequest) {
-  // Returns a provider-specific session descriptor (credentials, url, etc.)
+  // Returns a provider-specific session descriptor. For "webrtc" transport this is
+  // RealtimeVoiceBrowserWebRtcSdpSession — clientSecret plus an optional offerUrl
+  // (the SDP exchange endpoint), not a generic "url" field.
   // The client connects directly to the provider — no audio flows through the Gateway.
   return {
     provider: this.id,
     transport: "webrtc",
     clientSecret: await this.issueEphemeralKey(req),
+    offerUrl: "https://api.example.com/v1/realtime/calls", // optional; omit if not applicable
     model: req.model,
     voice: req.voice,
   };
@@ -209,62 +400,112 @@ async createBrowserSession(req: RealtimeVoiceBrowserSessionCreateRequest) {
 ```
 
 If `createBrowserSession` is absent and a client requests a non-relay transport, the Gateway
-returns `UNAVAILABLE` — it never silently downgrade to relay.
+returns `UNAVAILABLE` — it never silently downgrades to relay.
 
 ## Agent consult tool
 
-The SDK ships a built-in function tool (`openclaw_agent_consult`) that voice providers can
-expose to the voice model. When the model calls it, the Gateway delegates the request to the
-configured WednesdayAI agent — enabling tool use, memory lookups, workspace actions, and
-current-information retrieval from within a voice session.
+The SDK ships a reserved built-in function tool (`openclaw_agent_consult`, exported as
+`REALTIME_VOICE_AGENT_CONSULT_TOOL`) that, for **gateway-relay sessions only**, lets the voice
+model delegate a request to the configured WednesdayAI agent. Under the default `safe-read-only`
+policy this covers read-only tool use, memory lookups, and current-information retrieval; workspace
+actions and any other agent tool are available only when the `owner` policy is configured and
+authorized (see [Consult tool policies](#consult-tool-policies)).
 
-### Enabling the consult tool
+### Who installs it (not the provider)
 
-The session gateway handler passes resolved tools to `createBridge`. Include the consult
-tool by calling `resolveRealtimeVoiceAgentConsultTools` from `openclaw/plugin-sdk`:
+Your provider does not merge, reserve, or opt into this tool. For gateway-relay transport, the
+`talk.realtime.session` gateway handler (`src/gateway/server-methods/talk.ts`) resolves the
+effective policy and merges the built-in descriptor into the tool list **before** your
+`createBridge()` is ever called. Your provider receives the already-merged `req.tools` like any
+other tool and does not see which entries are gateway-reserved. Non-relay (`createBrowserSession`)
+sessions do not receive this merge — the built-in is a `gateway-relay`-only feature.
 
-```typescript
-import {
-  REALTIME_VOICE_AGENT_CONSULT_TOOL,
-  resolveRealtimeVoiceAgentConsultTools,
-  resolveRealtimeVoiceAgentConsultToolPolicy,
-} from "openclaw/plugin-sdk";
+`resolveConfig()` and `createBridge()` do not receive the same object: `resolveConfig({ cfg, rawConfig })`
+receives `rawConfig` — the JSON object under `talk.providers.<id>` as configured, unresolved —
+and its return value becomes `providerConfig`, the object `createBridge(req)` actually receives on
+`req.providerConfig`. Whether `consultToolPolicy` survives that trip **as-configured** depends on
+your `resolveConfig()`. The bundled OpenAI Realtime provider's `resolveConfig()`
+(`extensions/openai-realtime/src/provider.ts`) trims whitespace from a valid `"safe-read-only"` /
+`"owner"` / `"none"` string (so the exact value survives, just whitespace-normalized) and deletes
+`consultToolPolicy` entirely from `providerConfig` when the configured value is not one of those
+three — an invalid value is never passed through as-is. A `resolveConfig()` you write yourself may
+do something else entirely, including passing an invalid value through unchanged.
 
-// In resolveConfig or createBridge:
-const policy = resolveRealtimeVoiceAgentConsultToolPolicy(
-  rawConfig.consultToolPolicy,
-  "safe-read-only",
-);
-const tools = resolveRealtimeVoiceAgentConsultTools(policy, req.tools ?? []);
-// Pass tools to your backend session
-```
+**Regardless of what `resolveConfig()`/`createBridge()` does, never infer authorization from
+`providerConfig.consultToolPolicy`.** A connection without `operator.admin` scope can still see
+`consultToolPolicy: "owner"` in its resolved `providerConfig` if that is what is configured,
+even though the gateway handler silently downgrades the actual tool execution to
+`safe-read-only` for that session (see [Consult tool policies](#consult-tool-policies)). Gateway
+auth enforcement (the `operator.admin` scope check) is entirely separate from — and happens
+independently of — whatever value ends up in `providerConfig`. Treat the configured/requested
+value in `providerConfig` as a hint about what was asked for, never as proof of what was
+authorized.
+
+### Who handles the call (not the provider)
+
+When the voice backend calls `openclaw_agent_consult`, your bridge implementation fires
+`onToolCall` exactly as it would for any other tool — you do not need to detect or special-case
+this name. The Gateway's relay layer (`src/gateway/talk-realtime-relay.ts`) intercepts calls to
+this reserved name before they are broadcast to the browser client and requests cancellation
+after 30 seconds for one
+transient run on the Analysis lane via `runEmbeddedPiAgent` (`src/talk/agent-consult-runtime.ts`)
+— a temporary JSONL session removed in `finally`, with `disableMessageTool`, `disablePluginHooks`,
+and transcript/event suppression on regardless of policy. It then calls
+`bridge.submitToolResult(callId, result)` with exactly one final result. Cleanup completes after
+the runner settles, so 30 seconds is not a hard completion bound for a non-cooperative runner.
+No `toolCall` relay
+event reaches the client for this name, and a client-submitted `talk.realtime.toolResult` for
+that call ID is rejected by the relay. Every other tool name keeps the existing behavior: it is
+broadcast to the client as a `toolCall` event, and the client's `talk.realtime.toolResult`
+response is what your bridge receives through `submitToolResult`.
+
+An accepted barge-in on a still-live relay aborts an in-flight consult and settles it with a
+suppressed generic cancellation result, so `submitToolResult` is still called exactly once and
+the provider is not left waiting. Every other teardown path (relay close, stop, expiry, provider
+error, provider close) only aborts the consult — no result is submitted for it, and a late
+completion after teardown is silently dropped.
 
 ### Consult tool policies
 
-| Policy                       | Agent tool access                                                | When to use                 |
-| ---------------------------- | ---------------------------------------------------------------- | --------------------------- |
-| `"safe-read-only"` (default) | `read`, `web_search`, `web_fetch`, `memory_search`, `memory_get` | Low-risk voice assistants   |
-| `"owner"`                    | All tools the account owner has                                  | Trusted personal assistants |
-| `"none"`                     | Tool not exposed to voice model                                  | Disable consult entirely    |
+Configured via `talk.providers.<id>.consultToolPolicy` in `openclaw.json`, resolved by the
+gateway handler — not chosen by the provider:
 
-Configure via `talk.providers.<id>.consultToolPolicy` in `openclaw.json`.
+| Policy                            | Agent tool access                                                                                                                                                    | Notes                                                                                                                                                                                     |
+| --------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Missing or unrecognized (default) | `read`, `web_search`, `web_fetch`, `memory_search`, `memory_get`                                                                                                     | Same effective allowlist as explicit `"safe-read-only"`                                                                                                                                   |
+| `"safe-read-only"`                | `read`, `web_search`, `web_fetch`, `memory_search`, `memory_get`                                                                                                     | Low-risk voice assistants                                                                                                                                                                 |
+| `"owner"`                         | No consult-specific allowlist; owner-only tools are authorized, while remaining agent and sandbox policy still applies (message tool and plugin hooks stay disabled) | Only honored when the connection is authenticated with `operator.admin`; real actions can occur; otherwise the handler silently downgrades to `safe-read-only` and logs a bounded warning |
+| `"none"`                          | Tool not exposed to voice model                                                                                                                                      | Disable consult entirely; the name stays reserved even so                                                                                                                                 |
 
-### Handling a consult tool call
+### Public helper contracts
 
-When the voice model calls `openclaw_agent_consult`, the provider receives a `toolCall` event.
-The Gateway then calls `bridge.submitToolResult` with the delegated agent's answer. Providers do
-not need to implement this themselves — the session runtime handles the delegation loop.
-
-However, providers can emit an interim spoken instruction while the agent runs using
-`buildRealtimeVoiceAgentConsultWorkingResponse`:
+These helpers back the gateway handler's merge/policy logic. They are exported from
+`openclaw/plugin-sdk` as documented contracts for other integration surfaces — a provider does
+not need to call them to receive gateway-relay consult behavior, which applies automatically:
 
 ```typescript
-import { buildRealtimeVoiceAgentConsultWorkingResponse } from "openclaw/plugin-sdk";
-
-// Called when toolCall.name === REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME:
-const interim = buildRealtimeVoiceAgentConsultWorkingResponse("user");
-// Pass `interim` to your backend's "respond while processing" channel
+import type { RealtimeVoiceAgentConsultToolPolicy } from "openclaw/plugin-sdk";
+import {
+  REALTIME_VOICE_AGENT_CONSULT_TOOL,
+  REALTIME_VOICE_AGENT_CONSULT_TOOL_NAME,
+  resolveRealtimeVoiceAgentConsultToolPolicy, // (value, fallback) => RealtimeVoiceAgentConsultToolPolicy
+  resolveRealtimeVoiceAgentConsultTools, // (policy, customTools) => RealtimeVoiceTool[]
+} from "openclaw/plugin-sdk";
 ```
+
+`buildRealtimeVoiceAgentConsultWorkingResponse` and `buildRealtimeVoiceAgentConsultPolicyInstructions`
+are also exported but currently unused by the bundled relay — neither controls the shipped
+gateway-relay consult behavior described above.
+
+- `buildRealtimeVoiceAgentConsultWorkingResponse` builds an interim "working" message, but
+  OpenAI's Realtime API accepts exactly one function-call output per call ID, so an interim
+  message and a later final result cannot both be submitted for the same `openclaw_agent_consult`
+  call. Do not build a provider that submits interim and final results as separate outputs for one
+  call ID; the shipped relay submits exactly one final result (see
+  [Who handles the call](#who-handles-the-call-not-the-provider)).
+- `buildRealtimeVoiceAgentConsultPolicyInstructions` builds model-facing instruction text for when
+  the voice model should call the consult tool (it returns `undefined` for the `"auto"` consult
+  policy). The bundled relay does not inject these instructions into the session prompt.
 
 ## Reference implementations
 
@@ -273,10 +514,49 @@ implementation. It covers the full bridge contract: WebSocket lifecycle, server-
 signalling, tool calls, audio framing, and post-close race guard. Use it as a starting point
 when implementing a new production provider.
 
-**Minimal test stub** — the bundled `talk-voice` extension ships a `fakeRealtimeVoiceProvider`
-for integration testing. It covers the full lifecycle: connect → audio → transcript →
-toolCall → submitToolResult → close. Use `addRealtimeVoiceProvider(fakeRealtimeVoiceProvider)`
-in tests; this helper is part of the internal test suite and is not exported from the public SDK.
+**Public test registration** — tests can register a provider and create a bridge session using
+only the public SDK:
+
+```typescript
+import {
+  addRealtimeVoiceProvider,
+  createRealtimeVoiceBridgeSession,
+  type RealtimeVoiceProviderPlugin,
+} from "openclaw/plugin-sdk";
+
+const provider: RealtimeVoiceProviderPlugin = {
+  id: "example-test-provider",
+  label: "Example test provider",
+  isConfigured: () => true,
+  createBridge: () => ({
+    connect: async () => {},
+    sendAudio: () => {},
+    setMediaTimestamp: () => {},
+    submitToolResult: () => {},
+    acknowledgeMark: () => {},
+    close: () => {},
+    isConnected: () => true,
+  }),
+};
+
+addRealtimeVoiceProvider(provider);
+const session = createRealtimeVoiceBridgeSession({
+  provider,
+  providerConfig: {},
+  audioSink: { sendAudio: () => {}, clearAudio: () => {} },
+});
+await session.connect();
+session.close("completed");
+```
+
+Cover readiness, real playback acknowledgement, duplicate manual/VAD interruption,
+post-`response.done` playback, late-generation audio, re-entrant close, terminal errors,
+consult cancellation/ownership, and relay teardown.
+
+<Warning>
+Import only from `openclaw/plugin-sdk`. Relative imports from `src/talk/*` bypass the public
+contract and can break without a compatibility release.
+</Warning>
 
 ## `RealtimeVoiceTool` schema
 
@@ -301,7 +581,7 @@ the client-declared tools — declare this in `capabilities.supportsToolCalls`.
 
 ## Provider config resolution flow
 
-```
+```text
 openclaw.json talk.providers.<id> ──▶ resolveConfig({ cfg, rawConfig })
                                               │
                                               ▼
