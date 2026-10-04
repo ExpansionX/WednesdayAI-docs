@@ -1,0 +1,141 @@
+---
+summary: "ElevenLabs streaming speech-to-text and text-to-speech for the cascaded voice conversation loop"
+read_when:
+  - You want to configure ElevenLabs as the voice conversation's STT or TTS provider
+  - talk.catalog reports ElevenLabs unavailable or gives a diagnostic
+title: "ElevenLabs (Streaming Voice)"
+---
+
+# ElevenLabs (streaming voice)
+
+ElevenLabs is the first provider for the cascaded voice conversation loop behind the `/v2/client`
+web client's **Dictate** and **Voice mode** controls — see
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation). It ships two seams:
+
+- **ElevenLabs Scribe v2 Realtime** — a streaming speech-to-text provider (registered via
+  `registerRealtimeTranscriptionProvider`), used for both Dictate and Voice mode.
+- **ElevenLabs Flash v2.5** — a streaming text-to-speech provider (`registerStreamingSpeechProvider`),
+  used only for Voice mode's spoken replies.
+
+Both are part of the bundled `elevenlabs` plugin extension, alongside its unrelated, pre-existing
+**batch** audio-transcription provider (`tools.media.audio`, model `scribe_v2`) — see
+[Media Understanding](/nodes/media-understanding#provider-extensions). All three share one plugin
+id and API key but are otherwise independent seams with independent config.
+
+Website: [https://elevenlabs.io](https://elevenlabs.io)
+Docs: [https://elevenlabs.io/docs](https://elevenlabs.io/docs)
+
+## Quick start
+
+1. Enable the extension:
+
+```json5
+{
+  plugins: { entries: { elevenlabs: { enabled: true } } },
+}
+```
+
+2. Set an API key and turn on the conversation gate:
+
+```json5
+{
+  talk: {
+    providers: {
+      elevenlabs: {
+        apiKey: "elevenlabs_api_key", // or a SecretRef
+      },
+    },
+    conversation: {
+      enabled: true,
+      sttProvider: "elevenlabs", // default
+    },
+    provider: "elevenlabs", // TTS provider for the conversation loop
+  },
+}
+```
+
+A restricted key must include **Speech to Text** and **Text to Speech**. The create-key API names the text-to-speech permission `text_to_speech`; Speech to Text is a separate dashboard scope. Voice mode opens both sockets; Dictate opens only Scribe. These sockets send `model_id` themselves (`scribe_v2_realtime`, and `eleven_flash_v2_5` unless `modelId` is set) and do not call the models list, so a Models permission is not what gates them. A key without Speech to Text cannot transcribe; a key without Text to Speech cannot speak.
+
+`apiKey` accepts a plaintext string or a `SecretRef` (env/file/exec), resolved through
+`src/secrets/resolve.ts` the same way every other Talk provider key is. An unresolvable ref no
+longer fails gateway startup — it is a best-effort secret, and the gateway reports the provider
+unavailable with a diagnostic instead (see [Troubleshooting](#troubleshooting)).
+
+3. Confirm availability with `talk.catalog`: its `streamingTranscription` and `speech` sections
+   should each list an `elevenlabs` row with `configured: true`.
+
+## STT: Scribe v2 Realtime
+
+The provider opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with
+`model_id=scribe_v2_realtime`, `audio_format=pcm_16000` and `include_timestamps=true`, streaming
+base64 `input_audio_chunk` frames. Each frame includes `commit` and `sample_rate` (`16000`), which
+the realtime schema requires.
+
+| Setting                                | Default                | Effect                                                                            |
+| -------------------------------------- | ---------------------- | --------------------------------------------------------------------------------- |
+| `talk.conversation.sttModel`           | `"scribe_v2_realtime"` | STT model id                                                                      |
+| `talk.conversation.endOfTurnSilenceMs` | `500`                  | Maps to `vad_silence_threshold_secs`, used for Voice mode's `commit_strategy=vad` |
+
+Voice mode opens Scribe with `commit_strategy=vad` and `vad_silence_threshold_secs` from `talk.conversation.endOfTurnSilenceMs` (default 500, so `0.5`). The gateway injects `commitStrategy: "vad"` and that silence value into the STT provider config; an explicit `talk.providers.elevenlabs.commitStrategy` (`"vad"` or `"manual"`) or `talk.providers.elevenlabs.endOfTurnSilenceMs` wins. Dictate does not receive that injection, so it stays on the provider default `commit_strategy=manual` and commits only when the user stops, never on a silence timeout. Both map
+`partial_transcript` to live partial captions and the committed transcript (with word timestamps)
+to end-of-turn. The first partial of an utterance is also speech start — Scribe has no separate
+speech-start event — so `talk.conversation.maxTurnSeconds` can arm; a committed transcript ends
+that span. One unexpected close after a session is established triggers exactly one
+reconnect; a second, or a failure during that one reconnect, surfaces as `session.error` followed by
+`session.closed` with reason `error`, rather than retrying forever — no eager end-of-turn or
+turn-resumed signal is emitted (the gateway relay owns turn resume itself; see
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation#turn-taking)).
+
+## TTS: Flash v2.5
+
+The provider opens the stream-input WebSocket with model `eleven_flash_v2_5` and output
+`pcm_24000` as soon as `openStream()` is called (the caller fixes the timing — end-of-turn commit
+for Voice mode). The URL sets `inactivity_timeout` to 180 seconds, the vendor maximum; the default
+of 20 would close the socket during a slow turn. Text pushed before the socket's "open" event
+queues and flushes in order once it opens. Clauses flush at sentence ends; `normalizedAlignment`
+(`chars`/`charStartTimesMs`/`charDurationsMs`) maps to the character offsets the heard-text
+persistence rule uses.
+
+TTS reuses the existing `talk.provider`/`talk.providers.elevenlabs` settings — the same ones the
+batch `messages.tts` feature also partly overlaps with, but keeps separate (see
+[Text-to-speech](/tts#related)). There is no separate "streaming TTS" voice/model override: set
+`talk.providers.elevenlabs.voiceId`/`modelId` as you would for any other Talk provider.
+
+## Troubleshooting
+
+### `talk.catalog`'s `elevenlabs` row reports `configured: false`
+
+Check the row's `diagnostic` field:
+
+| `diagnostic`            | Meaning                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------- |
+| `missing-api-key`       | `talk.providers.elevenlabs.apiKey` is unset or resolved to an empty string.                         |
+| `secret-ref-unresolved` | `apiKey` is a `SecretRef` the gateway could not resolve (bad provider, missing env var, and so on). |
+| `provider-error`        | Resolving the key threw for some other reason; check the gateway log for the underlying error.      |
+
+A `secret-ref-unresolved` provider no longer blocks gateway startup — it surfaces here instead, and
+retries resolution on the next `talk.catalog` call, so fixing the underlying secret (for example
+setting the missing environment variable) takes effect without a restart.
+
+A key that authenticates but lacks Speech to Text or Text to Speech fails when the matching socket opens, not at `talk.catalog` time. `talk.catalog` only checks that a key resolved; it does not probe ElevenLabs permissions.
+
+### `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
+
+Voice mode needs both a configured `streamingTranscription` row and a configured `speech` row;
+Dictate needs only `streamingTranscription`. Confirm both via `talk.catalog` before assuming the
+gateway gate (`talk.conversation.enabled`) is the problem.
+
+### The STT session reconnects once, then fails
+
+ElevenLabs closed the realtime STT socket unexpectedly twice (or the one allowed reconnect itself
+failed). This surfaces as a named connection-lost error on the Talk session, not a silent hang.
+Check your network path to `api.elevenlabs.io` and the ElevenLabs status page before assuming a
+gateway bug.
+
+## Related
+
+- [Cascaded voice conversation sessions](/talk/realtime-voice-conversation)
+- [Text-to-speech](/tts) — the separate batch `messages.tts` feature
+- [Media Understanding](/nodes/media-understanding#provider-extensions) — ElevenLabs' unrelated
+  batch audio-transcription provider
+- [Register realtime voice, STT and TTS providers](/tools/plugin#register-realtime-voice-stt-and-tts-providers)

@@ -1,0 +1,310 @@
+---
+title: "Cascaded voice conversation sessions"
+description: "Configure and operate the stt-tts cascaded voice conversation loop behind Dictate and Voice mode."
+audience: admin
+component: talk/realtime-voice-conversation
+sources:
+  - src/config/types.gateway.ts
+  - src/config/talk.ts
+  - src/config/schema.help.ts
+  - src/gateway/server-methods/talk.ts
+  - src/gateway/talk-realtime-relay.ts
+  - src/gateway/protocol/schema/talk-session.ts
+  - src/gateway/method-scopes.ts
+  - src/talk/stt-tts-loop/
+  - src/talk/streaming-dictation-transcription-bridge.ts
+  - src/talk/provider-registry.ts
+  - extensions/elevenlabs/src/realtime-transcription-provider.ts
+  - extensions/elevenlabs/src/streaming-speech-provider.ts
+  - dev-docs/adr/0086-admit-cascaded-voice-to-web-client.md
+  - dev-docs/adr/0087-cascaded-voice-contracts.md
+  - dev-docs/adr/0088-cascaded-voice-wire-and-policy-fixes.md
+generated: 2026-10-04
+---
+
+# Cascaded voice conversation sessions
+
+This page covers the `stt-tts` and streaming-`transcription` Talk session modes: the cascaded
+voice conversation loop behind the `/v2/client` web client's **Dictate** and **Voice mode**
+controls. It is a separate feature from the gateway-relay realtime bridge described in
+[Realtime Voice gateway relay](/talk/realtime-voice) — that page covers the Control UI's **Talk**
+tab and the bundled OpenAI Realtime provider (a single provider that is both the speech and the
+brain). This page covers a cascaded design: a streaming speech-to-text provider, then an ordinary
+agent turn in the owning session, then a streaming text-to-speech provider.
+
+For end-user instructions, see [Using the web client](/web/using-the-web-client#dictate-and-voice).
+For the underlying session wire, see
+[Narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist).
+
+## Two session modes, one admission path
+
+`talk.session.create` accepts `mode: "transcription"` (streaming Dictate: STT only, no agent turn,
+final-only-on-close like the pre-existing ADR 0065 batch dictation) or `mode: "stt-tts"` (Voice
+mode: streaming STT, then a normal agent turn in the owning session under a voice profile, then
+streaming TTS). Both modes, plus `talk.catalog` (read-only), are narrow-admitted: a `/v2/client`
+connection holding only `operator.sessions.read`/`operator.sessions.write` can create and drive
+these sessions without `operator.read`/`operator.write`. See
+[Narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist) for the exact
+method list.
+
+## Turn on voice conversation
+
+Both modes are off until the operator enables the master gate:
+
+```json5
+{
+  talk: {
+    conversation: {
+      enabled: true,
+    },
+  },
+}
+```
+
+With the gate off, every `talk.session.create` call for either mode — narrow or operator-scope —
+fails `UNAVAILABLE: voice conversation disabled`, before any provider is resolved. `talk.catalog`
+still reports provider availability in both gate states (via its `conversationEnabled` field) so a
+client can render Dictate/Voice as available-but-off rather than hidden.
+
+A session additionally needs a configured streaming speech-to-text provider (Dictate), or both a
+configured streaming speech-to-text **and** streaming text-to-speech provider (Voice). Without
+one, `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
+(or the transcription-mode equivalent). Configure the provider under `talk.providers.<id>` and
+enable its plugin — see [ElevenLabs streaming voice](/providers/elevenlabs).
+
+Changes to `talk.conversation.*` apply without a gateway restart to new sessions; existing
+sessions keep the configuration resolved when they started.
+
+## `talk.catalog`
+
+`talk.catalog` reports what a client can offer, without exposing any secret:
+
+```json
+{
+  "transcription": { "activeProvider": null, "rows": [], "providers": [] },
+  "streamingTranscription": {
+    "activeProvider": "elevenlabs",
+    "rows": [
+      {
+        "id": "elevenlabs",
+        "label": "ElevenLabs",
+        "configured": true,
+        "modes": ["streaming"],
+        "transports": ["gateway-relay"],
+        "brains": ["agent-consult"]
+      }
+    ]
+  },
+  "speech": {
+    "activeProvider": "elevenlabs",
+    "rows": [
+      {
+        "id": "elevenlabs",
+        "label": "ElevenLabs",
+        "configured": true,
+        "modes": ["streaming"],
+        "transports": ["gateway-relay"]
+      }
+    ]
+  },
+  "realtime": { "activeProvider": null, "rows": [] },
+  "conversationEnabled": true
+}
+```
+
+- `streamingTranscription` backs Dictate; `speech` backs Voice mode (Voice additionally needs a
+  configured `streamingTranscription` row). `activeProvider` is the id named by
+  `talk.conversation.sttProvider` (STT) / `talk.provider` (TTS) when a matching row exists, else
+  `null` — there is no auto-detect order for either seam.
+- `realtime` reports the gateway-relay realtime providers (for example `openai-realtime`) with the
+  same row shape, so a client can show a named diagnostic for that bridge too, even though
+  `talk.realtime.*` itself stays operator-only.
+- `conversationEnabled` mirrors `talk.conversation.enabled`. It is reported unconditionally —
+  `streamingTranscription`/`speech`/`realtime` are not hidden while the gate is off — so a narrow
+  client can render "available but disabled by your administrator" instead of nothing.
+- A row's `configured` is resolved from `talk.providers.<id>.apiKey` through the secret resolver
+  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. `diagnostic`,
+  present only when `configured` is `false` and a cause is known, is one of `missing-api-key`,
+  `secret-ref-unresolved`, or `provider-error` — the three a `talk.catalog` reader can safely show
+  an operator without a stack trace.
+
+## Audio framing
+
+Input (client to gateway) is base64 PCM16, mono, 16 kHz — half the realtime relay's 24 kHz input,
+matching ElevenLabs Scribe v2 Realtime's expected rate. `talk.session.appendAudio` rejects a frame
+over 512 KB of base64 text, non-canonical base64, and (hardening) a non-PCM16-aligned (odd) byte
+count or a frame sent after the session closed, without poisoning the connection. Output (gateway
+to client) `output.audio.*` events carry PCM16 mono 24 kHz, tagged `kind: "speech" | "filler" |
+"ack"` so a client scheduler can route or exclude non-speech audio from its own metrics.
+
+## Session limits
+
+- 2 active Talk relay sessions per connection, 64 globally — shared across every session kind
+  (`transcription`, `stt-tts`, and the realtime bridge), not a separate stt-tts-only budget.
+- `talk.conversation.maxSessionMinutes` (default 30): the relay closes the session with
+  `session.closed { reason: "session-minutes-exceeded" }` once reached.
+- `talk.conversation.maxTurnSeconds` (default 60): a hard ceiling on one turn's continuous user
+  speech. The relay closes the session with `session.closed { reason: "turn-seconds-exceeded" }`.
+- A disconnected client's session closes the same way a realtime-bridge session does.
+
+## The voice turn
+
+A committed `stt-tts` turn runs through the same `startChatTurn` the typed chat path uses, in the
+session's own history, with its own tools, memory and approvals — not a separate "voice session".
+An additive `voice` profile on that call:
+
+- forces thinking off;
+- forces `CommandAuthorized: false` — spoken text can never trigger a slash command or an inline
+  directive (`/new`, `/model`, and so on read as plain words, not commands);
+- adds a short voice note and provenance to the user-role prefix;
+- races the memory-recall hook (`context.collect`) against `talk.conversation.recallDeadlineMs`
+  (default 250 ms), so one slow recall cannot stall a voice turn the way it can a typed one — a
+  typed chat turn never uses this deadline.
+
+While the agent run is in progress, a soft-timeout filler phrase plays if no assistant speech has
+started within `talk.conversation.fillerAfterMs` (default 1200 ms) of end-of-turn, and a spoken
+acknowledgement plays when the agent starts a tool call. Neither counts toward the
+`stopToFirstAudioMs` metric below. Phrases are per-locale
+(`talk.conversation.{fillerPhrases,ackPhrases,backchannels}`, keyed by
+`talk.conversation.locale`, default `"en"`; an unrecognised locale falls back to `"en"`).
+
+A voice turn that has to wait behind an in-flight run is queued as a follow-up, not merged into a `collect` batch. The follow-up keeps the same voice profile (thinking off, command-inert text, recall deadline, and the `stt-tts` bridge kind). A later voice utterance supersedes an older queued voice utterance; a typed message already in that queue is left alone. A voice turn that is still only queued, and is then superseded, is not written into the next turn's model context.
+
+The first turn of a new Talk session stops a leftover voice run left by a closed session on the same chat. A typed run the user started is never aborted for that reason. If the agent start itself fails, the turn is cancelled with `turn.cancelled { reason: "agent-error" }` and the session stays open for the next utterance.
+
+## Turn-taking
+
+- **End of turn.** The STT provider ends a turn on silence (`talk.conversation.endOfTurnSilenceMs`,
+  default 500 ms for ElevenLabs Scribe's `vad_silence_threshold_secs`), not on a fused
+  turn-detection signal — ElevenLabs Scribe v2 Realtime does not report one today.
+- **Turn resume.** A partial transcript with at least one real word, arriving after end-of-turn
+  but before the first assistant audio, cancels the in-flight run with
+  `turn.cancelled { reason: "turn-resumed" }` and appends no assistant message (nothing was heard
+  yet). The continuation's own commit starts the next turn, so the history shows both user
+  fragments followed by one reply.
+- **Client-local pause, then server confirmation.** The web client arms its interruption detector only while reply speech (`kind: "speech"`) is playing, not during a filler or acknowledgement one-shot, and re-arms it if playback resumes while that reply is still active. Talking through the filler does not confirm an interruption; speech that continues into the reply interrupts as soon as reply audio starts. The browser then pauses playback locally and sends `talk.session.bargeIn`. The relay confirms the burst on
+  the real appended audio (−45 dBFS or louder, sustained at least 250 ms), filters backchannels
+  (short per-locale phrases such as "mm-hmm") and echo (≥60% word-token overlap with the text just
+  pushed to TTS in the last 3 seconds), and requires a qualifying STT word within
+  `talk.conversation.falseInterruptionMs` (default 700 ms) of the client's report. A confirmed
+  interruption emits `output.audio.cleared { reason: "barge-in" }`; otherwise it emits
+  `output.audio.resumed` once the window elapses with no qualifying word, and playback continues.
+- **Heard-text persistence.** After a confirmed barge-in, the session's transcript holds exactly
+  one assistant message for that turn: only the text whose audio the client acknowledged as
+  played, plus an ` [interrupted]` marker. `talk.session.mark` `timestamp` for these speech marks is milliseconds of audio played for that turn (0 at the first speech sample), the same domain as the TTS alignment timeline — not the client's `performance.now()` clock. Barge-in `speechDetectedAt` / `playbackPausedAt` stay on that monotonic clock and are not mixed with mark timestamps. An interruption with zero
+  acknowledged characters appends no assistant message. The user's own utterance is still persisted. This holds on both the JSONL and database
+  session storage backends. On JSONL, the rewrite truncates the transcript file and rewrites the loaded entries, so earlier turns stay; it does not reset the file to a header-only session.
+- **`turn.ended` is not "written".** `turn.ended` is broadcast when the TTS stream drains. Session bookkeeping and the assistant transcript write land after it and are not awaited, so a disk write cannot block the next turn. Wait for the `chat` final event, or read `chat.history`, before treating the transcript as updated.
+- **TTS stall.** If a TTS stream goes 30 seconds without audio after it has been asked to finish, or a provider wait never settles, the turn is cancelled with `turn.cancelled { reason: "tts-stall" }`. The session stays open. Model latency before any TTS audio is not this watchdog.
+- **STT drop.** One unexpected STT close reconnects once. A second fault, or a failure of that reconnect, emits `session.error` and closes the session with reason `error`.
+
+## Metrics
+
+`talk.metrics` (operator-only; narrow clients are refused `missing scope: operator.read`) reports a
+bounded in-process rolling window (500 turns per STT/TTS provider pair):
+
+```json
+{
+  "providerPairs": [
+    {
+      "sttProvider": "elevenlabs",
+      "ttsProvider": "elevenlabs",
+      "count": 42,
+      "p50": {
+        "endOfTurnMs": 90,
+        "preModelMs": 40,
+        "modelFirstTokenMs": 210,
+        "ttsFirstByteMs": 95,
+        "gatewayAddedMs": 8,
+        "stopToFirstAudioMs": 820
+      },
+      "p95": {
+        "endOfTurnMs": 140,
+        "preModelMs": 60,
+        "modelFirstTokenMs": 410,
+        "ttsFirstByteMs": 160,
+        "gatewayAddedMs": 22,
+        "stopToFirstAudioMs": 1140
+      },
+      "falseInterruptions": 2,
+      "confirmedInterruptions": 5,
+      "interruptionCandidates": 9,
+      "falseInterruptionRate": 0.2857142857142857
+    }
+  ]
+}
+```
+
+Every stage field is optional per sample — a cancelled turn never reaches a later stage, and the
+ring never fabricates a zero for a stage it skipped. `falseInterruptionRate` is
+`falseInterruptions / (falseInterruptions + confirmedInterruptions)`; the key is omitted entirely
+(never `0` or `NaN`) when that denominator is 0, i.e. no interruption has resolved as either
+outcome yet for the provider pair. `interruptionCandidates` counts every time
+the burst detector itself qualifies, independent of whether backchannel/echo filtering or word
+confirmation later resolved it as false or confirmed — useful for proving the detector engaged even
+on a fixture whose mapped text can never distinguish the two outcomes. `p50` and `p95` may also include `bargeInStopMs`, the client-reported delay from speech detection to local playback pause; it is omitted when no accepted interruption carried both timestamps. The same per-turn stage
+timings are recorded as a `voice turn timing` log line (`createSubsystemLogger("talk/voice-loop")`)
+and, when `extensions/diagnostics-otel` is enabled, as OTel histograms named `openclaw.talk.turn.*_ms` (including `openclaw.talk.turn.barge_in_stop_ms`) — see
+[Task and dream spans](/diagnostics/otel-langfuse) for the exporter setup pattern.
+
+The pinned stop-to-first-audio ceiling for the fake-provider proxy run that stands in for this
+metric during development is 1150 ms; a live run with real provider keys against a deployed
+gateway is looser (p50 of at most 1200 ms), since it also carries real network variance the
+in-process budget does not model. A live run with real ElevenLabs/OpenAI keys, and the matching
+per-provider-pair series this section describes, is operator-owned post-deploy proof — with
+`OPENCLAW_GATEWAY_URL` and `ELEVENLABS_API_KEY` (or `XI_API_KEY`) set, run
+`node scripts/voice-live-smoke.mjs --turns 5` against a deployed gateway to check it.
+
+## `talk.conversation` configuration reference
+
+See [Configuration reference](/gateway/configuration-reference#talkconversation) for the full
+field table and defaults. TTS reuses the existing `talk.provider`/`talk.providers.<id>` settings
+(including `apiKey`, which accepts a `SecretRef`); this block only configures the STT seam,
+turn-taking thresholds, session limits, and the filler/acknowledgement phrases.
+
+## Troubleshooting
+
+### `talk.session.create` fails `UNAVAILABLE: voice conversation disabled`
+
+Set `talk.conversation.enabled: true`. This gate is checked before any provider is resolved, so a
+fully configured provider does not matter until it is on.
+
+### `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
+
+Check `talk.catalog`'s `streamingTranscription`/`speech` rows for the configured provider's
+`configured`/`diagnostic` fields. `missing-api-key` and `secret-ref-unresolved` both mean the
+gateway could not read a usable key for `talk.providers.<id>.apiKey` — see
+[ElevenLabs streaming voice](/providers/elevenlabs#troubleshooting).
+
+### A turn never speaks, or speaks very late
+
+Check `talk.metrics` for the provider pair's `p95.preModelMs` and `p95.modelFirstTokenMs`. A voice
+turn races `context.collect` against `talk.conversation.recallDeadlineMs` and falls back with no
+recalled context rather than hang — the gateway log names the fallback. A consistently slow
+`modelFirstTokenMs` points at the model provider, not this feature.
+
+### A real interruption is ignored, or a cough/backchannel stops the assistant
+
+Interruption needs a real sustained burst (−45 dBFS, 250 ms) plus a confirming STT word within
+`talk.conversation.falseInterruptionMs`; a cough or "mm-hmm" should resume, not clear. If
+`talk.metrics`'s `interruptionCandidates` rises but `confirmedInterruptions` does not, the burst
+detector is working and the word-confirmation or backchannel/echo filter is doing its job — that is
+expected on a false interruption, not a bug. If a genuine interruption is not clearing, verify the
+client is actually sending `talk.session.bargeIn`, not just pausing local playback.
+
+### A reply stops after about 30 seconds of silence from the speech service
+
+That is the TTS stall watchdog (`turn.cancelled { reason: "tts-stall" }`), not `maxTurnSeconds` (that limit is continuous user speech and closes the whole session). Check the speech provider's socket and `talk.metrics` `ttsFirstByteMs` before raising `maxTurnSeconds`.
+
+### Voice mode starts and the reply never speaks, while typed chat in the same chat is fine
+
+A previous Voice session may have left a voice run in flight. The next session's first turn stops that leftover voice run. A typed run is not aborted. If the agent start failed instead, the turn ends with `turn.cancelled { reason: "agent-error" }` and the gateway log names the start failure.
+
+## Related
+
+- [Realtime Voice gateway relay](/talk/realtime-voice) — the separate single-provider relay bridge
+  behind the Control UI's Talk tab
+- [ElevenLabs streaming voice](/providers/elevenlabs) — the first streaming STT/TTS provider pair
+- [Using the web client](/web/using-the-web-client#dictate-and-voice) — end-user instructions
+- [Configuration reference](/gateway/configuration-reference#talkconversation) — full field table
+- [Gateway protocol](/gateway/protocol#narrow-scope-method-allowlist) — the narrow scope wire

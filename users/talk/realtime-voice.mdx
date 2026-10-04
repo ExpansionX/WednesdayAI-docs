@@ -1,137 +1,239 @@
 ---
+title: "Realtime Voice gateway relay"
+description: "Configure, secure, and operate realtime voice sessions through the WednesdayAI Gateway."
 audience: admin
 component: talk/realtime-voice
 sources:
+  - src/config/types.gateway.ts
+  - src/gateway/config-reload-plan.ts
+  - src/gateway/method-scopes.ts
   - src/gateway/server-methods/talk.ts
   - src/gateway/talk-realtime-relay.ts
   - src/gateway/protocol/schema/talk-realtime.ts
-  - src/config/types.gateway.ts
-generated: 2026-06-26
+  - src/talk/agent-consult-runtime.ts
+  - src/talk/agent-consult-tool.ts
+  - extensions/openai-realtime/src/provider.ts
+generated: 2026-08-26
 ---
 
-# Realtime Voice (gateway relay)
+# Realtime Voice gateway relay
 
-WednesdayAI's realtime voice surface lets client apps (iOS, Android, macOS, web) stream
-two-way audio through the Gateway and receive transcripts, tool calls, and close events
-in real time. The Gateway acts as a relay between the client and a registered voice
-provider — it handles connection lifecycle, audio framing, and event fan-out.
+The realtime voice relay streams two-way audio between authenticated clients and a
+registered provider. The Gateway owns authentication, connection lifecycle, audio framing,
+tool-call routing, and bounded session state. The currently bundled production provider is
+OpenAI Realtime; compatible plugins can register other providers.
 
-## How it works
+For the browser workflow, see [Talk realtime voice](/web/talk). For provider development,
+see [Realtime Voice Provider API](/talk/realtime-voice-api).
 
+<Note>
+This page covers the single-provider gateway-relay bridge behind the Control UI's **Talk** tab.
+The `/v2/client` web client's **Dictate** and **Voice mode** controls use a separate, cascaded
+design (streaming speech-to-text, then an agent turn, then streaming text-to-speech) — see
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation).
+</Note>
+
+## Requirements
+
+- A registered realtime voice provider. Enable the bundled OpenAI provider with
+  `wednesdayai plugins enable openai-realtime`.
+- A nonblank provider key. OpenAI resolves it from `talk.providers.openai-realtime.apiKey`,
+  plugin defaults, or `OPENAI_API_KEY`.
+- `operator.read` for status; `operator.write` for session control and media methods.
+- `operator.admin` when `consultToolPolicy: "owner"` must be honored.
+
+Restart the Gateway after enabling or disabling a plugin or changing an environment
+variable. On Linux, run `systemctl --user restart openclaw-gateway`. On macOS, run
+`wednesdayai gateway restart --deep`.
+
+The provider key stays on the Gateway host. The browser sends audio over its existing
+authenticated Gateway WebSocket and never receives the provider key.
+
+## Enable browser Talk
+
+`talk.realtime.enabled` defaults to `false`. Set it to `true` to expose Talk in the
+Control UI and report it as enabled in status:
+
+```json5
+{
+  talk: {
+    realtime: {
+      enabled: true,
+    },
+    providers: {
+      "openai-realtime": {
+        voice: "alloy",
+      },
+    },
+  },
+  plugins: {
+    entries: {
+      "openai-realtime": {
+        enabled: true,
+      },
+    },
+  },
+}
 ```
-Client app ──audio──▶ Gateway relay ──bridge──▶ Voice provider
-          ◀──events── (talk-realtime-relay)      (OpenAI, ElevenLabs, etc.)
+
+Changes under `talk.*` apply without a restart to new sessions. Existing sessions retain
+the configuration resolved when they started. Changes under `plugins.*` and environment
+variable changes require a Gateway restart.
+
+<Warning>
+`talk.realtime.enabled` is a UI rollout gate, not an API kill switch. Direct callers with
+`operator.write` can still create sessions when it is `false`. Revoke write scope or disable
+the provider plugin when you must prevent API access.
+</Warning>
+
+## OpenAI provider defaults
+
+| Setting             | Default            | Effect                                |
+| ------------------- | ------------------ | ------------------------------------- |
+| `model`             | `gpt-realtime`     | OpenAI Realtime model ID              |
+| `voice`             | OpenAI API default | Spoken voice                          |
+| `consultToolPolicy` | `safe-read-only`   | Gateway-owned agent consult access    |
+| `vadThreshold`      | `0.5`              | Speech-start sensitivity              |
+| `prefixPaddingMs`   | `300`              | Audio retained before detected speech |
+| `silenceDurationMs` | `500`              | Silence required to end a turn        |
+
+OpenAI uses gateway relay only and PCM16 signed little-endian mono audio at 24 kHz. The
+browser has no provider picker; it uses the configured available provider selected by the
+Gateway.
+
+For faster turn detection, test a threshold of `0.58`, prefix padding of `300` ms, and a
+silence duration of `320` ms:
+
+```json5
+{
+  talk: {
+    providers: {
+      "openai-realtime": {
+        vadThreshold: 0.58,
+        prefixPaddingMs: 300,
+        silenceDurationMs: 320,
+      },
+    },
+  },
+}
 ```
 
-1. Client sends `talk.realtime.session` → Gateway resolves the provider, creates a relay session, returns `relaySessionId`.
-2. Client streams PCM16 audio via `talk.realtime.audio` frames.
-3. Gateway bridges audio to the provider's `RealtimeVoiceBridge`.
-4. Provider events (ready, audio, transcript, toolCall, error, close) are pushed back as `talk.realtime.relay` WebSocket events.
-5. Client sends `talk.realtime.stop` or disconnects; Gateway closes the relay and notifies the provider.
+## Configure agent consult access
+
+For gateway-relay sessions, the Gateway may expose its reserved
+`openclaw_agent_consult` tool to the voice model. The browser never executes this tool.
+
+| Value                                 | Effective access                                                                                                |
+| ------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| Missing, invalid, or `safe-read-only` | Exactly `read`, `web_search`, `web_fetch`, `memory_search`, and `memory_get`                                    |
+| `owner`                               | Removes the consult allowlist and authorizes owner-only tools; remaining agent and sandbox policy still applies |
+| `none`                                | Does not expose the consult tool                                                                                |
+
+`owner` is honored only for a connection with `operator.admin`. Otherwise the Gateway
+silently downgrades that session to `safe-read-only` and logs a bounded warning. Message
+tools and plugin hooks remain disabled under every policy. The reserved tool name cannot
+be replaced by a client tool, including when the policy is `none`, and client results for
+Gateway-owned calls are rejected.
+
+<Warning>
+`owner` consults can use action-taking and owner-only tools, so real changes can happen.
+The temporary consult session does not preview or undo those actions. Use `safe-read-only`
+unless the authenticated operator explicitly needs this access.
+</Warning>
+
+```json5
+{
+  talk: {
+    providers: {
+      "openai-realtime": {
+        consultToolPolicy: "safe-read-only",
+      },
+    },
+  },
+}
+```
+
+### Consult privacy and cancellation
+
+A consult can include up to 12 recent final transcript entries and sends them to the
+configured default agent/model provider, which may differ from the voice provider. The
+temporary local session file is deleted after the run, but that does not change the model
+provider's data-handling terms.
+
+The runtime requests cancellation after 30 seconds and cleans up after the embedded runner
+settles. This is not a hard completion bound for a non-cooperative runner. An accepted
+interruption cancels an in-flight consult without producing a stray spoken follow-up.
+
+## Permissions and methods
+
+| Method                     | Required scope   | Purpose                                 |
+| -------------------------- | ---------------- | --------------------------------------- |
+| `talk.realtime.status`     | `operator.read`  | Report availability and active sessions |
+| `talk.realtime.session`    | `operator.write` | Start a relay session                   |
+| `talk.realtime.audio`      | `operator.write` | Send a PCM16 audio frame                |
+| `talk.realtime.mark`       | `operator.write` | Acknowledge a playback mark             |
+| `talk.realtime.toolResult` | `operator.write` | Submit a client-owned tool result       |
+| `talk.realtime.bargeIn`    | `operator.write` | Request interruption                    |
+| `talk.realtime.stop`       | `operator.write` | Close a session                         |
+
+`owner` consult additionally requires explicit `operator.admin` authorization.
+
+## Relay events
+
+Gateway-relay clients receive `talk.realtime.relay` events:
+
+| Event type   | Meaning                                                                   |
+| ------------ | ------------------------------------------------------------------------- |
+| `ready`      | The provider can accept audio.                                            |
+| `audio`      | Base64-encoded PCM16 audio from the provider.                             |
+| `clear`      | Clear queued playback; reason is `barge-in` for an accepted interruption. |
+| `mark`       | Opaque provider playback boundary.                                        |
+| `transcript` | Partial or final user or assistant text.                                  |
+| `toolCall`   | A client-owned tool call is ready to execute.                             |
+| `vadBargeIn` | Provider server VAD detected speech start.                                |
+| `error`      | The provider reported a terminal error.                                   |
+| `close`      | The session ended as `completed`, `error`, or `cancelled`.                |
+
+Every pushed `mark` includes `markName`. The relay forwards mark acknowledgements to the
+active provider; the bundled OpenAI provider treats unknown, duplicate, cleared, and
+old-generation marks as inert. An `error` event is terminal and is followed by `close`.
 
 ## Transport modes
 
-| Transport                                        | When used                               | How configured                                   |
-| ------------------------------------------------ | --------------------------------------- | ------------------------------------------------ |
-| `gateway-relay` (default)                        | All providers; lowest client complexity | Automatic                                        |
-| `webrtc` / `provider-websocket` / `managed-room` | Provider-specific browser sessions      | Provider must implement `createBrowserSession()` |
+| Transport                                      | Behavior                                                                     |
+| ---------------------------------------------- | ---------------------------------------------------------------------------- |
+| `gateway-relay`                                | Default. Audio and events pass through the Gateway.                          |
+| `auto`                                         | Uses `createBrowserSession()` when available, otherwise falls back to relay. |
+| `webrtc`, `provider-websocket`, `managed-room` | Requires provider support; explicit requests never fall back.                |
 
-If a client requests a non-relay transport and the provider does not implement `createBrowserSession`, the request is rejected with `UNAVAILABLE` — it never silently falls back to relay.
+The Gateway-owned consult tool is available only on relay sessions, including `auto`
+sessions that fell back to relay.
 
 ## Session limits
 
-- **30 minutes** TTL per session (configurable at compile time; `RELAY_SESSION_TTL_MS`).
-- **2 sessions** max per connection.
-- **64 sessions** max globally across all connections.
-- Expired sessions close with reason `"completed"`. Disconnected-client sessions close with `"cancelled"`.
+- Fixed 30-minute TTL per session.
+- Two active sessions per authenticated connection.
+- 64 active sessions globally.
+- Expired sessions close as `completed`; disconnected-client sessions close as `cancelled`.
 
-## Configuration
+## Playback acknowledgements and interruption
 
-Providers are registered by Gateway plugins via `api.registerRealtimeVoiceProvider(provider)`.
-Provider-specific configuration is read from `talk.providers.<providerId>` in `openclaw.json`.
+Clients acknowledge provider marks only after the associated audio has drained to audible
+playback. A normal interruption with the bundled OpenAI provider requires at least 250 ms of
+acknowledged audio. `force: true` bypasses the duration floor and acknowledgement/echo
+guards; an assistant output item must have started, but no playback acknowledgement is
+required.
 
-```json
-{
-  "talk": {
-    "providers": {
-      "openai-realtime": {
-        "apiKey": { "$secret": "OPENAI_API_KEY" },
-        "model": "gpt-4o-realtime-preview",
-        "voice": "alloy"
-      }
-    }
-  }
-}
-```
+`audioPlaybackActive` is a provider-defined hint. The bundled OpenAI provider currently
+ignores it, so it does not replace playback acknowledgements.
 
-The config is passed to the provider's `resolveConfig()` and `isConfigured()` hooks at session
-start — the provider validates its own keys. Until a real provider plugin is installed,
-`talk.realtime.session` returns `UNAVAILABLE: No realtime voice provider registered`.
-
-## Gateway methods
-
-| Method                     | Purpose                                                         |
-| -------------------------- | --------------------------------------------------------------- |
-| `talk.realtime.session`    | Start a relay session; returns `relaySessionId`                 |
-| `talk.realtime.audio`      | Send a PCM16 audio frame                                        |
-| `talk.realtime.mark`       | Acknowledge a playback mark                                     |
-| `talk.realtime.toolResult` | Submit a tool call result                                       |
-| `talk.realtime.bargeIn`    | Signal that the user has started speaking (interrupt)           |
-| `talk.realtime.stop`       | Close the session gracefully                                    |
-| `talk.realtime.status`     | List active relay sessions (operator observability; READ_SCOPE) |
-
-## Session observability
-
-`talk.realtime.status` returns all active relay sessions visible to the gateway operator:
-
-```json
-[
-  {
-    "id": "<relaySessionId>",
-    "provider": "openai-realtime",
-    "connId": "<connectionId>",
-    "startedAt": "<ISO8601>",
-    "audioBytesIn": 12345,
-    "audioBytesOut": 67890
-  }
-]
-```
-
-No parameters are required. Sessions are scoped globally across all connections for the operator.
-
-## Events pushed to the client (`talk.realtime.relay`)
-
-| Event type   | When                                                        |
-| ------------ | ----------------------------------------------------------- |
-| `ready`      | Provider bridge connected and accepting audio               |
-| `audio`      | PCM16 audio chunk from provider (base64)                    |
-| `clear`      | Provider asked to clear the client's audio buffer           |
-| `mark`       | Playback position mark from provider                        |
-| `transcript` | Partial or final transcript (`role: user\|assistant`)       |
-| `toolCall`   | Provider is requesting a tool call                          |
-| `vadBargeIn` | Provider server-VAD detected speech start (barge-in signal) |
-| `error`      | Non-fatal error from provider                               |
-| `close`      | Session ended (`reason: completed\|error\|cancelled`)       |
-
-## Barge-in
-
-Send `talk.realtime.bargeIn` with optional hints to interrupt active playback:
-
-```json
-{
-  "relaySessionId": "<id>",
-  "audioPlaybackActive": true,
-  "force": false
-}
-```
-
-`audioPlaybackActive: true` confirms the assistant is still speaking (useful when the client
-cannot provide real playback-mark feedback). `force: true` bypasses the provider's echo-guard
-heuristics.
+An accepted interruption emits one `clear` event with reason `barge-in`. OpenAI can accept
+it after response generation has ended when acknowledged audio remains queued for playback.
 
 ## Tool calls
 
-When the provider emits a `toolCall` event, the client executes the tool and sends back:
+The relay intercepts `openclaw_agent_consult`; every other provider tool call is sent to
+the client. A client can return:
 
 ```json
 {
@@ -143,13 +245,79 @@ When the provider emits a `toolCall` event, the client executes the tool and sen
 }
 ```
 
-`suppressResponse: true` submits the result without asking the provider to generate a new
-assistant response — useful when another channel (chat) has already delivered the answer.
+`suppressResponse: true` submits the result without requesting another voice response.
+`willContinue: true` keeps the call ID in the client-owned set so the client can submit
+another result, but provider support for multiple results is not guaranteed. The bundled
+OpenAI provider expects one output per call ID.
 
-## Logging
+## Session observability
 
-The relay logs under `gateway/talk-realtime-relay`. Enable debug logging in `openclaw.json`:
+`talk.realtime.status` reports `enabled`, `available`, configured provider IDs, and active
+sessions with `durationMs`, audio byte counters, and accepted `bargeInCount`. These counters
+exist only in memory for currently active sessions; they are not durable metrics.
 
 ```json
-{ "logging": { "level": "debug" } }
+{
+  "enabled": true,
+  "available": true,
+  "configuredProviderIds": ["openai-realtime"],
+  "sessions": [
+    {
+      "id": "<relaySessionId>",
+      "provider": "openai-realtime",
+      "connId": "<connectionId>",
+      "startedAt": 1710000000,
+      "durationMs": 12000,
+      "audioBytesIn": 12345,
+      "audioBytesOut": 67890,
+      "bargeInCount": 1
+    }
+  ]
+}
 ```
+
+`startedAt` is Unix time in seconds. `bargeInCount` counts accepted playback clears, not
+every interruption attempt. Status covers active sessions across authenticated connections.
+
+Follow logs with:
+
+```bash
+wednesdayai logs --follow
+```
+
+The `gateway/talk-realtime-relay` subsystem emits these structured lifecycle messages:
+
+| Message                 | Useful fields                                                   |
+| ----------------------- | --------------------------------------------------------------- |
+| `relay session started` | relay session, provider, connection                             |
+| `relay barge-in`        | relay session and interruption context                          |
+| `relay session error`   | relay session, provider, bounded error                          |
+| `relay session ended`   | relay session, reason, duration, audio counters, barge-in count |
+
+Provider errors are terminal: the relay sends the bounded error message to the client and
+then closes the session with reason `error`.
+
+## Troubleshooting
+
+### Talk is unavailable
+
+If the client reports `UNAVAILABLE: No realtime voice provider registered`, verify the
+plugin is enabled. Also verify the API key resolves to a nonblank value and
+`talk.realtime.status` includes `openai-realtime` in `configuredProviderIds`. Restart after
+plugin or environment changes.
+
+### An owner consult runs read-only
+
+Confirm the connection token has `operator.admin`. The configured value alone is not
+authorization; otherwise the Gateway deliberately downgrades it.
+
+### Interruptions are ignored
+
+Verify the client acknowledges marks after actual playback. For browser echo problems, use
+a headset before changing VAD settings. `audioPlaybackActive` alone is insufficient for the
+bundled OpenAI provider.
+
+### Sessions close immediately
+
+Check `relay session error`, verify the model and voice are available to the OpenAI account,
+and confirm the session limits are not exhausted.
