@@ -7,6 +7,7 @@ read_when:
   - You want to change the theme or know why a button is dimmed
   - You want to pick a model or Think level, reply to a message, or rename a chat
   - You want to send another message while a reply is still being written
+  - You open the web client on several devices and want to know when replies and unread replies show up, or how desktop notifications work
 title: "Using the web client"
 description: "Chat with your WednesdayAI assistant, manage conversations, and choose what the web client displays."
 audience: user
@@ -23,6 +24,14 @@ sources:
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/app/use-chat-send.ts
   - apps/web/src/ui/Composer.tsx
+  - apps/web/src/runs/runs-model.ts
+  - apps/web/src/app/use-busy-sessions.ts
+  - apps/web/src/ui/AccountMenu.tsx
+  - apps/web/src/providers/reply-notifications.ts
+  - apps/web/src/app/use-reply-notifications.ts
+  - apps/web/src/ui/TypingIndicator.tsx
+  - apps/web/src/ui/EmptyState.tsx
+  - apps/web/src/state/chat.ts
 generated: 2026-10-05
 ---
 
@@ -77,12 +86,15 @@ Type in the message box and press Enter (or select the send arrow). Press Shift+
 new line without sending. Your message appears on the right, and the reply streams in beneath it
 as your assistant writes it.
 
-While a reply is being written, the message box stays open so you can keep typing. The send arrow
-becomes **Queue message** and a separate **Stop** button appears beside it. Select **Stop** to end
-the reply early. If the stop request fails, the thread shows **Could not stop the reply:** followed
-by the reason, and the reply keeps running. See
-[Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming) for what
-Enter does in the meantime.
+While your assistant is working on a reply - in this window, or in another browser or tab - the
+thread shows a three-dot indicator and the message box stays open so you can keep typing. The send
+arrow becomes **Queue message** and a separate **Stop** button appears beside it. Select **Stop**
+to end the reply early, including one that another device started. If the stop request fails, the
+thread shows **Could not stop the reply:** followed by the reason, and the reply keeps running.
+See [Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming) for what
+Enter does in the meantime, and
+[Use several browsers or devices at once](#use-several-browsers-or-devices-at-once) for the full
+multi-device behaviour.
 
 If you have not opened a chat yet (for example, the first time you use a new browser), you see a
 greeting (**Good morning**, **Good afternoon** or **Good evening**), a line that reads **What can
@@ -194,7 +206,8 @@ You do not have to wait for a reply to finish before sending your next message:
   (**Send options**) and choose **Send now**, to steer your assistant right away: the message is
   added to the reply in progress instead of waiting. If your assistant cannot take it in the middle
   of a reply, it is queued instead and marked **Queued**.
-- **Stop** ends the current reply early at any time.
+- **Stop** ends the current reply early at any time, including a reply started in another browser
+  or tab.
 
 **Send now** needs some text, and is unavailable while a file is attached. Attachments go with a
 queued message, but the **+** button is dimmed while a reply is being written, so attach files
@@ -205,6 +218,68 @@ If your assistant refuses the message, the thread shows **Could not queue that m
 assistant's queue settings discard the message). The text you typed returns to the message box so
 you can send it again; any attachments do not come back. If the reason is unclear, ask
 the person who manages WednesdayAI.
+
+### Dictate and voice
+
+Two buttons beside the send arrow turn your voice into a message: a microphone (**Dictate**) and
+a wave (**Voice mode**). Whichever one is on stays pressed and highlighted, so the buttons show at
+a glance whether they are off or on. Either may be dimmed, independently, depending on what the
+person who manages WednesdayAI has configured — see
+[Controls that are not available yet](#controls-that-are-not-available-yet) if both are dimmed for
+you.
+
+**Dictate** turns your speech into typed text in the message box, without sending anything on its
+own:
+
+<Steps>
+
+1. Select the microphone button and allow microphone access when your browser asks.
+
+   The button stays pressed while Dictate is on.
+
+2. Speak. A live caption appears above the message box while you talk, replacing itself as your
+   words are recognized.
+3. Select the microphone button again to stop. The final text is placed in the message box — edit
+   it like anything you typed, then press Enter to send.
+
+</Steps>
+
+**Voice mode** has a live, spoken conversation with your assistant instead:
+
+<Steps>
+
+1. Select the wave button and allow microphone access when your browser asks.
+
+   The button stays pressed while Voice mode is on.
+
+2. Speak normally. Your assistant answers aloud, using the same chat, tools, memory and history as
+   typed messages. You will see the exchange appear in the thread as text too.
+
+3. To interrupt, start talking once the actual reply is speaking. Playback stops almost immediately
+   and you can keep talking. The chat keeps only the part of the reply you heard, marked
+   **interrupted**.
+
+4. Select the wave button again (**Stop voice mode**) to end the conversation and release the
+   microphone.
+
+</Steps>
+
+A short phrase may play while your assistant is still thinking (for example "One moment."), and
+another when it starts using a tool on your behalf (for example "Working on that."). Both are
+normal. Talking during those short phrases does not interrupt the reply. You can interrupt once
+the actual answer starts speaking. A cough, a short "mm-hmm", or your assistant's own voice
+reaching the microphone should not cut the reply off either.
+
+If the strip under the message box changes to **Reconnecting...** or **Offline**, the microphone
+is released. Voice mode returns to the unpressed wave button, even if it was still starting.
+Dictate stops too, and the microphone button's tooltip reads **Voice input stopped because the
+connection dropped.** The words you had spoken are not placed in the message box. Wait until the
+strip says **Connected**, then select the button again.
+
+If either button shows an error (for example after you deny microphone access, or if this browser
+cannot use a microphone), the button gets a red outline and its tooltip shows the reason. Select
+it again to retry. Both release the microphone fully when you stop them, when the connection
+drops, or when you leave the page.
 
 ### Attach a photo or audio clip
 
@@ -232,7 +307,11 @@ Each separate conversation is a **chat**. Your chats are listed in the sidebar u
 with the most recently updated first. Each row shows the chat's title and its **session key**,
 the full identifier of that conversation, such as `agent:main:telegram:direct:example-user`.
 Long keys are shortened visually; hover over a row to read its full key. A colour dot identifies
-the assistant, and a small tag identifies chats from another app, such as Telegram or Discord.
+the assistant, and a small tag identifies chats from another app, such as Telegram or Discord. A
+chat whose assistant is working on a reply, or that has unseen replies, also shows a small dot
+beside its title - see
+[Use several browsers or devices at once](#use-several-browsers-or-devices-at-once).
+
 With no chats yet, the list reads **No chats yet**.
 
 Scheduled jobs, isolated heartbeat checks, subagents and other internal conversations are hidden
@@ -318,13 +397,61 @@ not suggest a title**.
 
 ### This chat changed elsewhere
 
-If you send a message in a chat that has moved on since you last saw it - because you or your
-assistant added to it from another browser, another device or another app - the message is not
-sent. The thread refreshes to the latest messages and a banner reads **This chat changed elsewhere.
-The latest messages are shown below.** The text you typed is put back in the message box (an
-attached file or a quote is not), so read what is new and press Enter again if you still want to
-send it. Select **Dismiss** to hide the banner; it also clears on your next send or when you switch
-chats. Queued and **Send now** messages are not checked this way.
+Each send is checked against the latest message this window has shown you. If the chat has moved on
+since then - because you or your assistant added to it from another browser, another device or
+another app - your message is still sent: the thread refreshes to show the messages you had not
+seen, and the message is sent again automatically against the refreshed chat. Attachments and a
+reply quote go with the resent message. You normally notice nothing except the new messages
+appearing above yours.
+
+A banner reads **This chat changed elsewhere. The latest messages are shown below.** only when the
+chat changes a second time while that automatic retry is under way. The text you typed is put back
+in the message box (an attached file or a quote is not), so read what is new and press Enter again
+if you still want to send it. If you switch to another chat while the automatic resend is being
+prepared, the resend is cancelled and your text is put back in the message box instead. Select
+**Dismiss** to hide the banner; it also clears on your next send or when you switch chats. Queued
+and **Send now** messages are not checked this way.
+
+## Use several browsers or devices at once
+
+You can have the web client open in several browsers, tabs and devices at the same time. A reply
+appears in every one of them without reloading the page: the window that sent the message shows
+the reply as it is written, and the others show the working indicator until it is ready, then the
+full exchange.
+
+While your assistant is working on a reply anywhere, the chat shows it in three ways:
+
+- The thread shows the three-dot indicator described in
+  [Send a message](#send-a-message), including in a chat that does not have any messages yet.
+- The chat gets a small pulsing dot in the sidebar.
+- The message box offers **Stop** and **Queue message** as usual, and they work on that reply even
+  though another device started it.
+
+The Runs panel lists the same work in progress; see [Check on Runs](#check-on-runs). Sending into
+a chat that gained messages elsewhere meanwhile is covered in
+[This chat changed elsewhere](#this-chat-changed-elsewhere).
+
+When a reply arrives while you have a different chat open, or while the tab is in the background,
+the chat gets a small dot in the sidebar and the tab's title shows the total number of unseen
+replies, for example **(2) WednesdayAI**. Opening that chat clears its dot, and so does returning
+to the tab while it is open. These work whether or not you turn on the notifications described
+below.
+
+To also get a desktop notification when a reply arrives while the tab is hidden, open the account
+menu (select your name at the bottom of the sidebar), find **Notifications** and choose **On**.
+Your browser asks for permission; choose **Allow**. While it is on and the tab is hidden, a
+notification names the assistant that replied and the chat it arrived in - never the reply text -
+and selecting the notification opens that chat. The choice is remembered in this browser for this
+WednesdayAI connection, like the theme.
+
+If your browser has blocked notifications for this site, the menu shows
+**Blocked in browser settings** and the choice stays **Off** until you re-allow notifications for
+this site in the browser's settings. On browsers without desktop notification support - most
+mobile browsers - the menu shows **Not supported in this browser**; there, the sidebar dot and the
+title count are the notification.
+
+Coming back to a tab you left in the background also catches the open chat up: messages that
+arrived elsewhere are fetched and shown without a reload.
 
 ## Check on Runs
 
@@ -378,16 +505,21 @@ dimmed, but for a different reason: see [Choose a model and Think](#choose-a-mod
 | Top bar          | **Canvas**                                   |
 | Sidebar          | **Calendar**, **Memory**, **Add extension**  |
 | Account menu     | **Settings**, **Keyboard shortcuts**         |
-| Message box      | **Search**, **Dictate**, **Voice mode**      |
+| Message box      | **Search**                                   |
 | Under each reply | **Read aloud**, **Feedback**, **Regenerate** |
 
-The tooltips for **Canvas**, **Dictate**, **Voice mode** and **Read aloud** name a numbered phase.
-The tooltips for **Calendar**, **Memory**, **Add extension**, **Settings**,
-**Keyboard shortcuts**, **Search** in the message box, **Feedback** and **Regenerate** instead read
-"coming with the extension panel SDK" followed by a tracked issue number. Voice and dictation are
-switched off for everyone in this release, whatever the person managing WednesdayAI has
-configured. The **⌘N** label beside **New chat** is only a hint for now: no keyboard shortcut is
-wired up to it.
+The tooltip for **Canvas** names a numbered phase. The tooltip for **Read aloud** reads "not
+available yet" followed by its tracked issue (GitHub #869). The tooltips for **Calendar**,
+**Memory**, **Add extension**, **Settings**, **Keyboard shortcuts**, **Search** in the message
+box, **Feedback** and **Regenerate** read "coming with the extension panel SDK" followed by a
+tracked issue number. The **⌘N** label beside **New chat** is only a hint for now: no keyboard
+shortcut is wired up to it.
+
+**Dictate** and **Voice mode**, the microphone and wave buttons beside the send arrow, are not on
+this list — see [Dictate and voice](#dictate-and-voice). Either can still be dimmed when the
+person who manages WednesdayAI has not turned on and configured that control's voice service yet;
+the tooltip then reads **unavailable on this gateway**. Ask them to enable it if you want to use
+it.
 
 ## Sign out
 
@@ -413,6 +545,28 @@ restarted before this reply finished. Your message was delivered; send it again 
 message arrived - nothing was lost. The old reply does not continue on its own, so send the message
 again if you still want an answer.
 
+### Dictate or Voice mode will not start, or the button is dimmed
+
+A dimmed microphone or wave button means the person who manages WednesdayAI has not turned that
+control on yet. Ask them to enable it. If the button is available and then shows an error, allow
+microphone access in the browser's site settings, reload the page, and select it again. If the
+tooltip says this browser cannot capture microphone audio, use a current desktop browser over
+HTTPS (or `localhost`).
+
+### Talking does not interrupt the reply
+
+Interruption works only while the actual reply is speaking, not during the short "One moment" or
+"Working on that" phrases, and not for a cough or a brief "mm-hmm". Wait until the reply itself
+is playing, then speak a real sentence. If your first words after a reply are missed, pause
+briefly or use a headset so speaker echo is not mistaken for you.
+
+### Voice mode or Dictate stops by itself
+
+Check the strip under the message box. **Reconnecting...** or **Offline** releases the microphone
+and returns Voice mode to the wave button. That is expected. Select the button again after the
+strip says **Connected**. If the strip stays **Connected** and the conversation still ends, try
+once more and tell the person who manages WednesdayAI the time it failed.
+
 ### You are suddenly asked to pair again
 
 Short interruptions - the assistant's server restarting, a flaky connection - no longer sign this
@@ -436,15 +590,27 @@ message box, ready to send again. If the box says **Replying isn't supported yet
 streaming...**, remove the quote with its **x** or wait for the reply to finish. If the bottom of
 the screen says **Offline** or **Reconnecting...**, see the first item in this list.
 
-### A message was not sent and the chat reloaded
+### A notice says the chat changed elsewhere
 
-The chat changed elsewhere while you had it open; see
-[This chat changed elsewhere](#this-chat-changed-elsewhere). Your text is back in the message box.
+Your message was still sent: the thread refreshed to show what this window had not seen, and the
+message went out again automatically (see
+[This chat changed elsewhere](#this-chat-changed-elsewhere)). The banner appears only when the
+chat changes a second time during that retry. Your text is back in the message box; an attached
+file or a quote is not, so add them again before sending.
 
 ### Suggest a title says "rate limit exceeded"
 
 Suggesting titles is limited to 3 per minute. Wait for the number of seconds shown and try again,
 or type a title yourself.
+
+### I am not getting desktop notifications
+
+Check four things, in order: **Notifications** is **On** in the account menu; the browser has
+granted notification permission for this site - if the menu reads **Blocked in browser settings**,
+re-allow notifications for this site in the browser's site settings; the tab is actually in the
+background, because notifications are only shown while it is hidden; and the browser supports
+them at all - most mobile browsers do not, and the menu reads
+**Not supported in this browser**. The sidebar dot and the title count work in every browser.
 
 ### A control does nothing when I select it
 
