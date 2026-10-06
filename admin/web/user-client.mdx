@@ -14,6 +14,8 @@ sources:
   - src/config/types.gateway.ts
   - src/gateway/web-client-route.ts
   - src/gateway/server-close.ts
+  - src/gateway/server-chat.ts
+  - src/config/sessions/run-pending-writes.ts
   - src/gateway/server/ws-connection.ts
   - src/gateway/protocol/schema/sessions.ts
   - src/gateway/session-utils.ts
@@ -25,7 +27,7 @@ sources:
   - apps/web/src/ui/NavigationMenus.tsx
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/state/types.ts
-generated: 2026-10-05
+generated: 2026-10-06
 ---
 
 # Web client hosting
@@ -118,9 +120,15 @@ relative asset URLs, so no rebuild is needed.
 ## Container
 
 The image builds the bundle and runs the standalone server. Build from the **repository root**, not
-from `apps/web`: the build needs the shared `packages/brand-tokens` package (colours and fonts) in
-its context, and `apps/web/Dockerfile.dockerignore` already limits the context to the files the
-build uses.
+from `apps/web`: the build needs the shared `packages/brand-tokens` package (colours and fonts) and
+`packages/talk-client` (browser audio client) in its context, and `apps/web/Dockerfile.dockerignore`
+already limits the context to the files the build uses.
+
+The packaged bundle and this image both include that audio client. Voice playback uses a 40 ms
+pre-roll into an echo-cancellation-safe speaker sink. The microphone stops if the gateway socket
+drops, including while Voice is still starting, and the control returns to idle rather than staying
+on "starting". Interruption is armed only while the spoken reply is playing, not during the short
+filler or tool-acknowledgement phrases.
 
 ```bash
 docker build -f apps/web/Dockerfile -t wednesdayai-web-client .
@@ -213,8 +221,9 @@ restart needs no change to the serving layer and no re-pairing:
   (`RECOVERY_NOT_READY`, `UNAVAILABLE`), auth rate limiting (`AUTH_RATE_LIMITED`), nonce and
   signature refresh codes, or a socket close during the handshake - keep the paired device
   credential; the client only reschedules its reconnect, honouring the server's `retryAfterMs`
-  (rate limiting backs off to 15 s). Only a genuine credential mismatch
-  (`AUTH_DEVICE_TOKEN_MISMATCH`) sends the user back to onboarding.
+  (rate limiting backs off to 15 s). Any other `connect` refusal - a credential the gateway no
+  longer accepts (`AUTH_DEVICE_TOKEN_MISMATCH`) is the common example - sends the user back to
+  onboarding.
 - **Replies survive a drop.** After reconnecting, the client reconciles its own runs against
   `sessions.runs.list`: a reply that finished in the gap is shown once from the transcript
   (deduplicated against what was already streamed), one still running keeps streaming, and one the
@@ -232,25 +241,53 @@ user-client disconnected code=1012 reason=service restart conn=<uuid> durationMs
 The webchat disconnect line is unchanged. See [Logging](/gateway/logging) for where the gateway
 file log lives and how to follow it.
 
+## Chat terminal events and transcript durability
+
+The `chat` events that end a run - `final` and `error` - are broadcast only after that run's
+transcript writes are durable, so a client that re-reads the chat when the event arrives sees the
+finished reply (ADR record: `dev-docs/adr/0089-chat-terminal-events-post-durable.md`). The wait is
+bounded at 5 seconds. If a write has not settled within the bound, the event is broadcast anyway
+and the gateway logs a warning:
+
+```text
+chat terminal broadcast before transcript durability (timeout)
+```
+
+The line carries the run id, the session key and the bound in milliseconds, under the
+`gateway/chat-final` subsystem. Backends whose transcript has no database write-through - the
+default fs-jsonl session store - never wait: their terminal events go out in the same tick as
+before. An aborted run already behaved this way, with its own 10 second save-then-announce bound
+(see [Protocol](/gateway/protocol#operator-helper-methods)).
+
+### If the timeout warning appears
+
+Once in a while, under a burst of writes, it is harmless: the event was still delivered, one run
+late by up to 5 seconds. If it appears regularly, session-storage writes are slower than the
+5 second bound - check the store backend (`session.storage.backend`; on Postgres, connection
+saturation, lock contention and slow queries). Clients do not lose messages over it: they keep
+what a reply had already streamed and re-read the chat on the next event, so the cost is latency,
+not lost replies.
+
 ## config.json
 
 Fields, all public by construction - never put a token or any per-user value here:
 
-| Field           | Required | Meaning                                                        |
-| --------------- | -------- | -------------------------------------------------------------- |
-| `schemaVersion` | yes      | Must be `1`                                                    |
-| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment |
-| `clientId`      | yes      | Must be `openclaw-user-client`                                 |
-| `basePath`      | yes      | Public path the bundle is served under, with a trailing slash  |
-| `assistantName` | no       | Name shown in the client                                       |
-| `features`      | no       | Feature flags; currently `voice` only, which is off            |
+| Field           | Required | Meaning                                                           |
+| --------------- | -------- | ----------------------------------------------------------------- |
+| `schemaVersion` | yes      | Must be `1`                                                       |
+| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment    |
+| `clientId`      | yes      | Must be `openclaw-user-client`                                    |
+| `basePath`      | yes      | Public path the bundle is served under, with a trailing slash     |
+| `assistantName` | no       | Name shown in the client                                          |
+| `features`      | no       | Feature flags; currently `voice` only, **deprecated and ignored** |
 
-Leave `features.voice` unset. Voice and dictation are not available in this release: the client
-always renders the **Dictate** and **Voice mode** controls disabled, whatever the flag says, so
-setting it changes nothing users can see. The voice surface would need the `talk.session.*` methods,
-and those are deliberately not on the narrow `operator.sessions.write` allowlist the user client
-connects with (ADR 0077), so the gateway would refuse them. Voice is tracked in GitHub #650; a
-release note will say when it ships.
+`features.voice` is deprecated and has no effect; leave it unset. Dictate's and Voice mode's
+availability are both driven by `talk.catalog` — Dictate needs a configured streaming
+transcription provider and the operator's `talk.conversation.enabled` gate on; Voice additionally
+needs a configured streaming speech provider — not by a client feature flag; see ADR 0088 item 12
+as amended. Setting `features.voice`/`--voice`/`OPENCLAW_WEB_FEATURE_VOICE` changes nothing users
+can see; it is kept as a no-op alias for one release (AGENTS.md's deprecated-alias rule) and will
+be removed in a later release.
 
 The Runs panel likewise depends on gateway configuration outside `config.json`: its queued and task
 lists need SQLite or Postgres session storage (`session.storage.backend`). On the default JSONL
@@ -286,27 +323,33 @@ which its setup code mints and its device token is bound to (see
 
 Methods the client calls with `operator.sessions.read`:
 
-| Method                                                                                              | What it powers                                                                                                                |
-| --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `status`, `models.authStatus`                                                                       | Start-up checks: the connection is alive, and the gateway has a model provider credential                                     |
-| `agents.list`                                                                                       | The assistant picker, the sidebar's assistants and their colours                                                              |
-| `models.list`                                                                                       | The model menu, the new chat picker's model choice, and whether Think is available for the chat's model                       |
-| `sessions.list`                                                                                     | The chat list, with the assistant filter, search and paging                                                                   |
-| `sessions.describe`                                                                                 | The open chat's own row: title, model and Think level                                                                         |
-| `sessions.subscribe`                                                                                | Live `sessions.changed` events, so the list refreshes when another device changes a chat                                      |
-| `chat.history`                                                                                      | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere |
-| `sessions.runs.list`, `sessions.runs.get`, `tasks.runs.list`, `tasks.runs.get`, `tasks.runs.events` | The Runs panel                                                                                                                |
+| Method                        | What it powers                                                                                                                |
+| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `status`, `models.authStatus` | Start-up checks: the connection is alive, and the gateway has a model provider credential                                     |
+| `agents.list`                 | The assistant picker, the sidebar's assistants and their colours                                                              |
+| `models.list`                 | The model menu, the new chat picker's model choice, and whether Think is available for the chat's model                       |
+| `sessions.list`               | The chat list, with the assistant filter, search and paging                                                                   |
+| `sessions.describe`           | The open chat's own row: title, model and Think level                                                                         |
+| `sessions.subscribe`          | Live `sessions.changed` events, so the list refreshes when another device changes a chat                                      |
+| `chat.history`                | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere |
+| `talk.catalog`                | Whether Dictate and Voice mode are available for this connection                                                              |
 
 Methods the client calls with `operator.sessions.write`:
 
-| Method                   | What it powers                                                                                                                                    |
-| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chat.send`              | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`) |
-| `chat.abort`             | Stop                                                                                                                                              |
-| `sessions.create`        | New chat, for the chosen assistant and optionally a model                                                                                         |
-| `sessions.steer`         | Queueing a message behind a streaming reply (`queue`) and Send now (`inject`)                                                                     |
-| `sessions.patch`         | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
-| `sessions.title.prepare` | Suggest a title                                                                                                                                   |
+| Method                     | What it powers                                                                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`) |
+| `chat.abort`               | Stop                                                                                                                                              |
+| `sessions.create`          | New chat, for the chosen assistant and optionally a model                                                                                         |
+| `sessions.steer`           | Queueing a message behind a streaming reply (`queue`) and Send now (`inject`)                                                                     |
+| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
+| `sessions.title.prepare`   | Suggest a title                                                                                                                                   |
+| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`). Refused while `talk.conversation.enabled` is false                                     |
+| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                         |
+| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                         |
+| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn                                                                     |
+| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                     |
+| `talk.session.close`       | End Dictate or Voice mode                                                                                                                         |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -419,18 +462,27 @@ enabling the preference shows nothing because the transcript has no reasoning co
 
 Some controls are drawn but switched off, with a tooltip naming the release phase (or a tracked
 finding) that enables them (for example "Canvas — coming in phase P4"). Selecting one sends nothing
-to the gateway. They are: **Canvas** in the top bar; **Search**, **Dictate** and **Voice mode** in
-the message box; the **Read aloud**, **Feedback** and **Regenerate** actions on replies; **Settings**
-and **Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and **Add extension** cite
+to the gateway. They are: **Canvas** in the top bar; **Search** in the message box; the
+**Read aloud**, **Feedback** and **Regenerate** actions on replies; **Settings** and
+**Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and **Add extension** cite
 the extension panel roadmap item (GitHub #634) instead of a phase; **Feedback**, **Regenerate**,
 **Settings**, **Keyboard shortcuts** and the message-box **Search** cite their own tracked finding
-(GitHub #696-#700) instead. The assistant picker, per-assistant colour, chat filter and search,
-paging past the first page, the model switcher and Think, queue/steer while a reply streams,
-rename and Suggest, and replying to a message are live (client-chat-v3 P2); see
+(GitHub #696-#700) instead; **Read aloud** cites its tracked finding (GitHub #869). The assistant
+picker, per-assistant colour, chat filter and search, paging past the first page, the model
+switcher and Think, queue/steer while a reply streams, rename and Suggest, and replying to a
+message are live (client-chat-v3 P2). Replies appearing on every open device without a reload, the
+busy and unread indicators, the desktop-notification opt-in, Dictate and Voice mode's on/off
+state, and the automatic resend into a chat changed elsewhere are also live; see
 [Using the web client](/web/using-the-web-client) for what users see.
 
 They are not gated by any setting, so there is nothing to enable. If users ask, point them at
 [Using the web client](/web/using-the-web-client#controls-that-are-not-available-yet).
+
+**Dictate** and **Voice mode** are not on this list: they render live or disabled per connection,
+driven by `talk.catalog` and the operator's `talk.conversation.enabled` gate (see
+[config.json](#configjson) above and
+[Cascaded voice conversation sessions](/talk/realtime-voice-conversation)), not by a fixed release
+phase.
 
 ## Rules the host must follow
 
