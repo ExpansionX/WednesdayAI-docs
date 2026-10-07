@@ -63,6 +63,7 @@ Quick answers plus deeper troubleshooting for real-world setups (local dev, VPS,
   - [What are the minimum VPS requirements and recommended OS?](#what-are-the-minimum-vps-requirements-and-recommended-os)
   - [Can I run OpenClaw in a VM and what are the requirements](#can-i-run-openclaw-in-a-vm-and-what-are-the-requirements)
 - [What is OpenClaw?](#what-is-openclaw)
+  - [Why do I see both WednesdayAI and openclaw?](#why-do-i-see-both-wednesdayai-and-openclaw)
   - [What is OpenClaw, in one paragraph?](#what-is-openclaw-in-one-paragraph)
   - [What's the value proposition?](#whats-the-value-proposition)
   - [I just set it up what should I do first](#i-just-set-it-up-what-should-i-do-first)
@@ -102,7 +103,7 @@ Quick answers plus deeper troubleshooting for real-world setups (local dev, VPS,
   - [Do I have to restart after changing config?](#do-i-have-to-restart-after-changing-config)
   - [How do I disable funny CLI taglines?](#how-do-i-disable-funny-cli-taglines)
   - [How do I enable web search (and web fetch)?](#how-do-i-enable-web-search-and-web-fetch)
-  - [config.apply wiped my config. How do I recover and avoid this?](#configapply-wiped-my-config-how-do-i-recover-and-avoid-this)
+  - [A config write was refused. How do I recover?](#a-config-write-was-refused-how-do-i-recover)
   - [How do I run a central Gateway with specialized workers across devices?](#how-do-i-run-a-central-gateway-with-specialized-workers-across-devices)
   - [Can the OpenClaw browser run headless?](#can-the-openclaw-browser-run-headless)
   - [How do I use Brave for browser control?](#how-do-i-use-brave-for-browser-control)
@@ -966,6 +967,10 @@ If you are running macOS in a VM, see [macOS VM](/install/macos-vm).
 
 ## What is OpenClaw?
 
+### Why do I see both WednesdayAI and openclaw?
+
+**WednesdayAI** is the product name you and the assistant should use in conversation. Paths, config files, environment variables, and some service names still say **openclaw** on purpose so upgrades do not break existing installs (`~/.openclaw/`, `openclaw.json`, `OPENCLAW_*`, and the permanent `openclaw` CLI alias). Full split: [Product naming](/concepts/product-naming) (operators) and [What is WednesdayAI?](/concepts/product-naming-user) (chat users).
+
 ### What is OpenClaw in one paragraph
 
 OpenClaw is a personal AI assistant you run on your own devices. It replies on the messaging surfaces you already use (WhatsApp, Telegram, Slack, Mattermost (plugin), Discord, Google Chat, Signal, iMessage, WebChat) and can also do voice + a live Canvas on supported platforms. The **Gateway** is the always-on control plane; the assistant is the product.
@@ -1105,6 +1110,9 @@ Checklist:
 - Confirm cron is enabled (`cron.enabled`) and `OPENCLAW_SKIP_CRON` is not set.
 - Check the Gateway is running 24/7 (no sleep/restarts).
 - Verify timezone settings for the job (`--tz` vs host timezone).
+- If the journal shows `[cron] failed to start` and `out of range for type integer`,
+  the Postgres `cron_jobs` table still has 32-bit epoch-ms columns. Upgrade and
+  restart so they become `BIGINT`. See [Cron jobs](/automation/cron-jobs#where-cron-jobs-are-stored).
 
 Debug:
 
@@ -1673,26 +1681,25 @@ A full restart is required for `gateway`, `discovery`, and `canvasHost` changes.
 
 ### Is there an API RPC way to apply config
 
-Yes. `config.apply` validates + writes the full config and restarts the Gateway as part of the operation.
+Yes. Prefer `config.patch` for partial updates. `config.apply` validates + writes the full config and restarts the Gateway as part of the operation. Non-sandbox agents cannot call `config.apply` unless you opt in with `tools.allow` or `tools.alsoAllow: ["gateway.config_apply"]`. See [Config writes](/gateway/config-writes).
 
-### configapply wiped my config How do I recover and avoid this
+### A config write was refused How do I recover
 
-`config.apply` replaces the **entire config**. If you send a partial object, everything
-else is removed.
+Unauthorized top-level key removal is **refused**. The on-disk file is left unchanged. The error code is `CONFIG_WRITE_REFUSED`.
 
-Recover:
+If you meant to delete a whole top-level section, name it in `allowTopLevelKeyRemoval` (the Control UI and `openclaw config unset <key>` do this for you).
 
-- Restore from backup (git or a copied `~/.openclaw/openclaw.json`).
+If an **older** build already truncated the file:
+
+- Restore `~/.openclaw/openclaw.json.bak` if present.
 - If you have no backup, re-run `openclaw doctor` and reconfigure channels/models.
-- If this was unexpected, file a bug and include your last known config or any backup.
-- A local coding agent can often reconstruct a working config from logs or history.
 
-Avoid it:
+Avoid whole-document replace:
 
-- Use `openclaw config set` for small changes.
+- Use `openclaw config set` or `config.patch` for small changes.
 - Use `openclaw configure` for interactive edits.
 
-Docs: [Config](/cli/config), [Configure](/cli/configure), [Doctor](/gateway/doctor).
+Docs: [Config writes](/gateway/config-writes), [Config](/cli/config), [Configure](/cli/configure), [Doctor](/gateway/doctor).
 
 ### What's a minimal sane config for a first install
 
@@ -2087,8 +2094,11 @@ Safe options:
 - `openclaw configure --section model` (interactive)
 - edit `agents.defaults.model` in `~/.openclaw/openclaw.json`
 
-Avoid `config.apply` with a partial object unless you intend to replace the whole config.
-If you did overwrite config, restore from backup or re-run `openclaw doctor` to repair.
+Avoid `config.apply` with a partial object unless you intend to replace the whole config
+and you pass `allowTopLevelKeyRemoval` for every top-level key you are deleting.
+A truncating apply is refused (`INVALID_REQUEST`, `details.code: CONFIG_WRITE_REFUSED`) and the file is left unchanged.
+If an older build already overwrote config, restore from `~/.openclaw/openclaw.json.bak`
+or re-run `openclaw doctor` to repair.
 
 Docs: [Models](/concepts/models), [Configure](/cli/configure), [Config](/cli/config), [Doctor](/gateway/doctor).
 
