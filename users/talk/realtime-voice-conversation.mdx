@@ -16,7 +16,7 @@ sources:
   - src/talk/provider-registry.ts
   - extensions/elevenlabs/src/realtime-transcription-provider.ts
   - extensions/elevenlabs/src/streaming-speech-provider.ts
-  - dev-docs/adr/0086-admit-cascaded-voice-to-web-client.md
+  - dev-docs/adr/0086-voice-admission-for-the-narrow-web-client.md
   - dev-docs/adr/0087-cascaded-voice-contracts.md
   - dev-docs/adr/0088-cascaded-voice-wire-and-policy-fixes.md
 generated: 2026-10-04
@@ -123,10 +123,12 @@ sessions keep the configuration resolved when they started.
   `streamingTranscription`/`speech`/`realtime` are not hidden while the gate is off — so a narrow
   client can render "available but disabled by your administrator" instead of nothing.
 - A row's `configured` is resolved from `talk.providers.<id>.apiKey` through the secret resolver
-  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. `diagnostic`,
-  present only when `configured` is `false` and a cause is known, is one of `missing-api-key`,
-  `secret-ref-unresolved`, or `provider-error` — the three a `talk.catalog` reader can safely show
-  an operator without a stack trace.
+  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. A `speech` row
+  is additionally unconfigured when the provider cannot resolve a voice: the config has no
+  `voiceId` and the plugin declares no `defaultVoiceId`. `diagnostic`, present only when
+  `configured` is `false` and a cause is known, is one of `missing-api-key`,
+  `secret-ref-unresolved`, `provider-error`, or `missing-voice-id` — the causes a `talk.catalog`
+  reader can safely show an operator without a stack trace.
 
 ## Audio framing
 
@@ -180,8 +182,9 @@ The first turn of a new Talk session stops a leftover voice run left by a closed
 - **Turn resume.** A partial transcript with at least one real word, arriving after end-of-turn
   but before the first assistant audio, cancels the in-flight run with
   `turn.cancelled { reason: "turn-resumed" }` and appends no assistant message (nothing was heard
-  yet). The continuation's own commit starts the next turn, so the history shows both user
-  fragments followed by one reply.
+  yet). The continuation's own commit starts the next turn. Both fragments normally persist as
+  user messages followed by one reply; when the cancelled run was still queued behind another
+  run, the first fragment may not persist and the reply answers the continuation alone.
 - **Client-local pause, then server confirmation.** The web client arms its interruption detector only while reply speech (`kind: "speech"`) is playing, not during a filler or acknowledgement one-shot, and re-arms it if playback resumes while that reply is still active. Talking through the filler does not confirm an interruption; speech that continues into the reply interrupts as soon as reply audio starts. The browser then pauses playback locally and sends `talk.session.bargeIn`. The relay confirms the burst on
   the real appended audio (−45 dBFS or louder, sustained at least 250 ms), filters backchannels
   (short per-locale phrases such as "mm-hmm") and echo (≥60% word-token overlap with the text just
@@ -191,7 +194,7 @@ The first turn of a new Talk session stops a leftover voice run left by a closed
   `output.audio.resumed` once the window elapses with no qualifying word, and playback continues.
 - **Heard-text persistence.** After a confirmed barge-in, the session's transcript holds exactly
   one assistant message for that turn: only the text whose audio the client acknowledged as
-  played, plus an ` [interrupted]` marker. `talk.session.mark` `timestamp` for these speech marks is milliseconds of audio played for that turn (0 at the first speech sample), the same domain as the TTS alignment timeline — not the client's `performance.now()` clock. Barge-in `speechDetectedAt` / `playbackPausedAt` stay on that monotonic clock and are not mixed with mark timestamps. An interruption with zero
+  played, plus an `[interrupted]` marker. `talk.session.mark` `timestamp` for these speech marks is milliseconds of audio played for that turn (0 at the first speech sample), the same domain as the TTS alignment timeline — not the client's `performance.now()` clock. Barge-in `speechDetectedAt` / `playbackPausedAt` stay on that monotonic clock and are not mixed with mark timestamps. An interruption with zero
   acknowledged characters appends no assistant message. The user's own utterance is still persisted. This holds on both the JSONL and database
   session storage backends. On JSONL, the rewrite truncates the transcript file and rewrites the loaded entries, so earlier turns stay; it does not reset the file to a header-only session.
 - **`turn.ended` is not "written".** `turn.ended` is broadcast when the TTS stream drains. Session bookkeeping and the assistant transcript write land after it and are not awaited, so a disk write cannot block the next turn. Wait for the `chat` final event, or read `chat.history`, before treating the transcript as updated.
@@ -275,6 +278,13 @@ Check `talk.catalog`'s `streamingTranscription`/`speech` rows for the configured
 `configured`/`diagnostic` fields. `missing-api-key` and `secret-ref-unresolved` both mean the
 gateway could not read a usable key for `talk.providers.<id>.apiKey` — see
 [ElevenLabs streaming voice](/providers/elevenlabs#troubleshooting).
+
+### `talk.session.create` fails `UNAVAILABLE: stt-tts requires talk.providers.<id>.voiceId`
+
+`talk.catalog`'s speech row shows `diagnostic: "missing-voice-id"` for the same condition: the
+provider has a usable key, its config has no `voiceId`, and the speech provider ships no default
+voice. A missing key is reported first. Set `talk.providers.<id>.voiceId` (ElevenLabs ships a
+default, so this only affects third-party speech providers without one).
 
 ### A turn never speaks, or speaks very late
 
