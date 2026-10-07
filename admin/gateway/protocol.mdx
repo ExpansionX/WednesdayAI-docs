@@ -493,7 +493,14 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   return `UNAVAILABLE` with `"session storage runtime not available"` rather than an empty page;
   on the default `fs-jsonl` backend the run/task projection does not exist, so a client should
   treat `UNAVAILABLE` from these methods as "configure `session.storage.backend`", not as a
-  transient failure.
+  transient failure. During the boot window these methods instead answer the storage-readiness
+  errors described under [Session storage readiness](#session-storage-readiness). Additionally,
+  `tasks.runs.list` with `view: "queued"`, `tasks.runDryRun` and `tasks.rollback` also need the
+  task operator registry: they wait up to 4 seconds for it while the task pipeline is still
+  booting and recovery has not settled blocked; if it is still absent they answer
+  `RECOVERY_NOT_READY` with `details.reasonCodes = ["task_pipeline_booting"]`, `retryable: true`
+  and `retryAfterMs: 1000`; once recovery has settled blocked they answer the plain non-retryable
+  `UNAVAILABLE` (`task_registry_unavailable`) instead.
 - None of the three read methods exposes `lastError`, `evidencePointer`, `scopeKind`, `scopeKey`,
   `gatewayInstanceId`, `ownerPluginId`, `retryPolicy`, `budgetDenials`, `preemptionCount`,
   `costClass`, `triggerSource` or the raw work id. The join and the redaction run on the server;
@@ -510,11 +517,58 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   and drops older ones whole (the newest message is always kept), and it does not move `cursor`, so
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
-  `details.reason = "invalid_cursor"`. While a freshly started gateway's sqlite or postgres session
-  storage is still starting, the call waits for it for up to 10 seconds, then returns `UNAVAILABLE`
-  with `retryable: true` and `retryAfterMs` rather than an empty page (see
-  [Restart recovery](/gateway/restart-recovery)). The leaf and reply fields that client-chat-v3 P2
+  `details.reason = "invalid_cursor"`. During the boot window the call is held by the dispatch
+  fence and answered per [Session storage readiness](#session-storage-readiness), never with an
+  empty page. The leaf and reply fields that client-chat-v3 P2
   added are described below.
+
+### Session storage readiness
+
+With restart recovery on, the gateway serves its WebSocket before its configured SQLite or
+Postgres session storage starts (ADR 0092). Every core method carries a storage classification in
+one table, checked at dispatch after authorization and rate limits (so an unauthorized caller
+never learns readiness) and before the handler runs. Only core methods are classified: plugin and
+`extraHandlers` methods are unaffected, and a method without a classification dispatches
+unchanged.
+
+- **`required`** — reads the configured session storage runtime with no JSONL path:
+  `tasks.runs.list`, `tasks.runs.get`, `tasks.runs.events`, `tasks.status`, `tasks.resetBudget`,
+  `tasks.runDryRun`, `tasks.rollback`, `tasks.runEvents`, `sessions.runHistory`,
+  `sessions.runs.list`, `sessions.runs.get`, `sessions.runs.events`, `sessions.runs.continue`,
+  `sessions.runs.cancel`, `sessions.claims.status`, `chat.history`.
+- **`boot-write`** — writes the JSONL session store first and the database only once a runtime is
+  published; holding them while storage starts is what rescues the write from being lost:
+  `sessions.create`, `sessions.patch`, `sessions.reset`, `sessions.delete`, `sessions.compact`,
+  `chat.inject`.
+- Everything else is `none` and dispatches unchanged, including the JSONL-side readers
+  (`sessions.list`, `sessions.preview`, `sessions.describe`, `sessions.resolve`, `usage.*`).
+
+While a `required` or `boot-write` method's request is in flight, the storage state decides the
+answer:
+
+- **Starting:** the request is held for up to 10 seconds. If the storage start completes inside
+  the hold, the handler runs normally. Otherwise the answer is `RECOVERY_NOT_READY` with
+  `message: "session storage is still starting"`, `retryable: true`, `retryAfterMs: 500` and
+  `details: { producer: "session-storage", phase: "starting", reasonCodes: ["storage_starting"] }`.
+  A gateway still starting after the hold logs a single warning.
+- **Stopping:** `markStopping` is terminal, so a request that arrives while the state is already
+  `stopping` is held for up to the same 10 seconds — `whenSettled` gets no earlier wake and the
+  socket normally closes first — and then answers `RECOVERY_NOT_READY` with
+  `message: "gateway is stopping"`, `retryable: true`, `retryAfterMs: 500` and
+  `details: { producer: "session-storage", phase: "stopping", reasonCodes: ["storage_stopping"] }`.
+  A request already held through `starting` answers the same shape as soon as `markStopping`
+  fires.
+- **Failed start:** `required` methods answer `UNAVAILABLE` with
+  `message: "session storage failed to start"`, `retryable: false`, and
+  `details: { code: "storage_start_failed", reasonCodes: [...] }`. `UNAVAILABLE` from these
+  methods is permanent until an operator acts; a client may latch on it. `boot-write` methods
+  instead fall through to their handler: the write lands in the JSONL store, and the database
+  copy is silently lost until that backlog item is closed.
+- **Ready, or never deferred** (fs-jsonl backend, restart recovery off): the handler runs
+  unchanged.
+
+Clients that receive `RECOVERY_NOT_READY` should retry after `retryAfterMs`; the web client does
+this automatically.
 
 ### client-chat-v3 P2 additions (ADR 0083, ADR 0084, ADR 0085)
 
@@ -861,10 +915,7 @@ Gate and provider errors are `UNAVAILABLE`:
 - `voice conversation disabled` — gate off, for every `stt-tts` caller and for every narrow
   caller.
 - `stt-tts requires a configured STT and TTS provider` — Voice has no configured streaming
-  transcription row and streaming speech row, or a provider key that does not resolve.
-- `stt-tts requires talk.providers.<id>.voiceId: speech provider "<id>" has no default voice` —
-  both keys resolved, the config sets no `voiceId`, and the speech provider declares no
-  `defaultVoiceId`. A missing key is reported before a missing voice.
+  transcription row and streaming speech row (including a speech `voiceId`).
 
 Voice opens STT with `providerConfig.commitStrategy: "vad"` and
 `providerConfig.endOfTurnSilenceMs` from `talk.conversation.endOfTurnSilenceMs`. Keys already set
@@ -962,9 +1013,7 @@ and `providers` — the same rows: `{id, label, configured, modes: ["transcripti
 `{id, label, configured, diagnostic?, modes, transports}` plus `brains: ["agent-consult"]` on
 streaming transcription only. `modes` is `["streaming"]`. `transports` is `["gateway-relay"]`.
 `diagnostic`, present only when `configured` is false and a cause is known, is
-`"missing-api-key"`, `"secret-ref-unresolved"`, `"provider-error"`, or, on a speech row whose
-config sets no `voiceId` and whose provider declares no `defaultVoiceId`, `"missing-voice-id"`.
-Realtime rows use
+`"missing-api-key"`, `"secret-ref-unresolved"`, or `"provider-error"`. Realtime rows use
 `modes: ["realtime"]` and `transports` of `"provider-websocket"` and/or `"webrtc"`. The catalog
 never includes a secret.
 
