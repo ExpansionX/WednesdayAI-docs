@@ -2,21 +2,37 @@
 summary: "Testing kit: unit/e2e/live suites, Docker runners, and what each test covers"
 read_when:
   - Running tests locally or in CI
-  - Adding regressions for model/provider bugs
+  - Looking for the live, Docker, or credentials kit
   - Debugging gateway + agent behavior
 title: "Testing"
 ---
 
 # Testing
 
-OpenClaw has three Vitest suites (unit/integration, e2e, live) and a small set of Docker runners.
+WednesdayAI has a default-on `pnpm test` parallel runner, a live Vitest suite, and a small set of Docker runners.
 
-This doc is a “how we test” guide:
+This doc is the live, Docker and provider test kit:
 
 - What each suite covers (and what it deliberately does _not_ cover)
-- Which commands to run for common workflows (local, pre-push, debugging)
 - How live tests discover credentials and select models/providers
-- How to add regressions for real-world model/provider issues
+
+Policy, thresholds, "which suite should I run?" and adding regressions live in [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing). Lanes and worker settings live in [Tests](/reference/test).
+
+## Build prerequisite
+
+`pnpm test` is not self-contained: a few suites exercise the shipped artifacts rather
+than the TypeScript sources, so run `pnpm build` first (CI runs `pnpm canvas:a2ui:bundle`
+for the same reason).
+
+- `test/gateway.multi.e2e.test.ts` and `test/gateway.restart-recovery.e2e.test.ts` spawn
+  `dist/index.js`.
+- `test/cli-json-stdout.e2e.test.ts` runs `openclaw.mjs`, which boots from `dist/entry.js`.
+- `src/gateway/server.canvas-auth.test.ts` fetches the A2UI assets, which
+  `pnpm canvas:a2ui:bundle` (the first step of `pnpm build`) generates into
+  `src/canvas-host/a2ui/a2ui.bundle.js`. That file is gitignored, so a fresh checkout has
+  no copy and the request answers `503 A2UI assets not found`.
+
+These suites fail (they never skip) when the build output is missing.
 
 ## Quick start
 
@@ -39,32 +55,79 @@ Tip: when you only need one failing case, prefer narrowing live tests via the al
 
 Think of the suites as “increasing realism” (and increasing flakiness/cost):
 
-### Unit / integration (default)
+### Unit / integration (default `pnpm test`)
 
-- Command: `pnpm test`
-- Config: `scripts/test-parallel.mjs` (runs `vitest.unit.config.ts`, `vitest.extensions.config.ts`, `vitest.gateway.config.ts`)
-- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`
+- Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/reference/test).
+- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, and the control-UI suite under `ui/src/**`
 - Scope:
   - Pure unit tests
   - In-process integration tests (gateway auth, routing, tooling, parsing, config)
+  - Channel, extension, core, gateway, and e2e smoke as part of the same command
   - Deterministic regressions for known bugs
 - Expectations:
   - Runs in CI
   - No real keys required
-  - Should be fast and stable
-- Pool note:
-  - OpenClaw uses Vitest `vmForks` on Node 24+ for faster unit shards.
-  - On Node 24+, OpenClaw automatically falls back to regular `forks` to avoid Node VM linking errors (`ERR_VM_MODULE_LINK_FAILURE` / `module is already linked`).
-  - Override manually with `OPENCLAW_TEST_VM_FORKS=0` (force `forks`) or `OPENCLAW_TEST_VM_FORKS=1` (force `vmForks`).
+
+### Web client
+
+- Command: `pnpm test:web` (also runs as the `web` lane of `pnpm test`)
+- Config: `apps/web/vitest.config.ts` — a single jsdom project, not a browser-mode run
+- Files: `apps/web/src/**/*.test.ts`, `apps/web/src/**/*.test.tsx`
+- Setup: `apps/web/vitest.setup.ts`
+- Scope: the `openclaw-user-client` React app — gateway connection and pairing/setup-code handling, the runs view (grouping/controller/model), the attachments/preferences/voice/runtime-config providers, the theme provider, the app shell, and the native component layer under `apps/web/src/ui/`
+- Run one file on its own with `pnpm --dir apps/web exec vitest run --config vitest.config.ts <file>`
+
+### Web client and brand e2e suites
+
+Component tests in jsdom cannot see scrolling, fonts, `color-scheme`, or the frames the browser
+actually sends. These suites drive the built web client in real Chromium against a real gateway
+(harness: `test/helpers/user-client-web-harness.ts`). They are part of the e2e lane and need
+`pnpm build` first.
+
+| File                                                 | Covers                                                                                                                                                                                                                                             |
+| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist |
+| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                             |
+| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller, markdown styling under `.prose`, `color-scheme` following the theme, the live Runs badge, high-contrast text on the accent colour                                                                              |
+| `test/console-brand-parity.e2e.test.ts`              | Control UI computed tokens and font loading identical between a pinned base commit and the branch (slow: builds two Control UIs, up to 10 minutes)                                                                                                 |
+
+The unit-level guard `test/brand-tokens-contrast.test.ts` (contrast ratios and `color-scheme` per
+theme) runs in the normal `pnpm test` lane and needs no browser. See
+[Brand tokens](/reference/brand-tokens) for what each guard pins.
+
+<Warning>
+Running a whole e2e file that boots many in-process gateways one after another can fail roughly 40%
+of the time with `FatalConfiguredStorageStartError` (tracked in GitHub #653). That is a known flaky
+boot, not evidence of a regression in the code under test. Run one test at a time with a `-t`
+filter, for example:
+
+```bash
+pnpm exec vitest run --config vitest.e2e.config.ts test/user-client-web-brand.e2e.test.ts -t "offers exactly auto"
+```
+
+If a filtered run also fails, treat it as a real failure.
+</Warning>
+
+### Control UI
+
+- Command: `pnpm test:ui` (also runs as the `ui` lane of `pnpm test`)
+- Config: `ui/vitest.config.ts`, which composes two projects:
+  - `node` (`ui/vitest.node.config.ts`): `ui/src/**/*.node.test.ts` in a node environment. These suites stub globals such as `window`/`location` or read `node:fs`, which a real browser page cannot do.
+  - `chromium` (`ui/vitest.browser.config.ts`): every other `ui/src/**/*.test.ts` in headless playwright chromium.
+- Every `ui/src` test file belongs to exactly one project; membership follows the `.node.test.ts` suffix, so name a node-style suite accordingly.
+- Failure screenshots are written to `ui/.vitest-screenshots/` and attachments to `ui/.vitest-attachments/`. Both are git-ignored: a test run must never modify a tracked file.
+- Run one project on its own with `pnpm --dir ui exec vitest run --config vitest.node.config.ts <file>` (or `vitest.browser.config.ts`).
 
 ### E2E (gateway smoke)
 
+- Also runs as the serial e2e lane inside default `pnpm test` unless `OPENCLAW_TEST_INCLUDE_E2E=0`.
 - Command: `pnpm test:e2e`
 - Config: `vitest.e2e.config.ts`
-- Files: `src/**/*.e2e.test.ts`
+- Files: `test/**/*.e2e.test.ts`, `src/**/*.e2e.test.ts`, `extensions/**/*.e2e.test.ts`
+- Requires `pnpm build` first (the gateway e2e suites spawn `dist/index.js`).
 - Runtime defaults:
-  - Uses Vitest `vmForks` for faster file startup.
-  - Uses adaptive workers (CI: 2-4, local: 4-8).
+  - Uses Vitest `forks`, not `vmForks`: vmForks leaked the `vi.mock` module registry across files in the shared worker, so whole-lane runs failed on order-dependent pollution while every file passed in isolation.
+  - 1 worker locally; in CI at most 2 (a quarter of the CPU count, floored at 1).
   - Runs in silent mode by default to reduce console I/O overhead.
 - Useful overrides:
   - `OPENCLAW_E2E_WORKERS=<n>` to force worker count (capped at 16).
@@ -92,14 +155,6 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
   - Prefer running narrowed subsets instead of “everything”
   - Live runs will source `~/.profile` to pick up missing API keys
 - API key rotation (provider-specific): set `*_API_KEYS` with comma/semicolon format or `*_API_KEY_1`, `*_API_KEY_2` (for example `OPENAI_API_KEYS`, `ANTHROPIC_API_KEYS`, `GEMINI_API_KEYS`) or per-live override via `OPENCLAW_LIVE_*_KEY`; tests retry on rate limit responses.
-
-## Which suite should I run?
-
-Use this decision table:
-
-- Editing logic/tests: run `pnpm test` (and `pnpm test:coverage` if you changed a lot)
-- Touching gateway networking / WS protocol / pairing: add `pnpm test:e2e`
-- Debugging “my bot is down” / provider-specific failures / tool calling: run a narrowed `pnpm test:live`
 
 ## Live: Android node capability sweep
 
@@ -334,14 +389,44 @@ If you want to rely on env keys (e.g. exported in your `~/.profile`), run local 
 
 ## Deepgram live (audio transcription)
 
-- Test: `src/media-understanding/providers/deepgram/audio.live.test.ts`
-- Enable: `DEEPGRAM_API_KEY=... DEEPGRAM_LIVE_TEST=1 pnpm test:live src/media-understanding/providers/deepgram/audio.live.test.ts`
+- Test: `extensions/deepgram/src/audio.live.test.ts`
+- Enable: `DEEPGRAM_API_KEY=... DEEPGRAM_LIVE_TEST=1 pnpm test:live extensions/deepgram/src/audio.live.test.ts`
 
 ## BytePlus coding plan live
 
 - Test: `src/agents/byteplus.live.test.ts`
 - Enable: `BYTEPLUS_API_KEY=... BYTEPLUS_LIVE_TEST=1 pnpm test:live src/agents/byteplus.live.test.ts`
 - Optional model override: `BYTEPLUS_CODING_MODEL=ark-code-latest`
+
+## Live: voice loop (real speech)
+
+- Test: `src/talk/voice-loop.live.test.ts` and script `scripts/voice-live-smoke.mjs` (both drive
+  the same `src/talk/voice-loop-driver.ts` against a deployed gateway; the script is the
+  operator-invoked post-deploy gate).
+- Goal: stream real-speech turns (ElevenLabs-synthesized audio, one of them a mid-thought pause)
+  plus interruptions through real ElevenLabs STT/TTS, then assert the pinned
+  `SC3`/`SC7`/`SC12`/`SC16` `talk.metrics` bounds plus `turnShape` (each normal utterance
+  starts exactly one turn and is never cancelled; the paused turn instead ends exactly once, with
+  any `turn.cancelled` reason `turn-resumed`) and `SC4` (one assistant reply per turn in
+  `chat.history`, no failure reply persisted, the continuation half of the paused utterance kept).
+- Enable (test): `OPENCLAW_GATEWAY_URL=... ELEVENLABS_API_KEY=... LIVE=1 pnpm test:live src/talk/voice-loop.live.test.ts`
+  (20 turns, 5 interruptions). The file runs only under `vitest.live.config.ts`, never in the
+  default lanes. `OPENCLAW_VOICE_LIVE_STT_PROVIDER` / `OPENCLAW_VOICE_LIVE_TTS_PROVIDER` override
+  the provider pair (default `elevenlabs` on both).
+- Operator command:
+
+```bash
+OPENCLAW_GATEWAY_URL=... ELEVENLABS_API_KEY=... \
+  node scripts/voice-live-smoke.mjs --turns 20 --interruptions 5
+```
+
+It prints `PASS` or `FAIL` plus a JSON summary whose `checks` object carries `sc3`, `sc7`,
+`sc12`, `sc16`, and, in speech mode, `turnShape` and `sc4`. `--stt`/`--tts` select the provider
+pair; `--silent-audio` streams silence instead and is only meaningful against a fake-provider
+gateway. Speech synthesis runs client-side and needs `ELEVENLABS_API_KEY` (or `XI_API_KEY`);
+`ELEVENLABS_BASE_URL` overrides the API origin for a region-locked key. The driver sends one
+100 ms audio chunk every 100 ms for the whole session (silence while it waits on a reply), so run
+it from a host under 100 ms RTT to the gateway.
 
 ## Docker runners (optional “works in Linux” checks)
 
@@ -395,13 +480,3 @@ Future evals should stay deterministic first:
 - A scenario runner using mock providers to assert tool calls + order, skill file reads, and session wiring.
 - A small suite of skill-focused scenarios (use vs avoid, gating, prompt injection).
 - Optional live evals (opt-in, env-gated) only after the CI-safe suite is in place.
-
-## Adding regressions (guidance)
-
-When you fix a provider/model issue discovered in live:
-
-- Add a CI-safe regression if possible (mock/stub provider, or capture the exact request-shape transformation)
-- If it’s inherently live-only (rate limits, auth policies), keep the live test narrow and opt-in via env vars
-- Prefer targeting the smallest layer that catches the bug:
-  - provider request conversion/replay bug → direct models test
-  - gateway session/history/tool pipeline bug → gateway live smoke or CI-safe gateway mock test

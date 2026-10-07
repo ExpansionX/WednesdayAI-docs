@@ -10,61 +10,24 @@ title: "Tests"
 - Full testing kit (suites, live, Docker): [Testing](/help/testing)
 
 - `pnpm test:force`: Kills any lingering gateway process holding the default control port, then runs the full Vitest suite with an isolated gateway port so server tests don’t collide with a running instance. Use this when a prior gateway run left port 18789 occupied.
-- `pnpm test:coverage`: Runs the unit suite with V8 coverage (via `vitest.unit.config.ts`). Global thresholds are 70% lines/branches/functions/statements. Coverage excludes integration-heavy entrypoints (CLI wiring, gateway/telegram bridges, webchat static server) to keep the target focused on unit-testable logic.
+- `pnpm test:coverage`: Runs the unit suite with V8 coverage (via `vitest.unit.config.ts`). Global thresholds are 70% lines/functions/statements and 55% branches. Coverage excludes integration-heavy entrypoints (CLI wiring, webchat static server) to keep the target focused on unit-testable logic; `src/telegram/` is counted. The configured Telegram exceptions are `index.ts`, `proxy.ts`, and `webhook-set.ts`, but currently only `proxy.ts` exists and resolves as an exclusion.
+- `pnpm test` needs `pnpm build` first: a few suites exercise `dist/` and the generated A2UI bundle rather than the TypeScript sources. See [Testing](/help/testing) for the list.
+- The `web` lane is also default-on: it spawns `pnpm test:web` (`apps/web/vitest.config.ts`, a jsdom project over `apps/web/src/**`) in the parallel group, and `ui` spawns `pnpm test:ui` in the serial group. Both are raw invocations, because the injected `--maxWorkers` and `--shard` flags do not apply to those workspaces. Set `OPENCLAW_TEST_INCLUDE_WEB=0` to skip the web lane.
 - `pnpm test` runs two stages: first `pnpm test:scripts` (`node --test "scripts/**/*.test.mjs"`, the release/CI policy suites), and only if that passes, `node scripts/test-parallel.mjs`. A `test:scripts` failure short-circuits the `&&` and no Vitest lane runs at all.
-- `scripts/test-parallel.mjs` then runs the enabled lanes in two groups. **Parallel**: unit, core, channels, extensions, and gateway (gateway is serial unless `OPENCLAW_TEST_PARALLEL_GATEWAY=1` or a high-memory local host). **Serial, after the parallel group**: e2e, plus gateway when it is not parallelized. Every lane is default-on; set `OPENCLAW_TEST_INCLUDE_CORE=0`, `OPENCLAW_TEST_INCLUDE_CHANNELS=0`, `OPENCLAW_TEST_INCLUDE_EXTENSIONS=0`, `OPENCLAW_TEST_INCLUDE_GATEWAY=0`, or `OPENCLAW_TEST_INCLUDE_E2E=0` to skip one. The parallel lanes all run to completion, then the runner exits with the first nonzero lane code **before starting the serial group**. So a failing run with no e2e output either failed `test:scripts` before any lane started, or failed in the parallel group — e2e was never reached, not skipped.
+- `scripts/test-parallel.mjs` runs every enabled lane — **parallel**: unit, core, channels, extensions, and gateway (gateway is serial unless `OPENCLAW_TEST_PARALLEL_GATEWAY=1` or a high-memory local host); **serial, after the parallel group**: e2e, ui, plus gateway when it is not parallelized. Every lane is default-on; set `OPENCLAW_TEST_INCLUDE_CORE=0`, `OPENCLAW_TEST_INCLUDE_CHANNELS=0`, `OPENCLAW_TEST_INCLUDE_EXTENSIONS=0`, `OPENCLAW_TEST_INCLUDE_GATEWAY=0`, `OPENCLAW_TEST_INCLUDE_E2E=0`, or `OPENCLAW_TEST_INCLUDE_UI=0` to skip one. All lanes — parallel and serial — run to completion regardless of an earlier failure, so one run accounts for every file; the runner then exits with the first nonzero lane code and prints `[test-parallel] lane exit codes: ...`.
 - Dedicated commands still exist for a single lane: `pnpm test:channels`, `pnpm test:extensions`, `pnpm test:gateway`, `pnpm test:e2e`.
-- `pnpm test:e2e` (also the serial e2e lane inside `pnpm test`): gateway end-to-end smoke (multi-instance WS/HTTP/node pairing). `vitest.e2e.config.ts` uses `pool: "forks"` — not `vmForks`, because vmForks leaked the `vi.mock` module registry across files in a shared worker — with 1 worker locally and at most 2 in CI, silent unless `OPENCLAW_E2E_VERBOSE=1`. Tune with `OPENCLAW_E2E_WORKERS=<n>` (capped at 16). Files come from `test/**`, `src/**`, and `extensions/**` matching `*.e2e.test.ts`.
-- `pnpm test` on Node 24+: OpenClaw auto-disables Vitest `vmForks` and uses `forks` to avoid `ERR_VM_MODULE_LINK_FAILURE` / `module is already linked`. You can force behavior with `OPENCLAW_TEST_VM_FORKS=0|1`.
-- `pnpm test:live`: Runs provider live tests (minimax/zai). Requires API keys and `LIVE=1` (or provider-specific `*_LIVE_TEST=1`) to unskip.
-
-## Local PR gate
-
-For local PR land/gate checks, run:
-
-- `pnpm check`
-- `pnpm build`
-- `pnpm test`
-- `pnpm check:docs`
-
-If `pnpm test` flakes on a loaded host, rerun once before treating it as a regression, then isolate with `pnpm vitest run <path/to/test>`. For memory-constrained hosts, use:
-
-- `OPENCLAW_TEST_PROFILE=low OPENCLAW_TEST_SERIAL_GATEWAY=1 pnpm test`
-
-## Model latency bench (local keys)
-
-Script: [`scripts/bench-model.ts`](https://github.com/openclaw/openclaw/blob/main/scripts/bench-model.ts)
-
-Usage:
-
-- `source ~/.profile && pnpm tsx scripts/bench-model.ts --runs 10`
-- Optional env: `MINIMAX_API_KEY`, `MINIMAX_BASE_URL`, `MINIMAX_MODEL`, `ANTHROPIC_API_KEY`
-- Default prompt: “Reply with a single word: ok. No punctuation or extra text.”
-
-Last run (2025-12-31, 20 runs):
-
-- minimax median 1279ms (min 1114, max 2431)
-- opus median 2454ms (min 1224, max 3170)
-
-## CLI startup bench
-
-Script: [`scripts/bench-cli-startup.ts`](https://github.com/openclaw/openclaw/blob/main/scripts/bench-cli-startup.ts)
-
-Usage:
-
-- `pnpm tsx scripts/bench-cli-startup.ts`
-- `pnpm tsx scripts/bench-cli-startup.ts --runs 12`
-- `pnpm tsx scripts/bench-cli-startup.ts --entry dist/entry.js --timeout-ms 45000`
-
-This benchmarks these commands:
-
-- `--version`
-- `--help`
-- `health --json`
-- `status --json`
-- `status`
-
-Output includes avg, p50, p95, min/max, and exit-code/signal distribution for each command.
+- `pnpm test:e2e` (also the serial e2e lane inside `pnpm test`): gateway end-to-end smoke (multi-instance WS/HTTP/node pairing) against `dist/index.js`, so run `pnpm build` first. `vitest.e2e.config.ts` uses `pool: "forks"` — not `vmForks`, because vmForks leaked the `vi.mock` module registry across files in a shared worker — with 1 worker locally and at most 2 in CI, silent unless `OPENCLAW_E2E_VERBOSE=1`. Tune with `OPENCLAW_E2E_WORKERS=<n>` (capped at 16). Files come from `test/**`, `src/**`, and `extensions/**` matching `*.e2e.test.ts`.
+- `pnpm test:ui`: Runs the control UI suite (`ui/vitest.config.ts`): node-style `*.node.test.ts` suites in a node environment plus every other `ui/src` test in headless playwright chromium. It also runs as the `ui` lane of `pnpm test`; set `OPENCLAW_TEST_INCLUDE_UI=0` to skip that lane.
+- Worker and memory knobs (all read in `scripts/test-parallel.mjs`):
+  - `OPENCLAW_TEST_PROFILE=low|serial|max` (unset is `normal`). `low` is the lever for constrained hosts.
+  - `OPENCLAW_TEST_WORKERS=<n>` overrides the per-lane worker budget.
+  - `OPENCLAW_TEST_SERIAL_GATEWAY=1` keeps the gateway lane serial (default except high-memory local hosts or `OPENCLAW_TEST_PARALLEL_GATEWAY=1`).
+  - `OPENCLAW_TEST_VM_FORKS=1` opts in to `vmForks`; it is disabled outright on Windows and not supported for full runs — a crashed worker silently drops its file from the lane's reported count.
+  - `OPENCLAW_TEST_MAX_OLD_SPACE_SIZE_MB=<n>` sets Node `--max-old-space-size` when `NODE_OPTIONS` does not already include it (CI default 4096 on non-Windows).
+- Memory: vmForks lanes keep large transformed graphs per worker. `vitest.config.ts` sets `vmMemoryLimit: "2048MB"` so workers recycle before V8 kills them. Prefer `OPENCLAW_TEST_PROFILE=low` on constrained hosts rather than raising the heap.
+- `pnpm test:live`: Runs the live suite (`vitest.live.config.ts`, `src/**/*.live.test.ts`): direct-model and gateway smoke plus opt-in lanes (voice loop, CLI backend, setup token, Deepgram, BytePlus). Requires API keys and `LIVE=1` (or `OPENCLAW_LIVE_TEST=1`; provider-specific `*_LIVE_TEST=1`) to unskip. The voice loop lane additionally needs a deployed gateway URL and `ELEVENLABS_API_KEY`; see [Testing](/help/testing).
+- `vmForks` is opt-in only (`OPENCLAW_TEST_VM_FORKS=1`). It runs each file in a `vm` realm, so `node:` builtin errors are host-realm objects and `instanceof Error` behaves differently from `forks`. Heavy files can exceed the V8 old-space ceiling and die with `Ineffective mark-compacts near heap limit`; raising `NODE_OPTIONS=--max-old-space-size` only postpones that. Use `forks`.
+- For the local PR gate, see Contributing. For which suite to run and when, see [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing).
 
 ## Onboarding E2E (Docker)
 
