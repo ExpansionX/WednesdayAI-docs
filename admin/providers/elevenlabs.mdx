@@ -54,7 +54,7 @@ Docs: [https://elevenlabs.io/docs](https://elevenlabs.io/docs)
 }
 ```
 
-A restricted key must include **Speech to Text** and **Text to Speech**. The create-key API names the text-to-speech permission `text_to_speech`; Speech to Text is a separate dashboard scope. Voice mode opens both sockets; Dictate opens only Scribe. These sockets send `model_id` themselves (`scribe_v2_realtime`, and `eleven_flash_v2_5` unless `modelId` is set) and do not call the models list, so a Models permission is not what gates them. A key without Speech to Text cannot transcribe; a key without Text to Speech cannot speak.
+A restricted key must include **Speech to Text** and **Text to Speech**. The create-key API names the text-to-speech permission `text_to_speech`; Speech to Text is a separate dashboard scope. Voice mode opens both sockets; Dictate opens only Scribe. These sockets send `model_id` themselves (`scribe_v2_realtime`, and `eleven_flash_v2_5` unless `modelId` is set) and do not call the models list, so a Models permission is not what gates them. A key without Speech to Text cannot transcribe; a key without Text to Speech cannot speak. Voice mode speaks with ElevenLabs' default voice (`pMsXgVXv3BLzUgSXRplE`) unless you set `talk.providers.elevenlabs.voiceId`.
 
 `apiKey` accepts a plaintext string or a `SecretRef` (env/file/exec), resolved through
 `src/secrets/resolve.ts` the same way every other Talk provider key is. An unresolvable ref no
@@ -67,7 +67,7 @@ unavailable with a diagnostic instead (see [Troubleshooting](#troubleshooting)).
 ## STT: Scribe v2 Realtime
 
 The provider opens `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with
-`model_id=scribe_v2_realtime`, `audio_format=pcm_16000` and `include_timestamps=true`, streaming
+`model_id=scribe_v2_realtime`, `audio_format=pcm_16000` and `include_timestamps=false`, streaming
 base64 `input_audio_chunk` frames. Each frame includes `commit` and `sample_rate` (`16000`), which
 the realtime schema requires.
 
@@ -77,8 +77,7 @@ the realtime schema requires.
 | `talk.conversation.endOfTurnSilenceMs` | `500`                  | Maps to `vad_silence_threshold_secs`, used for Voice mode's `commit_strategy=vad` |
 
 Voice mode opens Scribe with `commit_strategy=vad` and `vad_silence_threshold_secs` from `talk.conversation.endOfTurnSilenceMs` (default 500, so `0.5`). The gateway injects `commitStrategy: "vad"` and that silence value into the STT provider config; an explicit `talk.providers.elevenlabs.commitStrategy` (`"vad"` or `"manual"`) or `talk.providers.elevenlabs.endOfTurnSilenceMs` wins. Dictate does not receive that injection, so it stays on the provider default `commit_strategy=manual` and commits only when the user stops, never on a silence timeout. Both map
-`partial_transcript` to live partial captions and the committed transcript (with word timestamps)
-to end-of-turn. The first partial of an utterance is also speech start — Scribe has no separate
+`partial_transcript` to live partial captions and the committed transcript to end-of-turn. The first partial of an utterance is also speech start — Scribe has no separate
 speech-start event — so `talk.conversation.maxTurnSeconds` can arm; a committed transcript ends
 that span. One unexpected close after a session is established triggers exactly one
 reconnect; a second, or a failure during that one reconnect, surfaces as `session.error` followed by
@@ -99,7 +98,8 @@ persistence rule uses.
 TTS reuses the existing `talk.provider`/`talk.providers.elevenlabs` settings — the same ones the
 batch `messages.tts` feature also partly overlaps with, but keeps separate (see
 [Text-to-speech](/tts#related)). There is no separate "streaming TTS" voice/model override: set
-`talk.providers.elevenlabs.voiceId`/`modelId` as you would for any other Talk provider.
+`talk.providers.elevenlabs.modelId` as you would for any other Talk provider; `voiceId` is
+optional and defaults to the provider's own voice when unset.
 
 ## Troubleshooting
 
@@ -112,6 +112,7 @@ Check the row's `diagnostic` field:
 | `missing-api-key`       | `talk.providers.elevenlabs.apiKey` is unset or resolved to an empty string.                         |
 | `secret-ref-unresolved` | `apiKey` is a `SecretRef` the gateway could not resolve (bad provider, missing env var, and so on). |
 | `provider-error`        | Resolving the key threw for some other reason; check the gateway log for the underlying error.      |
+| `missing-voice-id`      | `talk.providers.<id>.voiceId` is unset and the speech provider has no default voice.                |
 
 A `secret-ref-unresolved` provider no longer blocks gateway startup — it surfaces here instead, and
 retries resolution on the next `talk.catalog` call, so fixing the underlying secret (for example
