@@ -1153,7 +1153,10 @@ type RealtimeTranscriptionSession = {
 `createSession` returns the session object. It does not return a promise. `onPartial`,
 `onTranscript`, `onSpeechStart`, and `onEndOfTurn` are required callbacks the relay passes in.
 `onEagerEndOfTurn` and `onTurnResumed` are optional, for a provider that fuses its own turn
-detection. `onTranscript` is a finalized fragment, not necessarily end of turn. `connect()` may
+detection. `onTranscript` is a finalized fragment, not necessarily end of turn. `onEndOfTurn` is
+one commit per committed segment: call it once per segment even when the vendor sends a companion
+event for the same segment. The voice loop ignores a repeat of the in-flight turn's text, so a
+duplicated commit neither cancels nor restarts the turn. `connect()` may
 resolve before the socket is usable only if you then refuse `sendAudio` until it is; the relay
 drops audio until its own ready signal.
 
@@ -1174,6 +1177,7 @@ type StreamingSpeechProviderPlugin = {
   label: string;
   aliases?: string[];
   defaultModel?: string;
+  defaultVoiceId?: string;
   models?: readonly string[];
   isConfigured: (ctx: { cfg?: OpenClawConfig; providerConfig: Record<string, unknown> }) => boolean;
   openStream: (req: StreamingSpeechOpenStreamRequest) => StreamingSpeechStream;
@@ -1205,10 +1209,11 @@ type StreamingSpeechStream = {
 ```
 
 `openStream` returns the stream. It does not return a promise. Output audio is PCM16 mono at
-24 kHz. `alignment.startMs` is milliseconds from stream start. Omit `ready`, and return `void`
-from `pushText`, unless the socket is not yet open or the outbound buffer must pause the clause
-queue. A `ready` or `pushText` promise that never settles is not infinite: the voice loop cancels
-that turn with `tts-stall` after 30 seconds. A throw from `openStream` closes the Talk session
+24 kHz. `alignment.startMs` is milliseconds from stream start. `defaultVoiceId` is the voice used
+when `talk.providers.<id>.voiceId` is unset; omit it to require an explicit voice. Omit `ready`,
+and return `void` from `pushText`, unless the socket is not yet open or the outbound buffer must
+pause the clause queue. A `ready` or `pushText` promise that never settles is not infinite: the
+voice loop cancels that turn with `tts-stall` after 30 seconds. A throw from `openStream` closes the Talk session
 (`session.error`, then `session.closed` with reason `error`). `onError` after the stream has
 opened cancels that turn with reason `tts-error`; it does not by itself close the session.
 
