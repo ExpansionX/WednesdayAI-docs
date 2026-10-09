@@ -12,6 +12,10 @@ OpenAI-compatible API. Bifrost handles all model-specific logic internally.
 Run a bifrost instance locally or on your own infrastructure. See
 [bifrost documentation](https://github.com/maximhq/bifrost) for setup.
 
+Deploy/upgrade Bifrost first, then WednesdayAI. Cost arrives in-band as
+`extra_fields.cost`, which older Bifrost builds do not send — WednesdayAI records
+those calls as missing cost (`gateway-unpriced`) until the gateway is updated.
+
 ## Setup
 
 ```bash
@@ -19,8 +23,15 @@ openclaw auth
 # Choose: Proxy / Gateway → Bifrost
 ```
 
-Enter your base URL, optional virtual key, and the model aliases you want available
-in WednesdayAI (e.g. `medium`, `fast`, `anthropic/claude-sonnet-4-6`).
+Onboarding prompts for your base URL, an optional virtual key (placeholder
+`sk-bf-...`; leave blank for local trust mode), and the model aliases you want
+available (e.g. `medium`, `fast`, `anthropic/claude-sonnet-4-6`). When Bifrost is
+reachable, the alias prompt is pre-filled from `/v1/models` and each model's
+context window, max output tokens, image input, and reasoning support are
+discovered from the same endpoint. Aliases Bifrost does not describe are asked for
+explicitly: their context window, plus whether they support reasoning and accept
+images. The written config always sets `contextWindow` and `input` per model — no
+silent 128k / text-only / non-reasoning defaults.
 
 ## Model aliases vs direct model IDs
 
@@ -33,11 +44,13 @@ Bifrost decides which backend and model to use. WednesdayAI does not influence r
 
 ## Usage dashboard
 
-When bifrost is configured to forward response headers (see plugin README), WednesdayAI
-records both the configured alias and the actual backend provider/model per call:
-
-- `byProvider` shows actual provider spend (`anthropic: $0.42`)
-- `byConfiguredModel` shows spend by alias (`medium: $0.42`)
+Cost arrives in-band as `extra_fields.cost` on `/v1/chat/completions`. This needs a Bifrost
+build with `BifrostResponseExtraFields.Cost`; older gateways record cost as missing
+(`gateway-unpriced`), and `/usage cost` counts those entries as missing cost rather
+than $0. Cache read/write tokens come from Bifrost's explicit split
+(`cached_read_tokens` / `cached_write_tokens`), and the resolved model is stored as
+`message.responseModel`. `/usage cost` reads the configured session store (JSONL
+transcripts or the sqlite/postgres store).
 
 ## Caching
 
@@ -45,11 +58,11 @@ Bifrost's prompt cache optimisation and semantic cache run on the bifrost side.
 WednesdayAI does not send `cache_control` markers to bifrost — bifrost's
 `CacheOptimizer` analyses request structure autonomously.
 
-The Bifrost extension attaches `x-bf-cache-key` from WednesdayAI's opaque
-provider-runtime `conversationId`. Core runner code does not emit the header on
-its own; when the Bifrost extension is not installed or enabled, no Bifrost cache
-header is sent. This scopes Bifrost's semantic cache per conversation without
-leaking raw `sessionKey` values.
+WednesdayAI sends only `x-bf-conversation-id` (stickiness, log grouping, affinity).
+It never adds `x-bf-cache-key` on its own. Agent-turn response caching is controlled
+only by the operator's Bifrost semantic-cache config (`default_cache_key`) or an
+explicit `x-bf-cache-key` set in `models.providers.bifrost.headers`, which passes
+through unchanged.
 
 ## Timeout
 
