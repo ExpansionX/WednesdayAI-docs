@@ -86,25 +86,44 @@ Per-agent heartbeat is supported at `agents.list[].heartbeat`.
 
 ## System Prompt Shape
 
-Prompt caching works best when stable shared content appears before volatile content. OpenClaw keeps identity, generated tool and skill indexes, stable workspace guidance, and stable Project Context before the cache boundary. Runtime details, channel-specific owner context, reply mechanics, heartbeat state, and other per-run context appear after it.
+Prompt caching works best when stable shared content appears before volatile content. WednesdayAI keeps identity, generated tool and skill indexes, stable workspace guidance, and stable Project Context before the cache boundary. Runtime details, channel-specific owner context, reply mechanics, heartbeat state, and other per-run context appear after it.
 
 The boundary is controlled by `agents.defaults.systemPrompt.cache.boundary` and can be overridden per agent at `agents.list[].systemPrompt.cache.boundary`:
 
 - `auto` (default): insert the cache boundary between stable and volatile prompt sections, regardless of preset.
 - `off`: render one continuous system prompt without the boundary marker.
 
+When `auto` is active, the assembler inserts the HTML comment `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` between the stable prefix and volatile suffix. Project Context blocks are closed with `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->` when present. Both markers are shared constants consumed by the system-prompt report parser (ADR 0051).
+
 The boundary marker is a structural ordering aid: it groups stable content before volatile content so providers that cache prompt prefixes get longer reusable prefixes. It is not itself a provider cache-control breakpoint.
+
+### Upgrade note (marker rename)
+
+Renaming the marker text changes every cached prompt prefix. After upgrading a build that renamed the cache and project-context markers to `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` and `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->`, expect a **one-time cold cache** (extra `cacheWrite` / latency) on the first turn per session and model. No operator config change is required. The `OPENCLAW_*` environment-variable namespace is unchanged. External tools that grepped the old marker strings must update.
 
 Use `agents.defaults.systemPrompt.sections.projectContext.files` for stable, ordered workspace context. Keep high-churn files out of the stable prefix by using `manifest` mode, `runKind` mode, or per-agent overrides for agents that truly need that content inline. A good cache-friendly shape is: stable identity and policy first, compact tool and skill listings next, stable project files next, then volatile runtime/session information.
 
 Use `/context list` to confirm the effective preset, cache boundary, and Project Context file modes for the current session. Use cache trace diagnostics when you need provider-level cache read and write evidence.
+
+### Byte stability across trigger kinds
+
+Section ordering alone is not enough: prefix caching only pays off when the stable prefix is **byte-identical** from turn to turn. WednesdayAI keeps the system prompt byte-stable across trigger kinds within a session — a heartbeat or cron turn that shares a session with user messages renders the same system prompt bytes as a user turn. Heartbeat-specific instructions (such as `HEARTBEAT.md` content in a shared session) travel in the trigger message rather than swapping the system prompt — unless the session's normal bootstrap already injects the file, in which case it is simply left where it is — so scheduled turns do not churn the cached prefix.
+
+Queued runtime events (scheduled trusted content) are rendered as turn-local input after the stable prefix, not as a dynamic `extraSystemPrompt` block. The trusted runtime-event header is core-only and registered in inbound stripping registries, so user text cannot forge gateway provenance. Repeated scheduled turns in one session keep the same system-prompt hash while the model still receives each turn's payload.
+
+Two things can still legitimately change the system prompt within a session:
+
+- A real configuration or workspace change (edited bootstrap files, model or tool changes, new skills).
+- An extension or plugin that injects per-turn dynamic content into the system prompt. Prefer delivering per-turn data as user-role context instead; system-prompt injection should be session-stable.
+
+Every turn computes a hash of the assembled system prompt and compares it with the previous turn in the same session. A change increments the flip counters described below and logs a rate-limited warning (`system prompt hash flipped within session`, at most once per 10 minutes per session) with the before and after hashes and sizes.
 
 ## Provider behavior
 
 ### Anthropic (direct API)
 
 - `cacheRetention` is supported.
-- With Anthropic API-key auth profiles, OpenClaw seeds `cacheRetention: "short"` for Anthropic model refs when unset.
+- With Anthropic API-key auth profiles, WednesdayAI seeds `cacheRetention: "short"` for Anthropic model refs when unset.
 
 ### Amazon Bedrock
 
@@ -113,7 +132,7 @@ Use `/context list` to confirm the effective preset, cache boundary, and Project
 
 ### OpenRouter Anthropic models
 
-For `openrouter/anthropic/*` model refs, OpenClaw injects Anthropic `cache_control` on system/developer prompt blocks to improve prompt-cache reuse.
+For `openrouter/anthropic/*` model refs, WednesdayAI injects Anthropic `cache_control` on system/developer prompt blocks to improve prompt-cache reuse.
 
 ### Other providers
 
@@ -152,7 +171,7 @@ agents:
 
 ## Cache diagnostics
 
-OpenClaw exposes dedicated cache-trace diagnostics for embedded agent runs.
+WednesdayAI exposes dedicated cache-trace diagnostics for embedded agent runs.
 
 ### `diagnostics.cacheTrace` config
 
@@ -185,6 +204,23 @@ Defaults:
 
 - Cache trace events are JSONL and include staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
 - Per-turn cache token impact is visible in normal usage surfaces via `cacheRead` and `cacheWrite` (for example `/usage full` and session usage summaries).
+
+### System prompt stability metrics
+
+When the `diagnostics-otel` plugin is enabled, two metrics track whether system prompts stay byte-stable within a session (see [Byte stability across trigger kinds](#byte-stability-across-trigger-kinds)):
+
+| Metric                                     | Type             | Labels                                     | Meaning                                                                                                                                                                                                                                                                                                     |
+| ------------------------------------------ | ---------------- | ------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `openclaw.session.system_prompt_flip`      | counter          | `openclaw.event_type`                      | Incremented each time the assembled system prompt hash changes between consecutive turns of a session. A flip means the prompt changed; the cache impact depends on where the change lands and on provider cache semantics — a change early in the prompt invalidates the cached prefix from that point on. |
+| `openclaw.session.system_prompt_stability` | observable gauge | `openclaw.stat` = `comparisons` or `flips` | Cumulative counts refreshed on each diagnostic heartbeat. Divide `flips` by `comparisons` for the flip rate; a healthy deployment trends toward zero.                                                                                                                                                       |
+
+Interpretation:
+
+- **Occasional flips after a config, model, or workspace-file change** are expected — the first turn after the change pays a cold cache, then stability resumes.
+- **A flip on every heartbeat or cron turn** means a scheduled trigger is rendering a different system prompt than user turns. Core heartbeat and cron paths are byte-stable; the usual cause is a plugin or extension injecting per-turn dynamic content into the system prompt. Move that content to user-role context.
+- **A flip on every turn** points at volatile content in the stable prefix (timestamps, random ordering, per-turn scores). Check the warned `prevChars`/`nextChars` sizes in the gateway log to narrow which section changed.
+
+The same comparison emits a `session.system-prompt.flip` diagnostic event, so custom diagnostic consumers can alert on flips without scraping metrics.
 
 ## Quick troubleshooting
 
