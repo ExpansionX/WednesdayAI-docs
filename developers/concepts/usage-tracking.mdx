@@ -17,10 +17,32 @@ title: "Usage Tracking"
 
 - `/status` in chats: emoji‑rich status card with session tokens + estimated cost (API key only). Provider usage shows for the **current model provider** when available.
 - `/usage off|tokens|full` in chats: per-response usage footer (OAuth shows tokens only).
-- `/usage cost` in chats: local cost summary aggregated from OpenClaw session logs.
+- `/usage cost` in chats: local cost summary aggregated from the configured session
+  store (JSONL transcripts or the sqlite/postgres store).
 - CLI: `openclaw status --usage` prints a full per-provider breakdown.
 - CLI: `openclaw channels list` prints the same usage snapshot alongside provider config (use `--no-usage` to skip).
 - macOS menu bar: “Usage” section under Context (only if available).
+
+## Per-model attribution
+
+`/usage cost` and `sessions.usage` split the per-model rows by **resolved model**, not just the
+configured alias:
+
+- `model` is the configured alias (e.g. `low`); `actualModel` is the resolved backend model from
+  the assistant entry's `responseModel` (e.g. `zai-org/GLM-5.3-Flash`).
+- byModel rows are keyed `provider::model::actualModel`; the third segment is empty when the
+  resolved model is unknown. One alias can therefore appear as several rows — one per resolved
+  model — and per-row counts/tokens/cost always add back up to the session totals.
+- The Control UI usage view shows the resolved model per row, and its model filter matches against
+  `actualModel` as well.
+
+## Historical backfill
+
+On the first startup after upgrading, the session store backfills the usage and model columns for
+historical entries once (marker `usage-columns-v1`), so older entries gain per-model rows and
+`actualModel` too. The backfill runs after startup without blocking it; a failed run is logged
+(`startup backfill usage columns failed`) and retried on the next start, because the marker is
+written only after the last batch commits.
 
 ## Providers + credentials
 
