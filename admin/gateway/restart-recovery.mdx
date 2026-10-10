@@ -89,9 +89,12 @@ ACP turns are recorded as session runs of kind `acp` with recovery mode `off`, s
 in the same restart machinery as other interactive work:
 
 - The restart gate counts active ACP turns, and the drain waits for them alongside queued commands
-  within `gateway.restartResilience.drainTimeoutMs` (default 30000). While the gateway is draining,
-  a new ACP message is rejected with `ACP_GATEWAY_DRAINING` before the agent runs anything: a
-  not-sent prompt has no side effects and is resent, not continued by replying.
+  within `gateway.restartResilience.drainTimeoutMs` (default 30000). Draining closes root-work
+  admission, so new work is refused before it reaches ACP: gateway RPC callers (`chat.send`,
+  `agent`) receive the retryable `RECOVERY_NOT_READY`, and inbound channel messages are refused at
+  ingress. A message admitted just before the drain began, but not yet sent to the agent, is
+  rejected with `ACP_GATEWAY_DRAINING`. In every case nothing ran, so the message is resent, not
+  continued by replying.
 - On both restart and stop, a 5 second cooperative cancel runs before the server closes. Each
   cancelled turn finalizes its row as `cancelled` with the shutdown reason (`gateway restart` or
   `gateway stop`), and its dispatcher delivers one interruption notice to the bound thread while
