@@ -1,0 +1,294 @@
+---
+summary: "Run focused plugin-owned LLM analysis through configured providers"
+read_when:
+  - You are building memory recall, extraction, topic detection, or shadow-brain style plugins
+  - You need an extension to call an LLM without importing core internals
+title: "Plugin Analysis Runtime"
+audience: developer
+sources:
+  - src/plugins/runtime/types-analysis.ts
+  - src/plugins/runtime/runtime-analysis.ts
+  - src/plugins/runtime/runtime-analysis-direct.ts
+  - src/plugins/runtime/types-core.ts
+  - src/plugins/runtime/analysis-limits.ts
+  - src/plugins/loader.ts
+generated: 2026-09-21
+---
+
+# Plugin analysis runtime
+
+`api.runtime.analysis` lets plugins run focused LLM analysis through the same
+provider, model, auth profile, and timeout plumbing that WednesdayAI already uses for
+agent turns.
+
+Use `run(...)` when the current turn should wait for the result:
+
+```ts
+const result = await api.runtime.analysis.run({
+  purpose: "topic-detection",
+  systemPrompt: "Return a compact JSON object with the topic and confidence.",
+  input: event.cleanUserMessage.content,
+  responseFormat: "json",
+  timeoutMs: 10_000,
+});
+
+if (result.status === "ok" && result.json) {
+  return {
+    contribution: {
+      systemPrompt: `Detected topic: ${JSON.stringify(result.json)}`,
+    },
+  };
+}
+```
+
+Use `enqueue(...)` when the current turn should not wait, such as memory extraction or
+background indexing:
+
+```ts
+api.runtime.analysis.enqueue(
+  {
+    purpose: "memory-extraction",
+    systemPrompt: "Extract durable user facts as JSON.",
+    input: event.cleanUserMessage.content,
+    responseFormat: "json",
+    timeoutMs: 30_000,
+    identity: ctx.runtimeIdentity,
+    turn: ctx.turn,
+    cacheKey: ctx.runtimeIdentity?.providerConversationId,
+  },
+  async (result) => {
+    if (result.status === "ok") {
+      await saveFacts(result.json);
+    }
+  },
+);
+```
+
+## Correlation metadata
+
+Analysis calls can carry the same SDK identity and turn objects that hooks receive:
+
+```ts
+await api.runtime.analysis.run({
+  purpose: "turn-classification",
+  input: event.cleanUserMessage.content,
+  responseFormat: {
+    type: "json_schema",
+    schema: {
+      type: "object",
+      properties: { label: { type: "string" } },
+      required: ["label"],
+    },
+  },
+  identity: ctx.runtimeIdentity,
+  turn: ctx.turn,
+  cacheKey: ctx.runtimeIdentity?.providerConversationId,
+  metadata: { sourceHook: "context.collect" },
+});
+```
+
+These fields are additive. Existing callers that pass only `purpose`, `input`,
+model options, and timeouts continue to work. `enqueue(...)` carries `identity`,
+`turn`, `cacheKey`, and `responseFormat` into the queued in-process job payload
+so completion handlers and telemetry can correlate background work with the
+originating turn.
+
+Use the typed `identity` and `turn` params for correlation. Do not copy raw
+`identityLinks`, raw sender ids that are not already exposed by the hook context,
+or provider hash preimages into `metadata`; reserved correlation keys in arbitrary
+`metadata` are stripped and replaced by the typed fields.
+
+`cacheKey` is caller-supplied correlation metadata for analysis work. It is metadata only:
+WednesdayAI never derives a provider cache key or header from it, so no provider-side
+response caching is opted into. It is not a request to expose or recompute raw session
+identity. When available, use the opaque `ctx.runtimeIdentity.providerConversationId` or a
+plugin-owned derived key.
+
+Analysis runs do not rewrite the raw user message. If a plugin wants analysis to affect
+the active turn, it should contribute context through normal hook returns, such as a
+`PromptContribution` from `context.collect`.
+
+`api.runtime.analysis` is deliberately bounded to analysis, classification,
+extraction, and summarisation. It is not a general subagent runtime. For full
+agent delegation, expose a tool or use the documented agent/subagent workflows
+instead of trying to run a multi-turn agent through analysis.
+
+## Prompt role mapping
+
+Tool-less analysis runs (no `toolsAllow`) execute as a single direct provider completion:
+
+- `systemPrompt` is sent verbatim as the wire system role for non-JSON requests. When omitted,
+  core sends a minimal neutral analysis prompt instead. Nothing else is added on this path: no
+  host-agent system prompt, no wrapper text, no `INPUT:` scaffolding.
+- `input` is sent verbatim as the sole user message.
+- JSON modes are the one documented exception to the verbatim guarantee: when `responseFormat`
+  is `"json"` or a `json_schema` object, core appends `Return valid JSON only.` to the system
+  role. The user message stays verbatim.
+- `provider` and `model`, `maxOutputTokens`, and `temperature` are applied to the wire request.
+  `authProfileId` selects the credential profile.
+- The call rides the provider plugin transport stack (`wrapStreamFn`), exactly like agent turns.
+  Provider plugins apply: Bifrost, for example, stamps `x-bf-conversation-id` derived from the
+  caller's `agentId` and the isolated analysis session key `agent:<id>:analysis:<jobId>` (never
+  the parent session key), and sends no cache-key header. In-band gateway data (`extra_fields.cost`,
+  the resolved `model`) is surfaced on the result instead of being discarded.
+- `metadata`, `identity`, `turn`, and `cacheKey` are correlation-only fields. They are never
+  forwarded to the provider on this path.
+
+Tool-enabled runs (`toolsAllow` set) still execute through the embedded agent runner, which
+builds its own agent system prompt; on that path `systemPrompt` is folded into the user message.
+This divergence is intentional. Keep tool-enabled analysis prompts self-contained and treat the
+tool-less path as the one with strict payload guarantees.
+
+By default, analysis runs are LLM-only. The v1 runtime only supports read-only memory
+tools in analysis runs. If a plugin needs memory access, pass a small explicit tool
+allow-list:
+
+```ts
+await api.runtime.analysis.run({
+  purpose: "memory-recall",
+  systemPrompt: "Find relevant durable memories. Return concise bullets.",
+  input: event.cleanUserMessage.content,
+  sessionKey: event.sessionKey,
+  toolsAllow: ["memory_search", "memory_get"],
+});
+```
+
+Only `memory_search` and `memory_get` are accepted in analysis allow-lists. Analysis runs
+use a dedicated command lane so awaited hook-time analysis does not queue behind the active
+user turn.
+
+Concurrency is two-tier:
+
+- Global `maxParallel` (default 2) concurrent `run(...)` slots across plugins.
+  Set `plugins.analysisConcurrency.maxParallel` or a plugin manifest
+  `analysisConcurrency.maxParallel` field. Operator global values win when
+  set; otherwise WednesdayAI keeps the most permissive value among winning
+  enabled manifests.
+- Global `maxSequential` (default 0) is the overflow queue for calls blocked by
+  either the global or per-plugin active boundary. With the default of 0, extra
+  awaited runs are rejected rather than queued.
+- Per plugin, inner bounds attach to that plugin's winning enabled manifest.
+  Default `maxParallelPerPlugin` is 1 (clamped to `maxParallel`).
+  `maxSequentialPerPlugin` inherits `maxSequential` when omitted (clamped to
+  `maxSequential`). Operator `maxParallelPerPlugin` / `maxSequentialPerPlugin`
+  are a uniform ceiling for every plugin when set. A disabled workspace winner
+  does not let a bundled same-id duplicate contribute. Overflow uses one
+  eligibility-aware queue; queued awaited runs occupy ordinary global parallel
+  slots when started. Background `enqueue(...)` stays 4 active jobs per plugin.
+  Saturated background work returns `accepted: false` with `reason: "queue-full"`.
+
+Awaited `run(...)` can occupy a free parallel slot even when a background job is already
+running. Nested `run(...)` from inside an analysis run is rejected.
+
+What not to do: do not assume a second same-plugin `run(...)` starts immediately,
+and do not assume another plugin's larger inner budget applies to yours.
+Without raising this plugin's `maxParallelPerPlugin` (and having a free global
+slot), the second call is queued or rejected. Zero overflow caps never queue.
+
+Default timeout is 15 s for `run(...)` and 30 s for background jobs. Caller-supplied
+`timeoutMs` is clamped to 250 ms through 120 s. The timeout bounds the whole run,
+including credential resolution, not just the provider call. Keep analysis prompts narrow,
+set a timeout, and prefer `enqueue(...)` for work that can update plugin-owned state for
+future turns. The completion callback runs after the analysis lane is released; keep
+callback work bounded anyway, because it still runs inside the plugin host process.
+
+If you call `run(...)` from a plugin hook (especially `context.collect`), the hook itself
+also has a 30 s default timeout. Raise it with `api.on(name, handler, { timeoutMs })` or
+ask the operator to set `plugins.hookTimeouts`. See [Plugins](/tools/plugin#typed-hook-registration-apion).
+
+### Correlating by lane
+
+`providerConversationId` is the opaque provider/cache **session** identity derived from
+`agentId + (sessionKey || sessionId)`. It is NOT lane-specific: in a multi-user group agent with
+workspace lanes, several lane users can share one `providerConversationId`. To partition correctly
+per lane, consumers (e.g. brain/background/cache systems) should dedupe on the composite key:
+
+```text
+providerConversationId + (laneId ?? canonicalIdentity ?? hashedUserId ?? sessionKey) + turnId + (entryId ?? cursor.entryId ?? rawSha256)
+```
+
+`laneId` is the opaque `lane-<hash>` digest, present only for an allowed multi-lane turn and
+`undefined` for single-user and denied resolutions. Never correlate on raw `identityLinks` or a
+lane hash preimage — they are intentionally stripped from runtime metadata.
+
+Both `run(...)` and `enqueue(...)` validate the requested params synchronously before
+claiming the lane or the per-plugin background quota. Invalid requests (empty `purpose`,
+empty `input`, a `provider` without a `model`, or a tool that is not in the analysis
+allow-list) are rejected immediately — `run(...)` returns `status: "rejected"` with a
+descriptive `error`, and `enqueue(...)` returns `accepted: false` with
+`reason: "invalid"` — so a misconfigured caller cannot starve the awaited slot or
+consume background-queue slots.
+
+## Troubleshooting
+
+- Symptom: `run(...)` returns `status: "rejected"` with
+  `error: "analysis concurrency limit exceeded"`.
+  Cause: no free global or per-plugin active slot, and no remaining queue
+  capacity. Reject logs on subsystem `plugins/runtime/analysis` include
+  `admissionBoundary`: `plugin-queue`, `global-queue`, `plugin-active`, or
+  `global-active` (zero overflow caps never emit the queue tokens).
+  Fix: raise the matching `plugins.analysisConcurrency` field, or `enqueue(...)`
+  work that can wait. Restart the gateway after config changes.
+
+System-level failures (timeouts, context overflow, image-size errors, auth/role-ordering
+problems) populate `result.error` only and leave `result.text` undefined. The `text`
+field is reserved for actual model output, including the case where the model returned
+text that failed JSON parsing. Callers should branch on `result.status` first and read
+`result.text` only for `"ok"` and JSON-parse `"error"` outcomes.
+
+## Result and job fields
+
+`run(...)` resolves to an `AnalysisResult`:
+
+| Field           | Type                                                   | Notes                                                                                                                                                          |
+| --------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`        | `string`                                               | One of: `ok`, `empty`, `timeout`, `error`, `rejected`. Branch on this before reading model output.                                                             |
+| `text`          | `string`                                               | Model text output. Undefined for system-level failures.                                                                                                        |
+| `json`          | `unknown`                                              | Parsed output when `responseFormat` is `"json"` or `json_schema`.                                                                                              |
+| `error`         | `string`                                               | Rejection, timeout, provider, parse, or runtime error detail.                                                                                                  |
+| `provider`      | `string`                                               | Provider used for the analysis run, when known.                                                                                                                |
+| `model`         | `string`                                               | Model used for the analysis run, when known.                                                                                                                   |
+| `usage`         | `{ input?, output?, cacheRead?, cacheWrite?, total? }` | Token/cache accounting reported by the provider path, when available.                                                                                          |
+| `usageState`    | `string`                                               | `not_attempted` (never reached a provider), `available` (completed with usage), or `unavailable`.                                                              |
+| `costUsd`       | `number`                                               | Set by the Gateway only when `usageState` is `available`: the in-band gateway cost when the provider gateway reported one, otherwise the model-entry estimate. |
+| `costOrigin`    | `string`                                               | Provenance of `costUsd`: `gateway` (in-band, e.g. Bifrost `extra_fields.cost`) or `estimate` (computed from `models.providers`).                               |
+| `responseModel` | `string`                                               | Resolved model reported by the provider response, when present (e.g. a gateway answered with `gpt-4o` while `model` names the proxy id).                       |
+| `elapsedMs`     | `number`                                               | Wall-clock runtime for the analysis attempt.                                                                                                                   |
+| `jobId`         | `string`                                               | Present for queued jobs and generated runs where correlation needs it.                                                                                         |
+
+`usageState` is authored by the transport, never guessed. `unavailable` means the call was
+dispatched but its usage may be missing or synthesized (an error, an abort, or a provider that
+reported none); treat it as spent. Pricing has two sources. When the provider gateway reports the
+cost in-band (`usage.cost.origin === "gateway"`, e.g. Bifrost's `extra_fields.cost`), that value
+is the real spend and wins over any estimate — including `$0` (`costOrigin: "gateway"`); a
+`gateway-unpriced` marker counts as missing cost, never `$0`. Otherwise `costUsd` is estimated by
+the Gateway from the model entry under `models.providers` (`costOrigin: "estimate"`), and any
+`costUsd` a transport supplies is discarded, so plugins never price calls themselves. The
+embedded transport has no in-band gateway cost and is always estimated. A model declared there
+without a `cost` block defaults to zero cost (`costUsd: 0`); a model with no config entry gets no
+`costUsd`. Task passes can roll results up with
+`createPassUsageAccumulator()` (see [Recording pass measurement](/concepts/tasks#recording-pass-measurement)).
+
+Pass `signal` (an `AbortSignal`) to cancel a call. A job still waiting in the plugin admission
+queue or the shared analysis lane is removed and resolves `rejected` with
+`usageState: "not_attempted"`; an in-flight provider call is aborted and resolves with
+`usageState: "unavailable"`.
+
+`enqueue(...)` returns an `AnalysisJob` immediately:
+
+| Field      | Type      | Notes                                                                                        |
+| ---------- | --------- | -------------------------------------------------------------------------------------------- |
+| `jobId`    | `string`  | Opaque id for the accepted or rejected queued analysis request.                              |
+| `accepted` | `boolean` | `true` when the job was accepted into the in-process queue.                                  |
+| `reason`   | `string`  | One of: `invalid`, `rejected`, `queue-full`, `shutdown`. Present when `accepted` is `false`. |
+
+When using memory tools, pass the originating session key so memory scope rules evaluate
+against the source channel or direct chat. The analysis transcript still uses a transient
+internal session key and is not synced back to session storage. Analysis is text-only in
+v1: prompt text that looks like a local image path is not auto-loaded into the model.
+Transient analysis runs also skip workspace cwd changes, skill environment overrides,
+sandbox startup, bootstrap context loading, and global hook dispatch.
+
+Provider overrides must include both `provider` and `model`. A provider-only override is
+rejected so extensions do not accidentally pair one provider with another provider's
+default model id.
