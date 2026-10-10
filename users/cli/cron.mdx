@@ -1,25 +1,41 @@
 ---
-summary: "CLI reference for `openclaw cron` (schedule and run background jobs)"
+summary: "CLI reference for `wednesdayai cron` (schedule and run background jobs)"
 read_when:
   - You want scheduled jobs and wakeups
-  - You’re debugging cron execution and logs
+  - You are debugging cron execution and logs
+audience: admin
+component: cron
+sources:
+  - src/cli/cron-cli/register.cron-add.ts
+  - src/cron/store.ts
+  - src/cron/service/ops.ts
+generated: "2026-08-20"
 title: "cron"
 ---
 
-# `openclaw cron`
+# `wednesdayai cron`
 
 Manage cron jobs for the Gateway scheduler.
+
+`openclaw cron` is a permanent alias for the same commands.
+
+After upgrade, existing jobs import from `~/.openclaw/cron/jobs.json` into the
+Gateway `cron_jobs` table on first start (SQLite or Postgres). On Postgres the
+epoch-ms columns are `BIGINT`; an older 32-bit table is widened on Gateway start.
+CLI commands are unchanged. Inspect pipeline fires with
+`wednesdayai task status --task cron-run`.
 
 Related:
 
 - Cron jobs: [Cron jobs](/automation/cron-jobs)
 
-Tip: run `openclaw cron --help` for the full command surface.
+Tip: run `wednesdayai cron --help` for the full command surface.
 
-Note: `openclaw cron run <id>` runs in force mode by default. Force mode bypasses only the
+Note: `wednesdayai cron run <id>` runs in force mode by default. Force mode bypasses only the
 schedule due-time check; it still respects payload validity, wake gates, already-running
-protection, heartbeat/runtime guards, and delivery constraints. Use `--due` to run only when
-the job is currently due.
+protection, heartbeat/runtime guards, and delivery constraints. A disabled job is not run:
+the command returns success with `ran: false` and `reason: "disabled"` (it does not pretend
+the job is already running). Use `--due` to run only when the job is currently due.
 
 Note: isolated `cron add` jobs default to `--announce` delivery. Use `--no-deliver` to keep
 output internal. `--deliver` remains as a deprecated alias for `--announce`.
@@ -77,3 +93,26 @@ Announce to a specific channel:
 ```bash
 openclaw cron edit <job-id> --announce --channel slack --to "channel:C1234567890"
 ```
+
+Note: delivery targets are validated on `cron add` and `cron edit`; the gateway reports a rejected
+target as an `INVALID_REQUEST` error:
+
+- `--to identity:<key>` delivers through a `session.identityLinks` key. An unknown key is rejected;
+  a configured key without exactly one link for the delivery channel fails at delivery time.
+- An unprefixed `--to` that equals an `identityLinks` key is rejected. Use the `identity:<key>` form
+  or a channel-native id.
+- `--to ""` is the explicit clear value: the stored job drops `delivery.to`. Disabling delivery
+  (`--no-deliver`) always succeeds too, so a job with a bad target can always be repaired.
+- A target rejection at run time is terminal even for `--best-effort-deliver` jobs: the summary is
+  not relayed to the main session.
+
+Capture and the full fail-closed rules: [Cron jobs](/automation/cron-jobs).
+
+Note: identity attribution for job runs:
+
+- Identity attribution is only supported for isolated assistant-task jobs (`--session isolated` with an agent-turn `--message`). Only those jobs run the turn themselves and can carry the identity. Main-session jobs (timeline messages and wake-gate checks) hand the work to a heartbeat turn that runs under the heartbeat's own identity, so `--identity` is **rejected** on them rather than silently ignored.
+- `--identity <key>` on `cron add` / `cron edit` attributes the job's runs to a `session.identityLinks` key (matched case-insensitively against the keys); an absent or unmatched value leaves runs as unattributed system runs — there is never a default or fallback identity.
+- `--clear-identity` on `cron edit` removes the attribution. Clear the identity in the same edit if you are switching an attributed job to a main-session shape, otherwise the edit is rejected.
+- A pre-existing job that already carries an identity on an unsupported shape is never locked: the attribution is stripped (with a warning) when the store is loaded, and `cron enable|disable` or any other edit that does not re-assert `--identity` still succeeds.
+- Attribution applies to agents backed by the embedded agent runtime. Agents backed by a CLI provider run cron turns through `runCliAgent`, which has no sender-identity plumbing, so their runs stay unattributed even with `--identity` set.
+- The agent-facing Gateway cron tool cannot set or patch `identity`; only operator surfaces (CLI, gateway RPC, Web UI) can.
