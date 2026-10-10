@@ -414,9 +414,11 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   - Reusing an `idempotencyKey` replays the first response and starts no second run; a second call
     while the first is still in flight returns `CONFLICT` with
     `details.reason = "duplicate_in_flight"`.
-  - Attachments are inline only. For `queue` and `interrupt`, an attachment without base64
-    `content` returns `INVALID_REQUEST` with `details.reason = "attachment_content_required"`
-    rather than being dropped on the way to the agent.
+  - `queue` and `interrupt` accept attachments under the same contract as `chat.send`: any file
+    type, raster images inline, everything else through the inbound media store (see the
+    `chat.send` bullet below). An attachment without base64 `content` (for example, url-only)
+    returns `INVALID_REQUEST` with `details.reason = "attachment_content_required"` rather than
+    being dropped on the way to the agent.
   - A `message` that is blank once trimmed returns `INVALID_REQUEST`, as does a session whose send
     policy denies the send. `sessions.steer` has no `replyToId` and no `expectedLeafEntryId`: a
     steered or queued message carries neither a reply reference nor a leaf guard.
@@ -558,12 +560,11 @@ answer:
   `details: { producer: "session-storage", phase: "stopping", reasonCodes: ["storage_stopping"] }`.
   A request already held through `starting` answers the same shape as soon as `markStopping`
   fires.
-- **Failed start:** `required` methods answer `UNAVAILABLE` with
+- **Failed start:** `required` and `boot-write` methods answer `UNAVAILABLE` with
   `message: "session storage failed to start"`, `retryable: false`, and
   `details: { code: "storage_start_failed", reasonCodes: [...] }`. `UNAVAILABLE` from these
-  methods is permanent until an operator acts; a client may latch on it. `boot-write` methods
-  instead fall through to their handler: the write lands in the JSONL store, and the database
-  copy is silently lost until that backlog item is closed.
+  methods is permanent until an operator acts; a client may latch on it. A `boot-write` method
+  never runs its handler after a failed start, so its write cannot land only in the JSONL store.
 - **Ready, or never deferred** (fs-jsonl backend, restart recovery off): the handler runs
   unchanged.
 
@@ -647,6 +648,19 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     before instead of being re-checked against a leaf that may have advanced; a `/stop` message is
     not checked. The guard narrows the race between two devices. It is not a lock: two sends that
     arrive together can both pass.
+  - `attachments` accepts any file type (ADR 0093). Raster images (mime sniffed from the bytes,
+    else the declared type; SVG never counts as inline) travel as inline `images[]`; every other
+    file is written through the inbound media store and handed to the turn as media paths, with
+    the mime resolved from the sniffed bytes, else the declared type, else
+    `application/octet-stream` (a sniffed WAV is stored as `audio/wav` unless the client declared
+    `audio/x-wav`). Limits: 32 attachments per message and 5,000,000 decoded bytes per file.
+    Every attachment is validated before any file is stored, and a failure answers
+    `INVALID_REQUEST` with one of `too many attachments (max 32)`,
+    `attachment <fileName>: content must be base64 string`,
+    `attachment <fileName>: invalid base64 content`, or
+    `attachment <fileName>: exceeds size limit (N > 5000000 bytes)`. A retry or in-flight replay
+    of the same `idempotencyKey` is answered without re-parsing, so a replay never writes
+    duplicate media-store files.
 - A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
   starts, from run start to run end (never from the moment it was merely enqueued). From then it
   is exactly as abortable and listable as a run started any other way - see the `queued` outcome
@@ -914,8 +928,13 @@ Gate and provider errors are `UNAVAILABLE`:
 
 - `voice conversation disabled` — gate off, for every `stt-tts` caller and for every narrow
   caller.
-- `stt-tts requires a configured STT and TTS provider` — Voice has no configured streaming
-  transcription row and streaming speech row (including a speech `voiceId`).
+- `stt-tts requires a configured STT and TTS provider` — Voice has no registered streaming
+  transcription and streaming speech provider pair for the configuration.
+- `stt-tts requires a configured STT and TTS provider: <transcription|speech> provider "<id>" is not configured; check talk.providers.<id>.apiKey`
+  — the pair is registered, but the named provider's key is missing or does not resolve.
+- `stt-tts requires talk.providers.<id>.voiceId: speech provider "<id>" has no default voice` —
+  both keys resolved, the config sets no `voiceId`, and the speech provider declares no
+  `defaultVoiceId`. A missing key is reported before a missing voice.
 
 Voice opens STT with `providerConfig.commitStrategy: "vad"` and
 `providerConfig.endOfTurnSilenceMs` from `talk.conversation.endOfTurnSilenceMs`. Keys already set
@@ -1013,7 +1032,9 @@ and `providers` — the same rows: `{id, label, configured, modes: ["transcripti
 `{id, label, configured, diagnostic?, modes, transports}` plus `brains: ["agent-consult"]` on
 streaming transcription only. `modes` is `["streaming"]`. `transports` is `["gateway-relay"]`.
 `diagnostic`, present only when `configured` is false and a cause is known, is
-`"missing-api-key"`, `"secret-ref-unresolved"`, or `"provider-error"`. Realtime rows use
+`"missing-api-key"`, `"secret-ref-unresolved"`, `"provider-error"`, or, on a speech row whose
+config sets no `voiceId` and whose provider declares no `defaultVoiceId`, `"missing-voice-id"`.
+Realtime rows use
 `modes: ["realtime"]` and `transports` of `"provider-websocket"` and/or `"webrtc"`. The catalog
 never includes a secret.
 

@@ -8,7 +8,9 @@ title: "Media Understanding"
 
 # Media Understanding (Inbound) — 2026-01-17
 
-OpenClaw can **summarize inbound media** (image/audio/video) before the reply pipeline runs. It auto‑detects when local tools or provider keys are available, and can be disabled or customized. If understanding is off, models still receive the original files/URLs as usual.
+WednesdayAI can **summarize inbound media** (image/audio/video) before the reply pipeline runs. It auto‑detects when local tools or provider keys are available, and can be disabled or customized. If understanding is off, models still receive the original files/URLs as usual.
+
+**Providers as extensions:** media understanding providers are shipped as plugin extensions (e.g. `@wednesdayai/openai`, `@wednesdayai/google`), not built into core. **By default, all provider extensions are disabled** — enable them in config by setting `plugins.entries.<vendor>.enabled: true`. See [Plugin Extensions](#provider-extensions) below.
 
 ## Goals
 
@@ -85,8 +87,61 @@ Each `models[]` entry can be **provider** or **CLI**:
   capabilities: ["image"], // optional, used for multi‑modal entries
   profile: "vision-profile",
   preferredProfile: "vision-fallback",
+  apiKeyProvider: "bifrost", // optional: use credentials from a different provider (credential borrowing)
 }
 ```
+
+#### Credential borrowing (apiKeyProvider)
+
+Use `apiKeyProvider` to apply credentials from a different provider. This is useful when
+a proxy provider (e.g., Bifrost) handles authentication for underlying models:
+
+```json5
+{
+  provider: "openai",
+  model: "gpt-4o",
+  capabilities: ["image", "audio"],
+  apiKeyProvider: "bifrost", // use Bifrost API key instead of OPENAI_API_KEY
+}
+```
+
+#### Config-provided proxy bindings (OpenAI-compatible)
+
+An OpenAI-compatible API in `models.providers` can be used directly as a media
+understanding provider **without a plugin extension**:
+
+```json5
+{
+  models: {
+    providers: [
+      {
+        id: "my-proxy",
+        type: "openai-completions", // or openai-responses
+        baseUrl: "https://my-ai-gateway.example.com",
+        apiKey: "sk-...", // or use environment variable
+      },
+    ],
+  },
+  tools: {
+    media: {
+      models: [
+        {
+          provider: "my-proxy", // matches the provider id above
+          model: "gpt-4o-mini", // model available via your proxy
+          capabilities: ["image", "audio", "video"],
+        },
+      ],
+    },
+  },
+}
+```
+
+This synthesis is applied automatically when the config is loaded. The proxy provider
+is registered with audio, image, and video capabilities using standard OpenAI-compatible wire formats.
+
+Core sends the configured model id on the request as written in config. Proxy-side model
+aliasing and routing are operator configuration on the proxy — WednesdayAI does not rewrite
+or map model ids for the hop.
 
 ```json5
 {
@@ -129,24 +184,115 @@ Rules:
 - Audio files smaller than **1024 bytes** are treated as empty/corrupt and skipped before provider/CLI transcription.
 - If the model returns more than `maxChars`, output is trimmed.
 - `prompt` defaults to simple “Describe the {media}.” plus the `maxChars` guidance (image/video only).
-- If `<capability>.enabled: true` but no models are configured, OpenClaw tries the
-  **active reply model** when its provider supports the capability.
+- If `<capability>.enabled: true` but no models are configured, WednesdayAI determines the
+  image/media model using the chat's session or channel model rather than just the agent default.
+  When the turn's active model is text-only, selection follows the
+  [text-only fallback order](#describing-media-when-the-primary-model-is-text-only).
+
+### Describing media when the primary model is text-only
+
+Media understanding evaluates whether the model handling the turn can perceive images or media
+natively. This check inspects the turn's session or channel model override (if set) rather than only
+the agent default model. If the active model is text-only, media understanding automatically selects
+a capable vision model in this order:
+
+1. `tools.media.image.models` (or shared `tools.media.models`) — explicit configuration replaces
+   the automatic chain below entirely
+2. `agents.defaults.imageModel`
+3. The active provider's first image-capable model in `models.providers.<id>.models[]`
+4. The provider's declared default model (`defaultModels.image`)
+5. The Gemini CLI, when the `gemini` binary is on PATH
+6. Auto-detect across enabled media providers (`autoDetectOrder`)
+
+The order above — the pin displacing the active model — applies only when the turn's active model
+is known to be text-only. When the active model is vision-capable, or unknown to the model
+catalog, `agents.defaults.imageModel` does not displace it: the active model is used first, and
+the pin keeps its fallback slot — after the active-model probe and local audio, before the
+Gemini CLI and auto-detect. This keeps a provider that authenticates through its own declared
+environment variables reachable on the active-model probe.
 
 ### Auto-detect media understanding (default)
 
 If `tools.media.<capability>.enabled` is **not** set to `false` and you haven’t
-configured models, OpenClaw auto-detects in this order and **stops at the first
-working option**:
+configured models, WednesdayAI auto-detects enabled providers and chooses based on
+per-provider `autoDetectOrder` metadata. **Shipped order** (lower numbers tried first):
 
-1. **Local CLIs** (audio only; if installed)
-   - `sherpa-onnx-offline` (requires `SHERPA_ONNX_MODEL_DIR` with encoder/decoder/joiner/tokens)
-   - `whisper-cli` (`whisper-cpp`; uses `WHISPER_CPP_MODEL` or the bundled tiny model)
-   - `whisper` (Python CLI; downloads models automatically)
-2. **Gemini CLI** (`gemini`) using `read_many_files`
-3. **Provider keys**
-   - Audio: OpenAI → Groq → Deepgram → Google
-   - Image: OpenAI → Anthropic → Google → MiniMax
-   - Video: Google
+**Audio:**
+
+1. OpenAI (10)
+2. Groq (20)
+3. Deepgram (30)
+4. Google (40)
+5. Mistral (50)
+6. ElevenLabs (60)
+7. OpenRouter (70)
+8. DeepInfra (80)
+9. Bifrost (90)
+
+**Image:**
+
+1. OpenAI (10)
+2. Anthropic (20)
+3. Google (30)
+4. MiniMax (40)
+5. Z.ai (50)
+
+**Video:**
+
+1. Google (10)
+2. Moonshot (20)
+
+When a provider extension is **enabled**, its default model is used automatically if no explicit
+model entry is configured. To enable an extension, add its entry to your config:
+
+```json5
+{
+  plugins: {
+    entries: {
+      openai: { enabled: true },
+      groq: { enabled: true },
+      // other media-understanding providers...
+    },
+  },
+}
+```
+
+**Local CLIs** (audio only) are tried before provider auto-detection if installed:
+
+- `sherpa-onnx-offline` (requires `SHERPA_ONNX_MODEL_DIR` with encoder/decoder/joiner/tokens)
+- `whisper-cli` (`whisper-cpp`; uses `WHISPER_CPP_MODEL` or the bundled tiny model)
+- `whisper` (Python CLI; downloads models automatically)
+
+**Gemini CLI** (`gemini`) using `read_many_files` is available as a fallback CLI entry if configured.
+
+#### Migration from pre-0.5
+
+If you upgraded WednesdayAI and media understanding stopped working, the provider extension
+you need is now **disabled by default**. Check the gateway warning logs for a message like:
+
+```text
+media auto-selection exhausted: no media-understanding providers are registered — enable a
+media provider extension (plugins.entries.<id>.enabled: true)
+```
+
+The fix is to enable your provider extension in config (see above). You may also need to
+set `OPENAI_API_KEY` or the equivalent environment variable for your chosen provider if not
+already set. Credentials resolve in this order, first hit wins:
+
+1. A stored auth profile for the provider.
+2. An environment variable core maps for that provider id.
+3. Any variable the provider extension declares for itself, such as `ELEVENLABS_API_KEY` or
+   `DEEPINFRA_API_KEY`.
+4. `models.providers.<id>.apiKey` in `openclaw.json`.
+
+A provider whose credential resolves nowhere is **skipped** during auto-detection rather than
+tried and failed.
+
+<Note>
+Step 3 did not work in releases up to and including 0.4.10: a provider whose id core did not
+recognise could never authenticate, no matter which variable was exported. ElevenLabs and DeepInfra
+were affected, as was Google when only `GOOGLE_API_KEY` was set rather than `GEMINI_API_KEY`.
+</Note>
 
 To disable auto-detection, set:
 
@@ -191,13 +337,22 @@ lists, OpenClaw can infer defaults:
 For CLI entries, **set `capabilities` explicitly** to avoid surprising matches.
 If you omit `capabilities`, the entry is eligible for the list it appears in.
 
-## Provider support matrix (OpenClaw integrations)
+## Provider support matrix (WednesdayAI integrations)
 
-| Capability | Provider integration                             | Notes                                                     |
-| ---------- | ------------------------------------------------ | --------------------------------------------------------- |
-| Image      | OpenAI / Anthropic / Google / others via `pi-ai` | Any image-capable model in the registry works.            |
-| Audio      | OpenAI, Groq, Deepgram, Google, Mistral          | Provider transcription (Whisper/Deepgram/Gemini/Voxtral). |
-| Video      | Google (Gemini API)                              | Provider video understanding.                             |
+| Provider     | Audio | Image | Video | Notes                                                         |
+| ------------ | ----- | ----- | ----- | ------------------------------------------------------------- |
+| OpenAI       | ✓     | ✓     | —     | Whisper API (audio), vision model (image).                    |
+| Groq         | ✓     | —     | —     | Whisper API via Groq.                                         |
+| Deepgram     | ✓     | —     | —     | Deepgram speech-to-text.                                      |
+| Google       | ✓     | ✓     | ✓     | Gemini API (all three capabilities).                          |
+| Mistral      | ✓     | —     | —     | Mistral Voxtral transcription.                                |
+| ElevenLabs   | ✓     | —     | —     | ElevenLabs Scribe.                                            |
+| MiniMax      | —     | ✓     | —     | MiniMax-VL vision models.                                     |
+| Moonshot     | —     | —     | ✓     | Moonshot video understanding.                                 |
+| OpenRouter   | ✓     | —     | —     | OpenAI-compatible audio transcription proxy.                  |
+| DeepInfra    | ✓     | —     | —     | OpenAI-compatible Whisper proxy.                              |
+| Bifrost      | ✓     | ✓     | ✓     | Proxy/LLM routing; audio, image, video via OpenAI-compatible. |
+| Config proxy | ✓     | ✓     | ✓     | Any OpenAI-compatible API in `models.providers`.              |
 
 ## Model selection guidance
 
@@ -206,6 +361,46 @@ If you omit `capabilities`, the entry is eligible for the list it appears in.
 - Keep at least one fallback per capability for availability (quality model + faster/cheaper model).
 - CLI fallbacks (`whisper-cli`, `whisper`, `gemini`) are useful when provider APIs are unavailable.
 - `parakeet-mlx` note: with `--output-dir`, OpenClaw reads `<output-dir>/<media-basename>.txt` when output format is `txt` (or unspecified); non-`txt` formats fall back to stdout.
+
+## Provider extensions
+
+Media understanding providers are plugin extensions that must be explicitly enabled. Enable
+a provider extension by adding it to your config under `plugins.entries`:
+
+```json5
+{
+  plugins: {
+    entries: {
+      // Built-in provider extensions; disabled by default
+      openai: { enabled: true },
+      groq: { enabled: true },
+      deepgram: { enabled: true },
+      google: { enabled: true },
+      mistral: { enabled: true },
+      elevenlabs: { enabled: true },
+      openrouter: { enabled: true },
+      deepinfra: { enabled: true },
+      bifrost: { enabled: true },
+      // Enable only the providers you need
+    },
+  },
+}
+```
+
+See [Plugin Agent Tools](/plugins/agent-tools) and [Plugin Media Understanding
+Providers](/plugins/media-understanding-providers) for details on building custom
+media understanding providers.
+
+Each extension provides:
+
+- **Provider ID**: used in `provider:` field when explicitly configuring a model entry.
+- **Auto-detect metadata**: `autoDetectOrder` (priority for auto-selection) and
+  `defaultModels` (fallback model when none is configured).
+- **Wire functions**: capabilities-specific implementations (audio transcription, image
+  description, video understanding).
+- **Declared env vars**: `envVars`, the environment variables the provider can authenticate from.
+  These are honoured as a credential source, so an extension can ship support for its own key
+  without a core change.
 
 ## Attachment policy
 
@@ -216,6 +411,23 @@ Per‑capability `attachments` controls which attachments are processed:
 - `prefer`: `first`, `last`, `path`, `url`
 
 When `mode: "all"`, outputs are labeled `[Image 1/2]`, `[Audio 2/2]`, etc.
+
+To describe every photo in an album, configure `attachments` under `tools.media.image`:
+
+```json5
+{
+  tools: {
+    media: {
+      image: {
+        attachments: {
+          mode: "all",
+          maxAttachments: 10,
+        },
+      },
+    },
+  },
+}
+```
 
 ## Config examples
 
@@ -369,7 +581,7 @@ When `mode: "all"`, outputs are labeled `[Image 1/2]`, `[Audio 2/2]`, etc.
 
 When media understanding runs, `/status` includes a short summary line:
 
-```
+```text
 📎 Media: image ok (openai/gpt-5.2) · audio skipped (maxBytes)
 ```
 
@@ -380,6 +592,10 @@ This shows per‑capability outcomes and the chosen provider/model when applicab
 - Understanding is **best‑effort**. Errors do not block replies.
 - Attachments are still passed to models even when understanding is disabled.
 - Use `scope` to limit where understanding runs (e.g. only DMs).
+- A failure is quiet in the reply but not in the log. Each provider that is reached and fails logs
+  one `warn` line with its status and message, and an exhausted chain logs a single `warn`
+  summarising every attempt. Set `logging.level` to `debug` for per-step detail: the resolved
+  chain, each attempt, and the transcript length on success.
 
 ## Related docs
 
