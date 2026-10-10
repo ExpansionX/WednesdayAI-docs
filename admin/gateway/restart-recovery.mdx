@@ -1,0 +1,170 @@
+---
+summary: "Gateway restart-recovery control plane: readiness, journal, Doctor, and what recovers on default vs sqlite installs"
+read_when:
+  - A gateway restart leaves chat, deliveries, or session runs blocked
+  - Interpreting /readyz recovery snapshots or doctor.recovery.*
+  - Confirming which adapters run on default/jsonl vs sqlite storage
+title: "Restart recovery"
+---
+
+# Restart recovery
+
+On gateway start the restart-recovery control plane claims a single-owner epoch, inspects first-party and plugin adapters for interrupted work, classifies evidence, applies safe dispositions, then opens root-work admission. Fire-and-forget startup orchestrators (`src/gateway/startup-recovery.ts`) are gone; recovery is this awaited sequence.
+
+There is no config block for recovery budgets or journal paths. The journal is `${stateDir}/restart-recovery.sqlite` (`stateDir` from `OPENCLAW_STATE_DIR` or `~/.openclaw`). The owner lock is `${stateDir}/restart-recovery-owner.sock`.
+
+Recovery uses one 30-second startup deadline and schedules at most 256 adapter mutations per boot. The deadline covers streamed inspection and every `reattach`, `resume`, `complete`, and `cancel` mutation. An inspection timeout keeps the boot not ready. An apply timeout records `unknown_settlement` and also keeps the boot not ready because the timed-out mutation may still be running.
+
+## Startup phases
+
+Snapshot `phase` walks:
+
+`listen` → `claim_owner` → `discover` → `classify` → `reconcile` → `prepare_runtime` → `ready`
+
+`blocked` is the failure phase (journal unwritable/corrupt, owner lock held, producer prepare failed). Admission stays closed.
+
+A subsystem safety hold is different from a durable blocked item. In particular, `storage_preservation_blocked` rejects all root work, so `/healthz` remains `200` while `/readyz` returns `503` with `ready: false` and `degraded: true`.
+
+`ready` may still be `degraded: true` when items remain `blocked` (unknown settlement). Root work is admitted; operators repair those items with Doctor.
+
+A blocked item clears on its own once the subsystem that owns its source finalizes it. While items are blocked, the gateway re-checks them every 15 seconds. An item whose source is no longer recoverable is recorded `completed`, its incident closes, and `degraded` returns to `false`. For example, a task pass interrupted by a crash is held while its lease may still be live. Once the task dispatcher reclaims the expired lease (the run becomes `preempted` with `recovered: true`), the item clears.
+
+## Probes
+
+| Probe                      | While recovering                                                                                                      | When ready                                                                       |
+| -------------------------- | --------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------- |
+| `/healthz` (and `/health`) | `200` `{ ok: true, status: "live" }`                                                                                  | same                                                                             |
+| `/readyz` (and `/ready`)   | `503` with a recovery snapshot, or `{ recovery: null, reasonCodes: ["recovery_pending"] }` if no runtime is installed | `200`; body includes `recovery.ready`, `recovery.degraded`, counts, reason codes |
+
+Probes are unauthenticated. `Cache-Control: no-store`. Only `GET` and `HEAD` are allowed (`405` otherwise). Dockerfile HEALTHCHECK uses `/healthz`.
+
+Chat `send` / `chat.send` / `agent` RPCs reject with `RECOVERY_NOT_READY` (`recovery_pending`) until admission opens.
+
+## Storage-backed RPCs during a restart
+
+On a sqlite or postgres install the gateway serves its WebSocket before its session storage is published, because the storage supervisor starts behind the recovery owner fence. Storage-backed methods — run history, `chat.history`, the session-run and task reads, and the session
+writers (`sessions.create`, `sessions.patch`, `sessions.reset`, `sessions.delete`, `sessions.compact`,
+`chat.inject`) — are held at dispatch for up to 10 seconds while that start completes. The hold keeps
+required reads from using a JSONL fallback and keeps boot-write methods from landing only in JSONL;
+the full method classification is in
+[Protocol](/gateway/protocol#session-storage-readiness). If the start finishes inside the hold, the handler runs normally. If the gateway is still starting after 10 seconds, they answer retryable `RECOVERY_NOT_READY` (`storage_starting`), and the log carries a single warning from the `gateway/storage-fence` subsystem — `session storage still starting after 10000ms; storage-backed methods answer RECOVERY_NOT_READY` — once per boot, not one line per request. A client that reconnects during a restart therefore never sees an empty list or an error burst: it gets the real transcript once storage is ready, and if storage takes longer than the hold its first request gets a retryable error and the client keeps its run list until a retry succeeds.
+
+`UNAVAILABLE` with `details.code = "storage_start_failed"` from these methods means session storage did not start in this process while the gateway kept serving: restart recovery failed non-fatally. `details.reasonCodes` names the cause — `owner_lock_held` (another gateway process still holds the owner lock for this state dir; stop it), `prior_owner_unproven` or `owner_fence_unavailable` (the owner fence could not be established), `journal_unavailable` / `journal_unwritable` / `journal_corrupt` (the state dir's restart-recovery journal cannot be opened, written, or parsed), `storage_supervisor_start_failed` (the storage supervisor itself failed to start), or `assembly_failed` (recovery assembly threw); a failure that carries no specific code answers `recovery_start_failed`. That list is the complete set of start-failure codes. The answer is immediate and non-retryable by design, and clients may latch on it. The same failure answers the session writers above without running their handler, so a write refused this way never lands only in the JSONL store. Diagnose with the gateway log lines `restart-recovery journal unavailable` / `restart-recovery owner fence unavailable`, `storage.v1` (`wednesdayai status` or `wednesdayai doctor --deep`), and the restart-recovery troubleshooting below.
+
+During shutdown the hold applies in reverse: the storage state turns `stopping` at shutdown entry, so requests arriving between admission close and socket close answer retryable `RECOVERY_NOT_READY` (`storage_stopping`, "gateway is stopping") instead of a storage error, held for up to the same 10 seconds. The socket can close before the hold expires, though, so a client may instead see the connection drop. From the client's perspective both answers are retryable — reconnect and send the request again; it lands on the next process.
+
+## What recovers
+
+On **every** install (default, `fs-jsonl`, and sqlite):
+
+- outbound delivery (`core:outbound-delivery`)
+- session runs (`core:session-runs`)
+- agent turns (`core:agent-turns`)
+- Pi embedded (`core:pi-embedded`)
+- ACP runtime (`core:acp-runtime`)
+- storage supervisor (`core:storage-supervisor`)
+- plugin-owned work without an adapter (`core:plugin-owned-work` → `unsupported_runtime` block). A plugin's task passes are not included: the task pipeline recovers them.
+
+**Not** on default or `fs-jsonl` installs: task-run (`core:task-runs`) and cron/heartbeat (`core:cron-heartbeat`) adapters assemble only when sqlite session storage publishes `taskRuns` / `cronJobs`. Do not expect those surfaces to recover on default installs.
+
+Session-run and embedded-Pi resume require a persistent agent-turn work queue. On the default loopback runtime, automatic resume and `sessions.runs.continue` fail closed before changing run state; configure durable session storage or cancel the run instead.
+
+### Interrupted user runs
+
+Turns started through the Gateway `agent` RPC (including `wednesdayai agent` without `--local`)
+are recorded as session runs of kind `chat` with recovery mode `off`, so the idle trigger sees
+them. Recovery never resumes an `off` run. When a crash leaves one `running`, the next start
+finalizes it as `abandoned`: its `recoveryReason` starts with `recovered on restart:` and a
+`session_run.recovered` event is appended. The item is cancelled, not blocked, so it does not set
+`degraded`.
+
+A `running` `off` run that belongs to the current Gateway instance is live, not a crash leftover.
+Ingress that is not admission-gated (the OpenAI-compatible and OpenResponses HTTP endpoints, and
+node `voice.transcript` / `agent.request`) can start one before recovery finishes. Recovery
+neither inspects nor changes it, and the run finalizes its own row.
+
+### ACP turns
+
+ACP turns are recorded as session runs of kind `acp` with recovery mode `off`, so they participate
+in the same restart machinery as other interactive work:
+
+- The restart gate counts active ACP turns, and the drain waits for them alongside queued commands
+  within `gateway.restartResilience.drainTimeoutMs` (default 30000). While the gateway is draining,
+  a new ACP message is rejected with `ACP_GATEWAY_DRAINING` before the agent runs anything: a
+  not-sent prompt has no side effects and is resent, not continued by replying.
+- On both restart and stop, a 5 second cooperative cancel runs before the server closes. Each
+  cancelled turn finalizes its row as `cancelled` with the shutdown reason (`gateway restart` or
+  `gateway stop`), and its dispatcher delivers one interruption notice to the bound thread while
+  channels are still up. A turn the drain catches mid-setup ends `cancelled` with reason
+  `gateway draining: not sent`, so it is distinguishable from a turn cancelled mid-run.
+- At boot, a prior instance's non-terminal `acp` rows are finalized as `abandoned` with a
+  `session_run.recovered` event, and one notice is delivered per affected turn (at-least-once,
+  marker-guarded; 24 hour lookback, so older rows are not re-notified). The item is cancelled, not
+  blocked, so it never sets `degraded`. A `cancelled` row whose shutdown-time notice did not reach
+  the thread gets the boot notice too. Sessions whose `recoveryMode` is `decide` and that a crash
+  left `interrupted`, `needs_recovery_decision`, or still `running` get the same at-least-once
+  notice, with one gap: a restart
+  that stayed in-process (the fresh-process respawn failed, or `OPENCLAW_NO_RESPAWN` is set) keeps
+  the same instance id, so decide rows that same process marked are treated as current and get no
+  notice.
+- At boot the gateway also settles each affected session's harness state (bounded to 5 seconds per
+  session): after the runtime backend reports healthy, it asks the runtime for status and
+  cooperatively cancels a still-running prior owner (`reason: "gateway-restart-recovery"`), then
+  resets the session meta to idle. It never spawns a harness process to do this; if the backend
+  does not become healthy inside the budget, the settle is skipped with a warning and the surviving
+  owner is left to the next boot.
+
+The user-facing behavior, including the notice text and how to continue, is in
+[ACP agents](/tools/acp-agents#gateway-restarts).
+
+### Background child processes
+
+Background commands started through the exec and process tools run under the process supervisor,
+and so do agent turns on CLI backends (for example a `claude-cli` provider): those turns are
+supervisor children too. On restart and stop the supervisor cancels those children, waits up to
+~3.5 s for them to exit (enough for the SIGTERM → SIGKILL escalation), and flushes its ledger of
+live children — with a final bounded sweep right before the process exits, for children spawned
+while the server was closing. The ledger is `${stateDir}/process-supervisor/gateway-children.json`,
+written with mode 0600; a file it cannot parse is renamed aside as
+`gateway-children.json.corrupt-<timestamp>`, never deleted. Children cancelled this way carry
+reason `gateway-shutdown`, and model fallback treats that cancel as an abort instead of re-running
+the turn on a fallback model.
+
+Crash-orphan reaping has prerequisites: it runs at boot only when restart recovery is running and
+unblocked (skipped or blocked boots never touch the ledger), and only on POSIX. On Linux the
+identity probe reads `/proc` directly; on macOS it uses `ps`; Windows gets only the
+stop-at-shutdown guarantee. If the gateway itself crashed and a child outlived it, the next
+eligible boot reaps the orphan by matching the recorded start time against the child's real
+elapsed process time; only children proven to belong to a prior instance are killed, and entries
+a probe could not verify are kept for a later boot (capped at 7 days) instead of being erased.
+
+## Doctor
+
+`wednesdayai doctor` (`openclaw` alias) calls `noteRecoveryHealth`, which drives generation-bound RPCs:
+
+- `doctor.recovery.inspect`
+- `doctor.recovery.plan` (requested action, typically `resume`)
+- `doctor.recovery.apply` (plan + authority token)
+
+Plans bind to the current owner generation. A restart invalidates an unused plan. `status` and `health` project the same `recovery.v1` snapshot (owner generation and startedAt only; bootId/pid are redacted).
+
+`doctor.recovery.inspect` separates `items`, the current epoch's actionable inventory, from `historyItems`, retained audit rows from prior epochs and the legacy journal table. Plans can target only `items`; a historical item ID returns `doctor_item_missing`.
+
+Doctor publishes only evidence observed after a mutation: a fresh matching adapter observation first, then the observation returned by `apply`. It never reuses pre-apply evidence. A mutation that returns without either form of evidence is rejected with `doctor_evidence_changed`.
+
+If an adapter throws after its mutation may have started, automatic recovery records the item as `unknown_settlement` and does not retry it again in the same epoch. A successor epoch may retry only after fresh inspection proves `not_started`; the operation ID and attempt count remain stable across that succession.
+
+## Troubleshooting
+
+- **`/readyz` stays 503 with `recovery_pending`:** no runtime installed, or admission still recovering. Check gateway logs for journal/lock errors.
+- **`/readyz` 503, `phase: blocked`, `journal_unwritable` / `journal_corrupt`:** the sqlite file at `${stateDir}/restart-recovery.sqlite` is preserved; do not delete it to “fix” corruption.
+- **`/readyz` 200 but `degraded: true`:** blocked items remain. An interrupted task pass clears on its own after its lease is reclaimed. Inspect the others with Doctor, and do not restart in a loop expecting unknown settlement to resume on its own.
+- **Two live gateways on one state dir:** the second fails owner CAS / kernel lock (`owner_lock_held`). Stop the prior process. While the loser keeps serving, its storage-backed RPCs answer non-retryable `UNAVAILABLE` (`storage_start_failed`) — see [Storage-backed RPCs during a restart](#storage-backed-rpcs-during-a-restart).
+- **`storage_start_failed` from run history or `chat.history` with the gateway otherwise healthy:** restart recovery could not start session storage in this process. `details.reasonCodes` names the hold (`owner_lock_held`, `prior_owner_unproven`, `owner_fence_unavailable`, `journal_unavailable`, `journal_unwritable`, `journal_corrupt`, `storage_supervisor_start_failed`, `assembly_failed`). Remove the cause — stop the other process, or repair the state dir's journal — then restart the gateway. Clients may latch on this answer; it clears only after the restart.
+- **A user reports `ACP error (ACP_TURN_INTERRUPTED)` or `ACP_GATEWAY_DRAINING` around a restart:** expected behavior, not a fault. The first is a turn the shutdown cancelled; the second is a message that arrived while the gateway was draining and was never sent to the agent. Inspect the rows with `sessions.runs.list` (filter `kind: "acp"`); what the user should do is in [ACP agents](/tools/acp-agents#gateway-restarts).
+
+## Related
+
+- [Session storage recovery](/gateway/session-storage-recovery)
+- [Doctor](/gateway/doctor)
+- [Outbound delivery](/gateway/outbound-delivery)

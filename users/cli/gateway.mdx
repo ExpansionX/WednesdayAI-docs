@@ -37,7 +37,7 @@ Notes:
 
 - By default, the Gateway refuses to start unless `gateway.mode=local` is set in `~/.openclaw/openclaw.json`. Use `--allow-unconfigured` for ad-hoc/dev runs.
 - Binding beyond loopback without auth is blocked (safety guardrail).
-- `SIGUSR1` triggers an in-process restart when authorized (`commands.restart` is enabled by default; set `commands.restart: false` to block manual restart, while gateway tool/config apply/update remain allowed).
+- `SIGUSR1` triggers a restart when authorized (`commands.restart` is enabled by default; set `commands.restart: false` to block manual restart, while gateway tool/config apply/update remain allowed). The restart first drains active command-queue tasks and active ACP turns (within `gateway.restartResilience.drainTimeoutMs`, default 30000), then closes like a stop, and only then starts a fresh process: under launchd or systemd the service supervisor restarts it (on macOS the gateway kickstarts the launchd service to skip throttling delays); otherwise the gateway spawns its own replacement and exits. Only if that respawn fails, or `OPENCLAW_NO_RESPAWN` is set, does it restart in-process instead.
 - `SIGINT`/`SIGTERM` handlers stop the gateway process, but they don’t restore any custom terminal state. If you wrap the CLI with a TUI or raw-mode input, restore the terminal before exit.
 
 ### Options
@@ -149,6 +149,13 @@ openclaw gateway call status
 openclaw gateway call logs.tail --params '{"sinceMs": 60000}'
 ```
 
+For scripting, pass `--json`. Without it the command prints a `Gateway call: <method>` preamble
+before the payload, which breaks JSON pipes such as `jq`:
+
+```bash
+openclaw gateway call sessions.runs.list --params '{"limit": 10}' --json | jq '.runs[0]'
+```
+
 ### `gateway usage-cost`
 
 Fetch the usage cost summary for the last N days from gateway session logs.
@@ -174,6 +181,22 @@ Notes:
 
 - `gateway install` supports `--port`, `--runtime`, `--token`, `--force`, `--json`.
 - Lifecycle commands accept `--json` for scripting.
+
+### Config pre-flight gate
+
+`gateway restart` (and `gateway start` when the service is already loaded) validates the config before stopping anything. If the config is invalid, the restart is refused with exit code 1, the running gateway stays up, and the CLI prints the exact issue path plus repair hints:
+
+```bash
+openclaw gateway restart
+# Config invalid
+# File: ~/.openclaw/openclaw.json
+# Problem:
+#   - plugins.entries.<id>.config: invalid config: must NOT have additional properties
+# Run: openclaw doctor --fix
+# Or: openclaw config validate
+```
+
+Repair with `openclaw doctor --fix`, or fix the named key manually and re-check with `openclaw config validate`, then retry the restart. `gateway stop` is never gated; a first start of a stopped gateway is not gated either (the failure surfaces as a normal startup error instead).
 
 ## Discover gateways (Bonjour)
 
