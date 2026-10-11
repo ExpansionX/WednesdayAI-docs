@@ -4,12 +4,51 @@ read_when:
   - Deciding how to schedule recurring tasks
   - Setting up background monitoring or notifications
   - Optimizing token usage for periodic checks
+audience: user
+component: cron
+sources:
+  - src/cron/store.ts
+  - src/cron/service/agent-turn.ts
+  - src/cron/service/timer.ts
+  - src/infra/heartbeat-runner.ts
+  - src/acp/control-plane/agent-turn-enqueue.ts
+generated: "2026-08-24"
 title: "Cron vs Heartbeat"
 ---
 
 # Cron vs Heartbeat: When to Use Each
 
 Both heartbeats and cron jobs let you run tasks on a schedule. This guide helps you choose the right mechanism for your use case.
+
+## After you upgrade
+
+Existing reminders, scheduled jobs, and heartbeat checklists keep working. You
+do not need to recreate them or change how you talk to WednesdayAI in chat. If
+a reminder you expected never arrived, ask whoever runs the Gateway to check
+`wednesdayai cron list` and `wednesdayai task status --task cron-run`.
+
+### What you should see
+
+- A scheduled reminder or nudge that has something to say arrives in the same
+  chat you already use. Quiet check-ins (`HEARTBEAT_OK` / nothing to report)
+  stay silent.
+- If WednesdayAI was mid-conversation when a reminder fired, only a reminder
+  that is set to wait its turn (`--wake next-heartbeat`, or any other
+  `busy: delay` turn) still arrives after a Gateway restart. A main-session
+  reminder with `--wake now` may skip when the conversation is busy. Those
+  skipped "now" reminders are not parked, so a restart does not bring them back.
+- An isolated heartbeat check-in reads only the plugin signal notes queued for
+  your main chat, and it answers them in that check-in. Every other queued item
+  stays put and waits for your next real message.
+- Isolated summaries, failure alerts, auto-disable notices, and wake-ups are
+  ordinary scheduled turns. They do not start a separate heartbeat cycle.
+
+Cron jobs import into the Gateway store on first start. Heartbeat skip reasons
+and isolated-session rules stay the same.
+
+Cron, heartbeat, and nudge are peer producers on `agent.turn`. Each enqueues its
+own turn. Cron does not require heartbeat config and does not call the heartbeat
+runner.
 
 ## Quick Decision Guide
 
@@ -22,6 +61,10 @@ Both heartbeats and cron jobs let you run tasks on a schedule. This guide helps 
 | Remind me in 20 minutes                         | Cron (main, `--at`)           | One-shot with precise timing                 |
 | Background project health check                 | Heartbeat                     | Piggybacks on existing cycle                 |
 | Cheap check, wake persona only if it finds work | Wake-gate (cron or heartbeat) | Gate the expensive turn behind a cheap check |
+
+Scheduled isolated cron jobs still show up in chat the same way: a summary or
+nothing, depending on how you set delivery. Chat messages you send keep streaming
+as they arrive. Heartbeats are unchanged.
 
 ## Heartbeat: Periodic Awareness
 
@@ -226,20 +269,22 @@ See [Lobster](/tools/lobster) for full usage and examples.
 
 Both heartbeat and cron can interact with the main session, but differently:
 
-|         | Heartbeat                                          | Cron (main)              | Cron (isolated)            |
-| ------- | -------------------------------------------------- | ------------------------ | -------------------------- |
-| Session | Main or configured base; optional isolated sibling | Main (via system event)  | `cron:<jobId>`             |
-| History | Shared by default; fresh with `isolatedSession`    | Shared                   | Fresh each run             |
-| Context | Full by default; lightweight with `lightContext`   | Full                     | None (starts clean)        |
-| Model   | Heartbeat or main session model                    | Main session model       | Can override               |
-| Output  | Delivered if not `HEARTBEAT_OK`                    | Heartbeat prompt + event | Announce summary (default) |
+|         | Heartbeat                                          | Cron (main)                   | Cron (isolated)            |
+| ------- | -------------------------------------------------- | ----------------------------- | -------------------------- |
+| Session | Main or configured base; optional isolated sibling | Main (`agent.turn` kind cron) | `cron:<jobId>`             |
+| History | Shared by default; fresh with `isolatedSession`    | Shared                        | Fresh each run             |
+| Context | Full by default; lightweight with `lightContext`   | Full                          | None (starts clean)        |
+| Model   | Heartbeat or main session model                    | Main session model            | Can override               |
+| Output  | Delivered if not `HEARTBEAT_OK`                    | Cron turn on main             | Announce summary (default) |
 
 ### When to use main session cron
 
 Use `--session main` with `--system-event` when you want:
 
-- The reminder/event to appear in main session context
-- The agent to handle it during the next heartbeat with full context
+- The reminder/event to run as an `agent.turn` (`kind` cron) on the main session
+- The turn to run immediately (`--wake now`) or to deliver on the next main-lane idle
+  (`--wake next-heartbeat`: publishes immediately when the lane is idle at fire time, otherwise
+  parks and runs once the lane frees up — not a heartbeat tick)
 - No separate isolated run
 
 ```bash
@@ -309,22 +354,25 @@ the main session only on a positive result. The job uses `sessionTarget: "main"`
 }
 ```
 
-On a positive gate the cron runner nudges the main session with the gate text; on a negative gate
-the run is recorded as skipped and no persona turn happens. Like every nudge, the result is
-silent-unless-it-decides and honours all busy/active-hours gates.
-Cron also forwards job cancellation into the gate and the immediate heartbeat wake. If a scheduled
-or manual run is stopped, command/model checks are cancelled with the job instead of continuing in
-the background.
+On a positive gate the cron runner nudges the main session with the gate text (`agent.turn`
+`kind` nudge); on a negative gate the run is recorded as skipped and no persona turn happens.
+Like every nudge, the result is silent-unless-it-decides; a nudge against a busy main session
+parks (`busy: delay`) and delivers on lane idle rather than being dropped, and nudges are not
+subject to active-hours gating.
+Cron also forwards job cancellation into wake-gate checks and isolated runs, but not into
+`requestNudge` — a published nudge follows the nudge lifecycle and is not cancelled by job abort.
+If a scheduled or manual run is stopped, command/model checks are cancelled with the job instead of
+continuing in the background.
 
 See [Cron jobs](/automation/cron-jobs) for the full payload reference.
 
 ## Cost Considerations
 
-| Mechanism       | Cost Profile                                            |
-| --------------- | ------------------------------------------------------- |
-| Heartbeat       | One turn every N minutes; scales with HEARTBEAT.md size |
-| Cron (main)     | Adds event to next heartbeat (no isolated turn)         |
-| Cron (isolated) | Full agent turn per job; can use cheaper model          |
+| Mechanism       | Cost Profile                                               |
+| --------------- | ---------------------------------------------------------- |
+| Heartbeat       | One turn every N minutes; scales with HEARTBEAT.md size    |
+| Cron (main)     | One `agent.turn` (`kind` cron); does not require heartbeat |
+| Cron (isolated) | Full agent turn per job; can use cheaper model             |
 
 **Tips**:
 

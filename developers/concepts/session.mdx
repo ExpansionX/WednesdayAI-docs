@@ -192,7 +192,7 @@ Plugins can receive resolved runtime identity and turn correlation fields so the
 
 For operators, the important boundary is:
 
-- `session.identityLinks` remains configuration used by core identity resolution. Plugin contexts expose resolved fields such as `canonicalIdentity` and `senderIsOwner`; they do not expose raw `identityLinks`.
+- `session.identityLinks` remains configuration used by core identity resolution. Plugin contexts expose resolved fields such as `canonicalIdentity` and `senderIsOwner`; they do not expose raw `identityLinks`. Plugins additionally see `identitySource` (`"sender"` | `"parent-session"` | `"job-config"`) describing how the identity was resolved — raw `identityLinks` are still never exposed.
 - `channelConversationId` identifies the transport conversation or thread. Legacy plugin fields named `conversationId` refer to this channel identity.
 - `providerConversationId` is an opaque provider/cache correlation id derived by WednesdayAI for model calls. It is not a session storage column and should be stored only as an opaque value.
 - `turn.turnId` identifies one user turn and is the same string value as `runId` in the v1 plugin contract.
@@ -204,11 +204,12 @@ This feature does not make untrusted plugins safe. Plugins still run in-process 
 
 ## External session storage
 
-By default, sessions live in `~/.openclaw/agents/<agentId>/sessions/` on the gateway host as local
-JSONL transcript files plus the `sessions.json` store index.
+By default, transcript entries are stored in a local SQLite database at `<state-dir>/sessions.db`
+(normally `~/.openclaw/sessions.db`) on the gateway host. Each agent's session index remains at
+`~/.openclaw/agents/<agentId>/sessions/sessions.json`.
 
-For durable or shared storage, configure `session.storage` to use SQLite or Postgres, optionally
-with a Redis hot cache. See the `session.storage` section in
+To use JSONL files instead, or for shared Postgres storage with an optional Redis hot cache,
+configure `session.storage`. See the `session.storage` section in
 [Gateway configuration](/gateway/configuration) and the full
 [Configuration Reference](/gateway/configuration-reference#session).
 
@@ -217,18 +218,25 @@ with a Redis hot cache. See the `session.storage` section in
 WednesdayAI treats the configured `session.storage.backend` as the single source of truth for session
 transcript data:
 
-- **`fs-jsonl`** (legacy default): transcript entries are read and written through `*.jsonl` files.
-- **`sqlite`**: transcript entries are read and written through the SQLite `ctx_session_entries` table.
+- **`sqlite`** (default): transcript entries are read and written through the SQLite
+  `ctx_session_entries` table via a supervised worker thread that auto-recovers from crashes.
 - **`postgres`**: transcript entries are read and written through the Postgres `ctx_session_entries` table.
+- **`fs-jsonl`**: transcript entries are read and written through `*.jsonl` files.
 
-The JSONL path is reachable **only** when `backend === "fs-jsonl"`. When a database backend is active,
-core paths such as `chat.history`, `sessions.preview`, session-list title/preview derivation, and
-sub-agent announce output read from the configured database, not from JSONL files.
+Reads use the configured backend only: the JSONL path is reachable for reads **only** when
+`backend === "fs-jsonl"`. When a database backend is active, core paths such as `chat.history`,
+`sessions.preview`, session-list title/preview derivation, and sub-agent announce output read from
+the configured database, not from JSONL files. One write-side exception exists: with
+`session.storage.fallbackToJsonlOnError: true`, an individual failed database append is written to
+JSONL so the entry is not lost.
 
 What this means in practice:
 
 - Switching from JSONL to SQLite/Postgres does not require a manual transcript migration; the store
   metadata file is rebuilt on demand and the database becomes the source of truth for content.
+- Session run records (turn lifecycle rows powering run history and crash recovery) are stored in
+  the same configured backend, and the gateway converges the database schema automatically on
+  startup; no manual migrations are required.
 - If you have existing `.jsonl` files and start with a database backend, the gateway may backfill
   those files into the database on first startup, but subsequent reads always come from the database.
   Disable the backfill with `session.storage.migration.validateOnStart: false` if you want a clean
@@ -262,10 +270,12 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Direct chats follow `session.dmScope` (default `main`).
   - `main`: `agent:<agentId>:<mainKey>` (continuity across devices/channels).
     - Multiple phone numbers and channels can map to the same agent main key; they act as transports into one conversation.
-  - `per-peer`: `agent:<agentId>:dm:<peerId>`.
-  - `per-channel-peer`: `agent:<agentId>:<channel>:dm:<peerId>`.
-  - `per-account-channel-peer`: `agent:<agentId>:<channel>:<accountId>:dm:<peerId>` (accountId defaults to `default`).
+  - `per-peer`: `agent:<agentId>:direct:<peerId>`.
+  - `per-channel-peer`: `agent:<agentId>:<channel>:direct:<peerId>`.
+  - `per-account-channel-peer`: `agent:<agentId>:<channel>:<accountId>:direct:<peerId>` (accountId defaults to `default`).
   - If `session.identityLinks` matches a provider-prefixed peer id (for example `telegram:123`), the canonical key replaces `<peerId>` so the same person shares a session across channels.
+  - An inbound, unlinked sender whose raw peer id equals an `identityLinks` canonical key is contained instead of merged: it gets its own bucket with a `raw~` peer prefix (for example `agent:main:direct:raw~alice`). The `raw~` prefix is reserved — canonical keys starting with `raw~` are rejected at config load. Sessions merged before this containment landed stay merged.
+  - Because a contained `raw~` bucket is a distinct session key, peer-specific `sendPolicy` rules (and any other per-key config) do not carry over automatically: a rule matching `agent:<agentId>:direct:<canonicalKey>` does not match `agent:<agentId>:direct:raw~<peerId>` or vice versa. Add separate `keyPrefix`/`rawKeyPrefix` rules for contained senders, and keep canonical-identity rules separate.
 - Group chats isolate state: `agent:<agentId>:<channel>:group:<id>` (rooms/channels use `agent:<agentId>:<channel>:channel:<id>`).
   - Telegram forum topics append `:topic:<threadId>` to the group id for isolation.
   - Legacy `group:<id>` keys are still recognized for migration.
@@ -286,7 +296,10 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. `/new <model>` accepts a model alias, `provider/model`, or provider name (fuzzy match) to set the new session model. If `/new` or `/reset` is sent alone, WednesdayAI runs a short “hello” greeting turn to confirm the reset.
 - Manual reset: delete specific keys from the store or remove the JSONL transcript; the next message recreates them.
 - Isolated cron assistant-task jobs always mint a fresh `sessionId` per run (no idle reuse).
-  Main-session cron jobs add a system event or wake-gate nudge to the main heartbeat path instead of creating a `cron:<job.id>` chat session.
+  Main-session cron jobs enqueue an `agent.turn` (`kind` cron) on the existing main session,
+  except that main-session jobs with `payload.kind === "wakeGate"` route through `requestNudge`
+  (a `kind=nudge` turn) instead. They do not create a `cron:<job.id>` chat session and do not run
+  through the heartbeat tick.
 
 ## Send policy (optional)
 

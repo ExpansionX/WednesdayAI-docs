@@ -4,6 +4,20 @@ read_when:
   - Scheduling background jobs or wakeups
   - Wiring automation that should run with or alongside heartbeats
   - Deciding between heartbeat and cron for scheduled tasks
+audience: admin
+component: cron
+sources:
+  - src/cron/store.ts
+  - src/cron/service/store.ts
+  - src/cron/service/ops.ts
+  - src/cron/service/timer.ts
+  - src/cron/service/agent-turn.ts
+  - src/cron/service/jobs.ts
+  - src/acp/control-plane/agent-turn-enqueue.ts
+  - src/acp/control-plane/agent-turn-recovery.ts
+  - src/config/sessions/cron-job-schema.ts
+  - src/config/sessions/cron-job-store.ts
+generated: "2026-08-24"
 title: "Cron Jobs"
 ---
 
@@ -22,11 +36,18 @@ Troubleshooting: [/automation/troubleshooting](/automation/troubleshooting)
 ## TL;DR
 
 - Cron runs **inside the Gateway** (not inside the model).
-- Jobs persist under `~/.openclaw/cron/` so restarts don’t lose schedules.
+- Job definitions persist in the Gateway `cron_jobs` table. On first start after
+  upgrade the Gateway imports `~/.openclaw/cron/jobs.json` (or `cron.store`)
+  into that table so restarts do not lose schedules.
 - Two execution styles:
-  - **Main session**: enqueue a system event, then run on the next heartbeat.
-  - **Isolated**: run a dedicated agent turn in `cron:<jobId>`, with delivery (announce by default or none).
-- Wakeups are first-class: a job can request “wake now” vs “next heartbeat”.
+  - **Main session**: enqueue an agent.turn (`kind` cron). They do not call the heartbeat runner.
+  - **Isolated**: run a dedicated agent turn in `cron:<jobId>`, with delivery (announce by default or none). Isolated jobs stay isolated unless they wake/nudge the named main session.
+- Wakeups are first-class: `wakeMode: "now"` runs recurring main-session turns immediately unless
+  the lane is busy; exact-time (`schedule.kind: "at"`) turns park instead of skipping. For main-session jobs
+  `wakeMode: "next-heartbeat"` delivers on the next main-lane idle (publishes immediately when the
+  lane is idle at fire time, otherwise parks and runs once the lane frees up) — isolated jobs
+  always run at fire time, and `wakeMode` only controls the post-run main-session wake — not a
+  heartbeat tick.
 - Webhook posting is per job via `delivery.mode = "webhook"` + `delivery.to = "<url>"`.
 - Legacy fallback remains for stored jobs with `notify: true` when `cron.webhook` is set, migrate those jobs to webhook delivery mode.
 
@@ -77,6 +98,11 @@ openclaw cron add \
 
 For the canonical JSON shapes and examples, see [JSON schema for tool calls](/automation/cron-jobs#json-schema-for-tool-calls).
 
+The agent-facing cron tool deliberately cannot set or patch `identity` — identity attribution is
+operator-only (CLI, gateway RPC, Web UI), so an agent cannot escalate its own runs to a user's identity.
+Identity is also only supported on isolated agent-turn jobs; see
+[Identity attribution](/automation/cron-jobs#identity-attribution).
+
 ## Web UI workflow
 
 The Web UI is the recommended path when you are configuring cron by hand. It groups the raw
@@ -97,7 +123,8 @@ Mobile layout:
 
 The Web UI exposes the supported editable settings for normal cron operation: name, description,
 enabled state, schedule, timezone, exact timing/stagger, job type, prompt or check text, routing,
-delivery, timeout, model/thinking where applicable, remove-after-run, and failure alerts. Fields
+delivery, timeout, model/thinking where applicable, identity attribution (assistant-task jobs only),
+remove-after-run, and failure alerts. Fields
 that are inherited, unsupported for the selected job type, or only editable through raw API/store
 paths are called out in the settings coverage panel instead of being silently hidden.
 
@@ -105,23 +132,52 @@ paths are called out in the settings coverage panel instead of being silently hi
 
 **Run now** uses `cron.run` with `mode: "force"`. It bypasses only the schedule due-time check.
 It still respects payload validity, wake gates, already-running protection, heartbeat/runtime
-guards, and delivery constraints. A successful click can still create a `Skipped` run when one of
-those guards says the job should not execute.
+guards, and delivery constraints. A disabled job is not run: the result is
+`{ ok: true, ran: false, reason: "disabled" }` rather than `already-running`. A successful
+click can still create a `Skipped` run when one of those other guards says the job should
+not execute.
 
 **Run if due** uses `cron.run` with `mode: "due"`. It runs only when the schedule is currently due.
 
 For **Check first, then nudge** jobs, the test action evaluates the wake gate now. A skipped result
 with `wake-gate-empty` means the check found no work, so no nudge was sent.
-If the manual run or scheduled run is cancelled, cron forwards the cancellation signal into both
-the wake-gate check and any immediate heartbeat wake. Cancelled checks resolve as a failed/skipped
+If the manual run or scheduled run is cancelled, cron forwards the cancellation signal into the
+wake-gate check. An accepted nudge follows its own lifecycle and is not cancelled by job abort.
+Cancelled checks resolve as a failed/skipped
 run instead of leaving a command or model gate running after the cron job has stopped.
 
 ## Where cron jobs are stored
 
-Cron jobs are persisted on the Gateway host at `~/.openclaw/cron/jobs.json` by default.
-The Gateway loads the file into memory and writes it back on changes, so manual edits
-are only safe when the Gateway is stopped. Prefer `openclaw cron add/edit` or the cron
-tool call API for changes.
+Cron job _definitions_ live in the Gateway session store as a `cron_jobs` table
+(sibling to `task_runs`). The table is created for both SQLite and Postgres
+session backends. On Postgres, every epoch-ms column (`created_at_ms`,
+`updated_at_ms`, `next_run_at_ms`, `running_at_ms`, `last_run_at_ms`,
+`last_duration_ms`, `last_failure_alert_at_ms`) is `BIGINT`. A guarded
+`ALTER ... TYPE BIGINT` runs on Gateway start if an older table still has
+32-bit `integer` on those columns. On first start after upgrade, the Gateway imports
+`~/.openclaw/cron/jobs.json` (or `cron.store` if you set it) into that table
+with every row `migrated = false`, then the table is the source of truth.
+
+`cron.store` remains a valid config key and the import path. After import,
+`cron add` / `edit` / `remove` / `list` / `run` read and write the table.
+Hand-editing `jobs.json` while the Gateway is running was already unsupported;
+after cutover it also has no effect. Emptying `cron_jobs` and restarting
+re-imports `jobs.json` (including jobs added after the first import) and
+resets `migrated` to false. Prefer `wednesdayai cron add/edit` or the
+Gateway `cron.*` methods.
+
+A cut-over job (`migrated = true`) is claimed through the task pipeline and is
+not selected by the legacy timer. Two Gateway processes cannot both fire the
+same job. Each pipeline fire leaves a `task_runs` row with `trigger_source`
+`cron` (see [Task operations](/gateway/tasks)). After downtime, enabled
+migrated jobs that became due while the Gateway was down catch up at the next
+start: at least one fire per missed occurrence (duplicate delivery is
+accepted; see F-2026-08-18-01), with idempotency key
+`cron-run:<jobId>:<nextRunAtMs>`.
+
+Restart the Gateway after upgrade so the table is created and import runs
+(Linux: `systemctl --user restart openclaw-gateway`; macOS:
+`wednesdayai gateway restart --deep`).
 
 ## Beginner-friendly overview
 
@@ -133,8 +189,8 @@ Think of a cron job as: **when** to run + **what** to do.
    - If your ISO timestamp omits a timezone, it is treated as **UTC**.
 
 2. **Choose where it runs**
-   - `sessionTarget: "main"` → run during the next heartbeat with main context.
-   - `sessionTarget: "isolated"` → run a dedicated agent turn in `cron:<jobId>`.
+   - `sessionTarget: "main"` → enqueue an agent.turn (`kind` cron) on the main session.
+   - `sessionTarget: "isolated"` → run a dedicated agent turn in `cron:<jobId>`. Isolated jobs stay isolated unless they wake/nudge the named main session.
 
 3. **Choose the payload**
    - Timeline message → `sessionTarget: "main"` + `payload.kind = "systemEvent"`
@@ -171,7 +227,7 @@ Cron supports three schedule kinds:
 Cron expressions use `croner`. If a timezone is omitted, the Gateway host’s
 local timezone is used.
 
-To reduce top-of-hour load spikes across many gateways, OpenClaw applies a
+To reduce top-of-hour load spikes across many gateways, WednesdayAI applies a
 deterministic per-job stagger window of up to 5 minutes for recurring
 top-of-hour expressions (for example `0 * * * *`, `0 */2 * * *`). Fixed-hour
 expressions such as `0 7 * * *` remain exact.
@@ -192,18 +248,39 @@ Cron exposes three user-facing job types:
 
 #### Main session jobs (timeline messages and wake gates)
 
-Main jobs enqueue a system event and optionally wake the heartbeat runner.
+Main jobs enqueue an agent.turn (`kind` cron). They do not call the heartbeat runner.
 Timeline message jobs use `payload.kind = "systemEvent"`. Check first, then nudge jobs
 use `payload.kind = "wakeGate"` to evaluate a gate/check first and only nudge when
 there is work to do.
 
-- `wakeMode: "now"` (default): event triggers an immediate heartbeat run.
-- `wakeMode: "next-heartbeat"`: event waits for the next scheduled heartbeat.
+- `wakeMode: "now"` (default): attempt immediate delivery. If the main lane is busy, recurring jobs
+  skip the turn (`busy` policy `skip`), while exact-time (`schedule.kind: "at"`) jobs park it with
+  `busy: "delay"` so a one-shot run is not lost.
+- `wakeMode: "next-heartbeat"`: deliver on the next main-lane idle, not a heartbeat tick. At
+  fire time the payload publishes immediately when the main lane is idle; when the lane is busy it
+  parks and delivers once the lane goes idle.
 
-This is the best fit when you want the normal heartbeat prompt and the configured
-heartbeat session context. If that heartbeat uses `isolatedSession: true`, the
-cron wake still uses the heartbeat delivery path while the model turn runs in
-the isolated heartbeat sibling session.
+Under the hood, `wakeMode` selects the busy policy on the enqueued agent turn for when the main
+lane is occupied at fire time:
+
+- `skip` (the enqueue default, used by `wakeMode: "now"` on recurring jobs): nothing is published
+  and the run is recorded as skipped.
+- `delay` (selected by `wakeMode: "next-heartbeat"` or an exact-time schedule): when the main lane is
+  idle the turn is enqueued immediately like any other policy. Only when the lane is actually busy is
+  the turn parked, and then it is accepted only after it is
+  persisted in `bus_work_items` with the `acceptedBusyDelay` marker (per-session cap 32; a 33rd
+  is rejected and the run records an error). It releases FIFO once the main lane goes idle, or
+  after 10 minutes (`AGENT_TURN_DELAY_MAX_WAIT_MS`). On Gateway restart, recovery re-arms only
+  those producer-accepted pending rows; it does not execute at boot. Overflow and invalid work
+  are rejected before acceptance and are never recorded as a successful skip.
+- `run`: publish and claim immediately even while the lane is busy. There is no preemption — the
+  turn's model work serializes behind the in-flight command on the serial main lane and starts as
+  soon as the lane permits.
+
+Completed and failed main-session turns are recorded as `session-runs` rows (`kind` cron,
+`status` completed/failed); read them via the `sessions.runs.list` Gateway RPC.
+
+Cron does not require heartbeat config.
 See [Heartbeat](/gateway/heartbeat).
 
 #### Isolated jobs (dedicated cron sessions)
@@ -219,18 +296,51 @@ Key behaviors:
   - `announce`: deliver a summary to the target channel and post a brief summary to the main session.
   - `webhook`: POST the finished event payload to `delivery.to` when the finished event includes a summary.
   - `none`: internal only (no delivery, no main-session summary).
-- `wakeMode` controls when the main-session summary posts:
-  - `now`: immediate heartbeat.
-  - `next-heartbeat`: waits for the next scheduled heartbeat.
+- Isolated jobs stay isolated unless they wake/nudge the named main session.
+- The isolated turn itself always runs at fire time; `wakeMode` only controls the post-run
+  main-session wake and never starts a heartbeat run for the job:
+  - `now`: wake the main session immediately after the run so it picks up the summary.
+  - `next-heartbeat`: do not wake the main session; the summary surfaces with the next
+    main-session activity.
 
 Use isolated jobs for noisy, frequent, or "background chores" that shouldn't spam
 your main chat history.
+
+Isolated `agentTurn` jobs are claimed as durable `agent.turn` work inside the
+Gateway, then executed by the in-process agent-turn runner. The runner writes a
+`session-runs` row with `kind: "cron"` before execution starts, then marks that
+row completed or failed through `ack`/`nack`. A crash mid-turn therefore leaves
+a durable record that recovery treats as a cron run, not as a chat turn. Chat
+replies still run as a direct in-process turn with streaming; they do not go
+through this claim path. Heartbeat ticks enqueue their own agent.turn (`kind` heartbeat).
+A gateway restart waits for in-flight claimed cron turns the same way it waits
+for other active runs (confirm drain, or use `force`).
+
+See [Agent-turn runner](/plugins/agent-turn-runner) for the developer contract.
+
+### Cron outcomes as agent turns
+
+Four residual cron outcomes enqueue and claim `agent.turn` directly through
+`produceCronAgentTurn`. They do not call the heartbeat runner and they do not
+create heartbeat session-run rows:
+
+| Outcome             | When                                                           | Busy policy                               |
+| ------------------- | -------------------------------------------------------------- | ----------------------------------------- |
+| Isolated summary    | Isolated job posts a short main-session summary after the run  | `delay` (awaits completion)               |
+| Failure alert       | Isolated announce delivery failed and the fallback must notify | `delay`                                   |
+| Auto-disable notice | A job is disabled after repeated schedule errors               | `delay`                                   |
+| Cron wake RPC       | `cron.wake` / `wake({ mode, text })`                           | `now` → `run`; `next-heartbeat` → `delay` |
+
+Non-sentinel text from these turns reaches the configured delivery target.
+`NO_REPLY` and `HEARTBEAT_OK` stay silent. Named agents (`agentId` on the job)
+run under that agent's merged heartbeat configuration (model, identity, context,
+delivery), not the global defaults alone.
 
 ### Payload shapes (what runs)
 
 Three payload kinds are supported:
 
-- `systemEvent`: main-session only, routed through the heartbeat prompt.
+- `systemEvent`: main-session only, enqueued as an agent.turn (`kind` cron).
 - `agentTurn`: isolated-session only, runs a dedicated agent turn.
 - `wakeGate`: main-session only, evaluates a gate/check and nudges only when there is work.
 
@@ -250,7 +360,7 @@ Delivery config:
 Announce delivery suppresses messaging tool sends for the run; use `delivery.channel`/`delivery.to`
 to target the chat instead. When `delivery.mode = "none"`, no summary is posted to the main session.
 
-If `delivery` is omitted for isolated jobs, OpenClaw defaults to `announce`.
+If `delivery` is omitted for isolated jobs, WednesdayAI defaults to `announce`.
 
 Common `wakeGate` fields:
 
@@ -279,8 +389,9 @@ Behavior details:
   skipped to avoid duplicates.
 - Missing or invalid delivery targets fail the job unless `delivery.bestEffort = true`.
 - A short summary is posted to the main session only when `delivery.mode = "announce"`.
-- The main-session summary respects `wakeMode`: `now` triggers an immediate heartbeat and
-  `next-heartbeat` waits for the next scheduled heartbeat.
+- Isolated jobs stay isolated unless they wake/nudge the named main session. `wakeMode`
+  `next-heartbeat` skips the immediate post-run wake of the main session (the summary surfaces
+  with the next main-session activity); it is not a heartbeat tick.
 
 #### Webhook delivery flow
 
@@ -293,6 +404,38 @@ Behavior details:
 - No main-session summary is posted in webhook mode.
 - If `cron.webhookToken` is set, auth header is `Authorization: Bearer <cron.webhookToken>`.
 - Deprecated fallback: stored legacy jobs with `notify: true` still post to `cron.webhook` (if configured), with a warning so you can migrate to `delivery.mode = "webhook"`.
+
+### Identity attribution
+
+`identity` links a job's runs to a registered person instead of leaving them as anonymous system runs.
+It is a `session.identityLinks` key, matched case-insensitively; an unmatched or absent value leaves
+runs unattributed. There is never a default or fallback identity.
+
+**Supported job shape: isolated agent-turn jobs only** (`sessionTarget: "isolated"` with
+`payload.kind: "agentTurn"` — the `Assistant task` job type). Only that shape carries
+job `identity` into the run.
+
+Main-session jobs (`systemEvent` timeline messages and `wakeGate` checks) enqueue an
+agent.turn (`kind` cron, or a nudge after a positive wake-gate) and do not call the
+heartbeat runner. Identity attribution is still only honoured on isolated agent-turn
+jobs, so those main-session turns do not carry a job `identity`. Because the attribution
+could never be honoured there, cron **rejects** `identity` on those
+shapes on both create and update instead of accepting it and dropping it. Switching an attributed job
+to a main-session shape is rejected too; clear the identity in the same edit (`identity: null`,
+or `--clear-identity`) if you want to make that change.
+
+Jobs created before this validation existed could carry an `identity` on a main-session shape. Cron
+never blocks you from managing such a job: it strips the orphaned attribution when the job store is
+loaded (logging a warning with the job id), and an edit that does not itself re-assert the identity —
+`enabled: false` from the list toggle, a rename, a schedule change — succeeds and drops the orphan
+rather than failing. Re-adding an identity to an unsupported shape is still rejected.
+
+Caveat: attribution only applies to agents backed by the embedded agent runtime. When an agent is
+backed by a CLI provider, cron runs the turn through the CLI runner, which has no sender-identity
+plumbing — those runs stay unattributed even on a supported job shape.
+
+Identity is operator-only: it can be set from the CLI, the gateway RPC surface, and the Web UI, but
+never from the agent-facing cron tool.
 
 ### Model and thinking overrides
 
@@ -325,10 +468,74 @@ Isolated jobs can deliver output to a channel via the top-level `delivery` confi
 If `delivery.channel` or `delivery.to` is omitted, cron can fall back to the main session’s
 “last route” (the last place the agent replied).
 
+When the agent creates a job from a chat session and omits a target, the cron tool **captures** the
+delivery target at creation time. The creating turn's own route (channel, target, account id) is
+the source of record; the session's `deliveryContext` (channel, target and account id) and its last
+channel + last target pair are fallbacks, used as one coherent tuple each — fields are never mixed
+across sources. Cron selects the first complete source in that order. If the selected source does
+not match the requested `delivery.channel`, the target stays unset; cron does not fall through to
+another source. The captured values are stored on `job.delivery`, so they survive restarts and the
+job keeps announcing to the chat it was created from even if that session is later reset.
+
+Threads are preserved at capture: a Telegram topic folds into the `:topic:` target form
+(`-1001234567890:topic:77`). Channels whose `delivery.to` cannot carry a thread (for example Slack
+thread timestamps) are not captured at all — run-time resolution keeps using the thread session
+entry, and the fail-closed rule below applies if that entry is deleted. A parent-conversation
+target is never persisted for a thread-origin job.
+
+Retained limits (jobs created before capture existed, and legacy fallbacks):
+
+- A legacy to-less job still follows the session's **latest** route at run time; the creating-turn
+  route cannot be reconstructed for it.
+- Jobs without their own `sessionKey` use the main session's last route.
+- On WhatsApp, implicit delivery still substitutes an allowlisted recipient when the resolved
+  target is outside the allowlist.
+- To make a job's destination immutable, pin `delivery.channel` and `delivery.to` (and
+  `delivery.accountId` for multi-account channels).
+
+Fail-closed delivery target rules — what is checked when:
+
+- **At job creation/update** (gateway RPC, CLI, and the agent tool all pass through the same
+  validated service boundary): an unprefixed `delivery.to` that equals a `session.identityLinks`
+  key is rejected with an error naming the key and the `identity:` fix, and an `identity:<key>`
+  that does not match any configured key is rejected. Gateway RPC clients receive these as
+  `INVALID_REQUEST` errors. Announce `failureDestination` targets are
+  validated the same way; webhook URLs and targets retained under `delivery.mode: "none"` are
+  dormant and not namespace-checked (a webhook URL keeps its HTTP validation). A key that exists
+  but has no unique link for the delivery channel is accepted here — channel resolution has not
+  happened yet — and fails at the next check. An update that disables the job (`enabled: false`),
+  switches the delivery to `mode: "none"`, or clears the target always succeeds so operators can
+  repair. Clearing the target is an explicit empty value — `cron edit <id> --to ""` (CLI), or a
+  patch with `delivery.to: ""` (agent tool / RPC) — not an omitted field; the persisted job drops
+  the `delivery.to` property.
+- **At delivery time** (when the channel is resolved): `identity:<key>` resolves to that key's
+  single linked id for the delivery channel. An unknown key, or a key without exactly one link for
+  the channel, fails with an error naming the identity and channel. An unprefixed target that now
+  equals a configured key fails closed instead of silently rerouting.
+- A rejection is terminal for routing even when `delivery.bestEffort = true`: the target
+  rejection is recorded (`errorKind: delivery-target`) and the summary is **not** relayed to the
+  main session or heartbeat destination. This holds even when the run itself also produced a
+  fatal agent error payload: the run is then reported as an execution error, and the delivery
+  status is `not-delivered`, never a fallback summary. Failure notifications inherit the job's
+  own session provenance; a failure alert that inherits the primary route also inherits its
+  account id unless explicitly overridden.
+- Repair: update the job with `delivery.channel` plus a channel-native `delivery.to`, or with the
+  `identity:<key>` form once `session.identityLinks` is configured.
+
+If an isolated job names its own `sessionKey` and that session's entry no longer exists (for example
+after a reset or a deleted store), a delivery with no explicit `delivery.to` fails the job with
+`cron delivery for session <key> failed: its session entry no longer exists and the job has no
+explicit target; re-add the job with delivery.channel and delivery.to` (also logged at error level
+under the `cron/delivery` subsystem, with the job id) instead of falling back to the main session's
+last route, which could belong to a different conversation.
+
 Target format reminders:
 
-- Slack/Discord/Mattermost (plugin) targets should use explicit prefixes (e.g. `channel:<id>`, `user:<id>`) to avoid ambiguity.
+- Slack/Discord/Mattermost (plugin) targets should use explicit prefixes (e.g. `channel:<id>`,
+  `user:<id>`) to avoid ambiguity.
 - Telegram topics should use the `:topic:` form (see below).
+- With `session.identityLinks` configured, only the `identity:<key>` form is accepted for linked
+  people; an unprefixed key fails closed as described above.
 
 #### Telegram delivery targets (topics / forum threads)
 
@@ -412,8 +619,14 @@ Notes:
 - `everyMs` is milliseconds.
 - `sessionTarget` must be `"main"` or `"isolated"` and must match `payload.kind`.
 - `wakeGate` is valid only with `sessionTarget: "main"`.
-- Optional fields: `agentId`, `description`, `enabled`, `deleteAfterRun` (defaults to true for `at`),
-  `delivery`.
+- Optional fields: `agentId`, `identity` (operator RPC only — not accepted from the agent-facing cron
+  tool), `description`, `enabled`, `deleteAfterRun` (defaults to true for `at`), `delivery`.
+- `identity`: a `session.identityLinks` key (matched case-insensitively). Only accepted on
+  `sessionTarget: "isolated"` with `payload.kind: "agentTurn"`; the call is rejected on any other
+  shape. On match, runs carry that canonical identity as the requester identity
+  (`identitySource: "job-config"`); unmatched or absent values leave runs as unattributed system
+  runs — there is never a default or fallback identity. See
+  [Identity attribution](/automation/cron-jobs#identity-attribution).
 - `wakeMode` defaults to `"now"` when omitted.
 
 ### cron.update params
@@ -432,6 +645,10 @@ Notes:
 
 - `jobId` is canonical; `id` is accepted for compatibility.
 - Use `agentId: null` in the patch to clear an agent binding.
+- `identity` follows the same semantics as on `cron.add` (operator RPC only — not accepted from the
+  agent-facing cron tool, and only valid on isolated `agentTurn` jobs); use `identity: null` in the
+  patch to clear identity attribution. A patch that moves an attributed job to an unsupported shape
+  is rejected unless the same patch clears `identity`.
 
 ### cron.run and cron.remove params
 
@@ -445,14 +662,18 @@ Notes:
 
 ## Storage & history
 
-- Job store: `~/.openclaw/cron/jobs.json` (Gateway-managed JSON).
+- Job store: `cron_jobs` table in the Gateway session store (SQLite or Postgres).
+  Postgres epoch-ms columns are `BIGINT` (SQLite `INTEGER` is already 64-bit).
+  `~/.openclaw/cron/jobs.json` is the import source on first start (override with
+  `cron.store`). After import the table is truth; the file is not the claim path.
 - Run history: `~/.openclaw/cron/runs/<jobId>.jsonl` (JSONL, auto-pruned by size and line count).
+  Pipeline fires also appear in `wednesdayai task status --task cron-run`.
 - Isolated cron run sessions in `sessions.json` are pruned by `cron.sessionRetention` (default `24h`; set `false` to disable).
-- Override store path: `cron.store` in config.
+- Override import path: `cron.store` in config.
 
 ## Retry policy
 
-When a job fails, OpenClaw classifies errors as **transient** (retryable) or **permanent** (disable immediately).
+When a job fails, WednesdayAI classifies errors as **transient** (retryable) or **permanent** (disable immediately).
 
 ### Transient errors (retried)
 
@@ -488,7 +709,7 @@ Configure `cron.retry` to override these defaults (see [Configuration](/automati
 {
   cron: {
     enabled: true, // default true
-    store: "~/.openclaw/cron/jobs.json",
+    store: "~/.openclaw/cron/jobs.json", // import source; table is truth after first start
     maxConcurrentRuns: 1, // default 1
     // Optional: override retry policy for one-shot jobs
     retry: {
@@ -541,7 +762,7 @@ Cron has two built-in maintenance paths: isolated run-session retention and run-
 
 - Isolated runs create session entries (`...:cron:<jobId>:run:<uuid>`) and transcript files.
 - The reaper removes expired run-session entries older than `cron.sessionRetention`.
-- For removed run sessions no longer referenced by the session store, OpenClaw archives transcript files and purges old deleted archives on the same retention window.
+- For removed run sessions no longer referenced by the session store, WednesdayAI archives transcript files and purges old deleted archives on the same retention window.
 - After each run append, `cron/runs/<jobId>.jsonl` is size-checked:
   - if file size exceeds `runLog.maxBytes`, it is trimmed to the newest `runLog.keepLines` lines.
 
@@ -699,6 +920,18 @@ openclaw cron edit <jobId> --agent ops
 openclaw cron edit <jobId> --clear-agent
 ```
 
+Identity attribution (link job runs to a person). Only valid on isolated assistant-task jobs —
+see [Identity attribution](/automation/cron-jobs#identity-attribution):
+
+```bash
+# Attribute runs to the identityLinks key "alice" (runs stay unattributed if the key does not match)
+wednesdayai cron add --name "Ops sweep" --cron "0 6 * * *" --session isolated --message "Check ops queue" --identity alice
+
+# Switch or clear the identity on an existing job
+wednesdayai cron edit <jobId> --identity alice
+wednesdayai cron edit <jobId> --clear-identity
+```
+
 Manual run (force is the default, use `--due` to only run when due):
 
 ```bash
@@ -708,7 +941,8 @@ openclaw cron run <jobId> --due
 
 Forced manual run bypasses only the schedule due-time check. It still respects payload
 validity, wake gates, already-running protection, heartbeat/runtime guards, and delivery
-constraints. A manual run may correctly record `Skipped`.
+constraints. A disabled job is not run (`reason: "disabled"`); it is not reported as
+already running. A manual run may correctly record `Skipped`.
 
 Edit an existing job (patch fields):
 
@@ -745,17 +979,45 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 
 ## Troubleshooting
 
-### “Nothing runs”
+### Nothing runs
 
 - Check cron is enabled: `cron.enabled` and `OPENCLAW_SKIP_CRON`.
 - Check the Gateway is running continuously (cron runs inside the Gateway process).
 - For `cron` schedules: confirm timezone (`--tz`) vs the host timezone.
+- After upgrade, restart the Gateway so the `cron_jobs` table is created (and
+  Postgres `*_ms` columns are widened to `BIGINT` if needed) and `jobs.json`
+  import runs (Linux: `systemctl --user restart openclaw-gateway`; macOS:
+  `wednesdayai gateway restart --deep`).
+- `[cron] failed to start: value "..." is out of range for type integer` means
+  the live Postgres table still has 32-bit `integer` on an epoch-ms column.
+  Restart on a build that includes the guarded `ALTER`. Confirm with
+  `information_schema.columns` (`data_type = bigint` on every `*_ms` column)
+  and a row count or job-ID check that matches the expected jobs in `jobs.json`
+  (zero rows is success when the import source is empty).
+- If `tasks.enabled` is `false`, jobs already flipped to `migrated = true` stay
+  on the pipeline claim path and will not fire until the pipeline is enabled
+  again. Unmigrated jobs keep using the legacy timer.
+- After downtime, enabled migrated jobs that were due while the Gateway was
+  down fire once per missed occurrence at the next start. A disabled job
+  (`enabled: false`) does not catch up and a forced `cron.run` returns
+  `reason: "disabled"`.
+- Hand-editing `~/.openclaw/cron/jobs.json` after the first import does not
+  change the table. Use `wednesdayai cron add/edit` or `cron.*` methods.
 
 ### Main job requires `payload.kind="systemEvent"`
 
 - Use the Timeline message job type for plain main-session reminders.
 - Use Check first, then nudge for a main-session `wakeGate`.
 - Assistant task jobs must stay isolated because they use `payload.kind = "agentTurn"`.
+
+### A next-heartbeat reminder vanished after restart
+
+- Delayed main-session turns persist in `bus_work_items` before acceptance.
+- After a Gateway restart, recovery re-arms only producer-accepted pending
+  rows (`acceptedBusyDelay`). Check `sessions.runs.list` and
+  `wednesdayai task status --task cron-run`.
+- A `:skipped` or `:rejected-overflow` work id is not an accepted reminder.
+  Overflow (more than 32 parked turns on one session) records an error.
 
 ### `wake-gate-empty`
 
@@ -764,7 +1026,7 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 
 ### A recurring job keeps delaying after failures
 
-- OpenClaw applies exponential retry backoff for recurring jobs after consecutive errors:
+- WednesdayAI applies exponential retry backoff for recurring jobs after consecutive errors:
   30s, 1m, 5m, 15m, then 60m between retries.
 - Backoff resets automatically after the next successful run.
 - One-shot (`at`) jobs retry transient errors (rate limit, network, server_error) up to 3 times with backoff; permanent errors disable immediately. See [Retry policy](/automation/cron-jobs#retry-policy).

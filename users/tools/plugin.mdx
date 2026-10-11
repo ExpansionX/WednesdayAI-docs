@@ -144,6 +144,15 @@ export default plugin;
   (plain system run), and also when a seam supplies `canonicalIdentity` without
   knowing its provenance — provenance is never guessed, so `identitySource`
   implies `canonicalIdentity` but not the reverse
+- `sessionKind` — structural classification of the session derived from the
+  session key: `"user"` (a normal conversation session, including the main
+  session), `"cron"`, `"heartbeat"`, `"subagent"`, `"acp"`, or `"unknown"`
+  (missing or malformed session key). Never guessed from message text.
+- `accountId` — provider account id for multi-account setups.
+- `peerKind` and `peerId` — the actual input peer's kind (`"direct"`,
+  `"group"`, `"channel"`) and id, exposed under every `dmScope` value.
+- `isMainSession` — `true` only when `sessionKey` equals the agent's main
+  session key; never inferred from the session key shape.
 
 `ctx.turn` carries the per-turn correlation key and storage linkage. In the v1
 contract, `turn.turnId` is the same stable value as `runId` by value. Early hooks
@@ -898,7 +907,9 @@ api.on(
 );
 ```
 
-**`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `session:start`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
+**`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `message:received`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
+
+Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a warning naming the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Warnings surface as `PLUGIN_REGISTER_ERROR` diagnostics in `openclaw plugins doctor`, `openclaw plugins status`, and the gateway startup report; the plugin keeps loading.
 
 Available hook names and their event/context types are defined in `PluginHookHandlerMap` in the plugin SDK types:
 
@@ -941,6 +952,12 @@ task dispatcher's completion paths and the subagent completion path with
 `{ taskRunId?, agentId?, source: "task" | "subagent" | "session", outcome: "completed" | "failed" | "preempted" | "cancelled", quality?, meta? }`.
 The [Dream Cycle](/plugins/dream-cycle) plugin is the reference consumer of both.
 
+`session_start` and `session_end` carry `runtimeIdentity` when the session has real identity:
+the session's actor (channel, account id, peer kind/id, canonical identity) and
+`isMainSession: true` only for the agent's main session key. `runtimeIdentity.sessionKind`
+classifies the session as `"user"`, `"cron"`, `"heartbeat"`, `"subagent"`, `"acp"`, or
+`"unknown"`, derived structurally from the session key — never guessed from message text.
+
 ### Inbound channel replies
 
 Plugin `message_sending` and `message_sent` fire on inbound channel replies as well as CLI/cron
@@ -961,6 +978,12 @@ LINE and Zalo inbound replies do not fire these hooks.
 - `message_sent` event: `{ to, content, success, error? }`. Fire-and-forget; it does not block
   the send. Internal `message:sent` still needs a session key, so inbound replies typically fire
   only the plugin hook.
+- `message_sent` fires only when the message was dispatched to the platform. Send errors fire
+  with `success: false` and `error`. `ctx.messageId` is the platform id of the last message sent
+  for the payload; it is absent when the platform returns none. A payload that ends up as a
+  provable no-send — `message_sending` cancelled it, rewrote it to empty, or the channel
+  suppressed it (e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: no delivery result, no
+  transcript mirror, no queue receipt id, and no `message_sent` event.
 
 ```ts
 import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";
@@ -1279,6 +1302,9 @@ Notes:
 - `meta.aliases` adds alternate ids for normalization and CLI inputs.
 - `meta.preferOver` lists channel ids to skip auto-enable when both are configured.
 - `meta.detailLabel` and `meta.systemImage` let UIs show richer channel labels/icons.
+- `meta.preferSessionLookupForAnnounceTarget` is a deprecated no-op: the announce target
+  resolves entry-first from the session row. It is kept for plugin-SDK compatibility and
+  removed in the next minor release.
 
 ### Channel onboarding hooks
 

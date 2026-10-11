@@ -51,7 +51,7 @@ flowchart LR
 
 **Agent run.** The finalized message context is passed to `getReplyFromConfig`, which resolves session state, system prompt, model, and runs the agent loop. Directives embedded inline (e.g. `/model gpt-4o` or `/think high`) are extracted from the message before the loop starts.
 
-**Reply chunking.** Agent output is split into platform-sized chunks before delivery. The default chunk limit is 4 000 characters. You can override it per channel with `channels.<id>.textChunkLimit`. The `chunkMode` setting (`"length"` or `"newline"`) controls whether splits happen at length boundaries only, or at paragraph/block boundaries. In `newline` mode, the chunker prefers paragraph/block boundaries and packs as many complete paragraphs as fit into each message up to `textChunkLimit`, falling back to length-based splitting only when a single block exceeds the limit. Fenced code blocks and tables are kept intact. Set `chunkNewlinePacking: false` to restore one message per paragraph (the pre-packing behaviour). Default: `true`.
+**Reply chunking.** Agent output is split into platform-sized chunks before delivery. The default chunk limit is 4 000 characters. Override it per channel with `channels.<id>.textChunkLimit`. `chunkMode` is `length` (default: split only at the limit), `newline` (prefer paragraph boundaries and pack complete paragraphs up to the limit), or `paragraph` (one outbound message per paragraph). Oversized blocks fall back to length splitting. Fenced code blocks and tables stay intact. `chunkNewlinePacking` is deprecated; with `chunkMode: "newline"`, `false` ≡ `chunkMode: "paragraph"`. Prefer `chunkMode: "paragraph"`.
 
 **TTS / voice-note-loop.** If TTS is configured and `tts.auto` triggers, a voice note is synthesized and attached to the reply. When `tts.voiceNoteLoop` is `"enabled"`, a voice-note inbound triggers a voice-note reply with the text suppressed. See [Voice note loop](#voice-note-loop).
 
@@ -68,6 +68,8 @@ Plugins and hook files can subscribe to these `message:*` events. All are fired 
 | `message:preprocessed` | After all media + link understanding completes | `from`, `to`, `body`, `bodyForAgent`, `transcript?`, `timestamp`, `channelId`, `conversationId`, `messageId`, `senderId`, `senderName`, `senderUsername`, `provider`, `surface`, `mediaPath`, `mediaType`, `isGroup`, `groupId` | Always fires (even for text-only messages with no transcript)     |
 
 Hooks are registered via `api.registerHook(event, handler, opts)` in a plugin, or as hook files using event keys `message:received`, `message:transcribed`, and `message:preprocessed`. See [Hooks](/automation/hooks) for the full hook authoring guide.
+
+Hook names in plugin registrations are validated: a name the typed hook runner dispatches (`api.on` names), or one no internal emitter produces, produces a `PLUGIN_REGISTER_ERROR` warning — visible in `openclaw plugins doctor`, `openclaw plugins status`, and the gateway startup report — while the plugin keeps loading.
 
 Example — log every transcribed voice message:
 
@@ -180,6 +182,10 @@ Heartbeat runs are periodic background agent turns that fire independently of in
 
 **Heartbeat prompt.** The default prompt is: `"Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."` Override it with `heartbeat.prompt`.
 
+### Bootstrap context and cache stability
+
+Which bootstrap files are assembled into the system prompt is normally derived from the session key: a dedicated `:heartbeat` session gets the `heartbeat` run kind, everything else gets `default`. The run kind only narrows the file set when lightweight context is requested (`lightContext: true`): `heartbeat` then keeps HEARTBEAT.md alone, while `default` keeps nothing. With `lightContext: false` both run kinds load the full bootstrap set, and `heartbeat` additionally keeps run-kind-gated files such as HEARTBEAT.md. Callers that run a scheduled turn inside a _shared_ session can pin the bootstrap with the `bootstrapContextRunKind` reply option (`"default" | "heartbeat" | "cron"` on `GetReplyOptions`, threaded through to the embedded runner). The heartbeat runner uses this to keep shared-session heartbeats on the session's normal `default` bootstrap — the heartbeat checklist is inlined into the trigger message instead, unless that bootstrap already injects it — so the system prompt stays byte-identical to user turns and the provider prefix cache survives every heartbeat (see [Prompt caching](/reference/prompt-caching#byte-stability-across-trigger-kinds)). ACP cron execution pins `"cron"` the same way. You only need to care about this option when writing a custom trigger that enqueues agent turns into shared sessions; channel messages and the built-in heartbeat/cron paths already do the right thing.
+
 For a comparison between heartbeats and cron jobs, see [Heartbeat vs Cron](/automation/cron-vs-heartbeat).
 
 ## Troubleshooting
@@ -198,7 +204,7 @@ Heartbeats fire on a timer regardless of recent activity. If you want heartbeats
 
 **Media attachment not understood.**
 
-Verify that a media-understanding provider is configured (e.g. `tools.media.audio` for audio, or a vision-capable model for images). Audio transcription requires Whisper or a compatible provider. Check the gateway log for `media-understanding` errors. If the attachment arrives as a URL rather than a local file, confirm that `tools.media.downloadMedia` is enabled so the pipeline can fetch it before processing.
+Verify that a media-understanding provider extension is enabled (`plugins.entries.<vendor>.enabled: true` — vendor extensions are disabled by default) and configured (e.g. `tools.media.audio` for audio, or a vision-capable model for images). Audio transcription requires a local CLI (Whisper) or an enabled provider extension. Check the gateway log for `media-understanding` errors, including the auto-selection-exhausted warning naming the remedy. If the attachment arrives as a URL rather than a local file, confirm that `tools.media.downloadMedia` is enabled so the pipeline can fetch it before processing.
 
 **Command not detected.**
 

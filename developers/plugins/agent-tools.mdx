@@ -1,0 +1,211 @@
+---
+summary: "Write agent tools in a plugin (schemas, optional tools, allowlists)"
+read_when:
+  - You want to add a new agent tool in a plugin
+  - You need to make a tool opt-in via allowlists
+title: "Plugin Agent Tools"
+audience: developer
+sources:
+  - src/plugins/types.ts
+  - src/agents/openclaw-tools.ts
+  - src/agents/pi-tools.before-tool-call.ts
+  - src/plugin-sdk/testing.ts
+  - src/plugins/tools.ts
+  - src/plugins/loader.ts
+  - src/agents/pi-tool-definition-adapter.ts
+generated: 2026-06-19
+---
+
+# Plugin agent tools
+
+WednesdayAI plugins can register **agent tools** (JSON‑schema functions) that are exposed
+to the LLM during agent runs. Tools can be **required** (always available) or
+**optional** (opt‑in).
+
+Agent tools are configured under `tools` in the main config, or per‑agent under
+`agents.list[].tools`. The allowlist/denylist policy controls which tools the agent
+can call.
+
+## Basic tool
+
+```ts
+import { Type } from "@sinclair/typebox";
+
+export default function (api) {
+  api.registerTool({
+    name: "my_tool",
+    description: "Do a thing",
+    parameters: Type.Object({
+      input: Type.String(),
+    }),
+    async execute(_id, params) {
+      return { content: [{ type: "text", text: params.input }] };
+    },
+  });
+}
+```
+
+## Tool context identity
+
+Plugin tool factories receive an `OpenClawPluginToolContext`. For tools that need
+owner checks, user attribution, or per-turn dedupe, prefer the typed nested
+identity fields over parsing tool arguments or session keys:
+
+```ts
+export default function (api) {
+  api.registerTool((ctx) => ({
+    name: "memory_store",
+    description: "Store a durable user fact",
+    parameters: { type: "object", properties: { fact: { type: "string" } }, required: ["fact"] },
+    async execute(_id, params) {
+      const identity = ctx.runtimeIdentity;
+      const turn = ctx.turn;
+
+      if (identity?.senderIsOwner !== true) {
+        return { content: [{ type: "text", text: "Not allowed for this sender." }] };
+      }
+
+      await saveFact({
+        fact: String(params.fact),
+        canonicalIdentity: identity.canonicalIdentity,
+        providerConversationId: identity.providerConversationId,
+        turnId: turn?.turnId,
+      });
+
+      return { content: [{ type: "text", text: "Saved." }] };
+    },
+  }));
+}
+```
+
+The same `runtimeIdentity` and `turn` objects are also available to
+`before_tool_call`, `after_tool_call`, and `tool_result_persist` hook contexts
+when the runtime has foreground run identity for the tool call. The normal
+agent tool wrapper path passes the same objects into `before_tool_call`, so
+plugins do not need a separate code path for hook-time authorization or
+dedupe. Existing flat fields such as `agentId`, `sessionId`, `sessionKey`,
+`canonicalIdentity`, and `senderIsOwner` remain available for compatibility.
+`ctx.runtimeIdentity.identitySource` (`"sender"` | `"parent-session"` |
+`"job-config"`) reports how the resolved identity was attached — live message
+sender, inherited from the spawning session, or operator-configured
+cron/heartbeat attribution; it is absent when the run has no resolved identity,
+and also when a seam supplies `canonicalIdentity` without knowing its provenance
+(provenance is never guessed). `identitySource` implies `canonicalIdentity`, but
+a present `canonicalIdentity` does not guarantee `identitySource`.
+
+## Optional tool (opt‑in)
+
+Optional tools are **never** auto‑enabled. Users must add them to an agent
+allowlist.
+
+```ts
+export default function (api) {
+  api.registerTool(
+    {
+      name: "workflow_tool",
+      description: "Run a local workflow",
+      parameters: {
+        type: "object",
+        properties: {
+          pipeline: { type: "string" },
+        },
+        required: ["pipeline"],
+      },
+      async execute(_id, params) {
+        return { content: [{ type: "text", text: params.pipeline }] };
+      },
+    },
+    { optional: true },
+  );
+}
+```
+
+Enable optional tools in `agents.list[].tools.allow` (or global `tools.allow`):
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "main",
+        tools: {
+          allow: [
+            "workflow_tool", // specific tool name
+            "workflow", // plugin id (enables all tools from that plugin)
+            "group:plugins", // all plugin tools
+          ],
+        },
+      },
+    ],
+  },
+}
+```
+
+Other config knobs that affect tool availability:
+
+- Allowlists that only name plugin tools are treated as plugin opt-ins; core tools remain
+  enabled unless you also include core tools or groups in the allowlist.
+- `tools.profile` / `agents.list[].tools.profile` (base allowlist)
+- `tools.byProvider` / `agents.list[].tools.byProvider` (provider‑specific allow/deny)
+- `tools.sandbox.tools.*` (sandbox tool policy when sandboxed)
+
+## Rules + tips
+
+- Tool names must **not** clash with core tool names; conflicting tools are skipped.
+- Plugin ids used in allowlists must not clash with core tool names.
+- Prefer `optional: true` for tools that trigger side effects or require extra
+  binaries/credentials.
+
+## Testing the real tool pipeline
+
+Extension test suites can drive the exact loader → factory → allowlist → adapter
+pipeline the gateway uses, instead of mocking it. Import the testing seam:
+
+```ts
+import {
+  loadOpenClawPlugins,
+  resolvePluginTools,
+  toToolDefinitions,
+} from "wednesdayai/plugin-sdk/testing";
+// "openclaw/plugin-sdk/testing" is the compatible spelling.
+```
+
+This subpath is **supported for test code only** — never import it from
+production extension code, and it is never loaded by the runtime jiti loader
+(enforced by `src/plugins/extension-import-boundary.test.ts`). This is a
+deliberate divergence from upstream openclaw, which keeps its testing barrel
+repo-local.
+
+The three-step flow:
+
+1. **Discovery** — `loadOpenClawPlugins({ cache: false, workspaceDir, config })`
+   with explicit `plugins.enabled: true`, `plugins.allow`, and
+   `plugins.load.paths` pointing at fixture plugin files (`.cjs` entry plus an
+   `openclaw.plugin.json` manifest). Explicit config survives the test-env
+   plugin-off default. Returns the real `PluginRegistry`.
+2. **Factory resolution + filtering** — `resolvePluginTools({ context })`
+   invokes each registered tool factory and applies `runToolAllowlist` (and the
+   optional-tool `allow` policy). Entries registered as bare factories (no
+   up-front tool names) cannot be pre-filtered, so they are invoked and
+   filtered by their **resolved** tool names under a non-empty
+   `runToolAllowlist`; an empty `runToolAllowlist` invokes no factory at all.
+   Declare `names` via `registerTool(factory, { names })` so restricted runs
+   can skip the factory call entirely — and keep any dynamic discovery inside
+   the factory cached, never re-discovered per run. When an unnamed factory
+   returns no tool allowed in this run, or a named factory returns a tool
+   outside its declared names, a one-time warning is logged and surfaced as a
+   `PLUGIN_REGISTER_ERROR` diagnostic.
+3. **Adaptation** — `toToolDefinitions(tools)` produces the agent-facing
+   definitions: `label` falls back to `name` when unset, thrown errors are
+   normalized into structured error results, and `execute(toolCallId, params,
+signal, onUpdate)` passes the `AbortSignal` as the **third** argument
+   (pi-agent-core calling convention) — never a host-context object.
+
+Global-state hygiene: `loadOpenClawPlugins` activates the global plugin
+registry. Reset it between tests with
+`setActivePluginRegistry(createEmptyPluginRegistry())` in `afterEach` (both
+re-exported from the same subpath).
+
+`PluginLoadOptions`, `PluginRegistry`, `PluginToolRegistration`, and
+`HookContext` are exported as types for annotating fixtures. The loader test
+`src/plugin-sdk/testing.seam.test.ts` is the canonical worked example.
