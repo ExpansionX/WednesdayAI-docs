@@ -18,6 +18,7 @@ openclaw qr --setup-code-only
 openclaw qr --json
 openclaw qr --remote
 openclaw qr --client openclaw-user-client
+openclaw qr --client openclaw-mentra-node
 openclaw qr --url wss://gateway.example/ws --token '<token>'
 ```
 
@@ -28,7 +29,7 @@ openclaw qr --url wss://gateway.example/ws --token '<token>'
 - `--public-url <url>`: override public URL used in payload
 - `--token <token>`: override gateway token for payload
 - `--password <password>`: override gateway password for payload
-- `--client <id>`: issue the bootstrap token for a specific gateway client id, storing that client's bounded profile. Known ids: `openclaw-even-g2-node`, `openclaw-user-client`. Omitted keeps the broad setup profile.
+- `--client <id>`: issue the bootstrap token for a specific gateway client id, storing that client's bounded profile. Known ids: `openclaw-even-g2-node`, `openclaw-mentra-node` (MentraOS glasses miniapp), `openclaw-user-client`. Omitted keeps the broad setup profile.
 - `--setup-code-only`: print only setup code
 - `--no-ascii`: skip ASCII QR rendering
 - `--json`: emit JSON (`setupCode`, `gatewayUrl`, `auth`, `clientId`, `urlSource`)
@@ -38,10 +39,9 @@ openclaw qr --url wss://gateway.example/ws --token '<token>'
 - `--token` and `--password` are mutually exclusive.
 - `--client` applies only to the bootstrap setup code, so it cannot be combined with `--legacy`, `--remote`, `--token`, or `--password`. An unknown or profile-less client id exits non-zero.
 - `--client openclaw-user-client` stores a bounded profile (operator role, `operator.sessions.read` + `operator.sessions.write`). Redemption binds the stored profile to the connecting client exactly: a token issued for one client id cannot be redeemed by another.
+- `--client openclaw-mentra-node` stores a bounded operator-only profile (role `operator`, `operator.read` + `operator.write`). Tokens minted from it cover chat, session reads, `agents.list` and voice wake get/set on the broad operator read/write surface, but never the node role or the admin, approvals, pairing or talk-secret scopes. This code pairs the [MentraOS glasses](/platforms/mentra-glass) miniapp.
 - When the resolved gateway URL is not loopback, the command prints one reminder naming the origin allowlist that governs the selected client: `gateway.webClient.allowedOrigins` for `--client openclaw-user-client`, and `gateway.controlUi.allowedOrigins` for every other client. The Control UI allowlist never admits the web client, so the two are not interchangeable.
 - With `--remote`, if effectively active remote credentials are configured as SecretRefs and you do not pass `--token` or `--password`, the command resolves them from the active gateway snapshot. If gateway is unavailable, the command fails fast.
 - Without `--remote`, local `gateway.auth.password` SecretRefs are resolved when password auth can win (explicit `gateway.auth.mode="password"` or inferred password mode with no winning token from auth/env), and no CLI auth override is passed.
 - Gateway version skew note: this command path requires a gateway that supports `secrets.resolve`; older gateways return an unknown-method error.
-- After scanning, approve device pairing with:
-  - `openclaw devices list`
-  - `openclaw devices approve <requestId>`
+- Bootstrap setup codes approve pairing silently: the first connect redeems the setup code, so no `devices approve` step is needed; use `openclaw devices list` to confirm the device. Legacy and shared-credential forms (`--legacy`, `--remote`, `--token`, `--password`) can require `openclaw devices list` followed by `openclaw devices approve <requestId>`.

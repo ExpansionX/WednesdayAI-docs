@@ -1,0 +1,102 @@
+---
+summary: "WednesdayAI on MentraOS display glasses: pair the glasses miniapp, set the wake word, and what the client may and may not do"
+read_when:
+  - Pairing MentraOS display glasses to a gateway
+  - Checking the least-privilege profile of the glasses client
+  - Revoking or removing a paired glasses device
+title: "MentraOS Glasses"
+---
+
+# MentraOS Glasses
+
+`apps/mentra-glass` in [ExpansionX/WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)
+is a background miniapp (`com.expansionx.wednesdayai.glass`) for MentraOS display glasses
+(Even G1/G2, Vuzix, Mentra display). It listens for the wake word, sends the spoken question
+to your gateway, and streams the reply onto the glasses display. It runs as a background
+miniapp, so other miniapps keep working while a reply is on screen.
+
+## Support snapshot
+
+- Role: gateway client app (`openclaw-mentra-node`), operator role. It is not a node and
+  does not use `node.pair.*` pairing.
+- Gateway required: yes.
+- Install: sideload only. In the Mentra App, open Settings → Miniapp Developer Settings →
+  Scan Miniapp QR Code and scan the QR printed by `bun run dev` in the app repo. For a
+  standalone install, `bun run release` prints a `miniapp://release` QR.
+- Transport: the app connects with `wss://` URLs, and with plain `ws://` only for
+  localhost, loopback or Tailscale addresses (`100.64.0.0/10`). The glasses need a network
+  path to the gateway.
+
+## Pairing
+
+1. On the gateway host, print a setup code:
+
+   ```bash
+   openclaw qr --client openclaw-mentra-node
+   ```
+
+2. In the WednesdayAI miniapp on the phone, tap **Scan setup QR** (or paste the setup code).
+3. The first connect redeems the setup code and approves the pairing silently, so there is
+   no `openclaw devices approve` step. The miniapp status shows the gateway host once it is
+   connected.
+
+The setup code is single-use and expires. Reconnects do not need it: the gateway mints an
+operator device token at first connect and the app reuses that token. If the device was
+removed or pairing must be redone, generate a fresh setup code.
+
+## Wake word
+
+The glasses trigger on the gateway voice wake config. Set it with:
+
+```bash
+openclaw gateway call voicewake.set --params '{"triggers":["wednesday"]}'
+```
+
+The miniapp reads the triggers at connect and follows `voicewake.changed` live. See
+[Voice wake](/nodes/voicewake).
+
+## What the client may do
+
+The setup code stores a bounded profile for `openclaw-mentra-node`: role `operator`, scopes
+`operator.read` + `operator.write`. That is a broad operator grant, not a narrow allowlist: it
+admits chat sends and history, session reads, `agents.list`, voice wake get/set, and the other
+operator read/write methods (`node.invoke` included, since that method is classified
+`operator.write`).
+
+Tokens minted by this bootstrap profile never include:
+
+- the `node` role (no node-role sockets, no `node.pair.*` pairing)
+- `operator.admin`
+- `operator.approvals`
+- `operator.pairing` (device management)
+- `operator.talk.secrets`
+
+The client id is identity metadata, not an authorization ceiling: an administrator-approved
+pairing request for the device can still grant it more.
+
+A setup code issued for a different client id cannot be redeemed by the glasses
+(`details.code: bootstrap_profile_violation`), and an over-scoped bootstrap redemption is
+refused the same way. An over-scoped device-token reconnect is refused with
+`details.code: AUTH_DEVICE_TOKEN_MISMATCH` and `details.deviceTokenReason: scope-mismatch`.
+Full rules: [Gateway protocol](/gateway/protocol#client-identity).
+
+## Device management
+
+```bash
+openclaw devices list --json                              # platform "mentraos", deviceFamily "glasses"
+openclaw devices revoke --device <deviceId> --role operator
+openclaw devices remove <deviceId>
+```
+
+`revoke` prevents subsequent reconnects but does not close an existing connection: restart the
+gateway (or otherwise close its socket) for immediate containment. After `remove`, the glasses
+must scan a new setup code to pair again. See
+[devices](/cli/devices) and [qr](/cli/qr).
+
+## Notes and limits
+
+- Replies are display only. Stop the Mentra AI miniapp in the Mentra App so only one
+  assistant answers.
+- The device token and the glasses device key are stored in the miniapp session storage on the
+  phone, backed by unencrypted MMKV in the current MentraOS host, not Keychain/Keystore. This
+  is tracked as a finding in the app repo.
