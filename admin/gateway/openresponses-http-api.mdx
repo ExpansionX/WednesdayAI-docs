@@ -303,10 +303,20 @@ Event types currently emitted:
 
 ## Errors
 
-Errors use a JSON object like:
+Request errors (`400`, `401`) use a JSON object like the following; `405` returns plain text `Method Not Allowed`.
 
 ```json
 { "error": { "message": "...", "type": "invalid_request_error" } }
+```
+
+Run failures return a `response` object with `status: "failed"` and an `error` that carries `code` instead of `type`:
+
+```json
+{
+  "object": "response",
+  "status": "failed",
+  "error": { "code": "permission_error", "message": "..." }
+}
 ```
 
 Common cases:
@@ -314,7 +324,8 @@ Common cases:
 - `401` missing/invalid auth
 - `400` invalid request body
 - `405` wrong method
-- `403` workspace lane denial: the target agent has [workspace lanes](/concepts/workspace-lanes) enabled and the run cannot be attributed to a linked identity in `session.identityLinks`. The body is `{ "error": { "code": "permission_error", "message": "..." } }`; with `stream: true` the stream ends with a `response.failed` event carrying that error instead of `response.completed`. HTTP requests carry no paired device, so calls into lane-enabled agents are currently denied; the message states the reason.
+- `403` workspace lane denial (`error.code: "permission_error"`): the target agent has [workspace lanes](/concepts/workspace-lanes) enabled and the run cannot be attributed to a linked identity in `session.identityLinks`. With `stream: true` the stream ends with a `response.failed` event carrying that error instead of `response.completed`. HTTP requests carry no paired device, so calls into lane-enabled agents are currently denied; the message states the reason.
+- `500` run failure (`error.code: "api_error"`)
 
 ## Examples
 
