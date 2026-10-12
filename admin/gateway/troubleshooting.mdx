@@ -412,7 +412,10 @@ Look for:
   flooding.
 - Schema drift after an upgrade. With `session.storage.backend: "postgres"` or `"sqlite"` the
   gateway adds any missing session tables and columns automatically on boot, so a gateway restart
-  repairs drift without manual SQL.
+  repairs drift without manual SQL. That schema pass waits at most 5 seconds for Postgres locks on
+  existing tables: a long-running or idle-in-transaction session (stuck client, backup, manual
+  `psql`) fails the start (fatal with the default `fallbackToJsonlOnError: false`), so resolve the
+  blocker (`pg_stat_activity`, `pg_locks`) and start the gateway again.
 
 If warnings appeared before an upgrade and stopped after a restart, schema drift is one possible
 cause — the restarted gateway converged it. The same warning also fires for generic store
@@ -485,6 +488,48 @@ Related:
 - [/tools/browser-linux-troubleshooting](/tools/browser-linux-troubleshooting)
 - [/tools/chrome-extension](/tools/chrome-extension)
 - [/tools/browser](/tools/browser)
+
+## Agent tool calls fail
+
+Use this when a tool call fails even though the gateway is healthy, or an agent
+keeps falling back from `edit` to `exec` or a whole-file `write`.
+
+```bash
+openclaw logs --follow
+journalctl --user -u openclaw-gateway | grep -E '\[tools\] .* (failed|rejected)'
+```
+
+Two journal lines cover tool-call failures:
+
+- `[tools] <tool> failed: <message>` (error level): the tool executed and its
+  execute stage failed, for example a file that does not exist or an edit that
+  found no match. The message is the tool's own error text.
+- `[tools] <tool> rejected: <category>` (warn level): the agent loop rejected
+  the call before execution. Categories: `schema validation failed (N issues)`
+  (the arguments did not match the tool schema), `unknown tool`, `blocked` (a
+  before-tool-call hook or policy denied the call), and `details redacted` (any
+  other rejection). A tool name that is not a valid identifier shows as
+  `<invalid tool name>`.
+
+The rejection line never echoes the call arguments or the model-authored
+rejection text; the full error and the original arguments stay in the session
+transcript. Inspect them with `sessions_history` for that session, or read the
+session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
+
+The file tools accept the argument shapes models commonly send: `edit`,
+`write` and `read` take `path` and also accept `file_path`; `edit` additionally
+accepts legacy top-level `oldText`/`newText` or `old_string`/`new_string`, which
+are folded into the `edits` list, and `edits` may arrive as a JSON string;
+`write` accepts empty `content` (it creates or truncates the file). A recurring
+`edit rejected: schema validation failed` on those shapes means the gateway
+predates the alias-handling fix, or the agent was instructed to use an argument
+shape the current schema does not define.
+
+Related:
+
+- [/tools](/tools)
+- [/logging](/logging)
+- [/concepts/session](/concepts/session)
 
 ## If you upgraded and something suddenly broke
 
