@@ -155,20 +155,21 @@ the allowlist ADR if it needs a new method, and update the disabled-control e2e 
 The UI says **chat**; the code says **session**. The gateway's `sessions.*` rows are what the user
 sees as chats.
 
-| User-facing                  | Code                                                                                                                                                     |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chat, Chats                  | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                            |
-| New chat                     | `createSession(label)`, `sidebar-new-chat`; labels "New chat", "New chat 2"...                                                                           |
-| Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                     |
-| Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                         |
-| Source tag on a row          | `deriveSourceTag(key)` in `ui/session-key-shape.ts`                                                                                                      |
-| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `new-chat-picker-option`                                         |
-| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                          |
-| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimal / full`                                                 |
-| Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                              |
-| Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                             |
-| Queue, Send now              | `handleQueue`, `handleSendNow` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                          |
-| This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed` |
+| User-facing                  | Code                                                                                                                                                              |
+| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Chat, Chats                  | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                     |
+| New chat                     | `createSession(label)`, `sidebar-new-chat`; labels "New chat", "New chat 2"...                                                                                    |
+| Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                              |
+| Switch chat locked           | `navigationLockReason` / `onNavigationBlocked` / `onNavigationLockChanged` (`web-client-runtime.ts`); notice `chat-switch-blocked` while Dictate or Voice is live |
+| Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                                  |
+| Source tag on a row          | `deriveSourceTag(key)` in `ui/session-key-shape.ts`                                                                                                               |
+| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `new-chat-picker-option`                                                  |
+| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                                   |
+| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimal / full`                                                          |
+| Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                       |
+| Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                      |
+| Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                     |
+| This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`          |
 
 Do not reintroduce "Space" or "Spaces" in UI copy or identifiers; that word is reserved for a
 possible external Spaces extension, and the brand e2e asserts the rendered page contains neither. Session keys
@@ -192,7 +193,7 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `onSessionChanged`, `onSessionsList`, `onConnectionStatus`). It also has WednesdayAI-native
   members the vendored seams have no room for, which the `app/` hooks call directly: `listAgents`,
   `listModels`, `patchSession`, `prepareSessionTitle`, `createSessionForAgent`, `sendChatMessage`
-  (the one `chat.send` seam), `queueMessage`, `sendNow`, `listActiveRunIds`, the `sessionList`
+  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`, the `sessionList`
   runtime, and the `onSidebarSessionsChange`, `onActiveSessionRowChange`, `onQueuedRunStarted`,
   `onAssistantReply` and `onActiveLeafConflict` subscriptions.
 - `app/AppShell.tsx` subscribes to the events seam once per runtime, writes into the store
@@ -297,7 +298,7 @@ provider module per concern, each testable without a gateway connection.
 | Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                     | none; browser-local preferences                                                                            |
 | Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                     | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
 | Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`      | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort`                                                 |
-| Queue, Send now                  | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts` | `sessions.steer`, `sessions.runs.list`                                                                     |
+| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts` | `sessions.steer`, `sessions.runs.list`                                                                     |
 | History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                         | `chat.history {before}`                                                                                    |
 | Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                      | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                                                                             |
@@ -468,12 +469,14 @@ Contracts worth keeping when you change them:
   `recoverFromActiveLeafConflict`, the thread reload, `activeLeafConflict` (the
   `chat-changed-notice` banner) and `ActiveLeafChangedError`, whose draft restore `useChatSend`
   owns — so two back-to-back foreign appends cannot loop.
-- **Queue and Send now.** While a reply streams, or a queued turn is still waiting, Enter sends
-  `sessions.steer` with `mode: "queue"` and shows the turn at once with `message-queued-badge`;
-  Ctrl/Cmd+Enter or the send menu's Send now (`composer-send-menu-now`) sends `mode: "inject"`. Both
-  send `fallback: "queue"`, and only `queue` carries attachments, so Send now is unavailable while a
-  file is staged. Neither can carry a reply: the composer refuses both while a reply chip is set,
-  because `sessions.steer` has no `replyToId`. A queued turn is saved in `sessionStorage`
+- **Steer and Queue.** While a reply streams, or a queued turn is still waiting, Enter or Send
+  steers into the current turn via `sessions.steer` with `mode: "inject"` and `fallback: "queue"`
+  (unless attachments are staged, which inject refuses, in which case it sends `mode: "queue"`).
+  The send menu item "Send after reply" (`composer-send-menu-queue`) and desktop Ctrl/Cmd+Enter send
+  `sessions.steer` with `mode: "queue"` and show the turn at once with `message-queued-badge`. Both
+  send `fallback: "queue"`. Neither can carry a reply: the composer refuses both while a reply chip is set,
+  because `sessions.steer` has no `replyToId`. On touch-primary devices (coarse pointer), plain Enter
+  inserts a native newline and only the Send button sends. A queued turn is saved in `sessionStorage`
   (`openclaw.web.pendingQueuedTurns.v1`, dropped after 24 hours) until its run drains, so it
   survives a reload or reconnect; `useChatHistory` shows it again only when `sessions.runs.list`
   still reports its run.
@@ -559,14 +562,36 @@ Availability comes from `talk.catalog`, and updates on reconnect:
   `configured: true` row.
 - Voice is live only when Dictate's conditions hold and `speech` also has a configured row.
 
-`useDictate` returns `status` `unavailable | idle | recording | error`, a live `partialText`
-caption while recording, and `errorMessage` (mic denied or no input device). Stopping fills the
-composer with the final transcript, including an empty one. A capture failure leaves the control
-recoverable: the next click retries. `partialText` is a replacement caption, not an append.
+`useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
+`transcript` while recording, `commit: { text: string; nonce: number } | null`, `consumeCommit(): void`,
+and `errorMessage` (mic denied or no input device). The live transcript previews in the textarea as a
+read-only draft with an accent border and muted text (`.cl-composer--dictating`), without breaking the
+textarea height cap. When dictation stops or encounters a capture error, `commit` receives the final or
+last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
+calls `onDictateCommitConsumed` to clear the commit.
 
 `useVoice` returns `status` `unavailable | idle | listening | speaking | error`. Voice does not
 fill the composer. Toggle starts or stops the cascaded session. A start rejection is swallowed
 here; the seam's `error` status is what the button shows.
+
+While either feature is live, switching chats is locked. The runtime derives the lock
+synchronously from the live talk seams (`navigationLockReason`: a dictate take from its first
+toggle click, including the lazy create of a first chat, until its stop settles, whether the
+stop succeeds, fails, or the gateway drops; a Voice conversation while `listening` or
+`speaking`; dictation wins when both are live), so a guard holds in the same tick the feature
+starts — no React effect latency. A user-initiated switch — a `sidebar-session` row, the unread
+bell, an assistant chip, New chat or the picker — is then refused: no session change and no
+`sessions.create`/history traffic, plus a `role="alert"` notice (`chat-switch-blocked`) saying
+exactly what to stop: "Stop dictation to switch chats." or "Turn off voice to switch chats.".
+The runtime emits `onNavigationBlocked` for every refusal and `onNavigationLockChanged` when the
+lock changes; the notice's reason follows the lock (a dictation→voice handoff re-labels it), and
+it clears when the runtime lock clears. A create whose
+`sessions.create` response lands after the lock leaves the created row unselected in the sidebar
+instead of switching. The lock only gates user intent: startup restore (`forceSwitchSession`),
+send-create of a first message, and a chat deleted elsewhere still switch — a live Voice
+conversation is stopped cleanly when its chat is deleted elsewhere, while a Dictation take
+(session-independent) keeps running and commits into the draft. An assistant lookup that settles
+while locked just releases the pending navigation without touching the open thread.
 
 Playback and barge-in come from the `talk-client` package (`createTalkAudioPlayback`,
 `createBargeInDetector`), not from `wednesdayai/plugin-sdk`. Call playback with `preRollMs: 40`
@@ -606,7 +631,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
   `useSyncExternalStore` and holds a `useRunsLease`, so it stays live while the shell is mounted
   even when the Sidebar is not.
 - `AppShell` ORs the open chat's key into the composer's streaming state, so Stop sends
-  `chat.abort { sessionKey }` and Enter queues via `sessions.steer` for a run this client never
+  `chat.abort { sessionKey }` and Enter steers via `sessions.steer` for a run this client never
   started — one running in the same chat from another device, or one that predates a reload.
 - `ui/TypingIndicator.tsx` is the three-dot indicator: `role="status"` with
   `aria-label="<assistant> is working"`, the dots `aria-hidden`. `Thread` shows it while its
