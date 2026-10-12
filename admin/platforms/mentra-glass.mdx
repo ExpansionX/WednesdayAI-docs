@@ -58,21 +58,27 @@ The miniapp reads the triggers at connect and follows `voicewake.changed` live. 
 ## What the client may do
 
 The setup code stores a bounded profile for `openclaw-mentra-node`: role `operator`, scopes
-`operator.read` + `operator.write`. That admits chat sends and history, session reads,
-`agents.list`, and the voice wake get/set methods.
+`operator.read` + `operator.write`. That is a broad operator grant, not a narrow allowlist: it
+admits chat sends and history, session reads, `agents.list`, voice wake get/set, and the other
+operator read/write methods (`node.invoke` included, since that method is classified
+`operator.write`).
 
-It never gets:
+Tokens minted by this bootstrap profile never include:
 
-- the `node` role (no node invoke, no node pairing)
+- the `node` role (no node-role sockets, no `node.pair.*` pairing)
 - `operator.admin`
 - `operator.approvals`
 - `operator.pairing` (device management)
 - `operator.talk.secrets`
 
-A connect that declares a scope outside the stored profile is refused
-(`AUTH_DEVICE_TOKEN_MISMATCH` with `deviceTokenReason: "scope-mismatch"`), and a setup code
-issued for a different client id cannot be redeemed by the glasses
-(`bootstrap_profile_violation`). Full rules: [Gateway protocol](/gateway/protocol#client-identity).
+The client id is identity metadata, not an authorization ceiling: an administrator-approved
+pairing request for the device can still grant it more.
+
+A setup code issued for a different client id cannot be redeemed by the glasses
+(`details.code: bootstrap_profile_violation`), and an over-scoped bootstrap redemption is
+refused the same way. An over-scoped device-token reconnect is refused with
+`details.code: AUTH_DEVICE_TOKEN_MISMATCH` and `details.deviceTokenReason: scope-mismatch`.
+Full rules: [Gateway protocol](/gateway/protocol#client-identity).
 
 ## Device management
 
@@ -82,12 +88,15 @@ openclaw devices revoke --device <deviceId> --role operator
 openclaw devices remove <deviceId>
 ```
 
-After `remove`, the glasses must scan a new setup code to pair again. See
+`revoke` prevents subsequent reconnects but does not close an existing connection: restart the
+gateway (or otherwise close its socket) for immediate containment. After `remove`, the glasses
+must scan a new setup code to pair again. See
 [devices](/cli/devices) and [qr](/cli/qr).
 
 ## Notes and limits
 
 - Replies are display only. Stop the Mentra AI miniapp in the Mentra App so only one
   assistant answers.
-- The device token and the glasses device key are stored in the miniapp session storage on
-  the phone, not in the platform keystore. This is tracked as a finding in the app repo.
+- The device token and the glasses device key are stored in the miniapp session storage on the
+  phone, backed by unencrypted MMKV in the current MentraOS host, not Keychain/Keystore. This
+  is tracked as a finding in the app repo.
