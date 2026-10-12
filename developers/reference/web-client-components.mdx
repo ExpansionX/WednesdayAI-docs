@@ -24,6 +24,8 @@ sources:
   - apps/web/src/providers/navigation-preferences.ts
   - apps/web/src/providers/events.tsx
   - apps/web/src/providers/reply-notifications.ts
+  - apps/web/src/providers/unread-state.ts
+  - apps/web/src/providers/attention-runtime.ts
   - apps/web/src/app/use-busy-sessions.ts
   - apps/web/src/app/use-reply-notifications.ts
   - apps/web/src/runs/runs-model.ts
@@ -35,8 +37,9 @@ sources:
   - apps/web/src/ui/AccountMenu.tsx
   - apps/web/src/ui/AssistantMessage.tsx
   - apps/web/src/ui/EmptyState.tsx
+  - apps/web/src/ui/AttentionMenu.tsx
   - src/gateway/session-utils.ts
-generated: 2026-10-06
+generated: 2026-10-11
 ---
 
 # Web client components
@@ -59,7 +62,8 @@ apps/web/src/
 ```
 
 The components in `ui/` are `Shell`, `Sidebar`, `NavigationMenus`, `TopBar`, `ModelMenu`, `ThinkMenu`,
-`DisplayMenu`, `ToolDisplay`, `NewChatPicker`, `AccountMenu`, `Thread`, `TypingIndicator`,
+`DisplayMenu`, `ToolDisplay`, `NewChatPicker`, `AccountMenu`, `AttentionMenu` (the top-bar unread
+bell), `Thread`, `TypingIndicator`,
 `AssistantMessage`, `UserMessage`, `EmptyState`, `Composer`, `RightPanel`, `DisabledControl`,
 `Icon` and `markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile
 breakpoint at 860px, sidebar open and collapsed state) so `AppShell` supplies data, not chrome. The
@@ -589,8 +593,8 @@ Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
 ## Busy state, unread badges and reply notifications
 
 Three layers, kept separate: the runs projection says which chats have a run in flight, the store
-counts unseen replies, and `use-reply-notifications` turns hidden-tab replies into optional
-desktop notifications.
+carries the unread chat keys the sidebar renders, and `use-reply-notifications` owns the
+per-device unread state and turns hidden-tab replies into optional desktop notifications.
 
 ### Busy state
 
@@ -613,17 +617,44 @@ desktop notifications.
 
 ### Unread badges and the title count
 
-- The runtime broadcasts `assistantReply { sessionKey, runId, text }` on its events bus for a
+- The runtime broadcasts `assistantReply { sessionKey, runId, text, at }` on its events bus for a
   `chat` `final` that carries non-empty assistant text, once per `runId` (bounded FIFO of 200 run
   ids), from `handleEvent` before `handleChatEvent` — so a pre-ack buffered final replayed after
   the send acknowledgement still fires exactly once. Heartbeat finals (`message: undefined`),
-  silent finals and user-role finals never fire.
-- `AppShell`'s `useReplyNotifications` marks the chat unread in the store (`markUnread` on
-  `unreadBySession`, rendered as the static `sidebar-session-unread` dot,
-  `aria-label="New reply"`) when the reply lands in a non-active chat or while the tab is hidden,
-  and clears a chat's count when that chat is activated or the tab becomes visible with it open.
-  The document title gets a `(N)` prefix against the title captured at mount. Badges and the
-  count run whether or not the notification opt-in is on.
+  silent finals and user-role finals never fire. `at` is the gateway-stamped `message.timestamp`
+  of the final, or `null` from a gateway that does not stamp timestamps; unread detection is then
+  live-only.
+- `AppShell`'s `useReplyNotifications` owns unread state per browser or installed app: a chat is
+  unread when an assistant reply arrived after this device last had the chat open. Detection is
+  durable — it compares the session row's `lastReplyAt` (see
+  [Gateway protocol](/gateway/protocol#sessions-list-sorting-agent-activity-and-visibility))
+  against a per-device read cursor, and the state survives a reload. It publishes the unread keys
+  to the store (`setUnreadSessions` on `unreadBySession`, rendered as the static
+  `sidebar-session-unread` dot, `aria-label="New reply"`) and clears a chat when it is activated,
+  when the tab becomes visible with it open, or through the top-bar bell's **Mark all as read**.
+  The document title gets a `(N)` prefix counting unread chats against the title captured at
+  mount. Badges and the count run whether or not the notification opt-in is on.
+- `providers/unread-state.ts` is the pure state machine behind that durability (`UNREAD_STATE_STORAGE_KEY`
+  is `openclaw.web.unread.v1`, scoped like every other preference): per chat a seen floor and an
+  unread timestamp, a baseline seeded from the first attention window (replies older than it never
+  light), an optional read-all timestamp, a monotonic cross-tab merge in which a read always beats
+  an unread of the same or older reply, and pruning that sheds the oldest seen entries past 2000
+  keys by raising the baseline. Timestamps only — never message text or titles. A chat deleted
+  elsewhere is dropped by tombstoning it seen and forgetting the key, both from the live
+  `sessionDeleted` event and from a completed read (`completeAt`) whose window no longer lists it.
+- `providers/attention-runtime.ts` is the attention window the unread owner reconciles against.
+  In the default Chats view it adopts the sidebar's own completed page (`SESSIONS_LIST_LIMIT`, 100
+  rows); anywhere else `refresh()` reads the newest `ATTENTION_LIST_LIMIT` (50) user-facing chats
+  with `includeDerivedTitles`, coalescing to one fetch in flight plus one trailing and never
+  emitting on failure. The runtime publishes `attentionRows { sessions, completeAt }`; `completeAt`
+  is the response `ts` only when the read returned the whole window (`hasMore: false`), so only a
+  complete window can clear chats that vanished from it. A hidden-to-visible resume refetches the
+  sidebar and attention windows at most once per `RESUME_REFRESH_MIN_MS` (10 s).
+- `ui/AttentionMenu.tsx` renders the bell: an icon trigger whose badge caps at `99+`
+  (`aria-label="Notifications, N unread"`) opening a dismissible menu that lists unread chats
+  (assistant colour marker, chat name, an assistant and recency line) and offers
+  **Mark all as read** only when the list is non-empty; an empty menu reads "You're all caught
+  up".
 - Operator decision: nothing from the reply itself may reach the OS. `AssistantReply.text` exists
   only so empty finals can be skipped — never render it in a notification, a tooltip or a title.
 

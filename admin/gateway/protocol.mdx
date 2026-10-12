@@ -14,8 +14,10 @@ sources:
   - src/gateway/protocol/schema/sessions.ts
   - src/gateway/session-utils.ts
   - src/gateway/session-utils.fs.ts
+  - src/gateway/session-reply-activity.ts
+  - src/gateway/server-methods/chat.ts
   - src/shared/session-visibility.ts
-generated: 2026-10-02
+generated: 2026-10-11
 ---
 
 # Gateway protocol (WebSocket)
@@ -626,7 +628,10 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 - `chat.send` (`operator.write`; narrow-admitted) takes
   `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
-  running). P2 added the last two params:
+  running). When an embedded run is already active in the session and the queue policy enqueues the
+  turn behind it, the answer is `{ runId, status: "queued" }`, sent once the policy decides (at
+  most 30 s). No empty `final` is broadcast for a queued turn; its events stream under `runId` when
+  the queue drains. P2 added the last two params:
   - `replyToId` is the entry id of the message being replied to (the `__openclaw.id` of a
     `chat.history` message). The gateway looks it up in this session's own transcript and gives the
     turn's prompt the quoted message as reply context: its text (at most 2000 characters) and its
@@ -772,9 +777,19 @@ The operation applies work in this exact order:
 10. If `includeDerivedTitles` or `includeLastMessage` is true, read transcripts only for rows in
     the sliced page and add the requested title or preview fields.
 
-The result also reports `limitApplied` when the caller supplied a limit; non-zero `offset`;
-`nextOffset` (or `null` at the end); and `hasMore`. `count` is the number of rows in the returned
-page, while `totalCount` is the filtered count before `offset` and `limit`.
+The result also reports `ts` (server time of the read, epoch ms); `limitApplied` when the caller
+supplied a limit; non-zero `offset`; `nextOffset` (or `null` at the end); and `hasMore`. `count`
+is the number of rows in the returned page, while `totalCount` is the filtered count before
+`offset` and `limit`.
+
+Each row also carries `lastReplyAt` (optional, `number | null`): epoch ms of the latest
+user-visible assistant reply for that session - a `chat` `final` that carried assistant text. The
+gateway records it (`stampReplyActivity` in `src/gateway/session-reply-activity.ts`) when such a
+final is broadcast, when `chat.inject` appends an assistant message, and when an out-of-band send
+mirrors an assistant reply into the session (`src/infra/outbound/deliver.ts`,
+`outbound-send-service.ts`); the session entry carries the same field. The field is monotonic and
+distinct from `updatedAt`, which other writes such as renames and inbound routing also move. It is
+`null` when the session has had no such reply.
 
 For example, these are complete RPC `params` objects; they require no imports:
 
