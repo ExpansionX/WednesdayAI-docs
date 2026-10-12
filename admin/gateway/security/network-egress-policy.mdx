@@ -28,6 +28,19 @@ DNS is resolved and the resolved addresses are checked — a hostname that point
 
 The LLM inference path (Ollama, llama.cpp, LM Studio, bifrost, and the pi-ai SDK) is **not** SSRF-guarded and is unaffected by this policy. You can point the model endpoint at `http://localhost:11434` or any LAN address without any config change. The policy only covers HTTP requests made by the gateway itself — cron webhooks, agent web fetch, media downloads, memory remote HTTP, and skills install. (ADR 0008, Decision 3.)
 
+## Request bodies are preserved
+
+The guard does not alter what you send, with one exception: a `multipart/form-data` body is rebuilt
+for the HTTP client the guard dispatches on, and any caller-supplied `content-type` or
+`content-length` is dropped so the rebuilt boundary is the one that goes on the wire. This is
+invisible to callers and applies to guarded uploads such as audio transcription and memory batch
+upload.
+
+Releases up to and including 0.4.10 skipped this step, so a multipart body built from the global
+`FormData` was sent with no boundary and no fields. Symptoms were vendor-specific complaints that
+looked like configuration errors rather than transport errors: a missing `model` parameter, a bad
+multipart boundary, or an unexpected array. Upgrade if guarded uploads fail this way.
+
 ## Override options
 
 ### 1. `allowedCidrs`: preferred narrow override

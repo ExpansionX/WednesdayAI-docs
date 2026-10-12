@@ -1,0 +1,271 @@
+---
+audience: developer
+component: session-identity-keying
+sources:
+  - dev-docs/adr/0081-config-independent-actor-identity.md
+  - dev-docs/adr/0012-plugin-storage-read-access-boundary.md
+  - src/config/sessions/storage-runtime.ts
+  - src/config/sessions/read-query.ts
+  - src/routing/session-key.ts
+  - src/routing/resolve-route.ts
+  - src/plugins/types.ts
+  - src/plugin-sdk/index.ts
+generated: 2026-10-04
+---
+
+# Session Identity for Extension-Owned Storage
+
+If your extension keeps its own records about a conversation (a per-user preference, a
+moderation flag, a billing counter) do not key those records on `sessionKey`. `sessionKey` is a
+config-shaped bucket id. For a direct peer, `buildAgentPeerSessionKey`
+(`src/routing/session-key.ts`) composes it from the sender plus `session.dmScope`, and from
+`session.identityLinks` only when that scope is not `main`. Group and channel keys are
+`agent:<id>:<channel>:<group|channel>:<peer>`. Neither setting is an input. `resolve-route.ts`
+passes those same builder inputs and still exposes the raw route peer.
+
+A `dmScope` change rebuckets direct peers only. Group and channel keys are unaffected. An
+`identityLinks` change rewrites a direct key only when `dmScope` is not `main` and the resolved
+linked peer id differs from the raw peer id after the builder lowercases both. An unlinked direct
+peer, a `main`-scope direct peer, and every group or channel peer keep the same key. Under
+`identityLinks`, a direct key segment can still be ambiguous: a linked sender's canonical name is
+textually indistinguishable from an unlinked raw peer id that happens to equal it (#646). Stored
+group and channel peers remain the key segment. This limit does not change that rule, a route's
+raw `peerId`, or the persisted actor snapshot.
+
+ADR 0081 makes actor identity (`channel`, `accountId`, `peerKind`, `peerId`, optional
+`canonicalIdentity`) a persisted, queryable fact instead. This guide covers the contract your
+extension should use instead of parsing `sessionKey`.
+
+## The keying contract (ADR 0081 D8)
+
+Key your own tables on the raw tuple:
+
+```typescript
+type ExtensionRecordKey = {
+  channel: string;
+  accountId?: string;
+  peerKind: "direct" | "group" | "channel"; // matches core's ChatType
+  peerId: string;
+};
+```
+
+- `canonicalIdentity` may be carried as an **overlay** on top of the tuple (for example, to
+  group a linked sender's rows together), but it never replaces the tuple as the primary key.
+  It is `undefined` for an unlinked sender.
+- `sessionKey` is valid only as an opaque bucket id — pass it back to core APIs that expect a
+  bucket id (`readByKey`, hook dispatch), never parse it to recover channel/account/peer.
+- Within the ADR 0081 implementation, the one newly introduced legacy `sessionKey` parser
+  (`src/config/sessions/ctx-identity-backfill.ts`) exists solely to backfill pre-ADR-0081 rows.
+  The new identity read and runtime paths do not parse keys. Existing consumers that still parse
+  keys remain outside this workstream and retain their current behavior until the follow-up
+  `context-schema-consumers` workstream.
+
+### Gateway senders are devices
+
+On the gateway surfaces (`chat.send`, `sessions.steer`, talk), the raw peer id of a turn is
+`device:<deviceId>` — the verified device that connected — not the app id. The app id (for example
+`openclaw-user-client`) is used only when the connection has no device block (Control UI with
+`dangerouslyDisableDeviceAuth`, a trusted proxy without a device block). Nothing changes about the
+tuple: `device:<id>` is the raw `peerId`, attributed through the turn's channel by the existing
+precedence rules, and `canonicalIdentity` is set only when the operator linked the device in
+`session.identityLinks`. Key on the tuple as before; do not special-case the `device:` prefix — a
+lane-enabled agent denies turns it cannot attribute to a linked identity
+(`WorkspaceLaneDeniedError`; see [Workspace Lanes](/concepts/workspace-lanes#linking-gateway-devices)).
+
+## Reading identity-scoped history
+
+Your extension receives a `ConversationReadQuery` (ADR 0012), either injected into a context
+lifecycle hook (`context.collect`/`project`/`prune`) or fetched directly:
+
+```typescript
+import { getConversationReadQuery } from "openclaw/plugin-sdk";
+
+const query = getConversationReadQuery({ agentId });
+```
+
+It is read-only and owner-scoped to `agentId` by construction — there is no parameter to read
+another agent's sessions.
+
+### `listSessionsByActor`
+
+Finds every session written by one raw `(channel, accountId?, peerKind, peerId)` tuple:
+
+```typescript
+const { sessions, nextCursor } = await query.listSessionsByActor({
+  channel: "telegram",
+  peerKind: "direct",
+  peerId: "123456",
+  limit: 100, // optional; default 100, max 1000 — see "Limits" below
+});
+```
+
+**The `accountId` wildcard.** Omitting `accountId` matches _every_ account for that tuple,
+including rows whose `account_id` is NULL — it is a documented wildcard, not "no filter applied
+accidentally." Passing an explicit `accountId` narrows to exactly that account and never matches
+a NULL `account_id` row. Most multi-account channel configurations should omit it unless they
+specifically need one account's history.
+
+**Coverage limit.** `listSessionsByActor` requires `channel`. A row whose persisted `channel`
+is NULL is **not** returned by this query — there is no
+peer-only lookup, because a bare peer id can collide across channels. Such a row is still
+reachable through `listSessionsByCanonicalIdentity` (if `canonical_identity` was established) or
+through `readByKey` with its known `sessionKey`.
+
+### `listSessionsByCanonicalIdentity`
+
+Finds every session for a linked sender, across every channel in their `identityLinks` entry —
+the case `readByKey` cannot cover (see "Non-claims" below):
+
+```typescript
+const { sessions } = await query.listSessionsByCanonicalIdentity({
+  canonicalIdentity: "alice",
+  limit: 100,
+});
+```
+
+This matches rows whose `canonical_identity` column already equals `"alice"`, **and** rows whose
+direct-peer lookup keys match `"alice"`'s _currently configured_ `identityLinks` peers — so a link added
+after a row was written still finds it. It does **not** return the session of an unlinked raw
+peer whose id merely equals `"alice"` (the #646 case) unless that row's own metadata actually
+established the link.
+
+Configuration-derived links attribute direct peers only, never group or channel rows with colliding
+tokens. Link matching uses the resolver's full-token trim-and-lowercase semantics, including opaque
+colons; it does not split tokens into invented channel/peer components. Private normalized lookup
+keys leave the stored raw facts and the public actor-query contract unchanged. Canonical references
+whose persisted channel is NULL omit `channel` instead of inventing a channel name.
+
+### Limits
+
+Both queries clamp `limit` through the same read-limit clamp every other store read uses:
+default 100, max 1000. A `limit` above 1000 is truncated to 1000 and logged as a warning. A
+non-numeric, zero, or negative `limit` falls back to 100 without a warning. Neither case is
+rejected. Page with the returned `nextCursor` until it is absent; pages are keyset-ordered on
+`(updated_at, session_id)` with no duplicates across pages.
+
+Both queries return `{ sessions: [] }` when the configured runtime has no lossless conversation
+log (`capabilities.losslessConversationLog === false`) — check for an empty result, not an
+exception, when degrading gracefully on that backend.
+
+## What this does _not_ claim to fix (#646)
+
+`listSessionsByCanonicalIdentity` and the persisted actor tuple fix **stale attribution going
+forward**: a row's _current_ identity snapshot now reflects the actor who most recently wrote it,
+and a `dmScope`/`identityLinks` change no longer detaches history written under the old shape.
+
+They do **not** separate a historical collision. If two different senders already shared one
+`sessionKey` before this change — under `main`/`per-peer` dmScope, or because an unlinked raw
+peer id happened to equal a linked canonical name — the messages those two senders wrote into
+that shared bucket stay recorded together under it. Only the row's identity _snapshot_ (its
+current `channel`/`account_id`/`peer_kind`/`peer_id`/`canonical_identity` columns) moves to the
+newest actor; the transcript already stored under that `session_id` is not re-split or
+re-attributed per message. Do not build a feature on the assumption that per-message attribution
+inside one legacy collided session is now available — it still isn't.
+
+## Migrating off key parsing
+
+A consumer that used to recover identity by parsing `sessionKey` should switch to the SDK fields
+and read queries above instead. For example, a hand-rolled parser like this (illustrative —
+based on the shape `buildAgentPeerSessionKey` produces, not a file this guide edits):
+
+```typescript
+// Before: parses the key's positional segments to guess channel/account/peer.
+function inferPeerFromSessionKey(sessionKey: string) {
+  const parts = sessionKey.split(":"); // agent:<id>:<channel>:[<account>:]direct:<peer>
+  // ...shape-sniffing, ambiguous under identityLinks (#646), breaks on a dmScope change
+}
+```
+
+```typescript
+import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";
+
+// After: use the persisted/SDK-exposed tuple instead of the key text.
+export default function register(api: OpenClawPluginApi): void {
+  api.on("before_agent_start", async (_event, ctx) => {
+    const identity = ctx.runtimeIdentity;
+    if (!identity) {
+      return;
+    }
+    const { peerKind, peerId, accountId, canonicalIdentity } = identity;
+    if (!peerKind || !peerId) {
+      // The SDK fields are optional because non-inbound lifecycle paths may not have an actor.
+      return;
+    }
+  });
+}
+```
+
+An inbound turn can expose its actual peer through `runtimeIdentity` even when
+`isMainSession` is true. ADR 0081 D3 keeps the persisted shared-main row peerless; it does not
+erase the current inbound actor from SDK lifecycle context. An actorless turn is distinguished
+by missing `peerKind` or `peerId`, not by the main-session flag.
+
+`ResolvedAgentRoute` also exposes `peerKind`, `peerId`, `canonicalIdentity`, and
+`isMainSession` when your extension resolves a route instead of receiving a hook context.
+`peerId` on that route is the raw constructor input: trimmed, not lowercased, and not replaced
+by an `identityLinks` canonical name. The session bucket is still built from that input plus
+`dmScope`. This guide does not change the route field or the bucket.
+
+That raw route id is not always the id you can query. On a surface-prefixed group or channel
+(`slack:channel:…`, `slack:group:…`, `matrix:group:…`), the exposed group id is the lowercased
+sliced id. The write seam persists that exposed id, and the turn's `runtimeIdentity.peerId`
+publishes the same value. A bare `group:` / `channel:` marker still keeps the raw remainder,
+including case. That bare-marker case split is outside ADR 0081 D5 and is not the same id as the
+lowercased legacy key segment.
+
+For history older than the current turn, call `listSessionsByActor` /
+`listSessionsByCanonicalIdentity` with the matching turn's `runtimeIdentity` tuple. Do not pass
+`ResolvedAgentRoute.peerId`, and do not recover the tuple by parsing `sessionKey`.
+
+For `channel`, pass the turn's `runtimeIdentity.channelId` from an agent-turn hook such as
+`before_agent_start`; it follows the persisted actor channel (`OriginatingChannel`, then
+`Provider`, then `Surface`). On the inbound `message_received` hook, `channelId` prefers `Surface`
+over `Provider`, so it can differ from the persisted channel when `OriginatingChannel` is absent
+and `Provider` and `Surface` differ. Query from a turn hook when you need an exact match. Hook
+`channelId` values are lowercased, while the persisted actor channel keeps the raw case of the
+context field, so a channel that emits mixed-case context fields needs the persisted case.
+
+An account id may be the literal word `direct`, `group`, or `channel`. Each collides with a
+marker-shaped peer: `agent:<id>:slack:direct:direct:<peer>`, `agent:<id>:slack:group:direct:<peer>`,
+and `agent:<id>:slack:channel:direct:<peer>`. Do not parse those keys to decide account, peer
+kind, peer, or scope. The shared fact is channel `slack` only. Kind `direct` is shared only for
+the `direct:direct` shape. A mixed `group` or `channel` shape has no shared kind, so kind stays
+NULL. Account, peer, scope, and canonical identity stay NULL unless an independent account fact
+or an eligible raw sender establishes them. A raw human peer is used only when the resolved kind
+is `direct` and the existing channel provenance applies. A known `group`, `channel`, or absent
+kind never treats that human entry as the chat peer. Do not guess scope from a known kind or
+from a metadata account. Use the matching turn's `runtimeIdentity` or the persisted tuple.
+
+A local working-tree gate now keeps that contract for all three markers. It is not a shipped
+review or a deploy. Still do not parse the key.
+
+## Async safety
+
+`getConversationReadQuery` and both identity queries are plain async functions — no blocking I/O,
+safe to call from a tool `execute()` or a hook handler. They do not block the gateway event loop.
+A `listSessionsByCanonicalIdentity` page executes one SQL statement containing at most three
+indexed `UNION` arms: persisted `canonical_identity`, normalized bare-peer lookup keys and normalized
+channel-scoped lookup keys. This is one database round trip per page, not one per configured link.
+SQL text and bind work still grow with the selected full-token link list. Avoid calling it in a
+tight loop over many identities in one turn; page with `nextCursor` rather than raising `limit`.
+
+**Do not do this:**
+
+```typescript
+// ❌ parses sessionKey for identity instead of using the persisted tuple / read queries
+const peerId = ctx.sessionKey.split(":").pop();
+```
+
+**Do this instead:**
+
+```typescript
+// ✅ read the current actor from the injected runtime identity
+const identity = ctx.runtimeIdentity;
+if (!identity) {
+  return;
+}
+const { peerId, peerKind, accountId, canonicalIdentity } = identity;
+if (!peerKind || !peerId) {
+  return;
+}
+```

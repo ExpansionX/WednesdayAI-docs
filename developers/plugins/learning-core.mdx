@@ -1,13 +1,38 @@
 ---
-summary: "Learning Core plugin: lesson-first learning loop with skill proposals"
+summary: "Learning Core plugin: lesson-first learning loop with queued skill proposals"
 read_when:
-  - You want your agent to learn from interactions and propose new skills
+  - You want your agent to learn from corrections and mistakes across sessions
+  - You need to review, approve, or reject a queued skill proposal
+  - You want to know where lessons are stored and how to read them
 title: "Learning Core"
+audience: user
+component: learning-core
+sources:
+  - extensions/learning-core/index.ts
+  - extensions/learning-core/openclaw.plugin.json
+  - extensions/learning-core/src/config.ts
+  - extensions/learning-core/src/learning-runner.ts
+  - extensions/learning-core/src/promote-pass.ts
+  - extensions/learning-core/src/assist-collect.ts
+  - extensions/learning-core/src/tool.ts
+  - extensions/learning-core/src/markdown-export.ts
+  - extensions/learning-core/src/lesson-record.ts
+  - ui/src/ui/views/learning.ts
+generated: 2026-08-16
 ---
 
 # Learning Core (plugin)
 
-Lesson-first learning loop with queued skill proposals.
+Lesson-first learning loop with queued skill proposals. This page is for people who use the
+agent and review what it learned. Operators who run the Gateway should also read
+[Learning Core (admin)](/plugins/learning-core-admin); plugin authors,
+[Learning Core (developer)](/plugins/learning-core-developer). Run costs and lesson health are in
+the [Dreams view](/web/dreams).
+
+Learning Core watches finished chats, notes a short **candidate** when a chat ends, and later
+turns repeated corrections and failures into **lessons**. When a lesson has recurred enough times
+it queues a **skill proposal**. It never writes a skill by itself: applying a proposal is an
+explicit approval step you make.
 
 ## Install
 
@@ -21,13 +46,190 @@ Local checkout:
 wednesdayai plugins install ./extensions/learning-core
 ```
 
+## Turning it on
+
+The plugin is disabled by default. Enable the plugin entry, then set the mode:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "learning-core": {
+        "enabled": true,
+        "config": {
+          "mode": "observe"
+        }
+      }
+    }
+  }
+}
+```
+
+`mode` accepts `off`, `observe`, and `assist`. `off` stops capture entirely. `observe` is the
+default: it records candidates and can promote them into lessons, but does not change what the
+agent says next. `assist` does the same capture work **and** feeds a few active lessons into the
+next reply so the agent can use them.
+
 ## What it does
 
-- Implements a lesson-first learning loop: the agent extracts lessons from interactions.
-- Queues skill proposals based on learned patterns.
-- Integrates with the skills system to gradually expand agent capabilities.
+- **Notes a candidate when a chat ends.** The plugin claims that finished chat and stores a
+  redacted excerpt plus tags (for example `correction` or `untagged`). It does not write a lesson
+  at that moment.
+- **Promotes candidates into lessons.** A background `produce` task turns pending candidates into
+  lessons shortly after the chat ends, using LLM consolidation when it is configured and able to
+  run, and the deterministic promote step otherwise. Promote runs right when the chat is claimed
+  instead when background tasks are off, when `schedule.enabled` is `false`, or when lessons are
+  stored in the fs-jsonl file store, so you still see a lesson without waiting for a night-time
+  job. Dream Cycle being on or off makes no difference.
+- **Consolidates with a judge model (optional).** With consolidation turned on and a model set,
+  a judge model reads each new candidate next to up to five similar lessons and decides to add a
+  lesson, update or replace one, retire one, or do nothing. It runs within a daily call cap per
+  agent and needs a SQLite or Postgres store. Promote, by contrast, makes no model call: it
+  merges repeats of the same lesson text using the thresholds below.
+- **Counts recurrence.** A lesson seen once is recorded but not acted on. Repeats increment an
+  occurrence count and record which chats they came from.
+- **Queues skill proposals.** Once a lesson passes the promotion thresholds, or a distill pass
+  runs on a successful chat, a proposal sits in a queue waiting for you.
+- **Exports a readable trail.** Lessons are written as Markdown into your workspace so you can read
+  what the agent thinks it learned without touching a database.
+
+## Where lessons appear
+
+With `exportMarkdown` left on (the default), lessons are exported into your workspace at:
+
+```text
+<workspace>/memory/learning/
+```
+
+These files are a human-readable audit trail. The machine-readable store is separate and is the
+authoritative copy - see [Learning Core (admin)](/plugins/learning-core-admin) for where that lives.
+
+## Reviewing what was learned
+
+Open the **Learning** tab in the control panel. You can search lessons, jump to the chat a lesson
+came from, preview a proposal before you decide, and approve or reject several proposals at once.
+
+After this update the tab shows three data changes in every state:
+
+- **Legacy-only proposals are listed.** Proposals that existed only in an older fs-jsonl log
+  are copied into the database by the one-time upgrade repair, then appear in the queue and can
+  be decided like any other.
+- **fs-jsonl counts can be lower bounds.** On the fs-jsonl store the overview counts read at most
+  the newest 8 MiB of the log. When the log is larger, the counts are lower bounds and marked
+  `truncated`.
+- **Records are grouped by canonical workspace.** Lessons and proposals are grouped and filtered
+  under each agent's canonical workspace (its configured workspace path), so records written
+  under an older workspace key appear with that agent once the repair has moved them.
+
+Apart from those, in normal operation (upgrade repair finished, every agent on its recorded
+workspace) the tab behaves as it always has. Approving or rejecting several proposals at once
+works through them in order and stops at the first one that fails; the ones after it are left
+undecided. Three states change what the tab shows, and each is reported rather than hidden:
+
+- **Decisions wait for the upgrade repair.** Until the one-time
+  [upgrade fence](/plugins/learning-core-admin#upgrade-fence) finishes its repair, approve and
+  reject fail with `repair_pending`. A proposal of an agent whose workspace does not match the
+  recorded one fails with `scope_mismatch`. Internal skill-name claims are never decidable.
+- **Mismatched agents are hidden.** When this Gateway resolves a different workspace for an agent
+  than the one recorded in the shared database, that agent's lessons and proposals are left out
+  of the tab, and opening one of its proposals fails with `scope_mismatch`. See
+  [Learning workspace](/plugins/learning-core-admin#learning-workspace).
+- **Older lessons may be cut before the repair.** On SQLite or Postgres, before the repair
+  finishes, lessons that still live only in the old fs-jsonl log come from a bounded window of
+  its newest part. When that window does not reach the start of the log, the lesson list reports
+  `truncated`.
+
+Learning Core also registers an owner-only `learning` tool. Ask your agent to use it, or call it
+directly. The actions are:
+
+| Action                | What it does                                                         |
+| --------------------- | -------------------------------------------------------------------- |
+| `status`              | Counts of lessons and proposals, and the resolved storage backend.   |
+| `list_lessons`        | Every lesson in the current scope.                                   |
+| `list_proposals`      | The queue of skill proposals awaiting a decision.                    |
+| `inspect_proposal`    | Full body of one proposal plus its security scanner findings.        |
+| `create_proposal`     | Turn a lesson into a proposal by hand, before it hits the threshold. |
+| `apply_proposal`      | Approve a proposal and write the skill file.                         |
+| `reject_proposal`     | Decline a proposal; it stays recorded, not deleted.                  |
+| `quarantine_proposal` | Park a proposal that the scanner flagged as unsafe.                  |
+| `supersede_lesson`    | Replace a lesson with a corrected version, keeping the old one.      |
+
+Every action is refused unless the caller is the workspace owner.
+
+### Applying a proposal is gated
+
+`apply_proposal` runs the proposal body through a security scanner before anything is written. A
+proposal that trips a scanner rule is stored as `quarantined`. Apply accepts only `pending`
+proposals; there is no transition from `quarantined` back to `pending`. Re-create the proposal
+after review if you still want it applied. An approved skill is written as
+`~/.openclaw/skills/<name>/SKILL.md` (or `$OPENCLAW_STATE_DIR/skills/<name>/SKILL.md`). This is the
+point of the lesson-first design: a bad lesson is cheap to ignore, a bad skill changes behaviour
+in every future session.
+
+## Correcting a lesson
+
+Lessons are never deleted. `supersede_lesson` writes a replacement and links it to the lesson it
+replaces, so the chain of what the agent believed and when stays intact and auditable. The
+superseded lesson stops being active but remains readable.
+
+## Tuning when a lesson gets promoted
+
+These live under `plugins.entries.learning-core.config`:
+
+| Key                            | Default   | Meaning                                                               |
+| ------------------------------ | --------- | --------------------------------------------------------------------- |
+| `mode`                         | `observe` | `off`, `observe`, or `assist`.                                        |
+| `exportMarkdown`               | `true`    | Write the Markdown audit trail into the workspace.                    |
+| `minOccurrences`               | `3`       | Repeats needed before a general lesson is proposed.                   |
+| `minOccurrencesWithCorrection` | `2`       | Repeats needed for a correction lesson. Authoritative for that kind.  |
+| `minConfidence`                | `0.7`     | Lessons scoring below this are never proposed.                        |
+| `requireDistinctSessions`      | `true`    | Repeats must come from at least two different sessions.               |
+| `maxLessonsForPrompt`          | `5`       | How many active lessons `assist` mode feeds into the next reply.      |
+| `consolidation.enabled`        | `false`   | When true, a budgeted LLM pass may add, update, or drop lessons.      |
+| `consolidation.model`          | unset     | Judge model for that pass (with `consolidation.provider`).            |
+| `schedule.enabled`             | `true`    | Set `false` to stop consolidation; promote then writes lessons.       |
+| `distill.enabled`              | `false`   | When true, successful chats can become owner-gated skill proposals.   |
+| `distill.provider` / `.model`  | unset     | The model that writes each proposed skill. Needed for distill to run. |
+
+Correction lessons use `minOccurrencesWithCorrection` and do **not** also have to clear
+`minOccurrences` - being told directly that something is wrong is stronger evidence than a pattern
+inferred from a failure.
+
+`maxLessonsForPrompt` is read only when `mode` is `assist`. Consolidation and distill stay off
+unless you set their `enabled` flags. Distill queues a proposal written by the configured model; it
+does not write a skill file, and without a model it writes nothing.
+
+## If lessons stop appearing
+
+After an update, new lessons can stop if Learning Core failed to start with the Gateway
+(the assistant that talks to you). You still see older lessons, but corrections from new
+chats never become lessons.
+
+What you should see after a healthy restart: the Gateway comes back. The next finished
+chat produces a new candidate (and later a lesson) only when learning is turned on
+and that chat includes something you said. If learning is off, or the chat has no
+user excerpt, no candidate is expected.
+
+If that does not happen, ask whoever runs the Gateway to restart it and confirm Learning
+Core loaded without a register error. Right after an update, Learning Core also finishes a
+one-time repair of its database before it learns anything new; chats that end during it are
+learned from once it completes. If the Gateway log reports `scope_mismatch`, two Gateways that
+share the learning database resolve different workspaces for the same agent; see
+[Learning workspace](/plugins/learning-core-admin#learning-workspace). Scheduled reminders that also stopped after the same
+update are a separate cron-store issue; see [Cron or heartbeat did not fire](/help/troubleshooting).
+
+## Privacy
+
+Lesson text passes through a redaction layer before it is stored, covering credentials and
+API-key-shaped secrets, email addresses and phone numbers, plus any patterns you have configured in
+`logging.redactPatterns`. So a key pasted into a correction does not reach the stored lesson text or
+its evidence summary. Exported Markdown files and the state directory are created private to your
+user.
 
 ## Related
 
+- [Learning Core (admin)](/plugins/learning-core-admin) - storage backends, placement, verification
+- [Learning Core (developer)](/plugins/learning-core-developer) - store contract and extension seams
+- [Dream Cycle](/plugins/dream-cycle) - produces repeated-work candidates; stops short of proposals
 - [Plugins](/tools/plugin)
 - [Skills](/tools/skills)

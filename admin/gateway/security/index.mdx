@@ -423,6 +423,8 @@ Two built-in tools can make persistent control-plane changes:
 - `gateway` can call `config.apply`, `config.patch`, and `update.run`.
 - `cron` can create scheduled jobs that keep running after the original chat/task ends.
 
+`config.apply` is **denied by default** for non-sandbox agents (`gateway.config_apply`) even when the `gateway` tool itself is allowed. Re-enable with `tools.allow` or `tools.alsoAllow` (including `agents.list[].tools.alsoAllow`). Bare `*` does not count. `config.patch` stays available. A write that drops unnamed top-level keys is refused and the on-disk file is unchanged. See [Config writes](/gateway/config-writes).
+
 For any agent/surface that handles untrusted content, deny these by default:
 
 ```json5
@@ -494,7 +496,7 @@ Treat the snippet above as **secure DM mode**:
 - Local CLI onboarding default: writes `session.dmScope: "per-channel-peer"` when unset (keeps existing explicit values).
 - Secure DM mode: `session.dmScope: "per-channel-peer"` (each channel+sender pair gets an isolated DM context).
 
-If you run multiple accounts on the same channel, use `per-account-channel-peer` instead. If the same person contacts you on multiple channels, use `session.identityLinks` to collapse those DM sessions into one canonical identity. See [Session Management](/concepts/session) and [Configuration](/gateway/configuration).
+If you run multiple accounts on the same channel, use `per-account-channel-peer` instead. If the same person contacts you on multiple channels, use `session.identityLinks` to collapse those DM sessions into one canonical identity. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; add that value to the person's links so web turns resolve to the same identity. See [Session Management](/concepts/session) and [Configuration](/gateway/configuration).
 
 ## Allowlists (DM + groups) — terminology
 
@@ -941,9 +943,10 @@ access those accounts and data. Treat browser profiles as **sensitive state**:
 - Disable browser sync/password managers in the agent profile if possible (reduces blast radius).
 - For remote gateways, assume “browser control” is equivalent to “operator access” to whatever that profile can reach.
 - Keep the Gateway and node hosts tailnet-only; avoid exposing relay/control ports to LAN or public Internet.
-- The Chrome extension relay’s CDP endpoint is auth-gated; only OpenClaw clients can connect.
-- Disable browser proxy routing when you don’t need it (`gateway.nodes.browser.mode="off"`).
-- Chrome extension relay mode is **not** “safer”; it can take over your existing Chrome tabs. Assume it can act as you in whatever that tab/profile can reach.
+- The Chrome extension relay's CDP endpoint is auth-gated; only WednesdayAI clients can connect.
+- The Gateway's `/browser/extension` WebSocket route (remote extension pairing) enforces origin validation (`chrome-extension://` only), subprotocol token authentication, and per-IP rate limiting (20 attempts per 60s window, 60s lockout; loopback not exempt). The derived relay token is transmitted in the `Sec-WebSocket-Protocol` header — TLS (`wss://`) is required for non-loopback hosts.
+- Disable browser proxy routing when you don't need it (`gateway.nodes.browser.mode="off"`).
+- Chrome extension relay mode is **not** "safer"; it can take over your existing Chrome tabs. Assume it can act as you in whatever that tab/profile can reach.
 
 ### Browser SSRF policy (trusted-network default)
 

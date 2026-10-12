@@ -818,6 +818,17 @@ For example, these are complete RPC `params` objects; they require no imports:
 }
 ```
 
+### The chat error event
+
+A dispatched turn that fails without an assistant reply ends with a `chat` broadcast event
+carrying `state: "error"`: `{ runId, sessionKey, seq, state: "error", errorMessage }`. `seq`
+continues the per-run sequence the other `chat` events for that run use, and the event reaches
+operator subscriptions and node sessions the same way the final event does. `chat.send` answers
+`started` immediately, so this event is the only signal a failed turn gives the requesting client;
+the run disappears from the active-run tracking and `chat.history` gains no assistant message.
+`errorMessage` is user-facing where a reason exists: a workspace-lane denial (below) puts its
+message here verbatim, and an unlinked device sees its own `device:<id>` in the text.
+
 ### The runs.invalidated event
 
 `runs.invalidated` tells a subscribed client that something it may be showing has changed. It
@@ -908,6 +919,36 @@ The full rationale lives in the repo at `dev-docs/adr/0073-client-contract-rpc-a
   dropping the delivery.
 - CLI-backed providers own their own transcript, so a turn that would need one of these
   suppressions on a CLI provider fails the run instead of persisting anyway.
+
+### Agent identity inheritance and lane denials
+
+`agent` accepts two more additive, optional params: `inheritedCanonicalIdentity` and
+`inheritedSenderId`. They carry the requester identity of in-process callers that run on behalf of
+a person: `sessions_send`, subagent announces, and Discord voice. They are trusted assertions, not
+authenticated data — any `operator.write` caller may set them, and the only validation is a match
+against `session.identityLinks` keys. Never accept them from a narrow-scope end-user client.
+
+On a lane-enabled agent (`agents.list[].workspaceLanes.enabled`), a run that cannot be attributed
+to a linked identity is rejected before the run starts:
+
+- The error frame carries `code: "UNAVAILABLE"`, the user-facing denial as `message`, and
+  `details.reason: "workspace_lane_denied"`. Example denial on a `canonical-identity` agent:
+
+  ```text
+  Agent "main" keeps a private workspace for each person, and this run is not attributed to a linked identity in session.identityLinks.
+  ```
+
+- The second `res` frame (same request id) carries `{ runId, status: "error", summary: <denial> }`.
+- A terminal lifecycle event for the `runId` (`phase: "error"`, `retryable: false`) is emitted even
+  though no run started, so `agent.wait` ends with `status: "error"` and the denial instead of
+  timing out. Internal runs (ADR 0073 `sessionEffects: "internal"`) emit no lifecycle events and
+  are not covered.
+- Nothing is written: no transcript entries, no session-store update, no delivery.
+
+Read `details.reason` with `gatewayErrorReason(err)` (`src/gateway/client.ts`) instead of matching
+the message text. The CLI `agent` command treats this marker as final and does not fall back to an
+embedded run. The device sender, lane keys, and the denial behavior of every path are documented
+in [Workspace Lanes](/concepts/workspace-lanes).
 
 ## Talk sessions
 

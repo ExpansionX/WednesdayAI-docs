@@ -117,14 +117,72 @@ Most deployments should also set an explicit persona workspace:
 
 `laneKey` controls which actor fields choose a lane:
 
-| Value                  | Behavior                                                                                       |
-| ---------------------- | ---------------------------------------------------------------------------------------------- |
-| `canonical-identity`   | Uses `session.identityLinks` when available, then falls back to account/channel/peer identity. |
-| `account-channel-peer` | Uses account id, channel, and sender or conversation identity.                                 |
-| `channel-peer`         | Uses channel and sender or conversation identity.                                              |
+| Value                  | Behavior                                                                                                                                                                                        |
+| ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `canonical-identity`   | Uses `session.identityLinks` when available. On channel turns it falls back to channel/account/peer identity; gateway (web client) turns have no fallback — the sender must be a linked device. |
+| `account-channel-peer` | Uses account id, channel, and sender or conversation identity.                                                                                                                                  |
+| `channel-peer`         | Uses channel and sender or conversation identity.                                                                                                                                               |
 
 Lane ids are deterministic digests, not raw sender ids. Missing actor fields deny the lane instead
 of falling back to an anonymous shared lane.
+
+Lane keys also decide which run paths can reach an agent at all:
+
+- Agent-RPC runs (subagents, `sessions_send`, announces, OpenAI-compatible HTTP, CLI, Discord voice)
+  carry no channel sender of their own, so they are always denied on `channel-peer` and
+  `account-channel-peer` lane agents.
+- `account-channel-peer` lane agents are unreachable from gateway clients: a gateway turn has no
+  channel account.
+- On `canonical-identity` lane agents, a channel user who is not in `session.identityLinks` can no
+  longer spawn or `sessions_send` into the agent — the run identity is validated against
+  identityLinks keys, so an unlinked user's delegations are denied instead of running in the shared
+  persona workspace.
+
+### Linking gateway devices
+
+Gateway turns (web client, Control UI) are sent by the verified device, so their sender id is
+`device:<deviceId>` — not the app id. Link each device to a person in `session.identityLinks`, and
+every turn from that device resolves the person's canonical lane:
+
+```json5
+{
+  session: {
+    identityLinks: {
+      Alice: ["telegram:111", "device:6abfaeda…"],
+    },
+  },
+}
+```
+
+Get device ids with `openclaw devices list --json` (the `deviceId` field of each entry under
+`paired`). A device-less gateway turn is denied on every lane key; an unlinked device is denied on
+`canonical-identity` and `account-channel-peer` (see `channel-peer` below). The reason is shown to
+the requester:
+
+- Device not linked:
+  `This assistant keeps a private workspace for each person, and this device isn't linked to a person yet. Ask your administrator to add "device:<deviceId>" to your entry in session.identityLinks.`
+- No paired device:
+  `This assistant keeps a private workspace for each person, and this connection has no paired device identity, so it can't be linked to a person. Connect from a paired device.`
+- `account-channel-peer` agent:
+  `This assistant keeps a workspace per channel account, so it can't be used from this app. Message it on its channel instead.`
+- Otherwise (a linked turn the runtime still cannot serve):
+  `This assistant's private workspace isn't available. Ask your administrator to check the gateway log.`
+
+A Control UI running with `gateway.controlUi.dangerouslyDisableDeviceAuth` is treated as
+device-less — any presented device block is ignored — so it is denied on lane agents. Under
+`channel-peer` a device gets an isolated per-device lane (`channel:webchat:peer:device:<deviceId>`)
+whether or not it is linked.
+
+### Upgrading from app-id lanes (before the device sender)
+
+Builds before the device sender keyed gateway turns on the app id, producing lanes named
+`lane-<hash>` with the preimage
+`agent:<agentId>:channel:<channel>:account:<accountId>:peer:openclaw-user-client`. Those lanes are
+shared by every web user of the agent and become orphaned once the device sender is live. Find each
+one by hashing its preimage — `laneId = "lane-" + sha256(preimage).hex.slice(0, 24)` (Node:
+`crypto.createHash("sha256").update(preimage).digest("hex").slice(0, 24)`) — then merge it into the
+person's canonical lane (`agent:<agentId>:canonical:<identityLinks key>`) **by hand**: one app-id
+lane may hold several people's data, so do not wholesale-rename without reviewing the files.
 
 ### Root templates
 
@@ -206,6 +264,94 @@ use lanes only to separate user-specific files inside a persona that may be shar
 ## For Developers
 
 Workspace lane data is additive. Existing hooks and plugins continue to run without lane fields.
+
+### Gateway senders and lane denials
+
+Gateway turns (`chat.send`, `sessions.steer`, talk) carry `SenderId: "device:<deviceId>"` when the
+connect frame has a verified device block, and the app id (for example `openclaw-user-client`) only
+when it does not. A Control UI running with `gateway.controlUi.dangerouslyDisableDeviceAuth` counts
+as device-less: any presented device block is ignored. Identity consumers match `device:<id>` values
+against `session.identityLinks` directly; nothing re-derives identity from the session key or the
+delivery route.
+
+A lane-enabled agent resolves the lane from the validated run identity on every path. A run that
+cannot be attributed to a linked identity fails closed with `WorkspaceLaneDeniedError`
+(`message` is user-facing, `agentId` names the agent):
+
+- Gateway turns: the denial message is broadcast to the requesting client as the turn's error, and
+  no assistant message is appended to `chat.history`. `sessions.steer` checks lane admission before
+  it touches the active run, so a denied requester cannot abort another person's turn and receives
+  the reason as an RPC error.
+- `agent` RPC (sessions_send, subagents, announces, Discord voice) and the CLI: the gateway `agent`
+  error frame carries `details.reason: "workspace_lane_denied"`, `agent.wait` ends with
+  `status: "error"` and the message, and the CLI prints the denial and exits 1 instead of falling
+  back to an embedded run.
+- OpenAI-compatible HTTP: `/v1/chat/completions` answers `403` with
+  `{ "error": { "message": …, "type": "permission_error" } }`, `/v1/responses` with
+  `{ "error": { "code": "permission_error", "message": … } }`; streams carry
+  `Error: <message>` content / `response.failed` respectively.
+
+For `canonical-identity` agents the agent-RPC denial reads: `Agent "<agentId>" keeps a private
+workspace for each person, and this run is not attributed to a linked identity in
+session.identityLinks.` For `channel-peer` and `account-channel-peer` agents every agent-RPC run is
+denied, because those runs have no channel sender: `Agent "<agentId>" keeps a workspace per channel
+sender, so runs without a channel sender (subagents, sessions_send, HTTP, CLI) can't use it.`
+
+Trust boundary: lane isolation holds against narrow-scope clients (the user client). `operator.write`
+callers of the `agent` RPC are trusted to assert `inheritedCanonicalIdentity`, which is only checked
+against identityLinks keys.
+
+Denials on channel turns (Telegram, Discord, …) stay silent — an unlinked stranger gets no reply —
+and this is unchanged.
+
+### Lane admission and resolution API
+
+`src/agents/workspace-lanes.ts` is the resolver seam:
+
+- `checkWorkspaceLaneAdmission({ cfg, agentId, personaWorkspaceDir, actor })` is the
+  side-effect-free admission check: the policy decision plus the on-disk gates (`create: "manual"`
+  and non-directory paths). Pre-checks must call it instead of `resolveWorkspaceLane` so a
+  pre-check admits exactly what the turn admits. `sessions.steer` uses it before touching the
+  active run.
+- `resolveWorkspaceLaneForTurn(...)` runs the same admission and then creates and seeds the lane
+  when `create` is `"on-first-message"`. The reply path calls it with the actor built by
+  `buildWorkspaceLaneActor` (`src/auto-reply/reply/workspace-lane-actor.ts`): a gateway turn keys
+  the lane on the `device:` sender only, and channel turns keep their channel actor fields.
+- `WorkspaceLaneResolution` carries `mode`, `agentId`, `laneId`, `laneKeySource`, `actor`,
+  `personaWorkspaceDir`, `effectiveWorkspaceDir`, `created`, and
+  `policy: { decision, reason? }`. `workspaceLaneCorrelationId` exposes `laneId` only for an
+  allowed multi-lane run.
+
+### Agent-RPC lane resolution and skills
+
+`resolveAgentCommandWorkspace` (`src/commands/agent/workspace-lane.ts`) is the seam every
+agent-RPC run path shares: the gateway `agent` method, `sessions_send`, subagent spawns and
+announces, Discord voice, and the CLI `agent` command.
+
+- A non-lane agent keeps the persona workspace for the run and for skills; nothing changes.
+- A lane-enabled agent resolves the run identity with `resolveRunSenderIdentity` — the same inputs
+  the run itself uses, so the lane identity equals the run identity — and keys the lane on that
+  identity alone. The request's `channel`, `to`, and `accountId` are delivery targets, and
+  `inheritedSenderId` is an unvalidated wire value; neither keys a lane.
+- An unattributed run throws `WorkspaceLaneDeniedError` before any model call. An allowed run gets
+  `ensureAgentWorkspace` on the lane directory (bootstrap files are not seeded) and a
+  `workspaceLane` resolution to forward to the embedded or CLI runner.
+- `skillWorkspaceDir` is the lane directory when the agent sets `workspaceLanes.skills: "lane"`,
+  otherwise the persona directory. The reply path derives it the same way. Skill snapshots record
+  their source directory (`skillWorkspaceDir` on the snapshot) and are rebuilt when the current
+  run has a different one, so one lane never reuses another lane's skills. A snapshot without the
+  field predates this change and counts as persona-built: only a run whose skill source is a lane
+  directory rebuilds it, so non-lane agents never rebuild on the legacy shape.
+
+### The lane denial marker
+
+Every lane denial carries `details.reason: "workspace_lane_denied"` on the gateway error frame
+(`WORKSPACE_LANE_DENIED_REASON`, a dependency-free constant in
+`src/agents/workspace-lane-denied-reason.ts`). Read it back from a rejected gateway client request
+with `gatewayErrorReason(err)` (`src/gateway/client.ts`) instead of matching the message text.
+Core behavior keys on the marker: the CLI `agent` command skips its embedded fallback,
+`sessions_send` reports `status: "error"` with the denial instead of waiting out a timeout, and a
+denied subagent announce settles without retry (see [Sub-agents](/tools/subagents)).
 
 ### Bootstrap hooks
 

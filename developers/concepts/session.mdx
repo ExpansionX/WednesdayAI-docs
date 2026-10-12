@@ -26,7 +26,7 @@ Use `session.dmScope` to control how **direct messages** are grouped:
 - `per-peer`: isolate by sender id across channels.
 - `per-channel-peer`: isolate by channel + sender (recommended for multi-user inboxes).
 - `per-account-channel-peer`: isolate by account + channel + sender (recommended for multi-account inboxes).
-  Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`.
+  Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; add that value to the person's links so their web chats resolve to the same identity.
 
 ## Secure DM mode (recommended for multi-user setups)
 
@@ -270,12 +270,10 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Direct chats follow `session.dmScope` (default `main`).
   - `main`: `agent:<agentId>:<mainKey>` (continuity across devices/channels).
     - Multiple phone numbers and channels can map to the same agent main key; they act as transports into one conversation.
-  - `per-peer`: `agent:<agentId>:direct:<peerId>`.
-  - `per-channel-peer`: `agent:<agentId>:<channel>:direct:<peerId>`.
-  - `per-account-channel-peer`: `agent:<agentId>:<channel>:<accountId>:direct:<peerId>` (accountId defaults to `default`).
+  - `per-peer`: `agent:<agentId>:dm:<peerId>`.
+  - `per-channel-peer`: `agent:<agentId>:<channel>:dm:<peerId>`.
+  - `per-account-channel-peer`: `agent:<agentId>:<channel>:<accountId>:dm:<peerId>` (accountId defaults to `default`).
   - If `session.identityLinks` matches a provider-prefixed peer id (for example `telegram:123`), the canonical key replaces `<peerId>` so the same person shares a session across channels.
-  - An inbound, unlinked sender whose raw peer id equals an `identityLinks` canonical key is contained instead of merged: it gets its own bucket with a `raw~` peer prefix (for example `agent:main:direct:raw~alice`). The `raw~` prefix is reserved — canonical keys starting with `raw~` are rejected at config load. Sessions merged before this containment landed stay merged.
-  - Because a contained `raw~` bucket is a distinct session key, peer-specific `sendPolicy` rules (and any other per-key config) do not carry over automatically: a rule matching `agent:<agentId>:direct:<canonicalKey>` does not match `agent:<agentId>:direct:raw~<peerId>` or vice versa. Add separate `keyPrefix`/`rawKeyPrefix` rules for contained senders, and keep canonical-identity rules separate.
 - Group chats isolate state: `agent:<agentId>:<channel>:group:<id>` (rooms/channels use `agent:<agentId>:<channel>:channel:<id>`).
   - Telegram forum topics append `:topic:<threadId>` to the group id for isolation.
   - Legacy `group:<id>` keys are still recognized for migration.
@@ -337,7 +335,7 @@ Runtime override (owner only):
     scope: "per-sender", // keep group keys separate
     dmScope: "main", // DM continuity (set per-channel-peer/per-account-channel-peer for shared inboxes)
     identityLinks: {
-      alice: ["telegram:123456789", "discord:987654321012345678"],
+      alice: ["telegram:123456789", "discord:987654321012345678", "device:6abfaeda…"],
     },
     reset: {
       // Defaults: mode=daily, atHour=4 (gateway host local time).
