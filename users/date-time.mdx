@@ -8,7 +8,10 @@ title: "Date and Time"
 
 # Date & Time
 
-OpenClaw defaults to **host-local time for transport timestamps** and **user timezone only in the system prompt**.
+OpenClaw renders timestamps to the model and users in one canonical format,
+`[Ddd YYYY-MM-DD HH:MM GMT±H]` (for example `[Wed 2026-10-07 21:47 GMT+10]`), with explicit GMT
+offsets instead of zone abbreviations. Message envelopes default to host-local time; the stamp
+on each user turn uses `agents.defaults.userTimezone`.
 Provider timestamps are preserved so tools keep their native semantics (current time is available via `session_status`).
 
 ## Message envelopes (local by default)
@@ -16,7 +19,7 @@ Provider timestamps are preserved so tools keep their native semantics (current 
 Inbound messages are wrapped with a timestamp (minute precision):
 
 ```
-[Provider ... 2026-01-05 16:26 PST] message text
+[Provider ... Mon 2026-01-05 16:26 GMT-8] message text
 ```
 
 This envelope timestamp is **host-local by default**, regardless of the provider timezone.
@@ -39,7 +42,8 @@ You can override this behavior:
 - `envelopeTimezone: "local"` uses the host timezone.
 - `envelopeTimezone: "user"` uses `agents.defaults.userTimezone` (falls back to host timezone).
 - Use an explicit IANA timezone (e.g., `"America/Chicago"`) for a fixed zone.
-- `envelopeTimestamp: "off"` removes absolute timestamps from envelope headers.
+- `envelopeTimestamp: "off"` removes absolute timestamps from envelope headers, disables the
+  stamp on user turns, and drops the timestamp prevention line from the system prompt.
 - `envelopeElapsed: "off"` removes elapsed time suffixes (the `+2m` style).
 
 ### Examples
@@ -47,20 +51,33 @@ You can override this behavior:
 **Local (default):**
 
 ```
-[WhatsApp +1555 2026-01-18 00:19 PST] hello
+[WhatsApp +1555 Sun 2026-01-18 00:19 GMT-8] hello
 ```
 
 **User timezone:**
 
 ```
-[WhatsApp +1555 2026-01-18 00:19 CST] hello
+[WhatsApp +1555 Sun 2026-01-18 00:19 GMT-6] hello
 ```
 
 **Elapsed time enabled:**
 
 ```
-[WhatsApp +1555 +30s 2026-01-18T05:19Z] follow-up
+[WhatsApp +1555 +30s Sun 2026-01-18 05:19 GMT+0] follow-up
 ```
+
+## Message stamps and the raw transcript
+
+User messages are stored exactly as received. The stamp and any inbound framing are added when
+the message is sent to the model, not when it is stored:
+
+- Every user turn is stamped `[Ddd YYYY-MM-DD HH:MM GMT±H]` in `agents.defaults.userTimezone`,
+  from the time the channel reported when available.
+- Inbound framing (conversation and sender context) is composed on the current turn only. Later
+  turns render the same message byte-stable as `stamp + raw text`.
+- Replies that begin with a timestamp are stripped before display on every assistant surface
+  (streams, finals, history, channel sends), and a line in the system prompt asks the model
+  never to begin a reply with a timestamp.
 
 ## System prompt: Current Date & Time
 
@@ -75,13 +92,17 @@ Time zone: America/Chicago
 When the agent needs the current time, use the `session_status` tool; the status
 card includes a timestamp line.
 
+When message stamps are on (the default), the section also carries one prevention line telling
+the model that user messages may begin with a system-added timestamp and that its replies must
+not begin with one.
+
 ## System event lines (local by default)
 
 Queued system events inserted into agent context are prefixed with a timestamp using the
 same timezone selection as message envelopes (default: host-local).
 
 ```
-System: [2026-01-12 12:19:17 PST] Model switched.
+System: [2026-01-12 12:19 GMT-6] Model switched.
 ```
 
 ### Configure user timezone + format
