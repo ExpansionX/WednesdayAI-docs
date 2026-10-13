@@ -1,6 +1,6 @@
 ---
 title: "Session History Hygiene — Clean Replay and Turn Provenance"
-summary: "How WednesdayAI strips channel-framing metadata from stored messages, tags turns with trigger sources, and filters automated turns from recall and analytics"
+summary: "How WednesdayAI stores user turns as received, renders stamps and framing at the model boundary, tags turns with trigger sources, and filters automated turns from recall and analytics"
 read_when:
   - You want to understand what the model sees in past turns vs what is stored
   - You are configuring or debugging session recall for automated/heartbeat sessions
@@ -14,39 +14,41 @@ sources:
   - src/config/sessions/ctx-postgres.ts
   - src/config/sessions/storage-normalize.ts
   - src/config/sessions/db-session-hydration.ts
+  - src/sessions/message-ingress.ts
   - src/config/zod-schema.agent-defaults.ts
 generated: 2026-06-25
 ---
 
 # Session History Hygiene — Clean Replay and Turn Provenance
 
-WednesdayAI separates what is **stored** from what the model **sees in context**. Channel connectors inject metadata (sender id, conversation label, group context) into each user message as a JSON framing block so the agent knows who sent it. Storing and replaying that framing verbatim wastes tokens, inflates the context window, and can confuse models that see "[Conversation info …]" blocks in every prior turn. Session history hygiene addresses this at the storage layer.
+WednesdayAI separates what is **stored** from what the model **sees in context**. Channel connectors inject metadata (sender id, conversation label, group context) as structured inbound context, and WednesdayAI composes that framing onto the model prompt for the current turn only. Stored user text keeps the bytes exactly as received; timestamps and framing are rendered at the model boundary, never baked into storage. A structured `__openclaw.ingress` carrier on each user message records where the turn came from (trigger, received time, trusted channel/sender ids, untrusted inbound context). The carrier is internal provenance: core never renders it, and it is stripped from every client-facing payload such as `chat.history`.
 
 ## What changes
 
-### Clean message column (SC1)
+### Raw message columns (SC1)
 
-When a user turn is written to `ctx_session_entries`, the storage layer splits it into two representations:
+When a user turn that carries an `__openclaw.ingress` carrier is written to `ctx_session_entries`, the storage layer stores the message as received in both message columns:
 
-| Column / field      | Contains                                                                                                                                                     |
-| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `message`           | The stripped, clean message — channel framing blocks (`Conversation info (untrusted metadata): …`) removed from both string content and array content blocks |
-| `raw_entry.message` | The original, framing-intact message exactly as the connector produced it                                                                                    |
+| Column / field       | Contains                                                                                                    |
+| -------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `message`            | The raw message, exactly as received — no framing blocks, no timestamp stamp, no injected-context stripping |
+| `clean_user_message` | The same raw message (pristine by contract)                                                                 |
+| `raw_entry.message`  | The original entry exactly as produced, including the `__openclaw.ingress` carrier                          |
 
-On context replay (hydration), WednesdayAI feeds the model the **clean** `message` column by default. The raw framing is available for diagnostics and replay in framed mode (see [Replay mode](#replay-mode-sc6) below).
+Legacy rows (written before the carrier existed) keep the older derived path: `clean_user_message` has injected-context patterns stripped, and the derived `message` column additionally has channel framing blocks (`Conversation info (untrusted metadata): …`) stripped from string content and content blocks. See [Legacy rows](#legacy-rows) for how to clean them up.
 
-This applies to both plain-string content (`string` role messages) and structured array content (content-block arrays that include a text block containing the framing header).
+At the model boundary, every user turn is stamped `[Ddd YYYY-MM-DD HH:MM GMT±H]` and inbound framing is composed on the current turn only. From the next turn on, the same message renders byte-stable as `stamp + raw text` — see [Date & Time](/date-time).
 
 ### Turn provenance columns (SC3)
 
 Every row written to `ctx_session_entries` gains four new columns that record where the turn came from:
 
-| Column           | Type    | Meaning                                                                           |
-| ---------------- | ------- | --------------------------------------------------------------------------------- |
-| `trigger_source` | TEXT    | Who triggered this turn: `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, `'acp'` |
-| `is_automated`   | BOOLEAN | `1` when the turn was not initiated by a human (`trigger_source != 'user'`)       |
-| `sender_display` | TEXT    | Human-readable sender name (from channel connector, best-effort)                  |
-| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake)           |
+| Column           | Type    | Meaning                                                                                                                   |
+| ---------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `trigger_source` | TEXT    | Who triggered this turn: `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, `'acp'`                                         |
+| `is_automated`   | BOOLEAN | `1` when the turn was not initiated by a human (`trigger_source != 'user'`)                                               |
+| `sender_display` | TEXT    | Human-readable sender name — from the `__openclaw.ingress` carrier when present, else best-effort from message text       |
+| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake) — from the carrier when present, else best-effort |
 
 `trigger_source` is derived from the session key format (`storage-normalize.ts:deriveTriggerSource`):
 
@@ -82,7 +84,7 @@ This means:
 
 ### Raw entry preserved (SC4)
 
-The `raw_entry` (and `raw_line`) column always stores the full original framing-intact entry exactly as produced by the connector. Stripping happens only on the `message` column. Diagnostics, audit trails, and framed replay read `raw_entry.message` directly.
+The `raw_entry` (and `raw_line`) column always stores the full original entry exactly as produced by the connector, including the `__openclaw.ingress` carrier on user turns. Carrier rows strip nothing: `message`, `clean_user_message` and `raw_entry.message` are all raw. Legacy rows strip injected-context patterns on `clean_user_message` and additionally framing blocks on the derived `message` column. Diagnostics, audit trails, and framed replay read `raw_entry.message` directly.
 
 ### SQLite and Postgres parity (SC5)
 
@@ -90,12 +92,12 @@ The schema additions and filter changes are identical on both backends. Migratio
 
 ## Replay mode (SC6)
 
-`agents.defaults.ctx.replayMode` controls which representation the model receives on context hydration:
+`agents.defaults.ctx.replayMode` controls which representation history hydration loads after a gateway restart:
 
-| Value      | Default | Behavior                                                                          |
-| ---------- | ------- | --------------------------------------------------------------------------------- |
-| `"clean"`  | ✓       | Model sees the stripped `message` column — no framing, fewer wasted tokens        |
-| `"framed"` |         | Model sees `raw_entry.message` — original framing intact (backward compatibility) |
+| Value      | Default | Behavior                                                                                                                       |
+| ---------- | ------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `"clean"`  | ✓       | Model history replays the stored `message` column — raw text for carrier rows, framing-stripped text for legacy rows           |
+| `"framed"` |         | Model history replays `raw_entry.message` verbatim — framing blocks and carrier included (backward compatibility, diagnostics) |
 
 Set in `openclaw.json`:
 
@@ -112,6 +114,14 @@ Set in `openclaw.json`:
 ```
 
 `"framed"` is available for installations where downstream tooling or custom persona prompts depend on the channel framing block being present in history. New installations should use the default `"clean"`.
+
+## Legacy rows
+
+User rows written before the `__openclaw.ingress` carrier shipped can carry baked-in channel framing blocks, a `Current time: …` line, or a leading message stamp in `content_text`, `clean_user_message` and `message`. WednesdayAI never rewrites them in the hot path:
+
+- At render time, a legacy row that already begins with a parsed stamp or contains a `Current time:` line is left as-is instead of getting a second stamp; rows with no text are untouched. Setting `agents.defaults.envelopeTimestamp: "off"` disables stamp rendering entirely.
+- To remove the baked-in artifacts from storage, run the operator script
+  `pnpm tsx scripts/sessions/clean-legacy-user-rows.ts` (dry-run by default, undo-log-backed, restorable). See [Legacy user-row cleanup](/gateway/session-storage-recovery#legacy-user-row-cleanup) for the procedure. JSONL transcripts are the raw log and are never rewritten; render-time guards handle them at read time.
 
 ## Example queries
 
@@ -163,7 +173,7 @@ GROUP BY session_id, trigger_source;
 ## Backward compatibility
 
 - Rows written before this schema version have `trigger_source = NULL`, `is_automated = NULL`, `sender_display = NULL`, `sender_id_raw = NULL`. The production recall and analytics queries treat `NULL` trigger_source as `'user'` via `IS NULL` coalescing.
-- The `message` column for legacy rows may contain framing if it was written before the strip logic existed. `replayMode: "framed"` is the safe choice for sessions spanning the migration boundary if framing consistency matters for a persona.
+- Rows written before the `__openclaw.ingress` carrier keep the framing/stamp artifacts they were stored with (see [Legacy rows](#legacy-rows)); render-time guards prevent double-stamping them, and the cleanup script removes the artifacts. `replayMode: "framed"` is the safe choice for sessions spanning the migration boundary if framing consistency matters for a persona.
 - `ctx_turns.turn_idx` is a 1-based count of user turns. `getUserTurnCount` (the counter used when writing a new `ctx_turns` row) applies the same `trigger_source = 'user' OR IS NULL` filter so automated turns do not inflate `turn_idx` or create phantom rows.
 
 _Related: [Session Analytics](/concepts/session-analytics) · [Heartbeat](/gateway/heartbeat) · [Gateway Configuration](/gateway/configuration) · [Session Management](/concepts/session)_
