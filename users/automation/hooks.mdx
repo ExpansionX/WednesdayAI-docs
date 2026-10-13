@@ -272,7 +272,7 @@ Triggered when messages are received or sent:
 - **`message:received`**: When an inbound message is received from any channel. Fires early in processing before media understanding. Content may contain raw placeholders like `<media:audio>` for media attachments that haven't been processed yet.
 - **`message:transcribed`**: When a message has been fully processed, including audio transcription and link understanding. At this point, `transcript` contains the full transcript text for audio messages. Use this hook when you need access to transcribed audio content.
 - **`message:preprocessed`**: Fires for every message after all media + link understanding completes, giving hooks access to the fully enriched body (transcripts, image descriptions, link summaries) before the agent sees it.
-- **`message:sent`**: When an outbound message is successfully sent. Plugin `message_sent` also fires on inbound channel replies. Internal `message:sent` still needs a session key, so inbound replies typically fire only the plugin hook.
+- **`message:sent`**: When an outbound message was dispatched to the platform (a provable no-send — e.g. a suppressed empty reply — fires nothing). Plugin `message_sent` also fires on inbound channel replies. Internal `message:sent` still needs a session key, so inbound replies typically fire only the plugin hook.
 
 #### Message Event Context
 
@@ -381,41 +381,41 @@ Plugin hooks registered via `api.on(hookName, handler)` intercept the agent pipe
 
 ### Hook event reference
 
-| Event                  | Fires when                                                                                                                      | Context type                                         | Return value                                                                    |
-| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------- |
-| `before_model_resolve` | Before the model is resolved for a run                                                                                          | `PluginHookAgentContext`                             | `{ modelOverride?, providerOverride? }` or void                                 |
-| `before_prompt_build`  | After session messages are prepared, before the prompt is assembled                                                             | `PluginHookAgentContext`                             | `{ systemPrompt?, prependContext? }` or void                                    |
-| `before_context_send`  | Just before the full context is sent to the LLM                                                                                 | `PluginHookAgentContext`                             | `{ messages? }` or void                                                         |
-| `before_agent_start`   | Legacy combined hook (pre-session phase)                                                                                        | `PluginHookAgentContext`                             | `{ systemPrompt?, prependContext?, modelOverride?, providerOverride? }` or void |
-| `llm_input`            | Immediately before the LLM API call (observe only)                                                                              | `PluginHookAgentContext`                             | void                                                                            |
-| `llm_output`           | Immediately after the LLM API call (observe only)                                                                               | `PluginHookAgentContext`                             | void                                                                            |
-| `transform_llm_input`  | Before messages are sent to the LLM; handlers execute sequentially, each receiving the prior handler's output                   | `PluginHookAgentContext`                             | `{ messages: AgentMessage[] }`                                                  |
-| `transform_llm_output` | After the LLM returns; handlers execute sequentially                                                                            | `PluginHookAgentContext`                             | `{ assistantTexts?: string[] }`                                                 |
-| `agent_end`            | When an agent run completes (success or error)                                                                                  | `PluginHookAgentContext`                             | void                                                                            |
-| `before_compaction`    | Before compaction begins                                                                                                        | `PluginHookAgentContext`                             | void                                                                            |
-| `after_compaction`     | After compaction completes                                                                                                      | `PluginHookAgentContext`                             | void                                                                            |
-| `before_reset`         | When `/new` or `/reset` clears a session                                                                                        | `PluginHookAgentContext`                             | void                                                                            |
-| `message_received`     | Inbound message received                                                                                                        | `PluginHookMessageContext`                           | void                                                                            |
-| `message_sending`      | Outbound payload about to be sent (inbound channel replies and CLI/cron)                                                        | `PluginHookMessageContext`                           | `{ content?, cancel? }` or void                                                 |
-| `message_sent`         | Outbound payload was sent (inbound channel replies and CLI/cron)                                                                | `PluginHookMessageContext`                           | void                                                                            |
-| `before_tool_call`     | Before a tool is invoked                                                                                                        | `PluginHookToolContext`                              | `{ params?, block?, blockReason? }` or void                                     |
-| `after_tool_call`      | After a tool returns                                                                                                            | `PluginHookToolContext`                              | void                                                                            |
-| `tool_result_persist`  | Before a tool result is written to the JSONL transcript (synchronous)                                                           | `PluginHookToolResultPersistContext`                 | `{ message? }` or void                                                          |
-| `before_message_write` | Before any agent message is written to the JSONL                                                                                | `{ agentId?, sessionKey?, runtimeIdentity?, turn? }` | `{ block?, message? }` or void                                                  |
-| `model_call_ended`     | After an agent model-call attempt finishes                                                                                      | `PluginHookAgentContext`                             | void; handlers may update usage/proxy metadata                                  |
-| `storage.afterAppend`  | After a conversation entry is appended to context storage                                                                       | `ContextLifecycleContext`                            | void                                                                            |
-| `context.collect`      | During context construction, before prompt assembly                                                                             | `ContextLifecycleContext`                            | `PromptContribution` or void                                                    |
-| `context.project`      | During context projection, after collection                                                                                     | `ContextLifecycleContext`                            | `{ messages?, projection?, contribution? }` or void                             |
-| `context.prune`        | During context pruning                                                                                                          | `ContextLifecycleContext`                            | `{ messages?, dropped?, contribution?, suppressCompaction? }` or void           |
-| `session_start`        | A session begins (new or resumed)                                                                                               | `PluginHookSessionContext`                           | void                                                                            |
-| `session_end`          | A session ends                                                                                                                  | `PluginHookSessionContext`                           | void                                                                            |
-| `subagent_spawning`    | A sub-agent is about to be spawned                                                                                              | `PluginHookSubagentContext`                          | `{ status: "ok" \| "error", ... }` or void                                      |
-| `subagent_spawned`     | A sub-agent was successfully spawned                                                                                            | `PluginHookSubagentContext`                          | void                                                                            |
-| `subagent_ended`       | A sub-agent run finished                                                                                                        | `PluginHookSubagentContext`                          | void                                                                            |
-| `gateway_start`        | Gateway has started                                                                                                             | `PluginHookGatewayContext`                           | void                                                                            |
-| `gateway_stop`         | Gateway is stopping                                                                                                             | `PluginHookGatewayContext`                           | void                                                                            |
-| `agent_idle`           | The core idle monitor sees an agent cross the idle threshold or a schedule window open (`tasks.idle` / `tasks.schedule` config) | `PluginHookAgentContext`                             | void                                                                            |
-| `task_outcome`         | A task run or sub-agent run reaches a terminal outcome                                                                          | `PluginHookAgentContext`                             | void                                                                            |
+| Event                  | Fires when                                                                                                                      | Context type                                         | Return value                                                                                 |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------- |
+| `before_model_resolve` | Before the model is resolved for a run                                                                                          | `PluginHookAgentContext`                             | `{ modelOverride?, providerOverride? }` or void                                              |
+| `before_prompt_build`  | After session messages are prepared, before the prompt is assembled                                                             | `PluginHookAgentContext`                             | `{ systemPrompt?, prependContext? }` or void                                                 |
+| `before_context_send`  | Just before the full context is sent to the LLM                                                                                 | `PluginHookAgentContext`                             | `{ messages? }` or void                                                                      |
+| `before_agent_start`   | Legacy combined hook (pre-session phase)                                                                                        | `PluginHookAgentContext`                             | `{ systemPrompt?, prependContext?, modelOverride?, providerOverride? }` or void              |
+| `llm_input`            | Immediately before the LLM API call (observe only)                                                                              | `PluginHookAgentContext`                             | void                                                                                         |
+| `llm_output`           | Immediately after the LLM API call (observe only)                                                                               | `PluginHookAgentContext`                             | void                                                                                         |
+| `transform_llm_input`  | Before messages are sent to the LLM; handlers execute sequentially, each receiving the prior handler's output                   | `PluginHookAgentContext`                             | `{ messages: AgentMessage[] }`                                                               |
+| `transform_llm_output` | After the LLM returns; handlers execute sequentially                                                                            | `PluginHookAgentContext`                             | `{ assistantTexts?: string[] }`                                                              |
+| `agent_end`            | When an agent run completes (success or error)                                                                                  | `PluginHookAgentContext`                             | void                                                                                         |
+| `before_compaction`    | Before compaction begins                                                                                                        | `PluginHookAgentContext`                             | void                                                                                         |
+| `after_compaction`     | After compaction completes                                                                                                      | `PluginHookAgentContext`                             | void                                                                                         |
+| `before_reset`         | When `/new` or `/reset` clears a session                                                                                        | `PluginHookAgentContext`                             | void                                                                                         |
+| `message_received`     | Inbound message received                                                                                                        | `PluginHookMessageContext`                           | void                                                                                         |
+| `message_sending`      | Outbound payload about to be sent (inbound channel replies and CLI/cron)                                                        | `PluginHookMessageContext`                           | `{ content?, cancel? }` or void                                                              |
+| `message_sent`         | Outbound payload was dispatched to the platform (inbound channel replies and CLI/cron); suppressed no-sends fire nothing        | `PluginHookMessageContext`                           | void                                                                                         |
+| `before_tool_call`     | Before a tool is invoked                                                                                                        | `PluginHookToolContext`                              | `{ params?, block?, blockReason? }` or void                                                  |
+| `after_tool_call`      | After a tool returns                                                                                                            | `PluginHookToolContext`                              | void                                                                                         |
+| `tool_result_persist`  | Before a tool result is written to the JSONL transcript (synchronous)                                                           | `PluginHookToolResultPersistContext`                 | `{ message? }` or void                                                                       |
+| `before_message_write` | Before any agent message is written to the JSONL                                                                                | `{ agentId?, sessionKey?, runtimeIdentity?, turn? }` | `{ block?, message? }` or void                                                               |
+| `model_call_ended`     | After an agent model-call attempt finishes                                                                                      | `PluginHookAgentContext`                             | void; handlers may update `usage` (`event.proxyMetadata` is deprecated — removed next minor) |
+| `storage.afterAppend`  | After a conversation entry is appended to context storage                                                                       | `ContextLifecycleContext`                            | void                                                                                         |
+| `context.collect`      | During context construction, before prompt assembly                                                                             | `ContextLifecycleContext`                            | `PromptContribution` or void                                                                 |
+| `context.project`      | During context projection, after collection                                                                                     | `ContextLifecycleContext`                            | `{ messages?, projection?, contribution?, failedPluginIds? }` or void                        |
+| `context.prune`        | During context pruning                                                                                                          | `ContextLifecycleContext`                            | `{ messages?, dropped?, contribution?, suppressCompaction? }` or void                        |
+| `session_start`        | A session begins (new or resumed)                                                                                               | `PluginHookSessionContext`                           | void                                                                                         |
+| `session_end`          | A session ends                                                                                                                  | `PluginHookSessionContext`                           | void                                                                                         |
+| `subagent_spawning`    | A sub-agent is about to be spawned                                                                                              | `PluginHookSubagentContext`                          | `{ status: "ok" \| "error", ... }` or void                                                   |
+| `subagent_spawned`     | A sub-agent was successfully spawned                                                                                            | `PluginHookSubagentContext`                          | void                                                                                         |
+| `subagent_ended`       | A sub-agent run finished                                                                                                        | `PluginHookSubagentContext`                          | void                                                                                         |
+| `gateway_start`        | Gateway has started                                                                                                             | `PluginHookGatewayContext`                           | void                                                                                         |
+| `gateway_stop`         | Gateway is stopping                                                                                                             | `PluginHookGatewayContext`                           | void                                                                                         |
+| `agent_idle`           | The core idle monitor sees an agent cross the idle threshold or a schedule window open (`tasks.idle` / `tasks.schedule` config) | `PluginHookAgentContext`                             | void                                                                                         |
+| `task_outcome`         | A task run or sub-agent run reaches a terminal outcome                                                                          | `PluginHookAgentContext`                             | void                                                                                         |
 
 `agent_idle` carries `{ agentId, idleSinceMs, idleForMs, trigger: "idle" | "schedule" }`.
 `task_outcome` carries
@@ -436,6 +436,13 @@ LINE and Zalo inbound replies do not fire these hooks.
 `message_sending` can return `{ cancel: true }` to skip that payload, or `{ content }` to rewrite
 the text that is sent. A thrown handler is logged as `applyMessageSendingHook: hook failed` and
 the original payload is sent. Telegram chunking does not re-run the hook.
+
+`message_sent` fires only when the message was dispatched to the platform. Send errors fire with
+`success: false` and `error`. `ctx.messageId` is the platform id of the last message sent for the
+payload; it is absent when the platform returns none. A payload that ends up as a provable
+no-send — `message_sending` cancelled it, rewrote it to empty, or the channel suppressed it
+(e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: no delivery result, no transcript
+mirror, no queue receipt id, and no `message_sent` event.
 
 Inbound `message_sending` context is `channelId` and `accountId` only. It does not set
 `sessionKey` or `trigger`. Plugin `message_sent` still fires after a successful inbound send.
@@ -475,6 +482,13 @@ type PluginRuntimeIdentity = {
   identitySource?: "sender" | "parent-session" | "job-config";
   messageProvider?: string;
   channelId?: string;
+  /** Session classification derived from the session key (never guessed from message text). */
+  sessionKind?: "user" | "cron" | "heartbeat" | "subagent" | "acp" | "unknown";
+  accountId?: string;
+  peerKind?: "direct" | "group" | "channel";
+  peerId?: string;
+  /** `sessionKey === mainSessionKey`; never inferred by consumers from the session key shape. */
+  isMainSession?: boolean;
 };
 
 type PluginTurnIdentity = {
@@ -522,6 +536,21 @@ Important boundaries:
   the app id (for example `openclaw-user-client`, shared by every user of that app).
   `canonicalIdentity` resolves only when the operator linked `device:<id>` to a person in
   `session.identityLinks`; see [Workspace Lanes](/concepts/workspace-lanes).
+- `session_start` and `session_end` contexts carry `runtimeIdentity` when the
+  session has real identity: the ending session's stored `actor` (channel,
+  account, peer kind/id, canonical identity) on `session_end`, and the session's
+  actor at creation on `session_start`. `runtimeIdentity.isMainSession` is true
+  only for the agent's main session key. `runtimeIdentity.sessionKind`
+  classifies the session as `"user"` (a normal conversation session, including
+  the main session), `"cron"`, `"heartbeat"`, `"subagent"`, `"acp"`, or
+  `"unknown"` (missing or malformed session key). The kind is derived
+  structurally from the session key; WednesdayAI never guesses it from message
+  text. Main sessions stay display fail-open elsewhere — `sessionKind` is a
+  runtime classification, not a UI gate.
+- `runtimeIdentity.sessionKind` values mirror the session key grammar:
+  agent-prefixed keys whose first segment is an internal root (`cron`,
+  `heartbeat`, `subagent`, `acp`) map to that kind; every other well-formed
+  agent key maps to `"user"`.
 
 Storage append hooks can fire once for the user entry and once for the assistant
 entry. Both appends share the same `turnId`, so dedupe with the entry or cursor
@@ -538,9 +567,32 @@ available, sender identity fields, and the same optional `runtimeIdentity` and
 `turn` objects. Use `context.collect` for context contributions and
 `storage.afterAppend` for background capture or extraction queues.
 
+A `context.project` result can carry `failedPluginIds`: the plugins whose
+handlers threw or timed out. A plugin that registered the `message-render`
+context owner with `api.registerContextOwner` renders user messages (stamps and
+inbound framing) for the sessions it claims; if its `context.project` handler
+fails, core renders that run and the owner is retried on the next attempt.
+
+Pipeline order around the model boundary: `context.collect` contributes
+context, then `context.project` and `context.prune` see history user messages
+as stored (raw text plus the `__openclaw.ingress` carrier, unstamped). The
+current turn is already the framed prompt when the hooks run: core swaps the
+composed prompt (inbound framing plus contributions) in before projection, and
+only when a `message-render` context owner is active is the inbound framing
+removed from that prompt first. Core then applies the boundary render: every
+user turn is stamped from its carrier time, and `transform_llm_input` runs
+after that render, so its handlers and the model see stamped history and the
+stamped current turn.
+
 `model_call_ended` carries the completed `runId` and receives a context whose
 `turn.turnId` is aligned to that `runId`, so usage and provider metadata can be
 joined back to the same turn.
+
+`event.proxyMetadata` is deprecated with no core consumer since #935: the resolved
+model is reported on assistant entries as `responseModel` (surfaced as
+`sessions.usage` per-model rows keyed `provider::model::actualModel`) and gateway
+cost as the entry's `usage.cost`. The field is removed in the next minor release;
+handlers may still mutate `usage`.
 
 Tool lifecycle hooks also receive foreground identity when it exists. In
 particular, the production agent tool wrapper passes `runtimeIdentity` and

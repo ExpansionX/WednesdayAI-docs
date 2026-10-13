@@ -1,0 +1,189 @@
+# Session storage recovery
+
+WednesdayAI recovers durable session storage after a configured backend outage without losing the JSONL fallback window when `session.storage.fallbackToJsonlOnError` is enabled (the default `false` fails fast instead of serving JSONL).
+
+When postgres or sqlite is unreachable at gateway start, the storage supervisor serves JSONL, persists incomplete-generation manifests, then replays those tails into the backend before cutover. Frozen-incident rows from 2026-08-27 install from a packaged oracle; a live file whose fingerprint no longer matches is held, not overwritten.
+
+## Supervisor states
+
+The storage supervisor publishes `healthy`, `degraded`, `recovering`, or `blocked`:
+
+- **degraded** while the configured backend probe fails. JSONL continues to serve.
+- **recovering** while a source is pinned, an incomplete generation is held, or an unidentifiable corrupt manifest file exists.
+- **blocked** when the backend is healthy but recovery makes no durable progress for `session.storage.recovery.blockedAfterMs` (120 seconds by default). This state is latched until the gateway restarts.
+- **healthy** otherwise.
+
+A healthy probe that finds no replay target first holds that manifest in `recovering`; it does not re-enter `degraded` or restart the probe loop. If the hold makes no progress for `session.storage.recovery.blockedAfterMs` (120 seconds by default), the supervisor enters `blocked`.
+
+Blocked recovery fails closed. The gateway holds root-work admission and stops cron plus channel intake. Existing recovery evidence remains on disk. Run `wednesdayai doctor --deep`, repair the reported session mappings or corrupt manifests, then restart the gateway.
+
+If a healthy backend leaves only operator-input holds, the gateway still fails closed. To keep serving while you repair mappings, set `session.storage.recovery.blockedAfterMs` to `0` and restart; that disables the blocked latch without deleting recovery evidence. Re-enable a positive value after the backlog is repaired.
+
+Cutover publishes only after candidate validation, dispatcher readiness, replay, index CAS, writer quiescence, and a bounded exclusive fence.
+
+Live repair of frozen-incident rows runs only when startup is already `healthy`.
+
+## Configuration
+
+`session.storage.recovery` is present with these defaults when the block is omitted. Unknown keys are rejected. Changing any recovery key requires a gateway restart.
+
+| Key                                                     | Default  | Effect                                                                             |
+| ------------------------------------------------------- | -------- | ---------------------------------------------------------------------------------- |
+| `session.storage.recovery.probeTimeoutMs`               | `5000`   | Bound for one storage probe attempt.                                               |
+| `session.storage.recovery.startupProbeTimeoutMs`        | `600000` | Bound for the first probe attempt, which runs schema migrations after an upgrade.  |
+| `session.storage.recovery.blockedAfterMs`               | `120000` | Maximum no-progress interval before recovery enters blocked containment.           |
+| `session.storage.recovery.replayTimeoutMs`              | `120000` | Bound for one reconcile or replay pass.                                            |
+| `session.storage.recovery.quiesceTimeoutMs`             | `30000`  | Bound for writer quiescence before the fence.                                      |
+| `session.storage.recovery.validationTimeoutMs`          | `30000`  | Bound for candidate validation.                                                    |
+| `session.storage.recovery.dispatcherReadinessTimeoutMs` | `30000`  | Bound for dispatcher readiness.                                                    |
+| `session.storage.recovery.fenceTimeoutMs`               | `10000`  | Bound for the exclusive publication fence.                                         |
+| `session.storage.recovery.hydrationClosureMaxPages`     | `20`     | Max ancestor-closure pages during hydration. Restart-only. Runtime reads this key. |
+
+The first probe attempt after the gateway starts is bounded by `startupProbeTimeoutMs` (or `probeTimeoutMs`, if larger), because the first start after an upgrade applies schema migrations and identity backfills inside that attempt. While it runs, storage-backed RPCs answer retryable `RECOVERY_NOT_READY` and the gateway logs `session storage first probe still running; the first start after an upgrade applies schema migrations` every 30 seconds. The `session storage probe loop started` line reports the effective first-attempt budget in its `startupProbeTimeoutMs` field. Every later attempt, including re-activation after a storage failure, is bounded by `probeTimeoutMs`. A failed attempt logs `session storage probe failed; serving degraded` with the cause in its `error` field. That `error` value goes through standard log redaction, which does not mask credentials embedded in a URL, so keep the password out of `session.storage.databaseUrl` where you can. On a large store, raise `startupProbeTimeoutMs` before upgrading so the first start does not time out.
+
+`session.storage.fallbackToJsonlOnError` is optional and defaults to `false`. When the supervisor is not `healthy` at startup and this is false, the gateway rejects startup with `FatalConfiguredStorageStartError` (`CONFIGURED_STORAGE_START_FAILED`, message `configured session storage startup failed`). It stops the supervisor, closes any unpublished candidate, releases the recovery owner fence and listening sockets, and does not serve JSONL. Set the option to `true` only during rollout if you want JSONL to serve while the backend is down; it can hide operational storage failures.
+
+```json5
+{
+  session: {
+    storage: {
+      backend: "postgres",
+      databaseUrl: "postgresql://user:pass@localhost:5432/openclaw",
+      fallbackToJsonlOnError: true,
+      recovery: {
+        probeTimeoutMs: 5000,
+        blockedAfterMs: 120000,
+        replayTimeoutMs: 120000,
+      },
+    },
+  },
+}
+```
+
+Restart after changing recovery keys:
+
+```bash
+# Linux
+systemctl --user restart openclaw-gateway
+
+# macOS
+wednesdayai gateway restart --deep
+```
+
+## storage.v1
+
+Status and doctor expose `{version:"storage.v1", state, configuredBackend, liveBackend, since, lastError, preservation, replay, recovery, restartRequired}`.
+
+`recovery` reports `blockedSince`, `lastProgressAt`, and held counts for unresolved session keys, missing replay targets, corrupt manifests, and other holds. A blocked snapshot also carries the operator recommendation. `doctor.recovery.inspect` returns this live gateway snapshot even when the restart-recovery journal is unavailable.
+
+`restartRequired` lists subsystems that captured a null runtime at startup: `plugin-session-claims`, `claim-sweep-cadence`, `session-run-startup-recovery`, `task-pipeline`, `cron-storage`, `shutdown-run-reconciliation`, `agent-turn-runtime`. A healthy boot publishes an empty list.
+
+Inspect with `wednesdayai status` or `wednesdayai doctor --deep` (`openclaw` is the alias). Verify frozen-incident repair with `pnpm tsx scripts/verify-session-storage-recovery.ts`.
+
+## Replayed archives
+
+Successful replay archives the source to `<sessionId>.jsonl.replayed.<timestamp>` beside the original. Retention is at least 30 days (`max(pruneAfterMs, 30d)` unless archive retention is disabled).
+
+Ordinary appends strip `metadata.recovery`. Only supervised replay may stamp that namespace.
+
+## Frozen-incident install
+
+On gateway start the packaged 2026-08-27 asset is installed against the live state directory:
+
+- Matching canonical JSONL: register for live repair.
+- Canonical path present but fingerprint or size mismatch: disposition `held`; the live file is not overwritten.
+- Unresolved session key with canonical files present: disposition `held`.
+- Missing canonical files (verify-then-key): disposition `complete-and-ignored` without a session key.
+- Duplicate archive siblings: disposition `held` until extras are removed.
+
+## Session key overrides
+
+Replay and incident registration need the real channel session key for each recovered session. The resolver checks, in order:
+
+1. `recovery/session-key-overrides.json` — a flat map of `{ "<sessionId>": "<full sessionKey>" }`. The key's agent segment must match the session's agent or the entry is ignored with a warning.
+2. The database session index (`ctx_sessions`), when configured.
+3. The agent's `sessions.json` state index.
+
+When no source resolves a key, the manifest is held (no replay into the synthetic `agent:<id>:recovery:<sessionId>` keyspace) and the supervisor logs `session key unresolved; holding manifest`. Add the mapping to the overrides file and restart the gateway; the held manifest recovers on the next sweep. The file is read once at gateway start.
+
+If unresolved or targetless manifests enter `blocked`, do not delete recovery manifests or replay archives. Add only verified mappings, then restart with `systemctl --user restart openclaw-gateway` on Linux or `wednesdayai gateway restart --deep` on macOS.
+
+For manifests blocked with `storage_no_replay_target`, the recorded session has no replay destination in the session index or overrides. Restore the missing session-index row or add a verified override, then restart. If the transcript is intentionally abandoned, remove only that manifest and its incomplete-generation disposition; never bulk-delete recovery evidence.
+
+## Operator surgery
+
+All paths are under the state directory (`~/.openclaw` by default).
+
+- Packaged (frozen-incident) disposition: `recovery/disposition/<assetId>/<sessionId>.json`.
+- Incomplete-generation disposition: `recovery/disposition/incomplete/<sessionId>/<generationId>.json`.
+- Corrupt manifest plus held record: remove the matching manifest and the disposition path above.
+- Conflicted record plus retained source: remove the disposition record and the retained source jsonl.
+- Asset marker: remove `recovery/asset/<assetId>.json`.
+- Renamed manifest-corrupt file: remove `recovery/manifest-corrupt/...`.
+- Retained-in-place corrupt file: remove the unreadable manifest at its original path.
+- Duplicate archive siblings: keep one fingerprint-matching sibling; remove extras.
+- Divergent same-id source: stop; do not archive until the conflict is resolved.
+
+## Legacy user-row cleanup
+
+User rows written before the `__openclaw.ingress` carrier shipped can carry baked-in channel framing blocks (`Conversation info (untrusted metadata): …`), a `Current time: …` line, and a leading message stamp in `content_text`, `clean_user_message` and the `message` text content. Core never rewrites these rows; the render layer guards against double-stamping, but the artifacts stay in storage until you clean them.
+
+`scripts/sessions/clean-legacy-user-rows.ts` removes them, per row, with an undo log. It selects only `role='user'` rows whose `message` JSON has no `__openclaw.ingress` (post-upgrade rows are never candidates), never touches `raw_entry`, `raw_line`, `raw_sha256`, `content_blocks`, `provider_payload` or `metadata`, skips rows where a text field would change from non-empty to empty (reported as `ambiguous`), and is idempotent — a second run changes nothing. SQLite `ctx_fts` resyncs via its UPDATE trigger; Postgres `content_text_tsv` is a generated column. JSONL transcripts are out of scope: they are the raw log and render-time guards handle them.
+
+1. **Back up first.** The store runs with WAL enabled, so use SQLite's backup API, not a plain `cp`:
+   ```sh
+   mkdir -p ~/.openclaw/backups
+   dest=~/.openclaw/backups/ctx-backup-$(date +%Y%m%d-%H%M%S).sqlite
+   sqlite3 ~/.openclaw/<sessions sqlite path> ".backup '$dest'"
+   sqlite3 "$dest" 'PRAGMA integrity_check'   # must print: ok
+   ```
+   For Postgres, take a dump of the `ctx_*` tables before proceeding.
+2. **Dry-run** (default; prints `scanned` / `changed` / `ambiguous` / `skippedNoop` overall and per field):
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path>
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --postgres-url <url>
+   ```
+3. **Apply with an undo log** (`--undo-log` is required with `--apply`; the path must not exist — the run refuses to truncate an existing log):
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path> \
+     --apply --undo-log ~/.openclaw/backups/undo-$(date +%Y%m%d-%H%M%S).jsonl
+   ```
+   <Warning>
+   The undo log holds complete original conversation content (including anything users typed). Keep it under a private, dated path such as `~/.openclaw/backups/` — never a shared location — and keep it until you have verified the result.
+   </Warning>
+4. **Verify.** Re-run the dry-run: it should report `changed=0`. Spot-check cleaned rows and confirm full-text search follows the cleaned `content_text`.
+5. **Restore if needed** (conditional and atomic; rows that moved on after the cleanup are never overwritten):
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path> \
+     --restore ~/.openclaw/backups/undo-<date>.jsonl
+   ```
+
+Narrow a run with `--agent <id>` (exact agent id) or `--limit <n>`. Full procedure, verification queries and restore semantics: `dev-docs/runbooks/legacy-user-row-cleanup.md` in the repository.
+
+## Postgres notes
+
+Schema setup (tables, indexes, idempotent column adds) runs inside one transaction under a 5-second `lock_timeout` (a separate advisory lock serializes concurrent schema passes and is not bounded by that timeout). If another transaction holds a conflicting lock on an existing table for longer than that — typically a long-running or idle-in-transaction session, such as a stuck client, a backup, or a manual `psql` session — the schema pass fails, the storage probe fails with it, and with the default `fallbackToJsonlOnError: false` the gateway rejects startup with `configured session storage startup failed`. Nothing is corrupted: find the blocking transaction (`pg_stat_activity`, `pg_locks`), let it finish or cancel it, then start the gateway again.
+
+Background connection failures do not crash the gateway. The pool (4 connections) and every client it hands out carry error listeners that log warns instead: an idle client failure logs `postgres session storage idle client error; the pool replaces it`, a client-side failure logs `postgres session storage client connection error`, and a single idle-client failure currently logs both lines. Occasional warns across a database restart or failover are expected; sustained warns mean a connectivity problem.
+
+## Troubleshooting
+
+- **Gateway rejects startup with `configured session storage startup failed`:** the configured backend did not reach a healthy start and `fallbackToJsonlOnError` is `false`. The fatal error carries the probe or validation cause; fix that cause (connectivity, credentials, schema locks) and start the gateway again. No JSONL was served or written.
+- **State stays `degraded`:** the probe is still failing. Check postgres or sqlite connectivity and `lastError` on `storage.v1`.
+- **State stays `recovering` with many incomplete manifests:** jsonl files were registered during a probe blip and have no replay target in the session index. That is a hold, not a probe restart loop. Confirm logs show `reconciliation selected no replay target; holding manifest` without repeated `re-entering degraded`.
+- **State is `blocked`:** new root work, cron, and channel intake are contained. Run `wednesdayai doctor --deep`; use its held-reason counts to repair `recovery/session-key-overrides.json` or a corrupt manifest, then restart the gateway. Do not bulk-delete recovery evidence.
+- **Lease re-arm log flood plus CPU spike:** that was the pre-fix probe restart loop. Run a build that holds no-target manifests instead of calling `reenterDegraded`.
+- **Live repair skipped:** startup was not `healthy`. Fix the probe or held rows, then restart.
+- **A manifest holds with `conversation replay conflicts: N`:** replayed rows for that source already exist with different content, usually from an earlier recovery attempt. That source parks on its own; the sweep keeps going. Identify the earlier rows by their `metadata.recovery.replayedGenerationId` and remove only the stale prior-generation rows, then restart. Never clear rows you cannot attribute to a superseded generation.
+- **Retiring a non-conversation source** (cron output, notification-only transcripts): move the transcript out of `agents/<id>/sessions/` **and** remove its manifest, then record a disposition. Clearing the manifest alone lets the next sweep re-register the file; removing the file alone makes reconciliation fail to open it and re-enter degraded instead of holding.
+
+## What stays live while sources are held
+
+A held source does not stop the gateway. Once a sweep has done all it can:
+
+- The configured backend is published even when every remaining source is held, so new sessions are written to the real store instead of accumulating in JSONL. Held transcripts keep their manifests, their bytes and their preservation pin.
+- The exclusive writer fence is dropped and writer admission reopens at the settled sweep boundary. The fence covers active cutover work only; it is never an open-ended hold. If it were held open, every session write would wait on an untimed queue and accepted turns would stall before dispatch.
+- Preservation stays armed: session-store rotation and other maintenance remain gated until every source is resolved.
+- Transcripts created during the outage are enrolled by the sweep's re-census, so a session started mid-outage is replayed in the same episode rather than left outside recovery inventory.
+
+Readiness depends on whether the no-progress latch has fired. While the episode is still making progress — and permanently, when `session.storage.recovery.blockedAfterMs` is `0` — `/readyz` reports `ready: true, degraded: true` and names the specific hold: `storage_unresolved_session_key`, `storage_no_replay_target`, or `storage_recovery_held`. With the default positive `blockedAfterMs`, a held episode that makes no durable progress for that long latches to `blocked`: storage containment stops cron and channel intake, and `/readyz` returns `503` with `ready: false` and `storage_preservation_blocked`. `/healthz` stays `200` throughout. Both states are honest — the first admits root work and completes writes, the second says plainly that it does not.

@@ -34,14 +34,16 @@ The ctx storage layer (both SQLite and Postgres backends) ships four analytics s
 
 `ctx_session_entries` records four turn-provenance columns that identify who or what triggered each entry. These are populated at write time by `normalizeSessionEntryForStorage()` and are used to filter automated turns from recall and analytics queries.
 
-| Column           | Type    | Meaning                                                                                       |
-| ---------------- | ------- | --------------------------------------------------------------------------------------------- |
-| `trigger_source` | TEXT    | `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, or `'acp'` — derived from session key format |
-| `is_automated`   | BOOLEAN | `1` when `trigger_source != 'user'`; `NULL` for legacy rows                                   |
-| `sender_display` | TEXT    | Human-readable sender name from the channel connector (best-effort)                           |
-| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake)                       |
+| Column           | Type    | Meaning                                                                                                                   |
+| ---------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
+| `trigger_source` | TEXT    | `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, or `'acp'` — derived from session key format                             |
+| `is_automated`   | BOOLEAN | `1` when `trigger_source != 'user'`; `NULL` for legacy rows                                                               |
+| `sender_display` | TEXT    | Human-readable sender name — from the `__openclaw.ingress` carrier when present, else best-effort from message text       |
+| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake) — from the carrier when present, else best-effort |
 
 Derivation rules (see `storage-normalize.ts:deriveTriggerSource`): `:heartbeat` key suffix → `'heartbeat'`; `cron:` key prefix → `'cron'`; `:subagent:` segment (UUID-appended) → `'subagent'`; `:acp:` segment (UUID-appended) → `'acp'`; all other keys → `'user'`.
+
+On carrier-bearing user rows the sender columns come only from the structured `__openclaw.ingress` carrier (`trusted.senderId`, `untrusted.sender`) — never parsed out of the message text, so a sender label typed into the message body cannot set them. Legacy rows fall back to parsing the `Sender (untrusted metadata)` text block.
 
 A partial index `idx_ctx_session_entries_trigger_source` covers `trigger_source IS NOT NULL` rows for efficient provenance filtering.
 
@@ -119,17 +121,17 @@ ORDER BY in_tok DESC;
 
 `ctx_turns` stores one row per completed user-initiated turn within a session.
 
-| Column                | Type    | Meaning                                                                                 |
-| --------------------- | ------- | --------------------------------------------------------------------------------------- |
-| `session_id`          | TEXT    | Session identifier                                                                      |
-| `turn_idx`            | INTEGER | 1-based ordinal of the user message that opened this turn (over all session history)    |
-| `user_seq`            | INTEGER | `seq` of the user message entry that opened the turn                                    |
-| `end_seq`             | INTEGER | `seq` of the last assistant entry in the turn                                           |
-| `user_text`           | TEXT    | Cleaned text of the opening user message                                                |
-| `total_input_tokens`  | INTEGER | Sum of `input_tokens` across all assistant entries in the turn                          |
-| `total_output_tokens` | INTEGER | Sum of `output_tokens`                                                                  |
-| `tool_call_count`     | INTEGER | Count of assistant messages within the turn that contained at least one tool-call block |
-| `latency_ms`          | INTEGER | Wall-clock milliseconds from the user message timestamp to when `upsertTurn` ran        |
+| Column                | Type    | Meaning                                                                                                         |
+| --------------------- | ------- | --------------------------------------------------------------------------------------------------------------- |
+| `session_id`          | TEXT    | Session identifier                                                                                              |
+| `turn_idx`            | INTEGER | 1-based ordinal of the user message that opened this turn (over all session history)                            |
+| `user_seq`            | INTEGER | `seq` of the user message entry that opened the turn                                                            |
+| `end_seq`             | INTEGER | `seq` of the last assistant entry in the turn                                                                   |
+| `user_text`           | TEXT    | Derived `content_text` of the opening user message (trimmed, injected-context patterns stripped, 4000-char cap) |
+| `total_input_tokens`  | INTEGER | Sum of `input_tokens` across all assistant entries in the turn                                                  |
+| `total_output_tokens` | INTEGER | Sum of `output_tokens`                                                                                          |
+| `tool_call_count`     | INTEGER | Count of assistant messages within the turn that contained at least one tool-call block                         |
+| `latency_ms`          | INTEGER | Wall-clock milliseconds from the user message timestamp to when `upsertTurn` ran                                |
 
 `PRIMARY KEY (session_id, turn_idx)`. The upsert uses `ON CONFLICT … DO UPDATE` so calling `upsertTurn(sessionId)` repeatedly is idempotent.
 
@@ -193,7 +195,7 @@ LIMIT 10;
 
 ### SQLite — FTS5
 
-WednesdayAI uses a [FTS5 external-content virtual table](https://www.sqlite.org/fts5.html) backed by `ctx_session_entries`. The `ctx_fts` table indexes `content_text` (the plain-text content extracted from each entry).
+WednesdayAI uses a [FTS5 external-content virtual table](https://www.sqlite.org/fts5.html) backed by `ctx_session_entries`. The `ctx_fts` table indexes `content_text` (the plain-text content extracted from each entry). `content_text` is a derived, length-capped search field, not a transcript: it is extracted at write time from the stored message text with injected-context patterns stripped and truncated at 4000 characters. On carrier-bearing user rows the indexed text is the raw message as received.
 
 **Guardrail (ADR 0020):** all FTS queries **must** include a `session_id` equality filter. A global `ctx_fts MATCH ?` without scoping to a session returns results across all sessions and will produce stale entries for sessions that have been pruned (the FTS shadow table lags behind `pruneSessionsBefore` on very large prunes). Scope all reads:
 

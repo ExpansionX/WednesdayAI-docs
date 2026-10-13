@@ -10,6 +10,10 @@ sources:
   - src/plugins/types.ts
   - src/plugins/hooks.ts
   - src/plugins/provider-runtime-identity.ts
+  - src/plugins/runtime/runtime-time.ts
+  - src/sessions/message-ingress.ts
+  - src/shared/text/message-stamp.ts
+  - src/gateway/assistant-display.ts
   - src/logging/file-log-writer.ts
   - src/config/types.base.ts
   - src/config/types.plugins.ts
@@ -317,6 +321,62 @@ Notes:
   run, so the Gateway's idle detection sees it. It resolves to a handle with `complete()`,
   `fail(error)` and `abort(reason?)`; call exactly one when the turn ends. A turn without `runId`
   gets a unique one.
+
+### Time and stamp helpers
+
+- `api.runtime.time.timezone` is the resolved user timezone (`agents.defaults.userTimezone`,
+  host fallback).
+- `api.runtime.time.format(ms?)` renders a timestamp as the canonical message stamp
+  `[Ddd YYYY-MM-DD HH:MM GMT±H]` in that timezone; `ms` defaults to now.
+- `api.runtime.time.parseLeadingStamps(text)` parses leading message stamps (canonical
+  `GMT±H[:MM]`, zoneless, and legacy abbreviation forms) and returns
+  `{ body, stamps, pending }`; `stripLeadingStamps(text)` returns `body`. A fragment that may
+  still become a stamp (a bracket without a closing bracket, at most 40 characters) is reported
+  as `pending` with the text unchanged, so stream consumers can hold it back.
+
+```ts
+const stamp = api.runtime.time.format(); // "[Wed 2026-10-07 21:47 GMT+10]"
+const { body } = api.runtime.time.parseLeadingStamps(text);
+```
+
+`parseLeadingStamps` and `stripLeadingStamps` are also top-level SDK exports, for code that has no
+plugin `api` handle.
+
+### Read the message ingress carrier
+
+Stored user messages carry the raw bytes as received plus a structured
+`__openclaw.ingress` carrier: where the turn came from, when it arrived, and the inbound metadata
+the gateway collected. The stamp and inbound framing are added at the model boundary, so plugins
+that render user messages read the raw content and stamp it themselves.
+
+```ts
+import type { MessageIngress } from "wednesdayai/plugin-sdk";
+import { getMessageIngress, messageTime } from "wednesdayai/plugin-sdk";
+
+const ingress: MessageIngress | undefined = getMessageIngress(message);
+// undefined unless the carrier carries v: 1 and a non-empty id
+
+// ingress.trigger: "user" | "heartbeat" | "cron" | "memory" | "queue" | "steer" | "injected"
+// ingress.receivedAt: channel-reported time (epoch ms); absent means message.timestamp is the
+//   generated time, not the original send time
+// ingress.triggerId: heartbeat run id (used for heartbeat transcript pruning)
+// ingress.trusted: { channel?, provider?, surface?, chatType?, accountId?, senderId?, messageId? }
+// ingress.untrusted: InboundUserContext, the framing payloads the gateway itself generated
+
+const time = messageTime(message); // receivedAt when present, else message.timestamp
+```
+
+`messageTime` returns `undefined` when the message carries neither a valid carrier time nor a
+valid timestamp. Stamp only when you have a time:
+
+```ts
+const time = messageTime(message);
+const rendered = time === undefined ? raw : `${api.runtime.time.format(time)} ${raw}`;
+```
+
+The carrier is data, never display text: core never renders it, strips it from every
+client-facing payload such as `chat.history`, and strips it from every provider-bound message, so
+it never reaches the model wire either.
 
 ## Discovery & precedence
 
@@ -1556,6 +1616,100 @@ export default function (api) {
   });
 }
 ```
+
+### Register a display transform
+
+`api.registerDisplayTransform` lets a plugin rewrite assistant text on the gateway display
+surfaces: live stream deltas, finals, abort partials, chat history and agent-event frames.
+Core already strips leading message stamps on those surfaces and on channel-bound replies;
+plugin transforms run after that strip on the gateway surfaces, in plugin load order.
+
+```ts
+export default function (api) {
+  api.registerDisplayTransform({
+    id: "myplugin.hide-markers",
+    transform: (text, ctx) => {
+      // ctx.surface is "delta" | "final" | "history"; ctx.sessionKey may be set
+      return text.replaceAll("[[myplugin:marker]]", "");
+    },
+  });
+}
+```
+
+The type is `PluginDisplayTransform` and the surface union is `AssistantDisplaySurface`, both
+exported from `wednesdayai/plugin-sdk`.
+
+Contract:
+
+- The transform is synchronous, receives the current text and returns the replacement string.
+- A transform that throws or returns a non-string is skipped for that call and warned once.
+- The `id` is required and unique per registry; a duplicate is rejected with a
+  `PLUGIN_REGISTER_ERROR` diagnostic.
+- On the delta surface the output must keep the streaming prefix stable: the text a transform
+  returns for a longer input must extend what it returned for the shorter input. A transform that
+  breaks that prefix suppresses further deltas for that run until the final message carries the
+  full text, with one warning.
+
+What not to do on the delta surface:
+
+```ts
+// ❌ Wraps the whole text in a fence. The closing fence moves forward on every
+// delta, so each broadcast stops extending the previous one.
+transform: (text) => `---\n${text}\n---`,
+// ❌ Rewrites earlier output once a later word arrives. The redaction fires
+// mid-stream and retroactively changes text the client already rendered.
+transform: (text) =>
+  text.includes("confidential") ? text.replaceAll("acme", "[redacted]") : text,
+```
+
+Use display transforms for output cleanup on gateway consumers (UI streams, history, agent
+events). Display transforms do not run on channel sends: to rewrite channel-bound payloads, use
+the `message_sending` hook.
+
+### Register a context owner (message-render)
+
+`api.registerContextOwner` claims a context pipeline stage for a session. The first stage is
+`message-render`: the plugin takes over rendering of user messages (stamps and inbound framing)
+for the sessions it owns, and core adds no stamp or framing there.
+
+```ts
+import type { OpenClawPluginApi, PluginContextOwner } from "wednesdayai/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi) {
+  const owner: PluginContextOwner = {
+    stages: ["message-render"],
+    ownsSession: ({ agentId, sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
+  };
+  api.registerContextOwner(owner);
+
+  api.on("context.project", (event, ctx) => {
+    // User messages arrive as stored: raw bytes plus the __openclaw.ingress carrier.
+    // Read the carrier with getMessageIngress(message) to get trigger, received time
+    // and trusted sender fields; render and stamp as your plugin requires.
+    return { messages: event.messages };
+  });
+}
+```
+
+Contract:
+
+- Registration is exclusive per stage: the first plugin in load order wins, and a second
+  claimant is rejected with a `PLUGIN_REGISTER_ERROR` diagnostic.
+- `ownsSession({ agentId, sessionKey, sessionId, trigger })` is synchronous and pure; the claim
+  resolves once per attempt so the rendered prefix stays stable within a run.
+- The owner must also register a `context.project` handler; without one core keeps rendering.
+- In owner mode the projection your handler returns is sent to the model as-is, including on
+  overflow continuations. Core adds no stamp and no inbound framing to the messages you return.
+- History and steered messages arrive raw. The current turn still carries prompt-only additions:
+  the appended untrusted-context block, thread context, heartbeat turn notes and plugin
+  contributions stay in the prompt, and core removes only the exact inbound framing from it. The
+  carrier's `untrusted` field holds the same framing payload, so render the framing yourself and
+  do not duplicate the additions.
+- Your handler receives the messages as stored, with the `__openclaw.ingress` carrier still
+  attached. You do not need to strip it: core removes the whole `__openclaw` namespace from every
+  provider-bound message before the call leaves the process.
+- If your handler throws or times out, core renders that run instead and warns once; the next
+  attempt retries your plugin.
 
 ## Naming conventions
 

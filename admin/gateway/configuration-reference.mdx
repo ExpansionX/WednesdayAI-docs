@@ -1713,14 +1713,14 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - `per-peer`: isolate by sender id across channels.
   - `per-channel-peer`: isolate per channel + sender (recommended for multi-user inboxes).
   - `per-account-channel-peer`: isolate per account + channel + sender (recommended for multi-account).
-- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; add that value to the person's links. Get ids from `openclaw devices list --json` (`deviceId` on each `paired` entry). Agents with [workspace lanes](/concepts/workspace-lanes) deny unlinked devices.
+- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity). Keys starting with `raw~` are rejected at config validation — that prefix is reserved for contained unlinked-sender session buckets (see [Sessions](/concepts/session)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; add that value to the person's links. Get ids from `openclaw devices list --json` (`deviceId` on each `paired` entry). Agents with [workspace lanes](/concepts/workspace-lanes) deny unlinked devices.
 - **`reset`**: primary reset policy. `daily` resets at `atHour` local time; `idle` resets after `idleMinutes`. When both configured, whichever expires first wins.
 - **`resetByType`**: per-type overrides (`direct`, `group`, `thread`). Legacy `dm` accepted as alias for `direct`.
 - **`parentForkMaxTokens`**: max parent-session `totalTokens` allowed when creating a forked thread session (default `100000`).
   - If parent `totalTokens` is above this value, OpenClaw starts a fresh thread session instead of inheriting parent transcript history.
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
-- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins.
+- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
 - **`maintenance`**: session-store cleanup + retention controls.
   - `mode`: `warn` emits warnings only; `enforce` applies cleanup.
   - `pruneAfter`: age cutoff for stale entries (default `30d`).
@@ -2842,8 +2842,10 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
   default `15000`. The replacement turn is never started past this point, so a session cannot end
   up with two concurrent runs.
 
-The web client always sends an explicit `mode` (`queue` for a message queued behind a streaming
-reply, `inject` for Send now) and never `interrupt`, so neither key changes what it does.
+The web client always sends an explicit `mode` and never `interrupt`, so neither key changes what it
+does. While a reply streams, Send adds the message to the current turn (`inject`); with a file
+attached it sends `queue` instead, because `inject` refuses attachments. Send after reply sends
+`queue`.
 
 See [Gateway protocol](/gateway/protocol) for the full `sessions.steer` request and response shape.
 

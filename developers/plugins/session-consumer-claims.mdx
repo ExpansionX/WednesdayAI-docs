@@ -1,126 +1,310 @@
 ---
-title: "Session consumer claims"
-description: "Declare sessionConsumers in your plugin manifest and consume ended-session work with claimSessionWork/ackSessionWork — scopes, lanes, leases, and diagnostics events."
 audience: developer
-doc-schema-version: 1
+component: session-consumer-claims
+sources:
+  - src/config/sessions/session-consumer-claim-schema.ts
+  - src/config/sessions/session-consumer-claim-store.ts
+  - src/config/sessions/session-consumer-claim-reconciler.ts
+  - src/config/sessions/session-consumer-claim-prune-gate.ts
+  - src/config/sessions/session-consumer-claim-sweep.ts
+  - src/config/sessions/read-query.ts
+  - src/config/sessions/ctx-postgres.ts
+  - src/config/sessions/ctx-sqlite-worker.ts
+  - src/plugins/types.ts
+  - src/plugins/registry.ts
+  - src/plugins/manifest.ts
+  - src/plugins/loader.ts
+  - src/config/types.base.ts
+  - src/config/sessions/storage-config.ts
+  - src/config/zod-schema.session.ts
+  - src/plugin-sdk/index.ts
+  - src/infra/diagnostic-events.ts
+  - src/gateway/session-consumer-claim-sweep.ts
+  - src/gateway/server.impl.ts
+  - extensions/learning-core/index.ts
+generated: 2026-08-18
 ---
 
+# Session Consumer Claims
 
-# Session consumer claims
+The session-consumer claim ledger is a durable obligation-tracking primitive that
+prevents session pruning from deleting a session a registered consumer still owes
+work on. It is the foundation of the Cognitive Substrate program's session-lifecycle
+reliability layer (sub-project `0s`).
 
-WednesdayAI gives plugins a durable, at-least-once work queue over **ended sessions**: each finished session is materialized as claim rows per registered consumer, and your plugin pulls, leases, and acks them through the SDK. This replaces polling the session store or hooking the volatile `session_end` event (an in-process subscriber absent at emit time silently misses the session forever).
+## How it works
 
-The pieces:
+When a session ends (replaced via `/new` or `/reset`), a core-owned reconciler sweep
+materializes **claim rows** for every registered consumer that declares interest in
+`session.end` effects. Each claim represents an outstanding obligation: "consumer K
+still needs to process session S." The prune gate checks these obligations before
+deleting any session — a session is only pruned when all consumers have either
+processed, DLQ'd, or been released by the max-retention backstop.
 
-- **Manifest** — declare `sessionConsumers` in `openclaw.plugin.json`.
-- **SDK** — `api.claimSessionWork(opts)` / `api.ackSessionWork(claimId, result)` / optional `api.onSessionWorkAvailable({ effectKind })`.
-- **Diagnostics** — `session_consumer_claim` events surface DLQ, backstop, and skipped-backlog decisions.
+The gateway sweep runs on a `sweepCadenceMs` timer and performs **two** operations
+per tick: (1) `reconcileSessionConsumerClaims` reads one row per `session_id` past each
+consumer's watermark, keyset-paged on `(updated_at, session_id)`, and materializes a
+claim only once the session has ended, meaning it can no longer receive turns under its
+reset policy: superseded by a newer `session_id` on its key (`/new`, reset), or past the
+daily reset boundary or idle reset window of every configured reset policy, so the longest
+window wins (default: the next 04:00). A live session is
+never claimed early; the watermark stays just below it until it ends (ADR 0079). Turns
+that land on a session after its claim become a follow-up claim segment: the claim's
+`segment` is `1`, `2`, … and `fromSeq`/`toSeq` bound its `transcript`, so key captures
+on `(sessionId, segment)`; (2) `reapExpiredLeases` resets crashed/expired claims — claims
+whose `attempt_count` is still under `maxAttempts` go back to `pending`, claims at or
+over the budget transition to `dlq` (and emit a `dlq_terminal` diagnostic once).
 
-Contracts live in `src/plugins/manifest.ts` (`SessionConsumerDeclaration`) and `src/plugins/types.ts` (`ClaimedSessionWork`, `SessionWorkResult`), re-exported from `openclaw/plugin-sdk`. Design decisions: ADR 0041 (claim ledger) and ADR 0062 (seam carries `sessionKey` + `outcome`).
+Consumers claim work via `api.claimSessionWork()` (loader-bound `consumerId`, fail-closed
+authz, limit fixed at 1), process it, and acknowledge via `api.ackSessionWork()`. The
+claim/lease pattern mirrors `ctx_storage_outbox` (`FOR UPDATE SKIP LOCKED` on Postgres,
+`BEGIN IMMEDIATE` on SQLite) with a 30s lease and exponential backoff retry.
 
-## Manifest declaration
+### Agent ID scoping
+
+Claims are scoped to the agents this gateway serves: every agent in `agents.list`
+(ADR 0078 D8, ADR 0079). Consumer ids are agent-qualified
+(`<agent>:<plugin>:<effectKind>`), each agent keeps its own watermark, and
+`claimSessionWork` claims across the agents in rotation with a per-row agent guard. The
+`sessionConsumerRegistry` is built from manifest data **before** the plugin loop starts;
+the claim store and agent binding resolve at claim time.
+
+When no agent ID is configured (single-agent setups), the registry is not built and
+claims are unscoped — the SQL `agent_id` filter becomes a wildcard. The gateway sweep
+warns once and returns early when no agent ID is configured, preventing claim
+materialization for the wrong agent.
+
+Duplicate plugin IDs in the manifest registry are deduplicated using first-seen
+precedence, matching the loader's `seenIds` logic.
+
+## Architecture
+
+### Schema (two tables)
+
+- **`session_consumer_claims`** — the claim ledger. PK `claim_id` (uuid). Unique
+  idempotency key `(session_id, consumer_id, effect_kind, schema_version)`. Statuses:
+  `pending | claimed | processing | processed | dlq`. The live state machine is
+  `pending → claimed → processed | dlq` (the reaper moves over-budget claims to
+  `dlq`; under-budget expired leases return to `pending`). `processing` is a
+  documented placeholder retained for forward compatibility — no transition sets
+  it today, but the prune gate pins it defensively as active work. Tracks lease
+  owner, lease until, attempt count, last progress timestamp, last error.
+- **`session_consumer_watermarks`** — per-consumer per-lane watermark. PK
+  `(consumer_id, lane_id)`. The watermark advances to `max(updated_at)` of
+  materialized sessions. Disable (`enabled = 0`) preserves the watermark; only
+  uninstall (`purgeConsumer`) drops it.
+
+Lane is derived in-memory from `session_key` (format `agent:{agentId}:{channel}:{method}:{peerId}`)
+— there is no `lane_id` column on `ctx_sessions` (D0s-10). The `updated_at` column
+(last activity) serves as the effective session-end timestamp.
+
+### Backend implementations
+
+| Backend  | Claims store                       | Behaviour                                              |
+| -------- | ---------------------------------- | ------------------------------------------------------ |
+| SQLite   | `SqliteCtxStorageRuntime.claims`   | Full implementation (worker request types)             |
+| Postgres | `PostgresCtxStorageRuntime.claims` | Full implementation (`FOR UPDATE SKIP LOCKED`)         |
+| fs-jsonl | `undefined` (degraded)             | Stub — claim/lease ops throw, watermark no-ops (D0s-7) |
+
+Postgres timestamp columns (`dlq_at`, `lease_until`, …) are `bigint` epoch-ms.
+node-postgres sends parameters untyped, so a statement whose only typed anchor is
+the parameter — e.g. `dlq_at = CASE WHEN ... THEN $2 ELSE NULL END` — resolves the
+expression to `text` and fails with `column "dlq_at" is of type bigint but
+expression is of type text`. Cast such parameters explicitly
+(`THEN CAST($2 AS BIGINT)`); a bare assignment (`dlq_at = $2`) takes the column
+type directly and needs no cast. SQLite is dynamically typed and unaffected.
+
+### Plugin manifest extension
 
 ```json
 {
-  "id": "my-learner",
-  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} },
+  "id": "my-plugin",
+  "configSchema": { ... },
   "sessionConsumers": [
     {
-      "effectKind": "lesson-capture",
-      "subCursors": ["nightly", "realtime"],
-      "consumeScopes": ["session:read"],
-      "consumeLanes": ["telegram:dm:*"],
-      "enabled": true
+      "effectKind": "session.end",
+      "subCursors": ["lessons", "audit"],
+      "consumeScopes": ["session.end"],
+      "consumeLanes": ["telegram:direct:42"]
     }
   ]
 }
 ```
 
-| Field | Rules |
-| ----- | ----- |
-| `effectKind` | Required. Lowercase identifier (`^[a-z][a-z0-9.-]*$`). Keys the claim rows; **at most once per plugin** — duplicates are a manifest error (the reconciler keys claims by `(pluginId, effectKind)`) |
-| `subCursors` | Optional bounded fan-out (max **8**, each `^[a-z][a-z0-9-]*$`) — one claim stream per sub-cursor |
-| `consumeScopes` | Optional string list; claims outside the approved scopes are skipped, not leased |
-| `consumeLanes` | Optional lane filter: `""` (main/no-peer lane), `"*"` (wildcard), or `"{channel}:{method}:{peer}"` lane ids |
-| `enabled` | Defaults to `true` |
+- `effectKind` — the effect this consumer processes (default: `session.end`).
+- `subCursors` — bounded sub-cursor suffixes (max 8), each `^[a-z][a-z0-9-]*$`.
+- `consumeScopes` — manifest-declared authz scopes (fail-closed: mismatch → null).
+  Must be an array of strings; a bare string is rejected at manifest validation time.
+- `consumeLanes` — lane scopes the consumer is authorized for. Wildcard `"*"`
+  authorizes any lane; absent (omitted) defaults to the single-user `""` lane. An
+  explicit empty array means "no lanes authorized" and the consumer is skipped
+  during the sweep. Requesting an unauthorized lane at claim time is fail-closed
+  (returns `null`). Must be an array of strings; a bare string is rejected at
+  manifest validation time.
 
-Your `consumerId` is **loader-bound** — `${manifestId}:${effectKind}[/<subCursor>]` — and never caller-supplied. A plugin cannot claim work as another plugin, and unauthorized items (outside your manifest's scopes/lanes) are skipped before they reach you.
-
-## Claiming and acking work
+### SDK surface
 
 ```typescript
-import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+import type {
+  ClaimSessionWorkOptions,
+  ClaimedSessionWork,
+  SessionWorkResult,
+  SessionConsumerDeclaration,
+} from "openclaw/plugin-sdk";
 
-export default function register(api: OpenClawPluginApi): void {
-  api.on("gateway_start", () => {
-    void pump(api);
+// In a plugin's register() function:
+api.claimSessionWork({ laneId: "telegram:direct:42" });
+// → ClaimedSessionWork | null (null if no work or authz fail)
+//
+// `limit` is accepted on the options type for forward compatibility but is
+// currently fixed to 1 — the SDK returns a single ClaimedSessionWork or null.
+// A batch claim API is a future extension.
+
+api.ackSessionWork(claimId, { kind: "processed" });
+// or
+api.ackSessionWork(claimId, { kind: "failed", error: "...", retryable: true });
+// An optional third argument `leaseOwner?: string` may be passed; when omitted
+// the SDK resolves it from an internal claimId→leaseOwner map populated by
+// claimSessionWork. Pass it explicitly when acking outside the claiming process.
+```
+
+Read denials from the session store surface as `StorageReadAccessError` with a
+`code` and a `retryable` flag: `session_not_visible` (the owner row is not
+visible yet; `retryable: true`, so `deferSessionWork` the claim behind a
+nonzero `retryAfterMs` — acking `failed` would make the same drain re-claim it
+immediately and burn the attempt budget toward `dlq`) or
+`session_foreign_owner` (the session belongs to a different agent;
+`retryable: false`, straight to `dlq`). Read helpers such as
+transcript reads return empty results on those errors; only retry/ack decisions
+should branch on the flag.
+
+The not-visible defer must stay bounded: an owner row that never becomes
+visible (e.g. a permanently failed primary write) would otherwise be deferred
+forever, since `deferSessionWork` is attempt-neutral and never reaches `dlq`.
+Defer only while the claim is younger than a visibility window measured from
+`createdAt` (the claim row's materialization time, `created_at`; learning-core
+uses 10 minutes — the owner row normally becomes visible within ~250 ms of the
+primary write). Do not measure from `since`, which is the consumer scan
+watermark, not materialization time. Past the window — or when the backend does
+not record `createdAt`, so the age is unknown — ack `failed` with
+`retryable: true` and let the normal attempt budget take the claim to `dlq`.
+
+### Deferring a claim without spending an attempt
+
+`api.deferSessionWork(claimId, leaseOwner, { retryAfterMs })` returns a claim to
+`pending` without counting the attempt against its retry budget. Use it when the work
+cannot run _yet_ and retrying would only burn attempts toward `dlq`: a store outage after
+the claim, an enqueue that recovery admission refuses, or work that must wait for the next
+UTC day.
+
+```typescript
+const claim = await api.claimSessionWork({ effectKind: "session.end" });
+if (claim && !readyToProcess()) {
+  const result = await api.deferSessionWork(claim.claimId, claim.leaseOwner!, {
+    retryAfterMs: 60_000,
   });
-
-  // Optional: notified by the sweep after reconciliation and lease-reap
-  api.onSessionWorkAvailable = async ({ effectKind }) => {
-    await pump(api, effectKind);
-  };
-}
-
-async function pump(api: OpenClawPluginApi, effectKind?: string): Promise<void> {
-  for (let i = 0; i < 5; i++) {
-    const work = await api.claimSessionWork({ effectKind, limit: 1 });
-    if (!work) return;
-    try {
-      await process(work);
-      await api.ackSessionWork(work.claimId, { kind: "processed" });
-    } catch (err) {
-      await api.ackSessionWork(work.claimId, {
-        kind: "failed",
-        error: err instanceof Error ? err.message : String(err),
-        retryable: true,
-      });
-      return; // back off; the retry schedule owns the next attempt
-    }
-  }
+  // result: "deferred" | "stale"
 }
 ```
 
-`claimSessionWork(opts?)` options: `{ subCursor?, laneId?, limit?, leaseMs?, effectKind? }`. It returns `null` when no durable claims store is wired (`fs-jsonl` without the degraded store) or no work is available.
+- Every claim carries its own lease token in `leaseOwner` (`<process>:<token>`). Pass it
+  explicitly; there is no claim-id fallback. The update only applies while the claim is
+  still `claimed` by that token.
+- A deferred claim is `pending` again with its attempt given back and `retryAfterMs` as a
+  not-before time: nothing claims it earlier, and the reaper leaves it alone. Deferring it
+  any number of times never moves it to `dlq`.
+- A defer (or a late ack) from an owner whose lease was reaped and reclaimed by another
+  handler returns `"stale"` and changes nothing.
 
-The claim payload (`ClaimedSessionWork`):
+**Log the processing error before acking a failure.** If `ackSessionWork` itself
+throws (a store bug, a transient backend error), the claim is never marked — the
+lease expires, the reaper resets it, and the hook warning on the next sweep only
+shows the _ack_ failure, not the real processing error. Log the processing error
+via `api.logger.warn` first so it is never masked by a failing ack.
+
+`consumerId` is **not** a parameter — it is loader-bound from `record.id` (the
+plugin's manifest id), the effect kind, and an optional `/<subCursor>` suffix,
+in the form `${manifestId}:${effectKind}[/<subCursor>]`. The `:effectKind`
+suffix avoids consumerId collisions between consumers of different effect kinds
+declared by the same plugin. This is an irreversible contract (ADR 0026, D0s-3).
+
+### `onSessionWorkAvailable` hook
+
+Plugins can register a callback that the gateway sweep invokes after
+reconciliation and lease-reap on each tick. Use it to drive claim/ack
+loops without running a separate timer:
+
+```typescript
+// In a plugin's register() function:
+api.onSessionWorkAvailable(async ({ effectKind }) => {
+  let claim = await api.claimSessionWork({ effectKind });
+  while (claim) {
+    // process claim.transcript, claim.sessionId, claim.agentId
+    await api.ackSessionWork(claim.claimId, { kind: "processed" });
+    claim = await api.claimSessionWork({ effectKind });
+  }
+});
+```
+
+The hook receives `{ effectKind: string }` — the same `effectKind` the consumer
+declared in its manifest. The sweep calls the hook for each effect kind after
+materializing claim rows, so the plugin should drain work in a loop until `null`
+(as in the example above). The hook is additive (spec D2) — plugins that track
+their own timers can skip it and call `claimSessionWork` directly.
+
+### `ClaimedSessionWork` shape
 
 ```typescript
 type ClaimedSessionWork = {
   claimId: string;
   sessionId: string;
-  consumerId: string;          // "<pluginId>:<effectKind>[/<subCursor>]"
+  consumerId: string;
   laneId: string;
   effectKind: string;
   schemaVersion: number;
   attemptCount: number;
-  leaseOwner?: string;
-  agentId?: string;
-  sessionKey?: string;         // absent on pre-ADR-0062 rows
-  outcome?: "completed" | "aborted" | "unknown";  // absent on pre-ADR-0062 rows
-  transcript: ConversationReadQuery;  // scoped read of the session transcript
+  createdAt?: number; // epoch ms the claim row was materialized; absent when the backend doesn't record it
+  leaseOwner?: string; // this claim's own lease token (pass it to ack and defer)
+  agentId: string; // bound from runtime registration context
+  workspaceDir?: string | null; // the agent's canonical learning workspace, or null
+  transcript: Transcript; // durable conversation store access
 };
 ```
 
-`ackSessionWork(claimId, result)` takes `{ kind: "processed" }` or `{ kind: "failed", error, retryable }`. After `maxAttempts` (default 5) retryable failures the claim dead-letters (`dlq_terminal` event).
+`workspaceDir` is recorded when the ended session is materialized:
+`api.runtime.resolveLearningWorkspaceDir(agentId)` over the live config. Claims materialized
+before the column existed read `null`; resolve them with the same runtime method, and never
+fall back to a guessed directory.
 
-## Async safety
+`agentId` is the agent whose session was claimed: the gateway's runtime agent or any
+agent in `agents.list`, never a value from the plugin manifest. One gateway serves every
+configured agent, so a single `claimSessionWork` call can return a claim for any of them;
+branch on `agentId` (and resolve its workspace from `workspaceDir`) rather than assuming
+the runtime agent.
 
-`claimSessionWork`/`ackSessionWork` are async storage calls — never call them inside synchronous hook bodies without handling the promise. Claims hold **leases** (default 30 s): a claim you hold but neither ack nor release blocks re-offer until the lease expires. Batch small: claim → process → ack before claiming again, as in the pump above. Do not hold claims across user-facing request paths.
+### Wildcard lane claiming
 
-**What not to do:**
+When a consumer declares `consumeLanes: ["*"]`, omitting `laneId` from
+`claimSessionWork()` (or passing `undefined`) claims work from **any** materialized
+lane — the SQL wildcard check (`lane_id IS NULL`) matches all lanes. Passing an
+explicit `laneId` scopes the claim to that lane even when the consumer is
+wildcard-authorised.
 
-```typescript
-// ❌ fire-and-forget ack — failures vanish silently and the lease times out
-void api.ackSessionWork(work.claimId, { kind: "processed" });
+### Config keys
 
-// ❌ claiming everything at startup and holding it
-const backlog = await api.claimSessionWork({ limit: 1000 }); // leases expire mid-processing
+```yaml
+session:
+  storage:
+    consumerClaims:
+      progressWindowMs: 86400000 # 24h — liveness ceiling
+      maxRetentionBackstopMs: 2592000000 # 30d — last-resort age cap
+      sweepCadenceMs: 60000 # 1min — reconciler interval
+      maxAttempts: 5 # DLQ threshold
+      leaseMs: 30000 # 30s — claim lease
+      retryBaseMs: 1000 # 1s — backoff base
 ```
 
-## Diagnostics events
-
-Emitting from `src/infra/diagnostic-events.ts`, type `session_consumer_claim`:
+### Diagnostic events
 
 ```typescript
 type DiagnosticSessionConsumerClaimEvent = {
@@ -134,14 +318,39 @@ type DiagnosticSessionConsumerClaimEvent = {
 };
 ```
 
-Surface these in your plugin's observability story — `backstop_released` means a session your consumer never finished was pruned anyway.
+Emitted via `emitDiagnosticEvent()`:
 
-## Operator-facing behaviour
+- `dlq_terminal` — fires **once**, at the DLQ **transition** (when the lease reaper
+  moves a claim to `dlq` because `attempt_count >= maxAttempts`). Not emitted at
+  prune-evaluation time, so a surviving DLQ claim does not spam on every sweep.
+  Guarded by `rowCount` (Postgres) / `changes` (SQLite) to prevent duplicate
+  events when the `MARK_SCC_FAILED` update is a no-op (stale lease).
+- `backstop_released` — fires at the prune-gate ceiling release, for a **non-terminal**
+  claim (`pending`/`claimed`) on a session past `maxRetentionBackstopMs`.
+- `skipped_backlog` — fires at the prune-gate ceiling release, for a claim whose
+  consumer watermark is **disabled** (`enabled = 0`) and the session is past the
+  backstop. Signals that re-enabling the consumer would have resumed from this
+  watermark but the backstop released the session first.
 
-Declaring `sessionConsumers` makes pruning **obligation-gated** for your lanes: sessions you have not consumed are pinned (bounded by a 30-day backstop). Document this for operators in your plugin README, and point them at [Session consumer claims (admin)](/admin/gateway/session-consumer-claims).
+## Key design decisions
 
-## Related
+- **D0s-2 (irreversible):** Idempotency key `(session_id, consumer_id, effect_kind, schema_version)`.
+- **D0s-3 (irreversible):** `consumerId` is loader-bound, not a parameter.
+- **D0s-4 (irreversible):** Prune transitions from age-based to obligation-gated.
+- **D0s-7:** jsonl-fs is degraded (no crash-durability); claim/lease ops throw.
+- **D0s-10:** No `lane_id`/`ended_at` on `ctx_sessions`; lane derived from `session_key`.
 
-- [Session consumer claims (admin)](/admin/gateway/session-consumer-claims) — config keys, defaults, prune interaction
-- [Session store](/developers/plugins/session-store) — reading session data
-- [Plugin manifest](/developers/plugins/manifest) — required fields and validation
+See ADR 0026 (`dev-docs/adr/0041-session-consumer-claim-ledger.md`) for the full
+irreversible-decision record.
+
+## Limitations (hardening items)
+
+1. The `sessions.claims.status` RPC only surfaces claims for sessions with
+   stalled leases — sessions with only terminal (`processed`/`dlq`) claims are
+   not returned. A broader `listAllClaims` query would require a new store method.
+2. `retryBaseMs` is resolved from config but not yet wired through to the claim
+   store's retry-delay scheduling (hardcoded backoff in the reconcile/lease layer).
+   `leaseMs` and `maxAttempts` are wired through (`src/gateway/server.impl.ts`).
+3. `dlq_terminal` and `backstop_released` diagnostics are emitted through the
+   global event system, not the session-consumer ring buffer — they are not
+   surfaced by `sessions.claims.status`.
