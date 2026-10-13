@@ -9,8 +9,8 @@ description: "Deploy and host the WednesdayAI web client (static bundle, contain
 audience: admin
 component: web-user-client
 sources:
-  - src/user-client/static-server.ts
-  - src/config/gateway-web-client.ts
+  - src/user-client/runtime-config.ts
+  - src/config/gateway-spa-mounts.ts
   - src/config/types.gateway.ts
   - src/gateway/web-client-route.ts
   - src/gateway/server-close.ts
@@ -20,7 +20,7 @@ sources:
   - src/gateway/protocol/schema/sessions.ts
   - src/gateway/session-utils.ts
   - src/shared/session-visibility.ts
-  - apps/web/src/gateway/connection.ts
+  - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/providers/navigation-preferences.ts
   - apps/web/src/ui/DisplayMenu.tsx
@@ -168,9 +168,7 @@ the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
 
 - `config.json` is synthesized per request: `gatewayUrl` is the gateway's own origin, so the client
   connects back to where it was loaded from.
-- `basePath` defaults to `/v2/client` (the default in the sample above) and may not collide with `gateway.controlUi.basePath`. A base
-  path of `/` while the Control UI is enabled, or base paths that contain one another, are rejected
-  when the config loads. With a distinct base path the Control UI is unaffected.
+- `basePath` defaults to `/v2/client` (the default in the sample above). It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It also may not collide with another active SPA mount: a base path of `/` while the Control UI or the control UI v2 console is enabled, or base paths that contain one another, are rejected when the config loads, naming both keys. With a distinct base path the other consoles are unaffected.
 - `root` is optional. Unset, the gateway serves the packaged `dist/web-client` bundle and logs
   which directory it picked. Set, it always wins - including when it is broken, which answers `503`
   with that reason rather than silently falling back. When neither resolves, the route answers
@@ -337,20 +335,20 @@ Methods the client calls with `operator.sessions.read`:
 
 Methods the client calls with `operator.sessions.write`:
 
-| Method                     | What it powers                                                                                                                                                                  |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`)                               |
-| `chat.abort`               | Stop                                                                                                                                                                            |
-| `sessions.create`          | New chat, for the chosen assistant and optionally a model                                                                                                                       |
-| `sessions.steer`           | Enter or Send while a reply streams adds to the current turn (`inject`, falling back to `queue`); with a file attached, Send after reply, or Ctrl/Cmd+Enter it queues (`queue`) |
-| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                                                |
-| `sessions.title.prepare`   | Suggest a title                                                                                                                                                                 |
-| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`). Refused while `talk.conversation.enabled` is false                                                                   |
-| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                       |
-| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                       |
-| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn                                                                                                   |
-| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                   |
-| `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                       |
+| Method                     | What it powers                                                                                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`) |
+| `chat.abort`               | Stop                                                                                                                                              |
+| `sessions.create`          | New chat, for the chosen assistant and optionally a model                                                                                         |
+| `sessions.steer`           | Queueing a message behind a streaming reply (`queue`) and Send now (`inject`)                                                                     |
+| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                  |
+| `sessions.title.prepare`   | Suggest a title                                                                                                                                   |
+| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`). Refused while `talk.conversation.enabled` is false                                     |
+| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                         |
+| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                         |
+| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn                                                                     |
+| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                     |
+| `talk.session.close`       | End Dictate or Voice mode                                                                                                                         |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -369,8 +367,7 @@ Gateway settings that decide what users can do with those methods:
   session on the gateway, including channel and sub-agent sessions; per-session ownership does not
   exist yet (ADR 0077 section 5, ADR 0083). Pair only people who should have that reach.
 
-Adding to the current turn, Send after reply, replies and the notice that a chat changed elsewhere
-need no gateway setting.
+Queueing, Send now, replies and the notice that a chat changed elsewhere need no gateway setting.
 
 ### Link this device
 
@@ -524,7 +521,7 @@ The four root files in that table are the home-screen install: the web manifest 
 names, plus the Apple touch icon. `wednesdayai web serve` and the gateway route serve them from
 the bundle automatically; when you host the bundle yourself, copy them up from `apps/web/dist`
 with everything else and keep the manifest's `application/manifest+json` media type, the way
-`src/user-client/static-server.ts` maps it. They let users install the web client to a phone or
+`src/static-host/static-app.ts` maps it. They let users install the web client to a phone or
 tablet home screen (see
 [Using the web client](/web/using-the-web-client#install-the-web-client-on-your-home-screen)).
 
