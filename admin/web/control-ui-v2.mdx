@@ -1,0 +1,250 @@
+---
+summary: "Run the WednesdayAI Control UI v2 operator console from the gateway, a standalone server, or a container"
+read_when:
+  - You want the new operator console beside the classic Control UI
+  - You want to host the operator console on its own origin, a container, or a CDN
+  - Sign-in to Control UI v2 says the origin is not allowed or the device needs approval
+  - The gateway refuses to start after enabling `gateway.controlUiV2`
+  - The console shows a configuration error before sign-in
+title: "Control UI v2"
+description: "Deploy and sign in to the WednesdayAI Control UI v2 operator console."
+audience: admin
+component: control-ui-v2
+sources:
+  - apps/control/src/config/runtime-config.ts
+  - apps/control/src/app/SignIn.tsx
+  - apps/control/src/app/sign-in-errors.ts
+  - src/control-ui-v2/runtime-config.ts
+  - src/control-ui-v2/serve.ts
+  - src/gateway/control-ui-v2-route.ts
+  - src/config/gateway-spa-mounts.ts
+  - apps/control/Dockerfile
+generated: 2026-10-13
+---
+
+# Control UI v2
+
+Control UI v2 is the new WednesdayAI operator console. It covers the **Monitor** pages - Overview,
+Sessions, Runs, Usage and Logs - plus pending exec approvals, a command palette (⌘K or Ctrl+K) and
+light and dark themes. The [classic Control UI](/web/control-ui) is unchanged and stays the default
+console; the two run side by side, and Control UI v2 links back to the classic console.
+
+Like the [web client](/web/user-client), the console is a **static bundle**. It contains no gateway
+address and no credentials: everything environment-specific arrives at runtime from a small
+`config.json` served next to `index.html`. One build serves every deployment.
+
+## Choose a deployment
+
+| Shape              | Use when                                     | How                                                    |
+| ------------------ | -------------------------------------------- | ------------------------------------------------------ |
+| Gateway route      | Single origin, one process                   | `gateway.controlUiV2.enabled`                          |
+| Standalone server  | You want the console on its own port or host | `wednesdayai web serve-control`                        |
+| Container          | You deploy images                            | `apps/control/Dockerfile`                              |
+| Static host or CDN | You already run object storage or a CDN      | Upload `apps/control/dist` plus your own `config.json` |
+
+A published install ships the built console at `<install>/dist/control-ui-v2`; the gateway route
+and `web serve-control` use it by default. From a source checkout, build it first:
+
+```bash
+pnpm control:build:packaged    # writes dist/control-ui-v2 (the packaged location)
+pnpm control:build             # writes apps/control/dist (for a CDN or your own host)
+```
+
+## Gateway route
+
+The gateway can serve the console itself. This is **off by default**.
+
+```json5
+{
+  gateway: {
+    controlUiV2: {
+      enabled: true,
+      // basePath: "/v2/control",  // default
+      // root: "/srv/wednesdayai-control",  // optional: defaults to the packaged bundle
+    },
+  },
+}
+```
+
+Restart the gateway, then open `http://127.0.0.1:18789/v2/control/` (or your gateway's own
+address).
+
+- `config.json` is generated per request: the console connects back to the origin it was loaded
+  from, and links to the web client and classic console that this gateway serves.
+- `basePath` must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes,
+  whitespace or control characters, `.` or `..` segments, and query or fragment characters are all
+  rejected when the config loads. It also may not equal, contain, or be contained by another active
+  console mount (`gateway.webClient.basePath`, `gateway.controlUi.basePath`); a collision is
+  rejected when the config loads, naming both keys.
+- With no `root`, a missing packaged bundle answers `503` naming `pnpm control:build:packaged`, and
+  the gateway logs a warning at startup. A broken explicit `root` answers `503` with that reason.
+
+## Standalone server
+
+```bash
+wednesdayai web serve-control \
+  --port 8788 \
+  --gateway-url wss://gateway.example.com \
+  --classic-url https://gateway.example.com/
+```
+
+This starts **no gateway** and keeps no state, so instances can run behind a load balancer. Flags win
+over environment variables, which win over defaults.
+
+| Flag                  | Environment variable              | Default         | Meaning                                  |
+| --------------------- | --------------------------------- | --------------- | ---------------------------------------- |
+| `--root <dir>`        | `OPENCLAW_CONTROL_V2_ROOT`        | packaged bundle | Directory holding the built console      |
+| `--gateway-url <url>` | `OPENCLAW_CONTROL_V2_GATEWAY_URL` | required        | Absolute `ws://` or `wss://` gateway URL |
+| `--port <port>`       | `OPENCLAW_CONTROL_V2_PORT`        | `8788`          | TCP port                                 |
+| `--host <host>`       | `OPENCLAW_CONTROL_V2_HOST`        | `127.0.0.1`     | Bind host                                |
+| `--base-path <path>`  | `OPENCLAW_CONTROL_V2_BASE_PATH`   | `/`             | Public path the console is mounted under |
+| `--client-url <url>`  | `OPENCLAW_CONTROL_V2_CLIENT_URL`  | unset           | "Client" link in the sidebar             |
+| `--classic-url <url>` | `OPENCLAW_CONTROL_V2_CLASSIC_URL` | unset           | "Classic console" link in the sidebar    |
+
+Links must be absolute `http(s)` URLs or paths starting with a single `/`. Anything unusable - a
+missing gateway URL, a bad link, a bundle with no `index.html`, a port that is not an integer from
+0 to 65535 - exits non-zero before the socket binds, naming the flag and its environment variable.
+`GET /healthz` answers
+`200 {"status":"ok","service":"openclaw-control-ui-v2"}`.
+
+## Container
+
+Build from the **repository root**; `apps/control/Dockerfile.dockerignore` limits the context.
+
+```bash
+docker build -f apps/control/Dockerfile -t wednesdayai-control-ui-v2 .
+
+docker run --rm -p 8788:8788 \
+  -e OPENCLAW_CONTROL_V2_GATEWAY_URL=wss://gateway.example.com \
+  wednesdayai-control-ui-v2
+```
+
+The image holds only the static files and a dependency-free Node server: no secrets, no state, an
+unprivileged user, port `8788`, and a `HEALTHCHECK` against `/healthz`. The gateway URL is not baked
+in; supply it (and any other variable from the table above) at run time.
+
+## Sign in
+
+The console signs in the way the classic console does: paste the **gateway token** (or switch to
+**Password**) and select **Connect**. The browser creates a device identity and the gateway mints a
+device token for it; later visits reconnect with that device token and never show the sign-in
+screen. Select **Sign out** to forget the device token.
+
+The token or password is held in memory only for the connection attempt - it is never written to
+browser storage. Only the device identity, the device token and the theme are stored, under the
+`openclaw.control-v2.` prefix.
+
+### Origins
+
+The console connects as the classic console's client (`openclaw-control-ui`), so the gateway admits
+it exactly as it admits the classic console. Opened from a loopback address (`127.0.0.1`,
+`localhost`) it needs no configuration. Any other origin - including the gateway's own address
+when the console is opened by host name - must be listed in `gateway.controlUi.allowedOrigins`, the
+same list the classic console uses:
+
+```json5
+{ gateway: { controlUi: { allowedOrigins: ["https://control.example.com"] } } }
+```
+
+If it is missing, sign-in shows: "This console's origin (`https://control.example.com`) is not
+allowed. Add it to gateway.controlUi.allowedOrigins on the gateway."
+
+The gateway also enforces the allowlist at startup. On a non-loopback bind with either console
+enabled (v2 alone counts), a config that leaves `gateway.controlUi.allowedOrigins` empty is refused.
+Onboarding and gateway startup seed `http://localhost:<port>` and `http://127.0.0.1:<port>` (plus
+the custom bind host for `bind: "custom"`) when nothing is configured, so a startup refusal usually
+means the list was emptied or the bind changed outside onboarding. Setting
+`gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback: true` skips the requirement at the
+documented security cost.
+
+### HTTPS
+
+Device identity uses WebCrypto, which browsers allow only in a secure context: HTTPS, or
+`http://localhost` / `http://127.0.0.1`. On a plain `http://` LAN address the console shows "Open the
+console over HTTPS or on localhost; browser device identity needs a secure context." and does not
+connect. Serve it over HTTPS and point the gateway URL at `wss://`.
+
+### Device approval
+
+If the gateway requires approval for a new device, sign-in says so. Approve it on the gateway host,
+then select **Connect** again:
+
+```bash
+wednesdayai devices list
+wednesdayai devices approve <requestId>
+```
+
+## config.json
+
+All fields are public; never put a token here. Unknown keys are rejected: the console shows a
+configuration error instead of connecting anywhere.
+
+| Field           | Required | Meaning                                                        |
+| --------------- | -------- | -------------------------------------------------------------- |
+| `schemaVersion` | yes      | Must be `1`                                                    |
+| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment |
+| `clientId`      | yes      | Must be `openclaw-control-ui`                                  |
+| `basePath`      | yes      | Public path the console is served under, with a trailing slash |
+| `links`         | no       | `client` and `classicConsole` sidebar links (URL or `/path`)   |
+
+```json
+{
+  "schemaVersion": 1,
+  "gatewayUrl": "wss://gateway.example.com",
+  "clientId": "openclaw-control-ui",
+  "basePath": "/",
+  "links": { "classicConsole": "https://gateway.example.com/" }
+}
+```
+
+## What the pages show
+
+- **Overview**: gateway connection and version, channel accounts connected, active runs, spend for
+  today, 7 days or 30 days, upcoming automations, nodes and pending approvals. Refreshes every 30
+  seconds and on reconnect.
+- **Sessions**: every session with its channel, model, context use (flagged at 80%) and last
+  activity. Select one to see its runs.
+- **Runs**: agent turns and task runs, filtered by Queued, Running, Needs attention, Failed or Done. Select a
+  run for its details and timeline, abort a running turn, decide an interrupted run, or answer an
+  approval that belongs to it. Queued and task runs need SQLite or Postgres session storage
+  (`session.storage.backend`).
+- **Usage**: spend and tokens for the range, a daily token chart and the ten sessions that spent the
+  most (USD).
+- **Logs**: the gateway file log, following new lines every 2 seconds while the tab is visible,
+  with a minimum-level filter, a text filter and Pause.
+
+Approvals requested before the console connected are not listed; the bell counts the ones that
+arrived since.
+
+## Troubleshooting
+
+**"Configuration error" screen before sign-in.** The `config.json` served next to the bundle is
+missing or invalid; nothing connected. The detail line names the problem and shows the expected
+shape. Fix the file (see [config.json](#configjson)): unknown keys, a `schemaVersion` other than
+`1`, a `gatewayUrl` that is not an absolute `ws://`/`wss://` URL, a `clientId` other than
+`openclaw-control-ui`, or a bad `basePath` or `links` value all produce this screen. Reload after
+fixing it.
+
+**Sign-in says the origin is not allowed.** The browser origin is missing from
+`gateway.controlUi.allowedOrigins` on the gateway. Add the exact origin shown in the message and
+restart the gateway; see [Origins](#origins).
+
+**The gateway refuses to start, naming `gateway.controlUiV2.basePath` (or `web serve-control`
+exits naming `--base-path`).** The base path is not a single-slash path - a missing leading `/`, a
+`//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, or a query or
+fragment - or it collides with another active SPA mount. Choose a distinct single-slash path; the
+gateway validates it when the config loads, and the standalone server before it binds.
+
+**Sign-in asks for pairing approval.** The gateway requires approval for this new browser device.
+The console shows "This device needs pairing approval from the gateway host. Approve it there, then
+click Connect again." Approve it on the gateway host and select **Connect** again; see
+[Device approval](#device-approval).
+
+**Sign-in says "Open the console over HTTPS or on localhost; browser device identity needs a secure
+context."** The page is not in a secure context, so the browser blocks device identity. See
+[HTTPS](#https).
+
+**The route answers `503` naming a build command or a bundle directory.** The console bundle is
+missing or broken: for the gateway route, run `pnpm control:build:packaged` or set
+`gateway.controlUiV2.root` to a built `apps/control/dist`; for the standalone server, point `--root`
+at a directory containing `index.html`.
