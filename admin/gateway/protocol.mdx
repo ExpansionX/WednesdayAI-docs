@@ -272,12 +272,13 @@ connection on a gateway.
 the v3 signature proves the device signed the id it declared, so altering the id after signing (or
 replaying a signature produced for another id) fails signature verification.
 
-Two client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
+Three client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
 at pairing time:
 
 | Client id               | Roles              | Scopes                                                                           |
 | ----------------------- | ------------------ | -------------------------------------------------------------------------------- |
 | `openclaw-even-g2-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
+| `openclaw-mentra-node`  | `operator`         | `operator.read`, `operator.write`                                                |
 | `openclaw-user-client`  | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
 
 Rules that apply to bootstrap redemption:
@@ -294,6 +295,18 @@ Rules that apply to bootstrap redemption:
   connect requesting anything outside that set is refused; `details.code` is
   `AUTH_DEVICE_TOKEN_MISMATCH` with the additive `details.deviceTokenReason = "scope-mismatch"`.
   A subset of the approved scopes connects normally.
+
+`openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
+([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
+Its bootstrap profile is operator-only: role `operator` with the broad `operator.read` and
+`operator.write` scopes (chat, session reads, `agents.list`, voice wake get/set and the rest of
+the operator read/write surface), not a narrow allowlist like the user client's session scopes.
+Tokens minted by this bootstrap profile carry no node role and none of `operator.admin`,
+`operator.approvals`, `operator.pairing` or `operator.talk.secrets`; the client id itself is
+identity metadata, not an authorization ceiling, and an administrator-approved pairing request
+can still grant the device more. One scan pairs the glasses: the setup code is single-use,
+redemption approves the pairing silently, and later reconnects authenticate with the minted
+operator device token. Setup and device management: [MentraOS Glasses](/platforms/mentra-glass).
 
 `openclaw-user-client` carries two further admission rules:
 
@@ -367,6 +380,66 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   `{ "ok": true, "key": "...", "checkpoints": [{ "id": "...", "createdAt": "<ISO-8601>", "tokensBefore": 0, "firstKeptEntryId": "..." }] }`.
   The checkpoints come from the session transcript, so an empty array means the transcript has no
   compaction entries.
+- Operators may call `sessions.compact` (`operator.admin`) with `{key, maxLines?}` to run model
+  compaction for the session — the same compaction `/compact` runs over the session's stored
+  history, queued on the session's lane. A success answers
+  `{ "ok": true, "key": "...", "compacted": true }` (`compacted: false` plus a `reason` when
+  there was nothing to compact, e.g. `"no sessionId"`). Conversation history is append-only:
+  compaction appends a compaction entry rather than deleting or rewriting earlier entries.
+  `maxLines` predates SQL session storage, where it capped JSONL transcript lines; it is
+  accepted for compatibility with older clients, ignored, and reported as
+  `warnings: ["maxLines ignored"]`. A compaction that fails at the model (unknown model, missing
+  credentials, provider error) answers `UNAVAILABLE` with
+  `message: "session compaction failed: <reason>"`.
+- `sessions.delete` tombstones the session index without deleting stored conversation entries
+  or moving legacy import sources. Its result is
+  `{ "ok": true, "key": "...", "deleted": true, "archived": [] }`.
+  The `deleteTranscript` request flag is accepted but ignored, and `archived` is always empty.
+  Both fields are deprecated compatibility fields, removed in the next release.
+- Operators may call `sessions.export` (`operator.read`) with `{key, cursor?}` to page the
+  session's stored transcript as JSONL lines. Each answer is
+  `{ "sessionId": "...", "lines": ["..."], "nextCursor": "...", "warnings": ["..."] }`; every
+  page's serialized response targets at most 4 MiB, the first page starts with a synthesized
+  `{"type":"session","id":"...","timestamp":"...","cwd":""}` header line, and `nextCursor` is
+  absent on the last page. Lines follow event-time order (the order turns happened); pass the
+  previous `nextCursor` as `cursor` to fetch the next page — the token is opaque and bound to
+  the session it was issued for, so reusing it against another session is refused with
+  `INVALID_REQUEST` and every line arrives exactly once across pages. An entry whose
+  serialized line exceeds the export frame limit ships alone on its own page up to a hard cap
+  of 5.5 MiB; beyond it the entry is replaced by a
+  `{"type":"export-omitted","id":"...","reason":"entry exceeds export frame limit","bytes":0}`
+  placeholder line named in `warnings` — storage is untouched, the export is a view. An
+  unknown `key` answers `INVALID_REQUEST` with `details.reason = "session_not_found"` and
+  `details.key` set to the key that was asked for.
+- Operators may call `sessions.storage.status` (`operator.read`) with no params at any time — it is
+  classified `none`, so it answers during the storage boot window too — for
+  `{ "backend": "sqlite" | "postgres", "ready": boolean, "legacyImport": <LegacyImportStatus> }`.
+  `legacyImport` carries the legacy JSONL import progress: `state`
+  (`none | pending | running | completed | error`), `total`/`done`/`failed` counts plus
+  `pending`/`imported`/`capped`/`vanished`/`rejectedEntries` detail counts, the `archiveRoot`, the
+  pre-import `backupPath` when one was written, and `lastError`. A failed source never disappears:
+  it stays visible here and in `doctor` until a retry succeeds.
+- Operators may call `sessions.storage.import` (`operator.admin`) with `{retryFailed?}` to run the
+  legacy import sweep to completion now and get `{ "ok": true, "status": <LegacyImportStatus> }`.
+  A source that has burned its five automatic attempts is retried only when `retryFailed` is true;
+  the `openclaw session-storage import` command always sets it for its run (an operator-invoked
+  pass retries capped sources by design — there is no separate CLI flag).
+- Operators may call `sessions.storage.validate` (`operator.admin`) with no params to run the
+  schema/integrity validation the `openclaw session-storage validate` CLI uses against the
+  configured storage: `{ "ok": boolean, "backend": "...", "checks": [{ "name", "ok", "detail?" }] }`.
+- Operators may call `sessions.storage.backup` (`operator.admin`) with `{path?}` to write one
+  online SQLite backup (`VACUUM INTO` on a separate read-only connection; appends never wait).
+  A relative or absent `path` resolves under the gateway's `<state-dir>/backups/`; a path outside
+  it is refused. The answer is `{ "ok": true, "path": "...", "bytes": N }` (file mode `0600`).
+  Postgres storage rejects this method — use `pg_dump` there.
+- Operators may call `sessions.maintenance.run` (`operator.admin`) with
+  `{ task: "cleanup" | "backfill" | "drop-legacy-archive", agent?, allAgents?, dryRun?, enforce?, activeKey?, batchSize? }`.
+  `cleanup` runs the same retention core as `openclaw sessions cleanup` (`--enforce` maps to
+  `enforce: true`) and answers `summaries`; `backfill` and `drop-legacy-archive` answer `counts`.
+  `dryRun: true` never mutates.
+- Operators may call `memory.index` (`operator.admin`) with `{agentId?, force?}` to run the memory
+  index sync for one agent (or every configured agent) inside the gateway:
+  `{ "agents": [{ "agentId", "ok", "error?" }] }`.
 - Operators may call `models.authStatus` (`operator.read`) with no params to list configured auth
   profiles per provider:
   `{ "providers": [{ "provider": "...", "profiles": [{ "id": "...", "type": "api_key|oauth|token", "lastGood": true }] }] }`.
@@ -432,9 +505,8 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
     same run's id every time.
   - Once a `queued` follow-up's run actually starts, its id converges with the other outcomes: from
     that point it can be passed to `chat.abort` / `sessions.abort` and `sessions.runs.list` reports
-    it, on both the sqlite and `fs-jsonl` session-storage backends (`sessions.runs.list` merges the
-    live streaming run alongside the durable store, so the `fs-jsonl` backend, which has no durable
-    store at all, still lists it; `sessions.runs.get` reads the durable store only). This supersedes
+    it (`sessions.runs.list` merges the live streaming run alongside the durable store;
+    `sessions.runs.get` reads the durable store only). This supersedes
     ADR 0072's original "not abortable while the follow-up runs" consequence (ADR 0084 section 7,
     ADR 0085 M6).
 - Operators may call `sessions.runs.list` (`operator.read`) with
@@ -447,10 +519,11 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   by `runId` against the durable rows, merged newest first and cut to `limit`; later pages walk the
   durable store only. A live run with no durable row is reported as a synthetic record
   (`sessionRunId: "live:<runId>"`, `kind: "chat"`, `status: "running"`, `recoveryMode: "off"`) and
-  only matches a `statuses` filter that is empty or includes `running`. So without a configured
-  session-run store (SQLite or Postgres) the result is `{ "runs": [] }` only while no run is
-  streaming, and `{ "runs": [<live records>] }` otherwise, even on the default `fs-jsonl` backend,
-  which has no durable session-run store at all (ADR 0084 section 7, ADR 0085 M6). Unlike
+  only matches a `statuses` filter that is empty or includes `running`. The live/durable merge
+  applies once session storage is ready. Before storage publishes, `sessions.runs.list` is a
+  `required` method: dispatch holds the request and answers the readiness errors described under
+  [Session storage readiness](#session-storage-readiness) — never an empty page and never
+  live-only records. Unlike
   `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
   `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
 - Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
@@ -493,12 +566,9 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
 - Operators may call `tasks.runs.events` (`operator.read`) with `{taskRunId, limit, cursor?}` for a
   bounded per-run event page: `{ "events": [{ "eventId": "...", "eventType": "...", "createdAt": "<ISO-8601>" }], "nextCursor": "..." }`,
   ordered `(createdAt DESC, eventId DESC)`. Event payloads are never exposed.
-- Without a configured session-run store (SQLite or Postgres) all three `tasks.runs.*` methods
-  return `UNAVAILABLE` with `"session storage runtime not available"` rather than an empty page;
-  on the default `fs-jsonl` backend the run/task projection does not exist, so a client should
-  treat `UNAVAILABLE` from these methods as "configure `session.storage.backend`", not as a
-  transient failure. During the boot window these methods instead answer the storage-readiness
-  errors described under [Session storage readiness](#session-storage-readiness). Additionally,
+- Before session storage publishes its runtime, all three `tasks.runs.*` methods answer the
+  storage-readiness errors described under
+  [Session storage readiness](#session-storage-readiness) rather than an empty page. Additionally,
   `tasks.runs.list` with `view: "queued"`, `tasks.runDryRun` and `tasks.rollback` also need the
   task operator registry: they wait up to 4 seconds for it while the task pipeline is still
   booting and recovery has not settled blocked; if it is still absent they answer
@@ -535,20 +605,25 @@ never learns readiness) and before the handler runs. Only core methods are class
 `extraHandlers` methods are unaffected, and a method without a classification dispatches
 unchanged.
 
-- **`required`** — reads the configured session storage runtime with no JSONL path:
-  `tasks.runs.list`, `tasks.runs.get`, `tasks.runs.events`, `tasks.status`, `tasks.resetBudget`,
-  `tasks.runDryRun`, `tasks.rollback`, `tasks.runEvents`, `sessions.runHistory`,
+- **`required`** — reads or writes the session storage runtime. With SQL-only storage there is no
+  always-available file view to answer from, so session reads, session writes and usage reads are
+  all `required`: `chat.history`, `chat.inject`, `sessions.claims.status`, `sessions.compact`,
+  `sessions.compaction.list`, `sessions.create`, `sessions.delete`, `sessions.describe`,
+  `sessions.export`, `sessions.list`, `sessions.maintenance.run`, `sessions.patch`,
+  `sessions.preview`, `sessions.reset`, `sessions.resolve`, `sessions.runHistory`,
   `sessions.runs.list`, `sessions.runs.get`, `sessions.runs.events`, `sessions.runs.continue`,
-  `sessions.runs.cancel`, `sessions.claims.status`, `chat.history`.
-- **`boot-write`** — writes the JSONL session store first and the database only once a runtime is
-  published; holding them while storage starts is what rescues the write from being lost:
-  `sessions.create`, `sessions.patch`, `sessions.reset`, `sessions.delete`, `sessions.compact`,
-  `chat.inject`.
-- Everything else is `none` and dispatches unchanged, including the JSONL-side readers
-  (`sessions.list`, `sessions.preview`, `sessions.describe`, `sessions.resolve`, `usage.*`).
+  `sessions.runs.cancel`, `sessions.subscribe`, `sessions.title.prepare`, `sessions.usage`,
+  `sessions.usage.logs`, `sessions.usage.timeseries`, `sessions.storage.validate`,
+  `sessions.storage.backup`, `sessions.storage.import`, `memory.index`, `tasks.runs.list`,
+  `tasks.runs.get`, `tasks.runs.events`, `tasks.status`, `tasks.resetBudget`, `tasks.runDryRun`,
+  `tasks.rollback`, `tasks.runEvents`, `usage.cost`, `usage.status`.
+- **`none`** — everything the gateway answers without session storage: chat turns (`chat.send`,
+  `chat.abort`, `sessions.abort`), live control, diagnostics, `doctor.*`, `health`, `status`, and
+  `sessions.storage.status` (so operators can see why storage is not ready). `health` and `status`
+  never hold and never throw on storage: their session sections degrade to
+  `sessions: { unavailable: "<reason>" }` while storage is starting or failed.
 
-While a `required` or `boot-write` method's request is in flight, the storage state decides the
-answer:
+While a `required` method's request is in flight, the storage state decides the answer:
 
 - **Starting:** the request is held for up to 10 seconds. If the storage start completes inside
   the hold, the handler runs normally. Otherwise the answer is `RECOVERY_NOT_READY` with
@@ -562,13 +637,12 @@ answer:
   `details: { producer: "session-storage", phase: "stopping", reasonCodes: ["storage_stopping"] }`.
   A request already held through `starting` answers the same shape as soon as `markStopping`
   fires.
-- **Failed start:** `required` and `boot-write` methods answer `UNAVAILABLE` with
+- **Failed start:** `required` methods answer `UNAVAILABLE` with
   `message: "session storage failed to start"`, `retryable: false`, and
   `details: { code: "storage_start_failed", reasonCodes: [...] }`. `UNAVAILABLE` from these
-  methods is permanent until an operator acts; a client may latch on it. A `boot-write` method
-  never runs its handler after a failed start, so its write cannot land only in the JSONL store.
-- **Ready, or never deferred** (fs-jsonl backend, restart recovery off): the handler runs
-  unchanged.
+  methods is permanent until an operator acts; a client may latch on it. No handler runs after a
+  failed start, so a write can never land outside the database.
+- **Ready:** the handler runs unchanged.
 
 Clients that receive `RECOVERY_NOT_READY` should retry after `retryAfterMs`; the web client does
 this automatically.
@@ -618,7 +692,10 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   it never disagrees with the send-side check; a `before`-paged request reports `null` for both
   because an older page says nothing about the current leaf. Only message entries move the leaf: a
   model-change entry, a custom entry (including the reply-reference entry below) or a compaction
-  divider never moves it, so none of those ever causes a false conflict.
+  divider never moves it, so none of those ever causes a false conflict. The internal
+  `__openclaw.ingress` provenance carrier is stripped from every message before it reaches the
+  client and never appears in `chat.history` output; sibling `__openclaw` keys (`id`,
+  `replyToId`, …) are untouched.
 - A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
   plus the same reference under upstream's field names, `__openclaw.replyToId` and
   `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
@@ -674,7 +751,11 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   title" button) takes `{ agentId, message, model?, catalogId?, incognito? }` - `message` is
   0..1000 characters - and answers `{ title: string (1..60) | null }`. It is one completion call,
   never an agent run, and persists nothing; applying a suggestion is a separate
-  `sessions.patch { label }` call.
+  `sessions.patch { label }` call. The completion is budgeted at 4,096 tokens, or the resolved
+  model's own `maxTokens` when that is set and smaller: some providers emit reasoning tokens before the visible
+  title even when the catalog flags the model `reasoning: false`, and a tiny cap left them
+  stopping at `length` with no text to normalize
+  (`src/gateway/session-title-completion.ts`).
   - It answers `{ title: null }` without a model call for `incognito: true`, for a message that is
     blank once trimmed, and for a message that starts with `/`. It also answers `{ title: null }`
     when the completion times out (15 seconds), the provider returns an error, or no model or
@@ -704,32 +785,30 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 
 `sessions.list` (`operator.read`) accepts the following request parameters. All are optional.
 
-| Parameter              | Type and default                                         | Effect                                                                                                                                                                                                                              |
-| ---------------------- | -------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                                                        |
-| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                                                |
-| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                                                 |
-| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                                                     |
-| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows, capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. Read windows depend on the storage backend, as described below. |
-| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                                                           |
-| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                                                       |
-| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                                                         |
-| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                                                   |
-| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                                               |
-| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                                                   |
-| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                                                |
-| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                                               |
-| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                                                      |
-| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                                                     |
-| `includeLastMessage`   | boolean; default `false`                                 | Adds the latest usable message preview for returned rows. Read windows depend on the storage backend; use `limit` to bound the number of rows enriched.                                                                             |
+| Parameter              | Type and default                                         | Effect                                                                                                                                                                                                                                                    |
+| ---------------------- | -------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `sortBy`               | `"updatedAt" \| "title" \| "key"`; default `"updatedAt"` | Selects the global sort key.                                                                                                                                                                                                                              |
+| `sortOrder`            | `"asc" \| "desc"`; default `"desc"`                      | Selects the sort direction. The deterministic key tie-breaker remains ascending in either direction.                                                                                                                                                      |
+| `includeAgentActivity` | boolean; default `false`                                 | Adds `agentActivity: Record<string, number \| null>` to the result.                                                                                                                                                                                       |
+| `includeInternal`      | boolean; omitted by default                              | Selects legacy, user-facing-only, or all-session visibility as described below.                                                                                                                                                                           |
+| `includeDerivedTitles` | boolean; default `false`                                 | Adds transcript-derived titles for returned rows, capped at 60 characters. Title sorting also enriches unlabelled rows before paging, even when this flag is false. Read windows are described below.                                                     |
+| `activeMinutes`        | integer, minimum 1                                       | Keeps sessions updated at or after `Date.now() - activeMinutes * 60_000`.                                                                                                                                                                                 |
+| `configuredAgentsOnly` | boolean; default `false`                                 | Keeps agent-keyed sessions only when their normalized agent id is configured.                                                                                                                                                                             |
+| `agentId`              | non-empty string                                         | Keeps sessions for one normalized agent id.                                                                                                                                                                                                               |
+| `storeAgentId`         | non-empty string                                         | Store-scoped listing: serves that agent's own store and lists every row in it — no session-key prefix filter. Used by the CLI so a shared non-template store keeps rows of every agent bound to it; rows are attributed to the binding owner client-side. |
+| `spawnedBy`            | non-empty string                                         | Keeps sessions whose persisted `spawnedBy` value matches exactly.                                                                                                                                                                                         |
+| `label`                | session label string                                     | Keeps sessions whose persisted label matches exactly.                                                                                                                                                                                                     |
+| `search`               | string                                                   | Case-insensitive substring match over `displayName`, `label`, `subject`, `sessionId`, and `key`. Derived titles are not searched.                                                                                                                         |
+| `includeGlobal`        | boolean; default `false`                                 | Includes the non-agent `global` key.                                                                                                                                                                                                                      |
+| `includeUnknown`       | boolean; default `false`                                 | Includes the non-agent `unknown` key.                                                                                                                                                                                                                     |
+| `offset`               | integer, minimum 0; default 0                            | Skips rows after filtering and global sorting.                                                                                                                                                                                                            |
+| `limit`                | integer, minimum 1                                       | Limits the page after `offset`.                                                                                                                                                                                                                           |
+| `includeLastMessage`   | boolean; default `false`                                 | Adds the latest usable message preview for returned rows. Read windows are described below; use `limit` to bound the number of rows enriched.                                                                                                             |
 
-Transcript enrichment uses backend-specific read windows:
+Transcript enrichment runs against the database with fixed entry windows:
 
-- **`fs-jsonl`:** titles scan at most the first 8,192 bytes and first 10 transcript lines.
-  Previews read at most the last 16,384 bytes and scan the last 20 nonblank lines for a usable
-  user or assistant message.
-- **Other configured session backends:** titles query the oldest 20 stored entries; previews
-  query the newest 20 stored messages. These are entry limits, not byte caps.
+- Titles query the oldest 20 stored entries; previews query the newest 20 stored messages. These
+  are entry limits, not byte caps.
 
 A bounded window can miss a usable message outside it. Title sorting still uses its documented
 fallbacks, and an unavailable preview is omitted; these flags do not request a full transcript scan.
