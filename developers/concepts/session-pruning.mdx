@@ -8,7 +8,7 @@ read_when:
 
 # Session Pruning
 
-Session pruning trims **old tool results** from the in-memory context right before each LLM call. It does **not** rewrite the on-disk session history (`*.jsonl`).
+Session pruning trims **old tool results** from the in-memory context right before each LLM call. It never rewrites stored session history: the database keeps every entry, and only the request view is trimmed.
 
 ## When it runs
 
@@ -73,7 +73,7 @@ If `agents.defaults.contextTokens` is set, it is treated as a cap (min) on the r
 ## Interaction with other limits
 
 - Built-in tools already truncate their own output; session pruning is an extra layer that prevents long-running chats from accumulating too much tool output in the model context.
-- Compaction is separate: compaction summarizes and persists, pruning is transient per request. See [/concepts/compaction](/concepts/compaction).
+- Compaction is separate: compaction appends a summary entry to stored history, pruning is transient per request. See [/concepts/compaction](/concepts/compaction).
 
 ## Defaults (when enabled)
 
@@ -120,72 +120,22 @@ Restrict pruning to specific tools:
 
 See config reference: [Gateway Configuration](/gateway/configuration)
 
-## Session archival
+## Reset, delete, and where old history goes
 
-When a session is reset (`/new`, `/reset`) or removed during maintenance, OpenClaw **archives** the JSONL transcript rather than deleting it. Archival keeps the data on disk so you can recover or audit it later.
+Stored history is **append-only and kept forever by default**. Resetting (`/new`, `/reset`) or
+deleting a session removes only its index row (a tombstone); the conversation rows stay in the
+database until enforce-mode retention removes the whole session (see
+[Session Management / Maintenance](/concepts/session#maintenance)).
 
-### What archival means
-
-- The transcript file is **renamed in-place** — nothing is erased.
-- The new name follows the pattern `<sessionId>.jsonl.<reason>.<timestamp>`, for example:
-  - `abc123.jsonl.reset.2026-05-23T14-30-00.000Z` (from `/new` or `/reset`)
-  - `abc123.jsonl.deleted.2026-05-23T08-00-00.000Z` (from maintenance cleanup)
-- The original session slot is freed so a fresh JSONL starts on the next message.
-
-A separate config block, `session.archival`, controls in-session JSONL trimming. When enabled, OpenClaw can trim the head of the live JSONL file down to `keepLastTurns` turns and writes an `archive_marker` entry so the session remains usable. This function is also available to plugins via `archiveSessionTranscript` from `openclaw/plugin-sdk`.
-
-### Configuration
-
-```json5
-{
-  session: {
-    // Optional: enable in-session JSONL compaction (trim old turns from live transcript)
-    archival: {
-      enabled: true, // default: false
-      keepLastTurns: 20, // min 5, max 100
-    },
-    maintenance: {
-      mode: "enforce",
-      pruneAfter: "30d",
-      // How long to keep *.reset.<timestamp> archives; defaults to pruneAfter.
-      // Set false to keep archives forever.
-      resetArchiveRetention: "14d",
-    },
-  },
-}
-```
-
-| Field                                       | Type                | Default              | Description                                                                           |
-| ------------------------------------------- | ------------------- | -------------------- | ------------------------------------------------------------------------------------- |
-| `session.archival.enabled`                  | boolean             | `false`              | Trim old turns from the live transcript during active sessions.                       |
-| `session.archival.keepLastTurns`            | integer (5–100)     | —                    | Number of conversation turns to keep in the live JSONL; older turns are archived.     |
-| `session.maintenance.resetArchiveRetention` | duration \| `false` | same as `pruneAfter` | How long `*.reset.*` archives are kept before being purged. `false` disables purging. |
-
-### Where archived files go
-
-All archive files live alongside the primary transcript in the agent sessions directory:
-
-```
-~/.openclaw/agents/<agentId>/sessions/
-  <sessionId>.jsonl                        # live transcript
-  <sessionId>.jsonl.reset.2026-05-23T…    # post-reset archive
-  <sessionId>.jsonl.deleted.2026-05-23T…  # maintenance-removed archive
-```
-
-### Recovering or inspecting archived sessions
-
-Archived JSONL files are plain text. You can inspect them directly:
-
-```bash
-# List archives for an agent
-ls ~/.openclaw/agents/<agentId>/sessions/*.reset.* 2>/dev/null
-ls ~/.openclaw/agents/<agentId>/sessions/*.deleted.* 2>/dev/null
-
-# Read the last 50 lines of a reset archive
-tail -n 50 ~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl.reset.<timestamp>
-```
-
-To restore a session, rename the archive back to the primary name (or a new session ID) before starting the gateway so the session store picks it up on next write.
+The legacy JSONL archival machinery (per-session `*.jsonl.reset.*`/`*.deleted.*` archives and
+`session.archival` in-session trimming) is retired: SQL session storage never writes transcript
+files, so core no longer invokes it. The `archiveSessionTranscript` plugin-SDK export is
+**deprecated and unused by core**: calls reject unsupported file trimming without touching the
+filesystem. It is removed in the next release. `sessions.delete` ignores its deprecated
+`deleteTranscript` parameter and returns an empty deprecated `archived` list; neither reset nor
+delete moves legacy sources. Only the importer moves verified sources into
+`<state-dir>/legacy-session-archive/<agentId>/` (see
+[Upgrading from JSON session files](/concepts/session#upgrading-from-json-session-files)).
 
 ## Troubleshooting
 
@@ -195,10 +145,14 @@ Pruning only fires for `mode: "cache-ttl"` when the last Anthropic call for the 
 **Tool results with images are never pruned even when context is large**
 This is expected behavior. Tool results containing image blocks are always protected from both soft-trim and hard-clear. If image-heavy tool results are inflating context, consider capping image output at the tool level or reducing how many images are returned per tool call.
 
-**Archived session file is missing or not found after `/reset`**
-Check `~/.openclaw/agents/<agentId>/sessions/` for a file matching `<sessionId>.jsonl.reset.*`. Archival renames the file in place rather than moving it. If the file is absent, the session may have had no transcript written yet (no turns completed before reset), which means there is nothing to archive.
+**A reset or deleted session still has conversation rows in the database**
+That is expected: reset and delete remove only the index row (a tombstone); stored history is
+append-only. The rows go when enforce-mode retention ends the whole session
+(`session.maintenance.mode: "enforce"`). Nothing serves them to the model once the index row is
+gone.
 
-**`resetArchiveRetention` purged an archive I needed**
-Archives are purged on the next maintenance run after the retention window expires. To stop future purges, set `session.maintenance.resetArchiveRetention: false` in config. To recover an already-purged archive, check filesystem-level backups; OpenClaw does not keep secondary copies.
+**`/compact` ran but the stored entry count grew**
+Also expected: compaction appends a summary entry and keeps every pre-compaction entry, so the
+database only grows. Trimming happens in the request view, never in storage.
 
 _Related: [Session management](/concepts/session) · [Compaction](/concepts/compaction) · [Gateway configuration](/gateway/configuration)_

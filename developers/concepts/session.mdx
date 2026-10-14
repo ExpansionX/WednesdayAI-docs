@@ -6,11 +6,11 @@ title: "Session Management"
 audience: admin
 sources:
   - src/config/sessions/storage-types.ts
-  - src/config/sessions/backend-select.ts
+  - src/config/sessions/storage-config.ts
   - src/config/sessions/backend-transcript-read.ts
   - src/config/sessions/transcript.ts
   - src/config/sessions/store.ts
-  - src/config/sessions/session-utils.fs.ts
+  - src/config/sessions/legacy-import/owner.ts
   - src/plugins/types.ts
   - src/plugins/provider-runtime-identity.ts
 generated: 2026-07-02
@@ -71,63 +71,86 @@ Notes:
 All session state is **owned by the gateway**. UI clients (macOS app, WebChat, etc.) must query the gateway for session lists and token counts instead of reading local files.
 
 - In **remote mode**, the session store you care about lives on the remote gateway host, not your Mac.
-- Token counts shown in UIs come from the gateway’s store fields (`inputTokens`, `outputTokens`, `totalTokens`, `contextTokens`). Clients do not parse JSONL transcripts to “fix up” totals.
+- Token counts shown in UIs come from the gateway’s store fields (`inputTokens`, `outputTokens`, `totalTokens`, `contextTokens`). Clients do not read stored transcripts to “fix up” totals.
 
 ## Where state lives
 
 - On the **gateway host**:
-  - Store file: `~/.openclaw/agents/<agentId>/sessions/sessions.json` (per agent).
-- Transcripts: `~/.openclaw/agents/<agentId>/sessions/<SessionId>.jsonl` (Telegram topic sessions use `.../<SessionId>-topic-<threadId>.jsonl`).
-- The store is a map `sessionKey -> { sessionId, updatedAt, ... }`. Deleting entries is safe; they are recreated on demand.
+  - Session database: `<state-dir>/sessions.db` (SQLite by default; override with
+    `session.storage.backend: "postgres"` plus `session.storage.databaseUrl`).
+  - Per-agent store path: `~/.openclaw/agents/<agentId>/sessions/sessions.json`. Under SQL session
+    storage this path is an **identity** for the agent's index and the place the one-time import
+    looks for legacy JSON session files; it is not a file the gateway writes or reads afterwards.
+- The session index and every conversation entry live in the database; there are no transcript
+  files and no `sessions.json` shadow copy while the gateway runs.
+- Ownership of the database is exclusive: the running gateway holds it (SQLite:
+  `<sessions.db>.owner.lock` plus an `<sessions.db>.owner.json` holder sidecar; Postgres: an
+  advisory lock plus a `ctx_storage_owner` row). A CLI command that needs session data goes over
+  the gateway when one runs, or takes ownership itself when none does.
+- The session index is a map `sessionKey -> { sessionId, updatedAt, ... }` in the database.
+  Deleting an entry tombstones it; it is recreated on demand.
 - Group entries may include `displayName`, `channel`, `subject`, `room`, and `space` to label sessions in UIs.
 - Session entries include `origin` metadata (label + routing hints) so UIs can explain where a session came from.
 - WednesdayAI does **not** read legacy Pi/Tau session folders.
 
 ## Maintenance
 
-WednesdayAI applies session-store maintenance to keep `sessions.json` and transcript artifacts bounded over time.
+WednesdayAI applies session maintenance to bound the session index over time. Conversation history
+is **append-only and kept forever by default**: only enforce-mode retention deletes, and it deletes
+whole sessions — never individual entries.
 
 ### Defaults
 
 - `session.maintenance.mode`: `warn`
 - `session.maintenance.pruneAfter`: `30d`
 - `session.maintenance.maxEntries`: `500`
-- `session.maintenance.rotateBytes`: `10mb`
-- `session.maintenance.resetArchiveRetention`: defaults to `pruneAfter` (`30d`)
-- `session.maintenance.maxDiskBytes`: unset (disabled)
-- `session.maintenance.highWaterBytes`: defaults to `80%` of `maxDiskBytes` when budgeting is enabled
+
+The file-only controls (`rotateBytes`, `maxDiskBytes`, `highWaterBytes`, `resetArchiveRetention`)
+are retired: they applied to JSONL transcript files, which SQL session storage never writes. Configs
+that still set them are migrated automatically on load (see
+[Upgrading from JSON session files](#upgrading-from-json-session-files)).
 
 ### How it works
 
-Maintenance runs during session-store writes, and you can trigger it on demand with `openclaw sessions cleanup`.
+Retention runs in two distinct places:
 
-- `mode: "warn"`: reports what would be evicted but does not mutate entries/transcripts.
-- `mode: "enforce"`: applies cleanup in this order:
-  1. prune stale entries older than `pruneAfter`
-  2. cap entry count to `maxEntries` (oldest first)
-  3. archive transcript files for removed entries that are no longer referenced
-  4. purge old `*.deleted.<timestamp>` and `*.reset.<timestamp>` archives by retention policy
-  5. rotate `sessions.json` when it exceeds `rotateBytes`
-  6. if `maxDiskBytes` is set, enforce disk budget toward `highWaterBytes` (oldest artifacts first, then oldest sessions)
+- **Startup (gateway only).** With `mode: "enforce"`, whole-session conversation retention runs
+  before the gateway serves: sessions whose **newest** entry is older than `pruneAfter` are deleted
+  whole — a session with one recent entry keeps all of its history, including its oldest entries.
+  With the default `mode: "warn"`, startup deletes nothing and logs one line when any session would
+  qualify, for example `session retention: 3 sessions older than 30d would be pruned
+(maintenance.mode=warn)`. `maxEntries` is **not** applied at startup.
+- **Index upkeep on writes.** Ordinary session-index writes (and `openclaw sessions cleanup`)
+  maintain the index record itself: in `enforce` mode they drop index rows whose `updatedAt` is
+  older than `pruneAfter` and cap the index at `maxEntries` rows (a tombstone per dropped row);
+  in `warn` mode they only warn when the active session would be evicted. Because capping rides on
+  writes, restarting with a lower `maxEntries` applies it on the next index write (or manual
+  cleanup), not at startup.
+
+Deletion is session-granular and re-checked inside the deleting transaction: a session that
+receives a new entry while retention runs is not deleted. Reset (`/new`, `/reset`) and
+`sessions.delete` remove only the index row (a tombstone); the conversation rows stay until
+enforce-mode retention ends the session. Consumer claims (see
+[Session Consumer Claims](/gateway/session-consumer-claims)) can hold a session back from pruning.
 
 ### Performance caveat for large stores
 
-Large session stores are common in high-volume setups. Maintenance work is write-path work, so very large stores can increase write latency.
+Large stores are common in high-volume setups. Retention work is batched database work, so very
+large stores can lengthen gateway startup when `mode: "enforce"` is set.
 
 What increases cost most:
 
+- long `pruneAfter` windows that keep many sessions eligible
 - very high `session.maintenance.maxEntries` values
-- long `pruneAfter` windows that keep stale entries around
-- many transcript/archive artifacts in `~/.openclaw/agents/<agentId>/sessions/`
-- enabling disk budgets (`maxDiskBytes`) without reasonable pruning/cap limits
+- deleting whole sessions with very long histories
 
 What to do:
 
-- use `mode: "enforce"` in production so growth is bounded automatically
+- start in `mode: "warn"`, read the startup line, then switch to `"enforce"` once the thresholds
+  look right
 - set both time and count limits (`pruneAfter` + `maxEntries`), not just one
-- set `maxDiskBytes` + `highWaterBytes` for hard upper bounds in large deployments
-- keep `highWaterBytes` meaningfully below `maxDiskBytes` (default is 80%)
-- run `openclaw sessions cleanup --dry-run --json` after config changes to verify projected impact before enforcing
+- run `openclaw sessions cleanup --dry-run --json` after config changes to verify projected impact
+  before enforcing
 - for frequent active sessions, pass `--active-key` when running manual cleanup
 
 ### Customize examples
@@ -141,22 +164,6 @@ Use a conservative enforce policy:
       mode: "enforce",
       pruneAfter: "45d",
       maxEntries: 800,
-      rotateBytes: "20mb",
-      resetArchiveRetention: "14d",
-    },
-  },
-}
-```
-
-Enable a hard disk budget for the sessions directory:
-
-```json5
-{
-  session: {
-    maintenance: {
-      mode: "enforce",
-      maxDiskBytes: "1gb",
-      highWaterBytes: "800mb",
     },
   },
 }
@@ -171,9 +178,6 @@ Tune for larger installs (example):
       mode: "enforce",
       pruneAfter: "14d",
       maxEntries: 2000,
-      rotateBytes: "25mb",
-      maxDiskBytes: "2gb",
-      highWaterBytes: "1.6gb",
     },
   },
 }
@@ -202,61 +206,223 @@ If a plugin captures storage append events, user and assistant entries for the s
 
 This feature does not make untrusted plugins safe. Plugins still run in-process with gateway trust, but the public SDK now gives them resolved identity and opaque correlation fields instead of requiring them to read private config or reverse-engineer session key formats.
 
-## External session storage
+## Session storage
 
-By default, transcript entries are stored in a local SQLite database at `<state-dir>/sessions.db`
-(normally `~/.openclaw/sessions.db`) on the gateway host. Each agent's session index remains at
-`~/.openclaw/agents/<agentId>/sessions/sessions.json`.
+By default, the session index and every conversation entry are stored in a local SQLite database at
+`<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`) on the gateway host. For shared
+Postgres storage with an optional Redis hot cache, configure `session.storage`. See the
+`session.storage` section in [Gateway configuration](/gateway/configuration).
 
-To use JSONL files instead, or for shared Postgres storage with an optional Redis hot cache,
-configure `session.storage`. See the `session.storage` section in
-[Gateway configuration](/gateway/configuration) and the full
-[Configuration Reference](/gateway/configuration-reference#session).
+SQL session storage is the only session storage: there is no JSONL backend and no file fallback.
+The per-agent `sessions.json` paths survive only as (a) the identity of each agent's index and
+(b) import sources for the one-time legacy upgrade described in
+[Upgrading from JSON session files](#upgrading-from-json-session-files).
 
-### Configured-backend-only invariant
+### Backends
 
-WednesdayAI treats the configured `session.storage.backend` as the single source of truth for session
-transcript data:
+- **`sqlite`** (default): entries are read and written through the SQLite `ctx_session_entries`
+  table via a worker thread; the write-ahead log plus DB transactions are the durability story.
+- **`postgres`**: entries are read and written through the Postgres `ctx_session_entries` table.
+  `cache: "redis"` adds a write-through hot cache that is **never authoritative** — the database
+  always wins.
 
-- **`sqlite`** (default): transcript entries are read and written through the SQLite
-  `ctx_session_entries` table via a supervised worker thread that auto-recovers from crashes.
-- **`postgres`**: transcript entries are read and written through the Postgres `ctx_session_entries` table.
-- **`fs-jsonl`**: transcript entries are read and written through `*.jsonl` files.
+The gateway converges the database schema automatically on every startup (additive only:
+`CREATE TABLE/INDEX IF NOT EXISTS`, idempotent column adds); no manual migrations are required.
+If Postgres is unreachable at boot, the gateway exits with the probe cause instead of serving a
+degraded view; the service manager restarts it. The wait is bounded by
+`session.storage.recovery.startupProbeTimeoutMs` (default `600s`).
 
-Reads use the configured backend only: the JSONL path is reachable for reads **only** when
-`backend === "fs-jsonl"`. When a database backend is active, core paths such as `chat.history`,
-`sessions.preview`, session-list title/preview derivation, and sub-agent announce output read from
-the configured database, not from JSONL files. One write-side exception exists: with
-`session.storage.fallbackToJsonlOnError: true`, an individual failed database append is written to
-JSONL so the entry is not lost.
+### Single owner
 
-What this means in practice:
+The running gateway is the **single owner** of the session database, enforced by a storage-owner
+lock keyed to the database (SQLite: `<sessions.db>.owner.lock` with an `<sessions.db>.owner.json`
+holder sidecar; Postgres: `pg_try_advisory_lock` plus a `ctx_storage_owner` row).
 
-- Switching from JSONL to SQLite/Postgres does not require a manual transcript migration; the store
-  metadata file is rebuilt on demand and the database becomes the source of truth for content.
-- Session run records (turn lifecycle rows powering run history and crash recovery) are stored in
-  the same configured backend, and the gateway converges the database schema automatically on
-  startup; no manual migrations are required.
-- If you have existing `.jsonl` files and start with a database backend, the gateway may backfill
-  those files into the database on first startup, but subsequent reads always come from the database.
-  Disable the backfill with `session.storage.migration.validateOnStart: false` if you want a clean
-  cut-over.
-- Running `openclaw sessions cleanup` still bounds `sessions.json` and any JSONL archives for the
-  `fs-jsonl` backend; for database backends it does not mutate the database content directly.
+- While a gateway runs, every CLI storage operation — reads included — goes over the gateway RPC
+  and never opens the database. A `gateway.mode: "remote"` config always routes to the remote
+  gateway the same way.
+- With no gateway, a CLI command takes ownership as `cli` for the duration of the command:
+  index import on open, on-access transcript import, no automatic retention, no background sweep.
+- A second owner is refused with the holder's host and pid. `openclaw agent --local` refuses while
+  a gateway owns the database. Only `openclaw session-storage restore` needs the gateway stopped.
+
+### Append-only history
+
+Conversation entries are append-only: no code path updates or deletes stored content. Compaction
+appends a compaction entry and keeps the pre-compaction entries. Derived views (tool-output
+trimming, history limits, thinking stripping) are computed per request and never persisted. Only
+enforce-mode retention deletes, and only whole sessions (see [Maintenance](#maintenance)).
 
 ### Sub-agent and announce output
 
-Sub-agent runs (`sessions_spawn`) and their announce step use the same transcript read path as the
-rest of the gateway. Before this invariant, a database backend could leave sub-agent assistant output
-in Postgres while the announce reader looked at JSONL, producing a truncated or empty
-"(no output)" result. With the configured-backend-only invariant, the announce reader consults the
-same backend that the run wrote to, so sub-agent output renders correctly regardless of whether the
-backend is JSONL, SQLite, or Postgres.
+Sub-agent runs (`sessions_spawn`) and their announce step read the same database the run wrote to,
+so sub-agent output renders correctly.
+
+## Upgrading from JSON session files
+
+Installs that keep history in legacy `sessions.json` / `*.jsonl` files upgrade **online, with no
+operator step**. The first gateway start after upgrading:
+
+1. Auto-migrates retired config keys on load (`session.storage.backend: "fs-jsonl"`,
+   `session.storage.mode`, `session.storage.fallbackToJsonlOnError`, obsolete
+   `session.storage.recovery.*` and file-only `session.maintenance.*` keys, learning-core
+   `fs-jsonl` backend) and logs each change.
+2. Takes storage ownership and, before the gateway publishes storage, imports every agent's
+   `sessions.json` index. Database rows and tombstones always win: a legacy index entry never
+   changes the current session for a key that already exists or was deleted in the database.
+   This first start also writes **one pre-import snapshot** of the SQLite database to
+   `<state-dir>/backups/sessions-pre-legacy-import-<timestamp>.db`; because the snapshot runs
+   before storage is published, that first startup takes longer once.
+3. Publishes storage and starts the gateway. From then on: a legacy session's transcript is
+   imported the first time that session is accessed, and a throttled background sweep imports the
+   rest newest-first, archiving each source under
+   `<state-dir>/legacy-session-archive/<agentId>/` (files `0600`, dirs `0700`).
+
+Import is receipted in the database and therefore resumable: a failing source never fails startup,
+and the next owner open retries it (up to five attempts; after that only an explicit
+`openclaw session-storage import` retries). If an on-access import fails, the turn still proceeds
+— availability over completeness — and the failure stays visible in
+`openclaw session-storage status` and `openclaw doctor` until a retry succeeds.
+
+Only the importer moves legacy source transcripts. Session reset, delete, and corruption
+recovery leave those source files untouched so an in-flight or failed import cannot lose its
+only copy. One-shot slug/journal generation, voice consult, plugin analysis, and wake-gate
+helpers run without persisting extra session history.
+
+Legacy **unqualified session keys under a non-default agent** keep their stored identity.
+An ID-only agent request cannot target those sessions safely: it is rejected with
+`INVALID_REQUEST` naming the stored key instead of guessing an alias or choosing another agent.
+Use the explicit session key with the owning agent, not `--session-id` alone. This restriction
+does not discard the imported history.
+
+### Status and manual import
+
+```bash
+openclaw session-storage status          # backend, readiness, legacy import progress
+openclaw session-storage status --json
+openclaw session-storage import          # run the sweep to completion now (retries failures)
+```
+
+`status` reports the import state (`none | pending | running | completed | error`), how many
+sources are done, and the pre-import snapshot path when one exists.
+
+### Archives
+
+- Import sources are **archived, not deleted**: `<state-dir>/legacy-session-archive/<agentId>/`.
+  Reset, deleted and replayed transcript archives, `session-runs.jsonl`, and old `recovery/**`
+  manifests are archived **without import** and kept — the archive is their only copy.
+- Purge rule: a gateway sweep deletes an archived copy after 30 days only when its source was
+  **fully imported with zero rejected lines**. Archive-only sources, failed sources, and sources
+  with rejected lines are kept indefinitely.
+
+### Backups and rollback
+
+- `openclaw session-storage backup` writes an online SQLite backup (`VACUUM INTO` on a separate
+  read-only connection, so appends never wait); default output
+  `<state-dir>/backups/sessions-<timestamp>.db` (`0600`). Under a running gateway the file is
+  written under `<state-dir>/backups/`.
+- `openclaw session-storage restore <file>` is offline: stop the gateway, then the CLI replaces
+  `sessions.db` (the previous file is kept as `sessions.db.pre-restore-<timestamp>`).
+- Rollback means restoring a backup **with a SQL-capable build** of WednesdayAI. There is no
+  downgrade to JSONL serving.
+
+<Warning>
+Restoring an older backup (for example the pre-import snapshot) after the import ran rolls the
+database back to a state with fewer or no import receipts, while the imported files remain in
+`legacy-session-archive/` — and the census scans live session directories, not the archive. To
+make that history available again, return every archived copy to the distinct original path its
+receipt recorded (divergent same-name copies each have their own receipt row):
+
+1. Stop the gateway and restore the backup. `openclaw session-storage restore` refuses to run
+   under a live gateway and preserves the replaced database as
+   `<state-dir>/sessions.db.pre-restore-<timestamp>` — the live WAL is checkpointed into that
+   archived copy first, so it is self-contained (sidecar archives survive only when the
+   checkpoint itself failed, and a failed restore keeps every `.pre-restore-*` archive and names
+   them in its error).
+2. Read the mapping from THAT preserved database — it is the one that recorded the imports and
+   archivals. The preserved copy sits next to the configured database file, which may differ from
+   `sessions.db` when `session.storage.sqlitePath` is set:
+
+   ```bash
+   DB="<state-dir>/sessions.db.pre-restore-<timestamp>"
+   sqlite3 -json "$DB" \
+     'SELECT source_path, archive_path FROM ctx_legacy_imports WHERE archive_path IS NOT NULL;'
+   ```
+
+3. With the gateway still stopped, move each `archive_path` back to its `source_path`. The query
+   runs first and the procedure aborts if it fails, so a missing table or the wrong database can
+   never masquerade as an empty result; the JSON then goes to this script, which creates missing
+   parent directories, never overwrites an existing destination, and survives spaces, `|`, and
+   newlines in paths:
+
+   ```bash
+   MAP="$(sqlite3 -json "$DB" \
+     'SELECT source_path, archive_path FROM ctx_legacy_imports WHERE archive_path IS NOT NULL;')" \
+     || { echo "reading ctx_legacy_imports from $DB failed" >&2; exit 1; }
+   printf '%s' "$MAP" | node -e '
+   let raw = "";
+   process.stdin.on("data", (chunk) => (raw += chunk));
+   process.stdin.on("end", () => {
+     const fs = require("node:fs");
+     const path = require("node:path");
+     const db = process.argv[1];
+     const rows = raw.trim() ? JSON.parse(raw) : [];
+     if (rows.length === 0) {
+       console.error(`no receipts found in ${db} — wrong database?`);
+       process.exit(1);
+     }
+     let failed = 0;
+     for (const { source_path: source, archive_path: archive } of rows) {
+       try {
+         if (fs.existsSync(source)) {
+           console.error(`SKIP (destination exists): ${source}`);
+           failed += 1;
+           continue;
+         }
+         fs.mkdirSync(path.dirname(source), { recursive: true, mode: 0o700 });
+         try {
+           fs.renameSync(archive, source);
+         } catch (error) {
+           if (error.code !== "EXDEV") throw error;
+           fs.copyFileSync(archive, source);
+           fs.unlinkSync(archive);
+         }
+         fs.chmodSync(source, 0o600);
+         console.log(`restored: ${archive} -> ${source}`);
+       } catch (error) {
+         console.error(`FAILED: ${archive} -> ${source}: ${error.message}`);
+         failed += 1;
+       }
+     }
+     process.exit(failed > 0 ? 1 : 0);
+   });
+   ' "$DB"
+   ```
+
+   The script exits non-zero when any row failed; fix the reported rows and re-run it (already
+   restored rows then hit the `SKIP (destination exists)` guard and are reported, not overwritten).
+
+4. Start the gateway (or run `openclaw session-storage import`). The census reclassifies the
+   returned files at their original paths: a source with **no receipt row** in the restored
+   database imports fresh; one with a **settled receipt whose fingerprint still matches**
+   (`completed` or `archived_only`) is skipped because its rows are already in the restored
+   database — nothing duplicates.
+
+Any archived copy deliberately left in place has no receipt in the restored database, so it is
+never auto-purged; the archive stays a safety copy either way.
+</Warning>
+
+### Data retention after upgrade
+
+History imported from JSONL follows the same rules as native history: append-only, kept forever by
+default, and deletable only by enforce-mode retention (`session.maintenance.mode: "enforce"` plus
+`pruneAfter`/`maxEntries`), which removes whole idle sessions. Set `"enforce"` only after
+previewing with `openclaw sessions cleanup --dry-run`.
 
 ## Session pruning
 
 WednesdayAI trims **old tool results** from the in-memory context right before LLM calls by default.
-This does **not** rewrite JSONL history. See [/concepts/session-pruning](/concepts/session-pruning).
+This never rewrites stored history. See [/concepts/session-pruning](/concepts/session-pruning).
 
 ## Pre-compaction memory flush
 
@@ -294,7 +460,9 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Per-type overrides (optional): `resetByType` lets you override the policy for `direct`, `group`, and `thread` sessions (thread = Slack/Discord threads, Telegram topics, Matrix threads when provided by the connector).
 - Per-channel overrides (optional): `resetByChannel` overrides the reset policy for a channel (applies to all session types for that channel and takes precedence over `reset`/`resetByType`).
 - Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. `/new <model>` accepts a model alias, `provider/model`, or provider name (fuzzy match) to set the new session model. If `/new` or `/reset` is sent alone, WednesdayAI runs a short “hello” greeting turn to confirm the reset.
-- Manual reset: delete specific keys from the store or remove the JSONL transcript; the next message recreates them.
+- Manual reset: delete specific keys from the store; the next message recreates them. The deleted
+  session's conversation rows stay in the database until enforce-mode retention ends the session
+  (see [Maintenance](#maintenance)).
 - Isolated cron assistant-task jobs always mint a fresh `sessionId` per run (no idle reuse).
   Main-session cron jobs enqueue an `agent.turn` (`kind` cron) on the existing main session,
   except that main-session jobs with `payload.kind === "wakeGate"` route through `requestNudge`
@@ -355,6 +523,7 @@ Runtime override (owner only):
       discord: { mode: "idle", idleMinutes: 10080 },
     },
     resetTriggers: ["/new", "/reset"],
+    // Per-agent store identity; also where legacy JSON session files are found for the one-time import.
     store: "~/.openclaw/agents/{agentId}/sessions/sessions.json",
     mainKey: "main",
   },
@@ -370,7 +539,7 @@ Runtime override (owner only):
 - Send `/context list` or `/context detail` to see what’s in the system prompt and injected workspace files (and the biggest context contributors).
 - Send `/stop` (or standalone abort phrases like `stop`, `stop action`, `stop run`, `stop openclaw`) to abort the current run, clear queued followups for that session, and stop any sub-agent runs spawned from it (the reply includes the stopped count).
 - Send `/compact` (optional instructions) as a standalone message to summarize older context and free up window space. See [/concepts/compaction](/concepts/compaction).
-- JSONL transcripts can be opened directly to review full turns.
+- To review full turns, page the transcript with the gateway `sessions.export` method (the macOS app's "Open session log" uses it), or use `openclaw sessions --json` for index metadata.
 
 ## Tips
 
@@ -385,8 +554,8 @@ Runtime override (owner only):
 **Session does not reset at the expected daily time**
 The daily reset uses the gateway host's local time (default 4:00 AM). If the gateway host is in a different timezone than expected, the reset fires at the wrong wall-clock time. Adjust `session.reset.atHour` to match your preferred local time, or set the gateway host's timezone. Also verify the gateway restarted after the config change.
 
-**`sessions.json` grows very large and write latency increases**
-Enable `mode: "enforce"` and set both `pruneAfter` and `maxEntries` limits. Running maintenance only in `"warn"` mode lets the store grow unbounded. Use `openclaw sessions cleanup --dry-run --json` to preview the impact before enforcing. For hard upper bounds, add `maxDiskBytes` + `highWaterBytes`.
+**Session database grows very large**
+By default history is kept forever. Set `session.maintenance.mode: "enforce"` with both `pruneAfter` and `maxEntries` so whole idle sessions are removed on gateway start and manual cleanup. Running in `"warn"` mode only logs what would be pruned. Use `openclaw sessions cleanup --dry-run --json` to preview the impact before enforcing. To reclaim file size after mass pruning, stop the gateway and run `sqlite3 <state-dir>/sessions.db 'VACUUM'`.
 
 ## Related
 
