@@ -82,7 +82,12 @@ Details:
   `contextWindow - reserveTokensFloor - softThresholdTokens`.
 - **Silent** by default: prompts include `NO_REPLY` so nothing is delivered.
 - **Two prompts**: a user prompt plus a system prompt append the reminder.
-- **One flush per compaction cycle** (tracked in `sessions.json`).
+- **One flush per compaction cycle** (tracked in the session index).
+- **SQL history** supplies the latest nonzero usage when index token totals are stale.
+  `memoryFlush.forceFlushTranscriptBytes` measures serialized conversation entries in
+  SQL, not a transcript file on disk. Set it to `0` to disable size-based flushing.
+- **Storage read failures** fail the reply rather than skip the history check.
+  Typing is still stopped and queued follow-up processing is finalized.
 - **Workspace must be writable**: if the session runs sandboxed with
   `workspaceAccess: "ro"` or `"none"`, the flush is skipped.
 
@@ -199,7 +204,7 @@ out to QMD for retrieval. Key points:
 - `includeDefaultMemory` (default `true`): auto-index `MEMORY.md` + `memory/**/*.md`.
 - `paths[]`: add extra directories/files (`path`, optional `pattern`, optional
   stable `name`).
-- `sessions`: opt into session JSONL indexing (`enabled`, `retentionDays`,
+- `sessions`: opt into session transcript indexing (`enabled`, `retentionDays`,
   `exportDir`).
 - `update`: controls refresh cadence and maintenance execution:
   (`interval`, `debounceMs`, `onBoot`, `waitForBootSync`, `embedInterval`,
@@ -651,11 +656,15 @@ agents: {
 Notes:
 
 - Session indexing is **opt-in** (off by default).
-- Session updates are debounced and **indexed asynchronously** once they cross delta thresholds (best-effort).
+- SQL sessions emit no file events. Once a sync runs — the first search with `sessions` in
+  `sources` included — an initial full census indexes the agent's existing SQL turns (an
+  embedding provider must be configured; without one the sessions source is never indexed).
+- After that census, updates are indexed asynchronously: a cheap per-search freshness probe
+  detects appends newer than the last census watermark and schedules a catch-up sync.
 - `memory_search` never blocks on indexing; results can be slightly stale until background sync finishes.
 - Results still include snippets only; `memory_get` remains limited to memory files.
-- Session indexing is isolated per agent (only that agent’s session logs are indexed).
-- Session logs live on disk (`~/.openclaw/agents/<agentId>/sessions/*.jsonl`). Any process/user with filesystem access can read them, so treat disk access as the trust boundary. For stricter isolation, run agents under separate OS users or hosts.
+- Session indexing is isolated per agent (only that agent’s stored sessions are indexed).
+- Session content lives in the SQL session database (`~/.openclaw/sessions.db` by default). Any process or user with filesystem access to the state directory can read it, so treat disk access as the trust boundary. For stricter isolation, run agents under separate OS users or hosts.
 
 Delta thresholds (defaults shown):
 
@@ -666,7 +675,7 @@ agents: {
       sync: {
         sessions: {
           deltaBytes: 100000,   // ~100 KB
-          deltaMessages: 50     // JSONL lines
+          deltaMessages: 50     // appended messages
         }
       }
     }
