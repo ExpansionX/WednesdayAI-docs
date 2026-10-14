@@ -10,10 +10,12 @@ sources:
   - src/config/sessions/backend-transcript-read.ts
   - src/config/sessions/transcript.ts
   - src/config/sessions/store.ts
+  - src/config/sessions/sqlite-backup.ts
   - src/config/sessions/legacy-import/owner.ts
+  - src/config/sessions/legacy-import/path-containment.ts
   - src/plugins/types.ts
   - src/plugins/provider-runtime-identity.ts
-generated: 2026-07-02
+generated: 2026-10-14
 ---
 
 # Session Management
@@ -282,7 +284,9 @@ Import is receipted in the database and therefore resumable: a failing source ne
 and the next owner open retries it (up to five attempts; after that only an explicit
 `openclaw session-storage import` retries). If an on-access import fails, the turn still proceeds
 — availability over completeness — and the failure stays visible in
-`openclaw session-storage status` and `openclaw doctor` until a retry succeeds.
+`openclaw session-storage status` and `openclaw doctor` until a retry succeeds. Containment
+compares symlink-resolved paths, so a state dir reached through a symlink (for example the macOS
+`/var` -> `/private/var` link) imports the same transcripts as a plain path.
 
 Only the importer moves legacy source transcripts. Session reset, delete, and corruption
 recovery leave those source files untouched so an in-flight or failed import cannot lose its
@@ -320,7 +324,9 @@ sources are done, and the pre-import snapshot path when one exists.
 - `openclaw session-storage backup` writes an online SQLite backup (`VACUUM INTO` on a separate
   read-only connection, so appends never wait); default output
   `<state-dir>/backups/sessions-<timestamp>.db` (`0600`). Under a running gateway the file is
-  written under `<state-dir>/backups/`.
+  written under `<state-dir>/backups/`. The backup connection waits up to 5 seconds for a lock,
+  so a backup no longer fails immediately with `database is locked` when it races another backup
+  or the pre-import snapshot on a cold WAL database.
 - `openclaw session-storage restore <file>` is offline: stop the gateway, then the CLI replaces
   `sessions.db` (the previous file is kept as `sessions.db.pre-restore-<timestamp>`).
 - Rollback means restoring a backup **with a SQL-capable build** of WednesdayAI. There is no

@@ -124,7 +124,11 @@ per-session `*.jsonl` transcripts are import sources only, never served or writt
   sources retry on the next owner open, imported-but-unarchived sources finish archiving, and only
   completed sources are skipped. A failing source never fails startup.
   `openclaw session-storage import` runs the sweep to completion on demand and retries sources past
-  their attempt cap.
+  their attempt cap. Containment compares real (symlink-resolved) paths, so a state dir reached
+  through a symlink (a symlinked `~/.openclaw`, or the macOS `/var` -> `/private/var` link) no
+  longer drops transcripts named by an index entry's `sessionFile`. Discovered transcripts are
+  still recorded under the configured path spelling, so each file keeps a single import receipt;
+  a sessions-dir symlink that points outside the dir is still rejected.
 
 Archives: every imported source is moved — fingerprint-verified — to
 `<stateDir>/legacy-session-archive/<agentId>/` (files 0600, dirs 0700). Reset, deleted, and
@@ -143,7 +147,10 @@ still honoured for import key resolution; add mappings there before running
 
 `openclaw session-storage backup` writes a consistent SQLite copy with `VACUUM INTO` from a
 separate read-only worker connection (appends never wait on it). Gateway backup paths stay
-under `<stateDir>/backups/`; a local-owner CLI can use another `--out` path.
+under `<stateDir>/backups/`; a local-owner CLI can use another `--out` path. The backup
+connection waits up to 5 seconds for a lock, so two backups, or a backup and the pre-import
+snapshot, no longer fail immediately with `database is locked` when they open a cold WAL database
+together.
 `openclaw session-storage restore <file>` replaces the database offline — stop the gateway
 first; restore refuses while a gateway owns storage. The source is recovered through SQLite
 (committed `-wal` frames included) from a private temporary copy, never from the backup file
