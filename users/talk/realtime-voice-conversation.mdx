@@ -170,7 +170,7 @@ acknowledgement plays when the agent starts a tool call. Neither counts toward t
 (`talk.conversation.{fillerPhrases,ackPhrases,backchannels}`, keyed by
 `talk.conversation.locale`, default `"en"`; an unrecognised locale falls back to `"en"`).
 
-A voice turn that has to wait behind an in-flight run is queued as a follow-up, not merged into a `collect` batch. The follow-up keeps the same voice profile (thinking off, command-inert text, recall deadline, and the `stt-tts` bridge kind). A later voice utterance supersedes an older queued voice utterance; a typed message already in that queue is left alone. A voice turn that is still only queued, and is then superseded, is not written into the next turn's model context.
+A voice turn that has to wait behind an in-flight run is queued as a follow-up, not merged into a `collect` batch. The follow-up keeps the same voice profile (thinking off, command-inert text, recall deadline, and the `stt-tts` bridge kind). A later voice utterance supersedes an older queued voice utterance; a typed message already in that queue is left alone. A voice turn that is still only queued, and is then superseded or cancelled, is not written into the next turn's model context and never starts a run. Its words are still saved: once the turn that was running finishes, the cancelled utterance's user text is appended to the session history, so the transcript records what you said even though it produced no reply.
 
 The first turn of a new Talk session stops a leftover voice run left by a closed session on the same chat. A typed run the user started is never aborted for that reason. If the agent start itself fails, the turn is cancelled with `turn.cancelled { reason: "agent-error" }` and the session stays open for the next utterance.
 
@@ -274,9 +274,12 @@ fully configured provider does not matter until it is on.
 
 ### `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
 
-Check `talk.catalog`'s `streamingTranscription`/`speech` rows for the configured provider's
-`configured`/`diagnostic` fields. `missing-api-key` and `secret-ref-unresolved` both mean the
-gateway could not read a usable key for `talk.providers.<id>.apiKey` — see
+When the message ends with `<transcription|speech> provider "<id>" is not configured; check
+talk.providers.<id>.apiKey`, that provider's key is missing or does not resolve. Without the
+suffix, no registered provider matches `talk.conversation.sttProvider` or `talk.provider`. Either
+way, `talk.catalog`'s `streamingTranscription`/`speech` rows show the same cause in their
+`configured`/`diagnostic` fields: `missing-api-key` and `secret-ref-unresolved` both mean the
+gateway could not read a usable key for `talk.providers.<id>.apiKey`. See
 [ElevenLabs streaming voice](/providers/elevenlabs#troubleshooting).
 
 ### `talk.session.create` fails `UNAVAILABLE: stt-tts requires talk.providers.<id>.voiceId`
