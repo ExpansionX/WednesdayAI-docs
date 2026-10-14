@@ -152,8 +152,9 @@ curl "https://api.telegram.org/bot<bot_token>/getUpdates"
        - `disabled`
 
     `groupAllowFrom` is used for group sender filtering. If not set, Telegram falls back to `allowFrom`.
-    `groupAllowFrom` entries should be numeric Telegram user IDs (`telegram:` / `tg:` prefixes are normalized).
-    Non-numeric entries are ignored for sender authorization.
+    `groupAllowFrom` entries must be numeric Telegram sender IDs (`telegram:` / `tg:` prefixes are normalized).
+    Positive IDs identify users. Negative IDs identify group or channel actors, including channel-origin posts represented by Telegram through `sender_chat`.
+    Non-numeric entries, including usernames, are ignored for sender authorization.
     Security boundary (`2026.2.25+`): group sender auth does **not** inherit DM pairing-store approvals.
     Pairing stays DM-only. For groups, set `groupAllowFrom` or per-group/per-topic `allowFrom`.
     Runtime note: if `channels.telegram` is completely missing, runtime defaults to fail-closed `groupPolicy="allowlist"` unless `channels.defaults.groupPolicy` is explicitly set.
@@ -265,6 +266,11 @@ Developer note: the timeout policy is applied only to the bot polling client. St
 send helpers use their existing send-client timeout path, so changing the polling policy should not
 change message delivery timeout behavior.
 
+Two resilience guards run automatically:
+
+- a stall watchdog restarts the polling cycle if a `getUpdates` request stops making progress for 90 seconds (log line `Polling stall detected`); frequent stalls point to a stuck socket or proxy between the gateway and `api.telegram.org`
+- on gateway shutdown or restart, the in-flight `getUpdates` request is aborted immediately, so a restarting gateway does not collide with its own previous long poll and raise `409`
+
 ### Multi-bot fleet
 
 One gateway instance can run a fleet of Telegram bot accounts. Define shared defaults under
@@ -358,6 +364,10 @@ account id and sanitized token fingerprint, never the raw bot token. Startup hea
 conflicts already recorded when the startup report is emitted; `wednesdayai doctor` reads the
 running gateway channel-status snapshot for live duplicate-poller warnings.
 
+If polling keeps hitting `409` because a webhook owner reappeared (for example another tool
+re-registered the webhook), the gateway automatically re-runs webhook cleanup before the next
+polling cycle instead of conflict-looping forever.
+
 ### Channels UI health
 
 The Channels UI shows per-account Telegram fleet state from `application.telegram`.
@@ -368,6 +378,10 @@ High-signal fields:
 - `configured`, `running`, `gatewayInstanceId`, `owner`, and `ownerStartedAt` show ownership.
 - `retryAt` marks recoverable backoff or flood-wait recovery windows.
 - `poll.lastPollAt`, `poll.lastConflictAt`, and `poll.lastOffset` describe long-polling health.
+- The account snapshot's `lastEventAt` (shown by `wednesdayai channels status --json`) updates
+  after every successful `getUpdates` poll, including empty ones. The gateway health monitor reads
+  it, so an idle polling bot is not restarted as `stale-socket`. Webhook-mode accounts do not
+  publish it yet.
 - `webhook.configured`, `webhook.urlHash`, `webhook.path`, `webhook.secretPresent`,
   `webhook.pendingUpdateCount`, and webhook request counters describe webhook health without
   showing the raw URL secret or request body.
@@ -437,6 +451,8 @@ Privacy boundary:
 
     For complex replies (for example media payloads), OpenClaw falls back to normal final delivery and then cleans up the preview message.
 
+    If the final preview edit fails with an ambiguous error (for example a timeout where the edit may already have landed), WednesdayAI keeps the existing preview, which may be slightly incomplete, rather than sending a duplicate final message.
+
     Preview streaming is separate from block streaming. When block streaming is explicitly enabled for Telegram, OpenClaw skips the preview stream to avoid double-streaming.
 
     If native draft transport is unavailable/rejected, OpenClaw automatically falls back to `sendMessage` + `editMessageText`.
@@ -460,11 +476,18 @@ Privacy boundary:
   </Accordion>
 
   <Accordion title="Native commands and custom commands">
-    Telegram command menu registration is handled at startup with `setMyCommands`.
+    Telegram command menu registration is handled at startup with `setMyCommands`. Recoverable network failures trigger up to two retries, 2 seconds and then 5 seconds apart. If registration still fails, or the error is not recoverable, the gateway logs `Telegram command sync failed` with the error details. A stopped or replaced bot cancels its pending menu sync.
 
     Native command defaults:
 
     - `commands.native: "auto"` enables native commands for Telegram
+
+    Command authorization:
+
+    - In groups, a sender on the DM allowlist (`allowFrom`) or the group allowlist (`groupAllowFrom`, per-group or per-topic `allowFrom`) is authorized for native commands.
+    - If `commands.allowFrom` is configured (global or `telegram` key), it is the only authorization source for commands; channel allowlists no longer decide.
+    - `groupPolicy: "disabled"` still blocks native commands in groups even when `commands.allowFrom` is configured.
+    - A leading command addressed to another bot (for example `/status@otherbot`) is ignored in both message text and media captions.
 
     Add custom command menu entries:
 
@@ -497,7 +520,7 @@ Privacy boundary:
 
     Common setup failure:
 
-    - `setMyCommands failed` usually means outbound DNS/HTTPS to `api.telegram.org` is blocked.
+    - `setMyCommands failed` usually means outbound DNS/HTTPS to `api.telegram.org` is blocked. The log line includes the underlying transport cause (for example `UND_ERR_SOCKET` or `ETIMEDOUT`); bot tokens are redacted.
 
     ### Device pairing commands (`device-pair` plugin)
 
@@ -820,13 +843,16 @@ Privacy boundary:
     If your public endpoint differs, place a reverse proxy in front and point `webhookUrl` at the public URL.
     Set `webhookHost` (for example `0.0.0.0`) when you intentionally need external ingress.
 
+    Requests without a valid `x-telegram-bot-api-secret-token` header are rejected with `403` before the request body is read, and the local listener caps concurrent connections, so unauthenticated clients cannot tie up the gateway with large or slow bodies. Rejected requests are logged with the client IP for audit.
+
   </Accordion>
 
   <Accordion title="Limits, retry, and CLI targets">
     - `channels.telegram.textChunkLimit` default is 4000.
-    - `channels.telegram.chunkMode="newline"` prefers paragraph/block boundaries and packs as many complete paragraphs as fit into each message up to `textChunkLimit`, falling back to length-based splitting only when a single block exceeds the limit. Fenced code blocks and tables are kept intact.
-    - `channels.telegram.chunkNewlinePacking` (default `true`): set to `false` to restore one message per paragraph (the pre-packing behaviour).
+    - `channels.telegram.chunkMode="newline"` prefers paragraph/block boundaries and packs as many complete paragraphs as fit into each message up to `textChunkLimit`, falling back to length-based splitting only when a single block exceeds the limit. Fenced code blocks and tables are kept intact. Use `chunkMode: "paragraph"` for one message per paragraph. `chunkNewlinePacking` is deprecated (`false` ≡ `paragraph`).
+    - If Telegram definitely rejects one chunk of a long reply with HTTP 400, that chunk is logged and skipped while later chunks continue. A missing chat or thread, or any error without a definite chunk-level rejection, stops the remaining reply.
     - `channels.telegram.mediaMaxMb` (default 5) caps inbound Telegram media download/processing size.
+    - Inbound media downloads stop if no new response-body chunk arrives for 30 seconds. This idle timeout is fixed and applies independently to each chunk read.
     - `channels.telegram.timeoutSeconds` controls the Telegram long-poll (`getUpdates`) window. Safe values are 30-50 seconds; unset uses 30 seconds. The bot's HTTP client abort timeout is derived as this value plus 10 seconds (for example, 30s poll window → 40s HTTP abort), ensuring an empty poll that completes at the window boundary is never aborted. Account-level `channels.telegram.accounts.<id>.timeoutSeconds` overrides the channel-level value.
     - group context history uses `channels.telegram.historyLimit` or `messages.groupChat.historyLimit` (default 50); `0` disables.
     - DM history controls:
@@ -868,9 +894,18 @@ openclaw message send --channel telegram --target @name --message "hi"
 
   <Accordion title="Commands work partially or not at all">
 
-    - authorize your sender identity (pairing and/or numeric `allowFrom`)
-    - command authorization still applies even when group policy is `open`
-    - `setMyCommands failed` usually indicates DNS/HTTPS reachability issues to `api.telegram.org`
+    - authorize your sender identity: in DMs, pairing and/or numeric `allowFrom`; in groups, the group allowlist (`groupAllowFrom` or per-group `allowFrom`) or the DM allowlist
+    - command authorization still applies even when group policy is `open`; if `commands.allowFrom` is set, it is the only authorization source
+    - `setMyCommands failed` usually indicates DNS/HTTPS reachability issues to `api.telegram.org`; the transport cause at the end of the log line (`UND_ERR_*`, `ECONNRESET`, `ETIMEDOUT`) identifies the failing network layer
+
+  </Accordion>
+
+  <Accordion title="deleteWebhook failed at startup">
+
+    - Polling accounts call `deleteWebhook` before the first `getUpdates`. Recoverable failures are retried with backoff.
+    - Each recoverable failure logs once as `Telegram webhook cleanup failed for account "<id>": ...; retrying in ...`, including the transport cause when available. A later success logs `[telegram] webhook cleanup for account "<id>" succeeded after N attempts`.
+    - Non-recoverable failures log `telegram deleteWebhook failed: ...` and stop startup for that account.
+    - Failures followed by a success line recovered automatically. If failures persist, read the logged error: transport errors (`UND_ERR_*`, `ECONNRESET`, `ETIMEDOUT`) point to DNS, IPv6, or proxy routing (see the next section); Telegram API errors need action matching the returned status and description.
 
   </Accordion>
 
@@ -888,7 +923,7 @@ channels:
     proxy: socks5://user:pass@proxy-host:1080
 ```
 
-    - Node 22+ defaults to `autoSelectFamily=true` (except WSL2) and `dnsResultOrder=ipv4first`.
+    - Node 22+ defaults to `autoSelectFamily=true` (except WSL2) and `dnsResultOrder=ipv4first`. Without `channels.telegram.proxy`, an eligible network failure on a `get*` call or file download triggers one IPv4-safe retry: WednesdayAI applies `autoSelectFamily=false` + `dnsResultOrder=ipv4first` and logs a `fetch fallback` warning with the cause. If those values are already applied, the retry logs at debug level instead.
     - If your host is WSL2 or explicitly works better with IPv4-only behavior, force family selection:
 
 ```yaml
@@ -940,7 +975,7 @@ Primary reference:
 - `channels.telegram.allowFrom`: DM allowlist (numeric Telegram user IDs). `allowlist` requires at least one sender ID. `open` requires `"*"`. `openclaw doctor --fix` can resolve legacy `@username` entries to IDs and can recover allowlist entries from pairing-store files in allowlist migration flows.
 - `channels.telegram.defaultTo`: default Telegram target used by CLI `--deliver` when no explicit `--reply-to` is provided.
 - `channels.telegram.groupPolicy`: `open | allowlist | disabled` (default: allowlist).
-- `channels.telegram.groupAllowFrom`: group sender allowlist (numeric Telegram user IDs). `openclaw doctor --fix` can resolve legacy `@username` entries to IDs. Non-numeric entries are ignored at auth time. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
+- `channels.telegram.groupAllowFrom`: group sender allowlist (numeric Telegram sender IDs). Positive IDs identify users; negative IDs identify group or channel actors. `openclaw doctor --fix` can resolve legacy `@username` entries to IDs. Non-numeric entries are ignored at auth time. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
 - Multi-account precedence:
   - `channels.telegram.accounts.default.allowFrom` and `channels.telegram.accounts.default.groupAllowFrom` apply only to the `default` account.
   - Named accounts inherit `channels.telegram.allowFrom` and `channels.telegram.groupAllowFrom` when account-level values are unset.
@@ -971,8 +1006,8 @@ Primary reference:
 - `channels.telegram.commands.nativeSkills`: enable/disable Telegram native skills commands.
 - `channels.telegram.replyToMode`: `off | first | all` (default: `off`).
 - `channels.telegram.textChunkLimit`: outbound chunk size (chars).
-- `channels.telegram.chunkMode`: `length` (default) or `newline` to pack paragraph blocks up to `textChunkLimit` per message; oversized blocks fall back to length splitting.
-- `channels.telegram.chunkNewlinePacking`: packing mode for `newline` chunking (default: `true`). Set to `false` to restore one message per paragraph.
+- `channels.telegram.chunkMode`: `length` (default), `newline` (pack paragraphs up to `textChunkLimit`), or `paragraph` (one message per paragraph); oversized blocks fall back to length splitting.
+- `channels.telegram.chunkNewlinePacking`: **deprecated**; prefer `chunkMode: "paragraph"` (`false` ≡ that mode).
 - `channels.telegram.linkPreview`: toggle link previews for outbound messages (default: true).
 - `channels.telegram.streaming`: `off | partial | block | progress` (live stream preview; default: `partial`; `progress` maps to `partial`; `block` is legacy preview mode compatibility). In DMs, `partial` uses native `sendMessageDraft` when available. Per-account configs inherit this value — set it once at the channel level to apply to all bots. To override for a single account, set `channels.telegram.accounts.<id>.streaming`.
 - `channels.telegram.mediaMaxMb`: inbound Telegram media download/processing cap (MB).
@@ -1010,7 +1045,7 @@ Telegram-specific high-signal fields:
 - startup/auth: `enabled`, `botToken`, `tokenFile`, `accounts.*`
 - access control: `dmPolicy`, `allowFrom`, `groupPolicy`, `groupAllowFrom`, `groups`, `groups.*.topics.*`, `direct`
 - delivery target: `defaultTo`
-- command/menu: `commands.native`, `commands.nativeSkills`, `customCommands`
+- command/menu: `commands.native`, `commands.nativeSkills`, `customCommands`, `commands.allowFrom`
 - threading/replies: `replyToMode`
 - streaming: `streaming` (preview), `blockStreaming`
 - formatting/delivery: `textChunkLimit`, `chunkMode`, `linkPreview`, `responsePrefix`
