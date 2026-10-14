@@ -249,10 +249,12 @@ terminates the process, since serving without ownership could admit a second wri
   name the source path and cause in the gateway log — never edit transcripts in place while the
   gateway runs.
 - **`session storage unavailable: ... flagged for SQL reconciliation` (`binding_needs_reconcile`):**
-  a storage write failed mid-batch and the reconciliation read that followed failed too, so the
-  agent's store binding is flagged instead of served. Session reads report this unavailable error
-  rather than an empty session list. Fix the underlying storage failure (connectivity, credentials,
-  permissions, locks); the next locked write reconciles the binding from SQL and clears the flag.
-  This is a retryable unavailability, not data loss: the rows are still in the database.
+  a storage write failed mid-batch and the reconciliation read that followed failed too, leaving
+  the agent's store binding flagged. While that binding's retained snapshot is empty, session
+  reads report this unavailable error instead of serving an empty list; a flagged non-empty
+  snapshot keeps serving its last contents until the next locked write reconciles it from SQL.
+  Fix the underlying storage failure (connectivity, credentials, permissions, locks); the next
+  locked write clears the flag. This is a retryable unavailability, not data loss: the rows are
+  still in the database.
 - **State stays `starting` in `status`:** a large legacy index import runs before publish. Watch
   the log; the 10-second RPC hold answers retryable `storage_starting` meanwhile.
