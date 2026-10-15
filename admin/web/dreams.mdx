@@ -1,30 +1,37 @@
 ---
-summary: "Dreams view in the Control UI: dream and learning pass runs, measurements, cost, budget window, dream state, and lesson health"
+summary: "Dreams screen in the Control UI: dream and learning pass runs, measurements, budget window, dream state, and lesson health"
 read_when:
-  - You want to see what background dream and learning passes did and what they cost
-  - A Dreams panel shows disabled, degraded, or measurement missing
+  - You want to see what background dream and learning passes did and how they measured
+  - A Dreams panel says a method is not enabled, or a measurement badge is unclear
 title: "Dreams view"
 audience: user
 component: web/dreams
 sources:
+  - apps/control/src/views/dreams/DreamsView.tsx
+  - apps/control/src/views/dreams/DreamsRunsPanel.tsx
+  - apps/control/src/views/dreams/DreamsHealthPanel.tsx
+  - apps/control/src/views/dreams/dreams-model.ts
   - ui/src/ui/views/dreams.ts
   - ui/src/ui/controllers/dreams.ts
-  - ui/src/ui/app-polling.ts
   - src/gateway/server-methods/tasks.ts
   - src/gateway/server-methods/tasks-run-events.ts
   - src/gateway/server-dreams-bridge.ts
   - extensions/dream-cycle/src/gateway-methods.ts
   - src/config/defaults.ts
-generated: 2026-09-26
+generated: 2026-10-15
 ---
 
 # Dreams view
 
-The **Dreams** tab in the [Control UI](/web/control-ui) (route `/dreams`, in the agent group
-next to Learning) shows what the background task passes did: recent runs with their measured
-cost and phase timings, the [Dream Cycle](/plugins/dream-cycle) state, and the health of
-[Learning Core](/plugins/learning-core) lessons and skills. It is read-only: every panel needs
-only the `operator.read` scope, and nothing on the tab changes Gateway state.
+The **Dreams** screen in the [Control UI v2](/web/control-ui-v2) console (sidebar group
+**Learning**, path `/dreams`) shows what the background task passes did: recent runs with their
+status and measurement, the budget window, the [Dream Cycle](/plugins/dream-cycle) state, and
+the health of [Learning Core](/plugins/learning-core) lessons and skills. It is read-only:
+nothing on the screen changes Gateway state.
+
+The sidebar lists **Dreams** only when the gateway provides `dream.status` (Dream Cycle is
+loaded). Without it the screen stays out of the sidebar and the command palette, and a direct
+visit to `/dreams` shows "This feature is not enabled on this gateway".
 
 The data comes from the durable task run store through `tasks.status` and `tasks.runEvents`
 (see [Task operations](/gateway/tasks)), from `dream.status`, `dream.weights`, and
@@ -32,111 +39,81 @@ The data comes from the durable task run store through `tasks.status` and `tasks
 
 ## Panels
 
-### Recent task-pass runs
+### Runs
 
-A table of the 50 newest task-pass runs: task, status, start time, duration, a measurement
-label, and model cost. Above it, the **budget window** shows admission units used in the current
-window against the cap, the window length and start, the monthly ceiling, and the number of
-budget denials among the runs in view. These are governor admission units, not model spend.
+A table of the 50 newest task-pass runs: run id, task, status, mode (a **dry-run** chip marks
+dry runs), a measurement badge, and when the run started. Above the table, the budget line
+shows admission units used in the current window against the cap, the window length and scope,
+and the number of budget denials among the runs in view. These are governor admission units,
+not model spend.
 
-The measurement label says what can be shown for a run:
+The measurement badge says what can be shown for a run:
 
-| Label               | Meaning                                                                                                 |
-| ------------------- | ------------------------------------------------------------------------------------------------------- |
-| measured            | The run has a complete `pass.metrics` row.                                                              |
-| measurement missing | The run finished without a complete row (for example a crash, or a pass that ignored its abort signal). |
-| pruned              | The run's events are older than the retention period (30 days) and were deleted.                        |
-| not run (denied)    | A budget gate deferred the run before it started.                                                       |
-| in progress         | The run has not finished.                                                                               |
-| events not loaded   | The `tasks.runEvents` call failed, so there is nothing to show.                                         |
-
-A **dry-run** chip marks dry runs. Cost shows `$` with four decimals, `unpriced` when a model has
-no config entry, and a dash when there is no cost to show.
-
-Select a row to open the **run detail** drawer:
-
-- **Lifecycle:** status, attempts, start and end times, trigger source, preemption count, the
-  preemption reason (lease lost, reclaimed, or shutdown), the budget denial (budget window,
-  monthly ceiling, or restart-loop guard, with scope and usage against cap), a "finalized on
-  lease reclaim" note for a run recovered after a crash, and the last error.
-- **Phase latency:** a waterfall of the run's `pass.phase` rows, each bar placed at its offset
-  and colored by status (ok, error, aborted).
-- **Tokens:** input, output, cache read, cache write, reasoning, and total. When usage was lost
-  mid-run, the tokens known before that are shown instead.
-- **Model cost:** cost in USD (a lower bound when some usage was lost), `costSource`, model
-  calls, calls without usage, elapsed time, quality score, authoring path, and skip reason, plus
-  "stopped early" and "selection truncated" flags when set.
-- **Items:** the pass-specific counters from `pass.metrics.items`.
-
-A dry run says so in the drawer: it made no model calls and no writes, and its counts are a
-preview. A pruned run and a run whose measurement is missing are labeled rather than shown as
-zeros.
+| Badge       | Meaning                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| complete    | The run has a complete `pass.metrics` row.                                                             |
+| unavailable | The run's handler never settled its measurement (for example a timeout).                               |
+| missing     | The run finished without a metrics row (for example a crash, or a pass that ignored its abort signal). |
+| truncated   | The bounded `tasks.runEvents` response dropped this run's rows, so the metrics row is not in view.     |
+| pruned      | The run's events are older than the retention period the gateway reports and were deleted.             |
+| denied      | A budget gate deferred the run before it started.                                                      |
+| in progress | The run has not finished.                                                                              |
+| not loaded  | The run's events could not be loaded, so there is nothing to show.                                     |
 
 ### Dream state
 
-From `dream.status`, `dream.weights`, and `dream.candidates`: whether dreaming is enabled, the
-current stage of the newest active cycle, the crystallisation candidate and queued question
-counts (shown as `≥ n` when the count is a lower bound), a table of active cycles (cycle, stage,
-pending passes, failed stages, created), the configured stages with their last completion, the
-per-agent adaptation weights (success rate, completed and failed totals), and the 20 most recent
-candidates.
+Three cards, each from its own call:
 
-### Lessons and skills health
+- **Dream status** (`dream.status`): whether the cycle is enabled or paused, the queued
+  question and candidate counts (a trailing `+` means the count is a lower bound), each
+  configured stage with its last completion, and the active cycles with their current stage,
+  pending passes and failed stages.
+- **Weights** (`dream.weights`): per-agent adaptation weights - success rate, completed and
+  failed totals, and when each was last updated.
+- **Candidates** (`dream.candidates`): the 50 most recent crystallisation candidates with
+  signature, task, and first-seen time.
 
-- **Counts:** active lessons, pending proposals, and applied proposals from `learning.overview`
-  (shown as `≥ n` when the backend scan was truncated).
-- **Consolidation quality trend:** a sparkline of `qualityScore` over recent consolidation runs.
-  It merges the newest `learning-core.produce` runs whose metrics name consolidation as the
-  producer with standalone `learning-core.consolidation` runs, and skips dry runs. Runs with no
-  measurement (for example a crash-recovered run) cannot be classified and are counted separately.
-- **Preemption share:** consolidation runs preempted (lease, reclaim, or ceiling) out of the
+### Consolidation health
+
+- **Counts:** lesson and proposal counts from `learning.overview`, including pending proposals.
+- **Quality trend:** the `qualityScore` sequence of recent consolidation runs, newest last.
+  Crash-recovered runs without metrics cannot be classified and are counted separately.
+- **Preemptions:** consolidation runs preempted (lease, reclaim, or ceiling) out of the
   consolidation runs in view. Shutdown preemptions are not counted as preempted.
-- **Skill distillation:** the authoring path of the newest normal-mode distill run that recorded
-  one. Dry runs, budget-deferred runs, and pruned runs are skipped.
-- **Open Learning** switches to the [Learning](/plugins/learning-core#reviewing-what-was-learned)
-  tab.
+- **Distill authoring:** the authoring path of the newest completed distill run that recorded
+  one.
 
 ## Availability
 
-Each panel loads on its own, so one missing plugin or failing store never blanks the tab:
-
-- **Disabled:** the method the panel needs is not listed in the Gateway's
-  `hello.features.methods`, which means the plugin that serves it is not loaded (for example
-  Dream Cycle or Learning Core is off). Enable the plugin to fill the panel.
-- **Degraded:** the panel could not load its data. This is often temporary — wait a moment and
-  use **Refresh**. If it keeps failing, the panel shows the error: search the gateway logs for it.
-- **Empty:** the call succeeded with no data, for example no runs yet.
-
-Against an older Gateway that does not advertise its method list, panels try the call and show
-degraded on failure.
+Each panel checks its own gateway method, so one missing plugin never blanks the screen. A
+panel whose method is missing - Dream Cycle or Learning Core is not loaded, for example - shows
+"`<method>` is not enabled on this gateway."; enable the plugin to fill the panel. A failed call
+shows the gateway's error message.
 
 ## Refresh
 
-- The Gateway sends a payload-free `dreams.update` event after a task outcome commits or a dream
-  diagnostic fires. While the tab is visible, the first event refreshes at once and a burst of
-  events is coalesced into one more refresh 1 s after the last event (at most 5 s after the
-  first).
-- While the tab is visible, it also polls every 30 seconds in case an event was dropped.
-- While the tab is hidden (another tab is selected, or the browser tab is in the background),
-  events only mark it dirty. It refreshes once when you come back.
-- **Refresh** reloads every panel on demand. Opening the tab always loads it.
+Every panel reloads itself every 30 seconds while the screen is open. Opening the screen
+always loads fresh data.
 
-## Cost and pricing
+## The classic console's Dreams tab
 
-Model cost is computed by the Gateway from the model entries under `models.providers`, not by
-the UI or the plugins:
+The deprecated classic console (at `/classic`, see [Control UI](/web/control-ui)) shows the
+same data with more per-run detail: selecting a run opens a drawer with its lifecycle
+(attempts, preemption reason, budget denial), a phase-latency waterfall, token usage, and model
+cost in USD. Its cost display follows the gateway's pricing:
 
 - A model declared under `models.providers` **without** a `cost` block defaults to zero cost.
   Its runs show `costSource: priced` and `$0.0000`.
 - Only a model with no config entry shows `unpriced`.
 - Set `cost` (`input`, `output`, `cacheRead`, `cacheWrite`) on a model to see real spend.
 
-The budget window counts governor admission units, never model spend. See
-[Run measurement](/gateway/tasks#run-measurement) for every `costSource` value.
+The v2 screen shows no per-run model cost. The budget window counts governor admission units,
+never model spend. See [Run measurement](/gateway/tasks#run-measurement) for every
+`costSource` value.
 
 ## Related
 
-- [Control UI](/web/control-ui)
+- [Control UI v2](/web/control-ui-v2)
 - [Task operations](/gateway/tasks)
 - [Dream Cycle](/plugins/dream-cycle)
 - [Learning Core](/plugins/learning-core)
