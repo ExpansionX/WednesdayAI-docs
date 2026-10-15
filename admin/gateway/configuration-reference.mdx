@@ -1459,7 +1459,6 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 - `subagents.model`: per-agent default model for spawned sub-agents (overrides `agents.defaults.subagents.model`).
 - `subagents.thinking`: per-agent default thinking level for spawned sub-agents (overrides `agents.defaults.subagents.thinking`).
 - `subagents.completionDelivery`: per-agent delivery mode for top-level sub-agent completions (`"parent"` or `"direct"`; overrides `agents.defaults.subagents.completionDelivery`). See [Completion delivery](/tools/subagents#completion-delivery).
-- `tts`: per-agent override of `messages.tts` (voice, provider, model, `readAloud`, ...), deep-merged over the global config. Applies to read aloud, auto voice replies, `/tts` and the `tts` tool for this agent. A provider pinned with `/tts provider` still wins. See [Per-agent TTS](/tts#per-agent-tts-agentslisttts).
 - `systemPrompt`: per-agent prompt shape override. Merges over `agents.defaults.systemPrompt` by section key. When `projectContext.files` is set, that list replaces the default entirely (not merged). See [`agents.defaults.systemPrompt`](#agentsdefaultssystemprompt) for the full field reference.
 - Sandbox inheritance guard: if the requester session is sandboxed, `sessions_spawn` rejects targets that would run unsandboxed.
 
@@ -1836,7 +1835,6 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
       maxTextLength: 4000,
       timeoutMs: 30000,
       prefsPath: "~/.openclaw/settings/tts.json",
-      readAloud: { enabled: true }, // gate for chat clients' Read aloud button
       elevenlabs: {
         apiKey: "elevenlabs_api_key",
         baseUrl: "https://api.elevenlabs.io",
@@ -1866,13 +1864,6 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
 - `auto` controls auto-TTS. `/tts off|always|inbound|tagged` overrides per session.
 - `summaryModel` overrides `agents.defaults.model.primary` for auto-summary.
 - `modelOverrides` is enabled by default; `modelOverrides.allowProvider` defaults to `false` (opt-in).
-- `readAloud.enabled`: gate for chat clients reading replies aloud on demand through the
-  `tts.speak` gateway RPC (default `true`). Turn it off to stop on-demand synthesis spend; auto-TTS
-  and `/tts` are unaffected. Overridden per agent by `agents.list[].tts.readAloud.enabled`. See
-  [Read aloud for chat clients](/tts#read-aloud-for-chat-clients).
-- Per-agent override: an agent's `agents.list[].tts` block (same fields as `messages.tts`) merges
-  over the global config, so voice, provider, model and the read-aloud gate can differ per agent.
-  See [Per-agent TTS](/tts#per-agent-tts-agentslisttts).
 - API keys fall back to `ELEVENLABS_API_KEY`/`XI_API_KEY` and `OPENAI_API_KEY`.
 
 ---
@@ -1905,12 +1896,13 @@ Defaults for Talk mode (macOS/iOS/Android).
 
 ### `talk.conversation`
 
-Settings for the cascaded `stt-tts` voice conversation loop behind the `/v2/client` web client's
-Dictate and Voice mode controls. See
+Settings for the voice conversation behind the `/v2/client` web client's Dictate and Voice mode
+controls. `engine` selects how Voice runs: the cascaded `stt-tts` loop or the session-bound
+`realtime` speech-to-speech engine. See
 [Cascaded voice conversation sessions](/talk/realtime-voice-conversation) for the full behavior;
-text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block only
-configures the STT seam, turn-taking thresholds, session limits, and filler/acknowledgement
-phrases.
+cascaded text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block
+configures the STT seam, the engine choice, turn-taking thresholds, session limits, and
+filler/acknowledgement phrases.
 
 ```json5
 {
@@ -1931,26 +1923,28 @@ phrases.
       ackPhrases: { en: ["Working on that.", "Looking that up.", "On it."] },
       maxSessionMinutes: 30,
       maxTurnSeconds: 60,
+      engine: "stt-tts",
     },
   },
 }
 ```
 
-| Field                 | Default                | Meaning                                                                                                                         |
-| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every `stt-tts`/streaming-`transcription` session while this is `false`.             |
-| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                    |
-| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                   |
-| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                             |
-| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.           |
-| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                              |
-| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.              |
-| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                         |
-| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                             |
-| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                |
-| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`. |
-| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. Closes with `session.closed { reason: "session-minutes-exceeded" }`.                             |
-| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.            |
+| Field                 | Default                | Meaning                                                                                                                                                                                                                                   |
+| --------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every voice session (`stt-tts`, streaming-`transcription`, `realtime`) while this is `false`.                                                                                                  |
+| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                                                                                                                              |
+| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                                                                                                                             |
+| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                                                                                                                                       |
+| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.                                                                                                                     |
+| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                                                                                                                                        |
+| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.                                                                                                                        |
+| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                                                                                                                                   |
+| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                                                                                                                                       |
+| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                                                                                                                          |
+| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`.                                                                                                           |
+| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. A cascaded `stt-tts` session closes with `session.closed { reason: "session-minutes-exceeded" }`; the `realtime` engine uses the value as the relay session TTL and closes as a normal close when reached. |
+| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.                                                                                                                      |
+| `engine`              | `"stt-tts"`            | Voice mode engine. `"realtime"` runs speech-to-speech through the active talk realtime provider, bound to the chat session.                                                                                                               |
 
 Numeric fields (`endOfTurnSilenceMs`, `recallDeadlineMs`, `fillerAfterMs`, `falseInterruptionMs`, `maxSessionMinutes`, `maxTurnSeconds`) must be positive integers. `0`, negatives, and non-integers fail config validation.
 
