@@ -196,9 +196,11 @@ read or write groups later are refused until they are allowlisted.
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
   `sessions.resolve`, `sessions.subscribe`, `chat.history`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
-  `tasks.runs.events`, `talk.catalog`. `talk.catalog` joined the list with ADR 0086 (cascaded
-  voice admission) so a narrow client can render Dictate/Voice as available or disabled; it
-  reports provider/gate state only, never a secret.
+  `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
+  ADR 0086 (cascaded voice admission) so a narrow client can render Dictate/Voice as available or
+  disabled; it reports provider/gate state only, never a secret. `tts.readAloud.status` joined with
+  ADR 0102 (read aloud): it reports the read-aloud gate and `maxTextLength` for the requested agent,
+  never a secret.
 - `operator.sessions.write`: `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
@@ -212,8 +214,10 @@ read or write groups later are refused until they are allowlisted.
   table: `mode: "stt-tts"` is refused `UNAVAILABLE` (`voice conversation disabled`) for every
   caller while the gate is off, and a narrow connection is refused the same way for
   `mode: "transcription"` too. An operator-scope `transcription` create is not gated. Request
-  and event shapes are under [Talk sessions](#talk-sessions). `talk.realtime.*`, `talk.config`
-  and `talk.mode` stay operator-only.
+  and event shapes are under [Talk sessions](#talk-sessions). `tts.speak` joined with ADR 0102
+  (read aloud) so a narrow client can read replies aloud on demand; shapes and errors are under
+  [TTS read aloud](#tts-read-aloud). `talk.realtime.*`, `talk.config`
+  and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
 `sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
 scope it needs.
@@ -1204,6 +1208,54 @@ plugin enabled they export as `openclaw.talk.turn.end_of_turn_ms`, `pre_model_ms
 `barge_in_stop_ms` histograms, plus counters `openclaw.talk.turn.false_interruption`,
 `confirmed_interruption`, and `interruption_candidate`.
 
+## TTS read aloud
+
+Two RPCs back the web client Read aloud control (ADR 0102). Both resolve the TTS config for
+`agentId` when given, otherwise for the default agent; an unknown `agentId` silently falls back to
+the global `messages.tts` config. Both are narrow-admitted (above), and neither is rate limited:
+`maxTextLength` caps every call and chunked playback issues several calls back to back. TTS config
+changes need a gateway restart.
+
+### `tts.speak`
+
+`operator.write`; admitted to a narrow `operator.sessions.write`.
+
+Params (all required except `agentId`; `additionalProperties: false`):
+
+| Field     | Type                 | Required |
+| --------- | -------------------- | -------- |
+| `text`    | string, min length 1 | yes      |
+| `agentId` | string, min length 1 | no       |
+
+Result: `{audioBase64, mimeType, provider, outputFormat}` — one clip of inline base64 audio,
+synthesized with the agent's resolved TTS config. The clip is capped at 16 MiB raw bytes (about
+21.3 MiB as base64) to stay inside the 25 MiB WS frame cap.
+
+Errors:
+
+- `INVALID_REQUEST` `tts.speak requires text` — `text` is empty once trimmed.
+- `UNAVAILABLE` `read aloud is disabled for this assistant` with
+  `details.reason = "read_aloud_disabled"` — the `messages.tts.readAloud.enabled` gate (default
+  true, per-agent overridable) is off. No synthesis runs.
+- `INVALID_REQUEST` `tts.speak text too long (N chars, max M)` with
+  `details.reason = "text_too_long"` and `details.maxTextLength` — `text` exceeds the resolved
+  `maxTextLength` (default 4096).
+- `UNAVAILABLE` with the provider error, absolute filesystem paths stripped — synthesis failed.
+- `UNAVAILABLE` `unsupported audio format "<ext>"` with
+  `details.reason = "unsupported_audio_format"` — the provider emitted an extension outside the
+  mime map (`mp3`, `opus`, `ogg`, `webm`, `wav`).
+- `UNAVAILABLE` `synthesized audio too large to return inline (N bytes, max M)` with
+  `details.reason = "audio_too_large"` — the clip exceeds the 16 MiB inline cap.
+
+### `tts.readAloud.status`
+
+`operator.read`; admitted to a narrow `operator.sessions.read`.
+
+Params: `{agentId?}` (string, min length 1; `additionalProperties: false`). Result:
+`{enabled, maxTextLength}` with `maxTextLength` an integer of at least 1. `enabled` is true only
+when the read-aloud gate is on **and** at least one provider in the resolved provider order is
+configured; it reports gate state only, never a secret. A handler failure is `UNAVAILABLE`.
+
 ## Exec approvals
 
 - When an exec request needs approval, the gateway broadcasts `exec.approval.requested`.
@@ -1212,12 +1264,18 @@ plugin enabled they export as `openclaw.talk.turn.end_of_turn_ms`, `pre_model_ms
 
 ## Versioning
 
-- `PROTOCOL_VERSION` lives in `src/gateway/protocol/schema.ts`.
+- `PROTOCOL_VERSION` lives in `src/gateway/protocol/schema/protocol-schemas.ts` and is exported
+  from `src/gateway/protocol/schema.ts`.
 - Clients send `minProtocol` + `maxProtocol`; the server rejects mismatches.
-- Schemas + models are generated from TypeBox definitions:
-  - `pnpm protocol:gen`
-  - `pnpm protocol:gen:swift`
-  - `pnpm protocol:check`
+- Core generates the JSON Schema snapshot from the TypeBox definitions and commits it at
+  `src/gateway/protocol/gateway-protocol.schema.json` (`pnpm protocol:check` guards it); the
+  schema root carries `x-protocol-version` and `x-error-codes`, and reused definitions carry
+  `x-schema-name`. The npm tarball ships it at `dist/contracts/gateway-protocol.schema.json`,
+  with the exec and system-run parity fixtures under `dist/contracts/fixtures/` for the native
+  clients' parity tests.
+- Swift models are generated in the
+  [WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository from the synced
+  snapshot (`npm run contracts:sync`).
 
 ## Auth
 

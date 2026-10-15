@@ -124,8 +124,7 @@ The contract:
   provider.
 - The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `phase` for
   the one client-roadmap phase left (`dev-docs/workstreams/client-chat-v3/strategy/`; P4 widgets
-  and Canvas — the P3 phases were retired when dictation and voice mode went live and read aloud
-  moved to a `reason` citation). Use `finding` for controls that wait on a tracked finding rather
+  and Canvas — the P3 phases were retired when dictation, voice mode and read aloud went live). Use `finding` for controls that wait on a tracked finding rather
   than a phase: Calendar, Memory and Add extension cite `"F1, GitHub #634"`, and the P2 retags (message
   feedback, message regenerate, account-menu settings, account-menu keyboard shortcuts, composer
   search) each cite their own finding (`"F-2026-09-29-1x, GitHub #69x"`, ADR 0085 M9); the
@@ -133,7 +132,8 @@ The contract:
   finding it cites. Use `reason` for capability-driven unavailability that is not roadmap work:
   the `reason` text is rendered verbatim after the label, so it names why this connection cannot
   use the control — Dictate and Voice mode pass `"unavailable on this gateway"` when `talk.catalog`
-  does not offer them, Read aloud passes `"not available yet (GitHub #869)"`, and the account
+  does not offer them, Read aloud passes the same reason strings when the gateway gate is off or
+  the client is offline ([Read aloud](#read-aloud)), and the account
   menu's notifications toggle passes `"Not supported in this browser"` where there is no
   `Notification` constructor.
 - Give it a `testId`. The brand e2e asserts that each disabled control has `aria-disabled="true"`,
@@ -304,6 +304,7 @@ provider module per concern, each testable without a gateway connection.
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                                                                             |
 | Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`                                    | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
 | Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `app/use-voice.ts`                                        | `talk.catalog`, `talk.session.*` mode `stt-tts`                                                            |
+| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`            | `tts.readAloud.status`, `tts.speak`                                                                        |
 | Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                    | none                                                                                                       |
 
 ### Completed history boundary and transcript controls
@@ -616,6 +617,54 @@ for a transcript that can no longer arrive.
 
 Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
 
+## Read aloud
+
+The Read aloud action on assistant messages speaks that reply through the gateway TTS config
+(ADR 0102, wire shapes in [TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
+owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
+`ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, phase, error, toggle}`
+value. `AssistantMessage` takes it as `readAloud` plus `readAloudKey` (a stable key per message,
+`String(message.id ?? message.entryId ?? idx:<index>)` from `Thread`).
+
+`unavailableReason` is first match wins: `unavailable while offline` when disconnected,
+`unavailable during Voice mode`, `unavailable on this gateway` when the status reports
+`enabled: false`. A failed status read gates the control off instead of guessing the feature is
+live, and only a status for the current agent counts. When the player reports a
+`read_aloud_disabled` refusal, the hook bumps its status revision so the gate re-reads instead of
+staying stale. Playback stops when the session changes, Voice mode engages, or the connection
+drops.
+
+`providers/read-aloud-text.ts` turns the reply into speech chunks:
+
+- `messageMarkdownForSpeech` prefers the message transcript's `text` blocks over the streamed
+  content.
+- `extractSpeakableUnits` parses the markdown with remark (GFM) and keeps one unit per paragraph,
+  heading and list item, recursing into blockquotes, while dropping code blocks, inline and block
+  html, tables, rules and metadata nodes. Unpunctuated units get a trailing period so the voice
+  pauses at the unit end.
+- `packSpeechChunks` joins units with blank lines under the gateway's `maxTextLength`, splitting an
+  oversized unit on sentence boundaries (`Intl.Segmenter`), then on whitespace. Every chunk is
+  1..max characters and no non-whitespace text is lost.
+
+`providers/read-aloud-player.ts` is the framework-free playback engine. `start` runs synchronously
+inside the click handler — it creates and resumes the shared `AudioContext` there, which unlocks
+Safari/iOS playback from the user gesture — then fetches chunk 0 and prefetches the next chunk
+while the current one plays, with at most one `tts.speak` request in flight. A generation counter
+makes `stop()`, or starting another message, retire in-flight work silently: a late synth promise
+never surfaces audio or errors. `describeReadAloudError` maps a `read_aloud_disabled` refusal to
+`Read aloud is turned off for this assistant.`, any other gateway error to
+`Couldn't read aloud: <message>`, and a `decodeAudioData` failure to
+`Couldn't play the audio in this browser.`
+
+Markup contract:
+
+- The live button carries `data-testid="message-read-aloud"`, `aria-label` and `title`
+  `Read aloud` / `Stop reading` while active, `aria-pressed`, `aria-busy` while loading, and
+  `data-read-aloud-phase` set to `loading` or `playing` while this message reads, `idle`
+  otherwise.
+- The actions row gets `data-reading="true"` while this message reads or shows an error.
+- An error renders a `role="status"` span with `data-testid="message-read-aloud-error"`.
+
 ## Busy state, unread badges and reply notifications
 
 Three layers, kept separate: the runs projection says which chats have a run in flight, the store
@@ -722,11 +771,12 @@ sources of truth are `NARROW_SESSION_READ_METHODS` and `NARROW_SESSION_WRITE_MET
 `src/gateway/server-broadcast.ts`).
 
 - Methods: reads such as `agents.list`, `sessions.list`, `chat.history`, `sessions.runs.*`,
-  `tasks.runs.*`, and `talk.catalog`; writes `chat.send`, `chat.abort`, `sessions.create`,
-  `sessions.steer`, `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`,
-  `sessions.patch`, `sessions.title.prepare` (ADR 0083), and `talk.session.create`,
-  `talk.session.appendAudio`, `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
-  and `talk.session.bargeIn` (ADR 0086). `sessions.patch` is field-guarded even for this narrow
+  `tasks.runs.*`, `talk.catalog`, and `tts.readAloud.status`; writes `chat.send`, `chat.abort`,
+  `sessions.create`, `sessions.steer`, `sessions.abort`, `sessions.runs.cancel`,
+  `sessions.runs.continue`, `sessions.patch`, `sessions.title.prepare` (ADR 0083),
+  `talk.session.create`, `talk.session.appendAudio`, `talk.session.close`,
+  `talk.session.cancelTurn`, `talk.session.mark`, `talk.session.bargeIn` (ADR 0086), and
+  `tts.speak` (ADR 0102). `sessions.patch` is field-guarded even for this narrow
   client: only `label`, `model`, `thinkingLevel` and `reasoningLevel` are admitted
   (`NARROW_SESSION_PATCH_FIELDS`); every other field still needs `operator.admin` and is refused
   with `missing scope: operator.admin`, the same shape as a fully unlisted method. The patch
