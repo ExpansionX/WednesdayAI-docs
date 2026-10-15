@@ -4,6 +4,7 @@ read_when:
   - Enabling text-to-speech for replies
   - Configuring TTS providers or limits
   - Using /tts commands
+  - Turning the web client's Read aloud button on or off
 title: "Text-to-Speech"
 ---
 
@@ -254,6 +255,57 @@ Then run:
 - `edge.proxy`: proxy URL for Edge TTS requests.
 - `edge.timeoutMs`: request timeout override (ms).
 - `voiceNoteLoop`: voice note conversation loop mode (`"disabled"` | `"enabled"` | `"both"`). Telegram and WhatsApp only. Default `"disabled"`.
+- `readAloud.enabled`: allow chat clients to read replies aloud on demand through the `tts.speak` gateway RPC (web client's **Read aloud** action). Default `true`. Turn off to stop on-demand synthesis spend; auto-TTS and `/tts` are unaffected.
+
+### Per-agent TTS (`agents.list[].tts`)
+
+Any agent entry can carry a `tts` block with the same fields as `messages.tts`
+(voice, provider, model, `readAloud`, ...). It is deep-merged **over** the
+global config, so a per-agent block only needs the fields that differ:
+
+```json5
+{
+  agents: {
+    list: [{ id: "ops", tts: { provider: "elevenlabs", elevenlabs: { voiceId: "voice_id" } } }],
+  },
+}
+```
+
+Per-agent TTS applies to read aloud, auto voice replies, `/tts` commands, and
+the `tts` tool for that agent. A provider pinned with `/tts provider` (stored in
+the prefs file) still wins over any configured provider.
+
+For Discord voice playback there is one more layer: the resolution order is
+`messages.tts` → the route agent's `agents.list[].tts` → `channels.discord.voice.tts`,
+so `voice.tts` still wins for voice channels.
+
+## Read aloud for chat clients
+
+The web client's **Read aloud** button reads an assistant reply aloud on demand. The client sends
+the reply text to the `tts.speak` gateway RPC, which synthesizes it with the merged TTS config
+above and returns inline audio; `tts.readAloud.status` tells the client whether the button is
+available and what the text limit is. Both RPCs are admitted to the web client's narrow
+`operator.sessions.read`/`operator.sessions.write` scopes (see ADR 0102).
+
+What decides whether the button is available:
+
+- The gate: `messages.tts.readAloud.enabled` (default `true`), with the per-agent override
+  `agents.list[].tts.readAloud.enabled`. Turning the gate off stops on-demand synthesis spend;
+  auto-TTS, `/tts` and the `tts` tool are unaffected.
+- A configured provider. Edge TTS counts when enabled, so the default config works with no API
+  key. Edge needs `node-edge-tts` 1.2.11 or newer (older versions get HTTP 403 from the Edge
+  endpoint).
+
+Behavior and limits:
+
+- The client skips code blocks, tables and raw HTML when it decides what to speak, packs the rest
+  into chunks of at most `maxTextLength` (default 4096) characters, and plays the chunks in
+  sequence, so a long reply still plays in full.
+- Text longer than `maxTextLength` is refused with `text_too_long`; a synthesized clip larger than
+  16 MiB is refused with `audio_too_large`.
+- There is no rate limit; the gate and `maxTextLength` are the controls.
+- TTS config is read when the gateway starts. Restart the gateway after changing any
+  `messages.tts` or `agents.list[].tts` value.
 
 ## Model-driven overrides (default on)
 
@@ -419,8 +471,20 @@ Gateway methods:
 - `tts.convert`
 - `tts.setProvider`
 - `tts.providers`
+- `tts.speak` (on-demand read aloud, inline audio)
+- `tts.readAloud.status` (whether read aloud is available)
 
 ## Troubleshooting
+
+**The web client's Read aloud button is unavailable or fails**
+
+Check, in order: `messages.tts.readAloud.enabled` is `true` (or that agent's
+`agents.list[].tts.readAloud.enabled` does not override it to `false`); a provider is configured
+(Edge TTS with `messages.tts.edge.enabled` at its `true` default counts); and `node-edge-tts` is
+1.2.11 or newer, since older versions get HTTP 403 from the Edge endpoint. Turning read aloud off
+does not affect auto-TTS, `/tts` or the `tts` tool. A request whose text exceeds
+`messages.tts.maxTextLength` fails with `text_too_long`, and a clip larger than 16 MiB fails with
+`audio_too_large`. Config changes need a gateway restart.
 
 **TTS is enabled but no audio is sent — only text arrives**
 Check that `messages.tts.auto` is set to `"always"`, `"inbound"`, or `"tagged"` (not `"off"`). The `/tts status` command shows the active mode for the current session. Also confirm at least one provider is available: ElevenLabs or OpenAI API key in config or env vars, or Edge TTS enabled (`messages.tts.edge.enabled` defaults to `true`). Replies shorter than 10 characters and replies that already contain media are always sent as text.
