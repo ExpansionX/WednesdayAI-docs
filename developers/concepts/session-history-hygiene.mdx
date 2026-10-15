@@ -50,15 +50,18 @@ Every row written to `ctx_session_entries` gains four new columns that record wh
 | `sender_display` | TEXT    | Human-readable sender name — from the `__openclaw.ingress` carrier when present, else best-effort from message text       |
 | `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake) — from the carrier when present, else best-effort |
 
-`trigger_source` is derived from the session key format (`storage-normalize.ts:deriveTriggerSource`):
+`trigger_source` comes from the run's explicit provenance when the writer passes one (a cron or heartbeat agent-turn stamps every row of the run; a human `chat.send` into an existing cron or heartbeat session key is stamped `user`), and a user row's own `__openclaw.ingress` carrier trigger decides first — a `cron`/`heartbeat` carrier (a system turn steered into another run) keeps that trigger, a human `steer` carrier stays `user`. Otherwise it is derived from the session key format (`storage-normalize.ts:deriveTriggerSource`):
 
-| Pattern                                  | Example key                      | `trigger_source` |
-| ---------------------------------------- | -------------------------------- | ---------------- |
-| Key suffix `:heartbeat`                  | `telegram:direct:abc:heartbeat`  | `'heartbeat'`    |
-| Key prefix `cron:`                       | `cron:my-daily-job`              | `'cron'`         |
-| Key segment `:subagent:` (UUID-suffixed) | `agent:main:subagent:f47ac10b-…` | `'subagent'`     |
-| Key segment `:acp:` (UUID-suffixed)      | `agent:main:acp:f47ac10b-…`      | `'acp'`          |
-| All other keys                           | `telegram:direct:abc123`         | `'user'`         |
+| Pattern                                                                                | Example key                      | `trigger_source`          |
+| -------------------------------------------------------------------------------------- | -------------------------------- | ------------------------- |
+| Explicit system run (cron/nudge/work/announce agent-turns stamp `heartbeat`/`cron`)    | `agent:main:main`                | `'heartbeat'` or `'cron'` |
+| Key suffix `:heartbeat`                                                                | `telegram:direct:abc:heartbeat`  | `'heartbeat'`             |
+| Isolated cron key (`cron:` prefix or `agent:<id>:cron:<uuid>`, incl. `:run:` variants) | `agent:main:cron:1c70aabc`       | `'cron'`                  |
+| Key segment `:subagent:` (UUID-suffixed)                                               | `agent:main:subagent:f47ac10b-…` | `'subagent'`              |
+| Key segment `:acp:` (UUID-suffixed)                                                    | `agent:main:acp:f47ac10b-…`      | `'acp'`                   |
+| All other keys                                                                         | `telegram:direct:abc123`         | `'user'`                  |
+
+Cron keys are matched structurally (`isCronTriggerSessionKey` in `src/sessions/session-key-utils.ts`), so a direct peer id that merely contains `:cron:` (for example `agent:main:direct:a:cron:b`) stays `'user'`.
 
 A partial index `idx_ctx_session_entries_trigger_source` on `ctx_session_entries(trigger_source) WHERE trigger_source IS NOT NULL` supports efficient filtering by provenance.
 

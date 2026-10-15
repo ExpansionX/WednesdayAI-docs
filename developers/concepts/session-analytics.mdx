@@ -34,14 +34,14 @@ The ctx storage layer (both SQLite and Postgres backends) ships four analytics s
 
 `ctx_session_entries` records four turn-provenance columns that identify who or what triggered each entry. These are populated at write time by `normalizeSessionEntryForStorage()` and are used to filter automated turns from recall and analytics queries.
 
-| Column           | Type    | Meaning                                                                                                                   |
-| ---------------- | ------- | ------------------------------------------------------------------------------------------------------------------------- |
-| `trigger_source` | TEXT    | `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, or `'acp'` — derived from session key format                             |
-| `is_automated`   | BOOLEAN | `1` when `trigger_source != 'user'`; `NULL` for legacy rows                                                               |
-| `sender_display` | TEXT    | Human-readable sender name — from the `__openclaw.ingress` carrier when present, else best-effort from message text       |
-| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake) — from the carrier when present, else best-effort |
+| Column           | Type    | Meaning                                                                                                                       |
+| ---------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `trigger_source` | TEXT    | `'user'`, `'heartbeat'`, `'cron'`, `'subagent'`, or `'acp'` — from the run's explicit provenance, else the session key format |
+| `is_automated`   | BOOLEAN | `1` when `trigger_source != 'user'`; `NULL` for legacy rows                                                                   |
+| `sender_display` | TEXT    | Human-readable sender name — from the `__openclaw.ingress` carrier when present, else best-effort from message text           |
+| `sender_id_raw`  | TEXT    | Raw provider-level sender id (e.g. Telegram user id, Discord snowflake) — from the carrier when present, else best-effort     |
 
-Derivation rules (see `storage-normalize.ts:deriveTriggerSource`): `:heartbeat` key suffix → `'heartbeat'`; `cron:` key prefix → `'cron'`; `:subagent:` segment (UUID-appended) → `'subagent'`; `:acp:` segment (UUID-appended) → `'acp'`; all other keys → `'user'`.
+Derivation rules (see `storage-normalize.ts:deriveTriggerSource`): the writer passes the run's explicit provenance, and a user row's own `__openclaw.ingress` carrier trigger decides first — a `cron`/`heartbeat` carrier (including a system turn steered into another run) persists as that trigger, a human `steer` carrier stays `'user'`. Inside a system run every row takes the run's `cron`/`heartbeat` provenance, synthesized queue and memory prompts included, except a human message steered into it. Without an explicit value, session-key derivation applies: `:heartbeat` key suffix → `'heartbeat'`; an isolated cron key (`cron:<jobId>` or `agent:<id>:cron:<uuid>`, matched by `isCronTriggerSessionKey` so a direct peer id that merely contains `:cron:` stays `'user'`) → `'cron'`; `:subagent:` segment (UUID-appended) → `'subagent'`; `:acp:` segment (UUID-appended) → `'acp'`; all other keys → `'user'`. An explicit human run (a `chat.send` into an existing cron or heartbeat session key) stays `'user'`.
 
 On carrier-bearing user rows the sender columns come only from the structured `__openclaw.ingress` carrier (`trusted.senderId`, `untrusted.sender`) — never parsed out of the message text, so a sender label typed into the message body cannot set them. Legacy rows fall back to parsing the `Sender (untrusted metadata)` text block.
 
@@ -137,7 +137,7 @@ ORDER BY in_tok DESC;
 
 **`turn_idx` semantics:** `turn_idx` is the 1-based count of human-initiated `role='user' AND entry_type='message'` entries over all session history. Automated turns (heartbeat, cron, subagent, acp) are **excluded from the count** — `getUserTurnCount()` applies the same `trigger_source = 'user' OR IS NULL` filter so automated `upsertTurn` calls do not inflate `turn_idx` or create phantom rows. On sessions that predate the ctx-storage-phase3 schema, earlier turns have no `ctx_turns` row (ADR 0019: forward-only population, no backfill). Queries across mixed-era sessions must account for gaps.
 
-### Example queries
+### Example queries (turns)
 
 ```sql
 -- SQLite: average tokens per turn for the last 30 days
@@ -172,7 +172,7 @@ LIMIT 20;
 
 Tool-call blocks are recognised by `type` value: `toolCall` (primary), `toolUse` (alternative), `functionCall` (OpenAI), or `tool_use` (raw Anthropic API — stored verbatim by `primary-write-interceptor`).
 
-### Example queries
+### Example queries (tool calls)
 
 ```sql
 -- SQLite: count bash tool calls this month
