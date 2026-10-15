@@ -4,9 +4,17 @@ component: exec-tools
 sources:
   - src/config/types.tools.ts
   - src/infra/exec-approvals.ts
+  - src/infra/exec-policy-presets.ts
+  - src/infra/exec-effective-policy.ts
+  - src/infra/exec-policy-types.ts
+  - src/infra/exec-policy-evaluate.ts
+  - src/infra/exec-audit.ts
+  - src/infra/approval-replay-binding.ts
+  - src/infra/load-policies-for-request.ts
+  - src/gateway/node-invoke-system-run-approval.ts
   - src/config/types.approvals.ts
   - src/config/types.agent-defaults.ts
-generated: 2026-06-28
+generated: 2026-08-20
 ---
 
 # Exec Tool — Administrator Guide
@@ -35,7 +43,7 @@ Approvals live in a local JSON file on the execution host:
 
 **Location:** `~/.openclaw/exec-approvals.json`
 
-Full schema:
+### v1 schema (legacy on-disk format, still accepted)
 
 ```json
 {
@@ -70,7 +78,89 @@ Full schema:
 }
 ```
 
+### v2 schema (canonical execution model)
+
+The v2 schema is the in-memory shape produced by `loadExecApprovalsV2` after migrating a v1 file.
+It is a **super-set** of v1 — the `socket`, `defaults`, and per-agent `agents` fields are preserved
+so the gateway's legacy enforcement surfaces (IPC token, security/ask defaults, per-agent
+allowlists) continue to work alongside the new policy engine. The on-disk file is NOT
+auto-overwritten; you can author a v2 file directly if you prefer:
+
+```json
+{
+  "version": 2,
+  "policies": [
+    {
+      "id": "allow-pnpm-test",
+      "effect": "allow",
+      "source": "user",
+      "namespace": "exec.argv",
+      "match": {
+        "executableName": "pnpm",
+        "argvPattern": "test",
+        "matchAnyTrailingArgs": true
+      }
+    },
+    {
+      "id": "deny-rm-rf",
+      "effect": "deny",
+      "source": "managed",
+      "namespace": "exec.argv",
+      "match": { "executableName": "rm" }
+    }
+  ],
+  "approvals": [
+    {
+      "id": "approval-uuid",
+      "requestHash": "sha256-hex-of-canonical-request",
+      "scope": { "agentId": "main", "sessionKey": "sess-1" },
+      "boundAt": 1737150000000
+    }
+  ],
+  "socket": { "path": "~/.openclaw/exec-approvals.sock", "token": "base64url-token" },
+  "defaults": { "security": "allowlist", "ask": "on-miss" },
+  "agents": { "main": { "allowlist": [{ "pattern": "/opt/homebrew/bin/rg" }] } }
+}
+```
+
+**Migration behaviour:** v1 is read into v2 in memory on every load. The `policies` array is
+compiled from v1 `agents.<id>.allowlist` entries (`pattern` → `executableName: basename(pattern)`
+when the pattern ends in a leaf executable; glob patterns are preserved). The `approvals` array is
+empty until the gateway binds an approval to a canonical request at runtime.
+
 **Runtime hot-reload:** the gateway watches this file and applies changes without restart.
+
+## Canonical execution model (policy engine)
+
+The exec tool's host-execution path now runs through a **canonical execution model** policy engine.
+The engine is **opt-in**: when zero policies are loaded (the default), the pipeline is a no-op and
+the request is allowed (the pre-policy-engine behaviour is preserved). Deny-first enforcement only
+activates when at least one `CompiledExecutionPolicy` is present in the v2 `policies` array.
+
+**Deny-first + source precedence:** when multiple policies match the same request, the evaluator
+sorts by effect precedence (deny > ask > allow) then by source precedence
+(managed > project > user > session > approval). A single `deny` policy beats any number of `allow`
+policies, regardless of source.
+
+**Non-interactive ask:** when a policy yields `ask` and no UI is reachable, the request falls back
+to `askFallback` (default `deny`) — the same behaviour as the v1 security/ask knobs, but now driven
+by the policy engine when policies are loaded.
+
+**PATH re-resolution (B17):** when a request carries an `envDelta` that mutates `PATH`, the gateway
+re-resolves the executable against the sanitized env and re-runs the policy pipeline on the
+re-resolved request. This closes a path-hijack vector where a mutated `PATH` could point to a
+malicious shadowed binary after the policy check passed.
+
+**Audit trail (S8):** every policy-evaluation outcome emits a structured audit record via the
+`infra/exec-audit` subsystem logger. Secret-looking values (`sk-*`, `Bearer *`,
+`Authorization: Bearer *` spans) are redacted before the record is written. Early-deny sites
+(RPC command-id gate, approval-replay binding, PATH re-eval) do not emit audit today — this is a
+known-open gap tracked in the plan-fidelity review.
+
+**Approval-replay binding (anti-tamper):** when an operator approves a request, the gateway binds
+the approval to a SHA-256 of the canonical request's authoritative fields (display text excluded
+per ADR 0029). Replaying the approval later compares the presented hash to the stored hash using a
+timing-safe comparison — a tampered canonical request (e.g. swapped executable path) is rejected.
 
 ## Policy knobs
 
@@ -93,6 +183,10 @@ When a prompt is required but no UI is reachable:
 - **`deny`** (default) — block.
 - **`allowlist`** — allow only if allowlist matches.
 - **`full`** — allow.
+
+### `preset`
+
+`tools.exec.preset` (global or per-agent) selects a named baseline: `readonly` (read-only diagnostics pack), `minimal` (stdin-safe bins only), `coding` (readonly plus dev tooling), `full` (no restrictions). Explicit `security` / `ask` / `safeBins` fields override the preset; a per-agent preset overrides the global one. The preset allowlist pack is unioned with the agent's `exec-approvals.json` allowlist at evaluation time and is **never written** to that file; `minSecurity` flooring against the approvals file still applies. Unknown preset ids are ignored with a logged warning. Full contents: [Exec policy presets](/tools/exec-approvals#exec-policy-presets).
 
 ### `autoAllowSkills`
 
@@ -192,12 +286,14 @@ Reply in chat:
 
 ## Security posture recommendations
 
-| Use case                             | Recommended posture                                                          |
-| ------------------------------------ | ---------------------------------------------------------------------------- |
-| Personal assistant, trusted operator | `security: "full"`, `ask: "off"` (or keep `ask: "on-miss"` for a safety net) |
-| Shared/family agents                 | `security: "allowlist"`, explicit allowlist patterns per agent               |
-| Public-facing agents                 | `security: "deny"` or deny `exec` via tool policy                            |
-| Mixed fleet                          | Per-agent overrides in `exec-approvals.json`                                 |
+| Use case                             | Recommended posture                                                                                                                                                                                                                                                                                                                      |
+| ------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Personal assistant, trusted operator | `preset: "coding"` (or `security: "full"`, `ask: "off"` if you accept it). Warning: node, python3, npm, and pnpm execute arbitrary code with no argument constraints — the coding preset is equivalent to full code-execution capability for the agent; grant it only to agents that would otherwise warrant tools.exec security "full". |
+| Shared/family agents                 | `security: "deny"` or an isolated sandbox; `preset: "readonly"` only where host-file reads (via `cat` and friends) are acceptable                                                                                                                                                                                                        |
+| Non-technical / advisory agents      | `security: "deny"` or an isolated sandbox; `preset: "readonly"` only where host-file reads (via `cat` and friends) are acceptable                                                                                                                                                                                                        |
+| Developer / research agents          | `preset: "coding"`. Warning: node, python3, npm, and pnpm execute arbitrary code with no argument constraints — the coding preset is equivalent to full code-execution capability for the agent; grant it only to agents that would otherwise warrant tools.exec security "full".                                                        |
+| Public-facing agents                 | `security: "deny"` or deny `exec` via tool policy                                                                                                                                                                                                                                                                                        |
+| Mixed fleet                          | Per-agent `tools.exec.preset` in `openclaw.json`; approvals and allowlists remain in `exec-approvals.json`                                                                                                                                                                                                                               |
 
 - Prefer **allowlists** over `security: "full"` when possible.
 - Per-agent allowlists prevent one agent's approvals from leaking into others.
@@ -263,6 +359,7 @@ When approvals are required, the exec tool returns immediately with an approval 
 | `tools.exec.host`                     | `sandbox`                                        | Where exec runs                                        |
 | `tools.exec.security`                 | `deny` (`allowlist` for gateway/node when unset) | Enforcement mode                                       |
 | `tools.exec.ask`                      | `on-miss`                                        | Approval prompt mode                                   |
+| `tools.exec.preset`                   | unset                                            | Named baseline: readonly / minimal / coding / full     |
 | `tools.exec.node`                     | unset                                            | Default node binding for `host=node`                   |
 | `tools.exec.pathPrepend`              | `[]`                                             | Dirs prepended to PATH (gateway + sandbox)             |
 | `tools.exec.safeBins`                 | `["jq","cut","uniq","head","tail","tr","wc"]`    | Stdin-only auto-trusted binaries                       |
@@ -282,7 +379,9 @@ When approvals are required, the exec tool returns immediately with an approval 
 
 ## Control UI
 
-**Control UI → Nodes → Exec approvals** — edit defaults, per-agent overrides, and allowlists. Pick a scope (Defaults or an agent), tweak policy, add/remove allowlist patterns, then **Save**. Shows last-used metadata per pattern.
+**Control UI v2 → Configure → Agents → Tools** — per-agent exec policy preset picker (Inherit / Readonly / Minimal / Coding / Full), an effective-policy line (preset, ask, capability), and a warning banner when the exec tool is enabled but the effective policy can run nothing.
+
+**Control UI v2 → Fleet → Nodes & devices → Exec approvals** — edit defaults, per-agent overrides, and allowlists. Pick a scope (Defaults or an agent), tweak policy, add/remove allowlist patterns, then **Save**. Shows last-used metadata per pattern. (The deprecated classic console has both under **Agents → Tool Access** and **Nodes → Exec approvals**.)
 
 Target selector: **Gateway** (local approvals) or a **Node**. If a node does not advertise exec approvals yet, edit its local `~/.openclaw/exec-approvals.json` directly.
 
