@@ -352,17 +352,24 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 - OpenClaw gateway is local/loopback first. If you terminate TLS at a reverse proxy, set HSTS on the proxy-facing HTTPS domain there.
 - If the gateway itself terminates HTTPS, you can set `gateway.http.securityHeaders.strictTransportSecurity` to emit the HSTS header from OpenClaw responses.
 - Detailed deployment guidance is in [Trusted Proxy Auth](/gateway/trusted-proxy-auth#tls-termination-and-hsts).
-- For non-loopback Control UI deployments, `gateway.controlUi.allowedOrigins` is required by default.
+- For non-loopback Control UI deployments, `gateway.controlUi.allowedOrigins` is required by default. This covers both consoles: a gateway with only `gateway.controlUiV2.enabled` is held to the same requirement and refused at startup without it.
 - `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true` enables Host-header origin fallback mode; treat it as a dangerous operator-selected policy.
 - Treat DNS rebinding and proxy-host header behavior as deployment hardening concerns; keep `trustedProxies` tight and avoid exposing the gateway directly to the public internet.
 
-## Local session logs live on disk
+## Local session history is private data
 
-OpenClaw stores session transcripts on disk under `~/.openclaw/agents/<agentId>/sessions/*.jsonl`.
-This is required for session continuity and (optionally) session memory indexing, but it also means
-**any process/user with filesystem access can read those logs**. Treat disk access as the trust
-boundary and lock down permissions on `~/.openclaw` (see the audit section below). If you need
-stronger isolation between agents, run them under separate OS users or separate hosts.
+WednesdayAI stores sessions and conversation history in SQLite by default:
+`~/.openclaw/sessions.db` and its `sessions.db-wal` / `sessions.db-shm` sidecars.
+A custom `session.storage.sqlitePath` changes that location; Postgres deployments store history
+in the configured database instead. SQLite backups under `backups/`, legacy import sources under
+`agents/<agentId>/sessions/`, and copies under `legacy-session-archive/` can contain the same
+private messages and tool output.
+
+**Any process/user with filesystem access can read these files.** Treat disk access as the trust
+boundary: directories should be `0700`, database/sidecar/backup/archive files `0600`. Protect
+custom paths and database credentials too. For stronger isolation between agents, use separate
+OS users or hosts. Use `openclaw session-storage backup` for a consistent online SQLite copy;
+copying only the live `.db` file can miss committed data still in its WAL.
 
 ## Node execution (system.run)
 
@@ -795,7 +802,10 @@ Assume anything under `~/.openclaw/` (or `$OPENCLAW_STATE_DIR/`) may contain sec
 - `agents/<agentId>/agent/auth-profiles.json`: API keys, token profiles, OAuth tokens, and optional `keyRef`/`tokenRef`.
 - `secrets.json` (optional): file-backed secret payload used by `file` SecretRef providers (`secrets.providers`).
 - `agents/<agentId>/agent/auth.json`: legacy compatibility file. Static `api_key` entries are scrubbed when discovered.
-- `agents/<agentId>/sessions/**`: session transcripts (`*.jsonl`) + routing metadata (`sessions.json`) that can contain private messages and tool output.
+- `sessions.db`, `sessions.db-wal`, `sessions.db-shm`: session metadata, private messages, and raw tool output (or the corresponding files at `session.storage.sqlitePath`).
+- `backups/**`: SQLite snapshots containing session history.
+- `legacy-session-archive/**`: imported legacy copies and archive-only history; some sources are retained indefinitely.
+- `agents/<agentId>/sessions/**` and legacy `sessions/**`: old `sessions.json` / `*.jsonl` import sources, not the live store.
 - `extensions/**`: installed plugins (plus their `node_modules/`).
 - `sandboxes/**`: tool sandbox workspaces; can accumulate copies of files you read/write inside the sandbox.
 
@@ -817,7 +827,7 @@ Recommendations:
 - Keep tool summary redaction on (`logging.redactSensitive: "tools"`; default).
 - Add custom patterns for your environment via `logging.redactPatterns` (tokens, hostnames, internal URLs).
 - When sharing diagnostics, prefer `openclaw status --all` (pasteable, secrets redacted) over raw logs.
-- Prune old session transcripts and log files if you don’t need long retention.
+- Rotate log files if you don’t need long retention; session conversation history is never deleted automatically (`session.maintenance` only retires session index entries).
 
 Details: [Logging](/gateway/logging)
 
@@ -1108,7 +1118,7 @@ If your AI does something bad:
 ### Audit
 
 1. Check Gateway logs: `/tmp/openclaw/openclaw-YYYY-MM-DD.log` (or `logging.file`).
-2. Review the relevant transcript(s): `~/.openclaw/agents/<agentId>/sessions/*.jsonl`.
+2. Review the relevant session history through `chat.history` or `sessions.export`. Preserve a consistent database backup, including any evidence in `backups/` and `legacy-session-archive/`; do not assume the old `agents/<agentId>/sessions/*.jsonl` paths hold current history.
 3. Review recent config changes (anything that could have widened access: `gateway.bind`, `gateway.auth`, dm/group policies, `tools.elevated`, plugin changes).
 4. Re-run `openclaw security audit --deep` and confirm critical findings are resolved.
 

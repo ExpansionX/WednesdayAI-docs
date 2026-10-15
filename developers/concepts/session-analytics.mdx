@@ -197,7 +197,7 @@ LIMIT 10;
 
 WednesdayAI uses a [FTS5 external-content virtual table](https://www.sqlite.org/fts5.html) backed by `ctx_session_entries`. The `ctx_fts` table indexes `content_text` (the plain-text content extracted from each entry). `content_text` is a derived, length-capped search field, not a transcript: it is extracted at write time from the stored message text with injected-context patterns stripped and truncated at 4000 characters. On carrier-bearing user rows the indexed text is the raw message as received.
 
-**Guardrail (ADR 0020):** all FTS queries **must** include a `session_id` equality filter. A global `ctx_fts MATCH ?` without scoping to a session returns results across all sessions and will produce stale entries for sessions that have been pruned (the FTS shadow table lags behind `pruneSessionsBefore` on very large prunes). Scope all reads:
+**Guardrail (ADR 0020):** all FTS queries **must** include a `session_id` equality filter. A global `ctx_fts MATCH ?` without scoping to a session returns results across all sessions and can surface stale entries when the FTS shadow table lags behind bulk maintenance. Scope all reads:
 
 ```sql
 -- Correct: session_id-scoped FTS query
@@ -238,6 +238,6 @@ For operators with large deployments:
 - `ctx_fts` (SQLite FTS5 shadow table): proportional to `content_text` length across all entries. Typically 5–20% of the main `ctx_session_entries` table size.
 - Economics columns: 6 integer/text columns added to the existing wide `ctx_session_entries` rows — minimal overhead.
 
-`pruneSessionsBefore` deletes rows from `ctx_tool_calls` and `ctx_turns` for sessions whose entries are pruned, so these tables do not grow unboundedly.
+Core never deletes conversation rows (ADR 0098): `ctx_tool_calls` and `ctx_turns` rows persist for the life of the session, including sessions whose index entry has been retired.
 
 _Related: [Session Pruning](/concepts/session-pruning) · [Session History Hygiene](/concepts/session-history-hygiene) · [Gateway Configuration](/gateway/configuration) · [Context](/concepts/context)_

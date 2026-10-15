@@ -240,6 +240,13 @@ Common signatures:
 - `Gateway start blocked: set gateway.mode=local` → local gateway mode is not enabled. Fix: set `gateway.mode="local"` in your config (or run `openclaw configure`). If you are running OpenClaw via Podman using the dedicated `openclaw` user, the config lives at `~openclaw/.openclaw/openclaw.json`.
 - `refusing to bind gateway ... without auth` → non-loopback bind without token/password.
 - `another gateway instance is already listening` / `EADDRINUSE` → port conflict.
+- `Gateway failed to start: ...` → the gateway process exited during startup. The fatal line
+  prints the full error cause chain (nested `cause`s walked to the root, redacted), so the
+  underlying reason is in the message — for example
+  `Gateway failed to start: ... configured session storage startup failed ... connect ECONNREFUSED 127.0.0.1:5432`
+  when the configured Postgres is unreachable. Fix the named cause and let the service supervisor
+  restart the gateway. Storage start causes are covered in
+  [Session storage recovery](/gateway/session-storage-recovery).
 
 Related:
 
@@ -414,8 +421,8 @@ Look for:
   gateway adds any missing session tables and columns automatically on boot, so a gateway restart
   repairs drift without manual SQL. That schema pass waits at most 5 seconds for Postgres locks on
   existing tables: a long-running or idle-in-transaction session (stuck client, backup, manual
-  `psql`) fails the start (fatal with the default `fallbackToJsonlOnError: false`), so resolve the
-  blocker (`pg_stat_activity`, `pg_locks`) and start the gateway again.
+  `psql`) fails storage startup and the gateway exits with the cause. Resolve the
+  blocker (`pg_stat_activity`, `pg_locks`) and start the gateway again; there is no file fallback.
 
 If warnings appeared before an upgrade and stopped after a restart, schema drift is one possible
 cause — the restarted gateway converged it. The same warning also fires for generic store

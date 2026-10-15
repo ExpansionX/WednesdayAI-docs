@@ -97,9 +97,11 @@ All session state is **owned by the gateway**. UI clients (macOS app, WebChat, e
 
 ## Maintenance
 
-WednesdayAI applies session maintenance to bound the session index over time. Conversation history
-is **append-only and kept forever by default**: only enforce-mode retention deletes, and it deletes
-whole sessions — never individual entries.
+WednesdayAI applies session maintenance to bound the **session index** over time. Conversation
+history is append-only and **never deleted**: maintenance (`warn`/`enforce`, `pruneAfter`,
+`maxEntries`) only retires idle or over-cap sessions from the session index (tombstones, based on
+the index entry's last update); the conversation rows stay and remain readable. There is no
+automatic space reclamation (ADR 0098, `dev-docs/adr/0098-conversation-history-is-never-deleted.md`).
 
 ### Defaults
 
@@ -114,46 +116,40 @@ that still set them are migrated automatically on load (see
 
 ### How it works
 
-Retention runs in two distinct places:
+Maintenance only ever touches the session index, and never at startup: gateway activation runs
+only the startup backfill chains (user ids, token counts, usage columns) — no index retirement,
+even in `enforce` mode. Index upkeep happens when the index is written:
 
-- **Startup (gateway only).** With `mode: "enforce"`, whole-session conversation retention runs
-  before the gateway serves: sessions whose **newest** entry is older than `pruneAfter` are deleted
-  whole — a session with one recent entry keeps all of its history, including its oldest entries.
-  With the default `mode: "warn"`, startup deletes nothing and logs one line when any session would
-  qualify, for example `session retention: 3 sessions older than 30d would be pruned
-(maintenance.mode=warn)`. `maxEntries` is **not** applied at startup.
 - **Index upkeep on writes.** Ordinary session-index writes (and `openclaw sessions cleanup`)
   maintain the index record itself: in `enforce` mode they drop index rows whose `updatedAt` is
   older than `pruneAfter` and cap the index at `maxEntries` rows (a tombstone per dropped row);
-  in `warn` mode they only warn when the active session would be evicted. Because capping rides on
-  writes, restarting with a lower `maxEntries` applies it on the next index write (or manual
-  cleanup), not at startup.
+  the session being written is never dropped. In `warn` mode they only warn when the active
+  session would be evicted. Because capping rides on writes, restarting with a lower
+  `maxEntries` applies it on the next index write (or manual cleanup), not at startup.
 
-Deletion is session-granular and re-checked inside the deleting transaction: a session that
-receives a new entry while retention runs is not deleted. Reset (`/new`, `/reset`) and
-`sessions.delete` remove only the index row (a tombstone); the conversation rows stay until
-enforce-mode retention ends the session. Consumer claims (see
-[Session Consumer Claims](/gateway/session-consumer-claims)) can hold a session back from pruning.
+Retirement is index-granular: a session that receives a new entry gets a fresh `updatedAt`, so it
+no longer qualifies when maintenance runs. Reset (`/new`, `/reset`) and `sessions.delete` also
+only tombstone the index row; the conversation rows stay and remain readable (ADR 0098).
 
 ### Performance caveat for large stores
 
-Large stores are common in high-volume setups. Retention work is batched database work, so very
-large stores can lengthen gateway startup when `mode: "enforce"` is set.
+Large stores are common in high-volume setups. Retirement rides on index writes, so the first
+write after switching `mode: "enforce"` on pays the whole batch: on a very large store that write
+can take a while.
 
 What increases cost most:
 
-- long `pruneAfter` windows that keep many sessions eligible
+- long `pruneAfter` windows that keep many index entries eligible for retirement
 - very high `session.maintenance.maxEntries` values
-- deleting whole sessions with very long histories
 
 What to do:
 
-- start in `mode: "warn"`, read the startup line, then switch to `"enforce"` once the thresholds
-  look right
+- start in `mode: "warn"`, then switch to `"enforce"` once the thresholds look right
 - set both time and count limits (`pruneAfter` + `maxEntries`), not just one
 - run `openclaw sessions cleanup --dry-run --json` after config changes to verify projected impact
   before enforcing
-- for frequent active sessions, pass `--active-key` when running manual cleanup
+- to check whether a busy session would be evicted, pass `--active-key <key>` to a warn-mode
+  `openclaw sessions cleanup` and read the warning
 
 ### Customize examples
 
@@ -252,8 +248,9 @@ holder sidecar; Postgres: `pg_try_advisory_lock` plus a `ctx_storage_owner` row)
 
 Conversation entries are append-only: no code path updates or deletes stored content. Compaction
 appends a compaction entry and keeps the pre-compaction entries. Derived views (tool-output
-trimming, history limits, thinking stripping) are computed per request and never persisted. Only
-enforce-mode retention deletes, and only whole sessions (see [Maintenance](#maintenance)).
+trimming, history limits, thinking stripping) are computed per request and never persisted.
+Maintenance never deletes conversation rows — it only retires session index entries (see
+[Maintenance](#maintenance)).
 
 ### Sub-agent and announce output
 
@@ -267,7 +264,8 @@ operator step**. The first gateway start after upgrading:
 
 1. Auto-migrates retired config keys on load (`session.storage.backend: "fs-jsonl"`,
    `session.storage.mode`, `session.storage.fallbackToJsonlOnError`, obsolete
-   `session.storage.recovery.*` and file-only `session.maintenance.*` keys, learning-core
+   `session.storage.recovery.*` and file-only `session.maintenance.*` keys, prune-only
+   `session.storage.consumerClaims.progressWindowMs` and `maxRetentionBackstopMs`, learning-core
    `fs-jsonl` backend) and logs each change.
 2. Takes storage ownership and, before the gateway publishes storage, imports every agent's
    `sessions.json` index. Database rows and tombstones always win: a legacy index entry never
@@ -420,9 +418,10 @@ never auto-purged; the archive stays a safety copy either way.
 
 ### Data retention after upgrade
 
-History imported from JSONL follows the same rules as native history: append-only, kept forever by
-default, and deletable only by enforce-mode retention (`session.maintenance.mode: "enforce"` plus
-`pruneAfter`/`maxEntries`), which removes whole idle sessions. Set `"enforce"` only after
+History imported from JSONL follows the same rules as native history: append-only and never
+deleted. `session.maintenance` (`session.maintenance.mode: "enforce"` plus
+`pruneAfter`/`maxEntries`) only retires idle or over-cap sessions from the session index
+(tombstones); the conversation rows stay readable. Set `"enforce"` only after
 previewing with `openclaw sessions cleanup --dry-run`.
 
 ## Session pruning
@@ -467,8 +466,8 @@ the workspace is writable. See [Memory](/concepts/memory) and
 - Per-channel overrides (optional): `resetByChannel` overrides the reset policy for a channel (applies to all session types for that channel and takes precedence over `reset`/`resetByType`).
 - Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. `/new <model>` accepts a model alias, `provider/model`, or provider name (fuzzy match) to set the new session model. If `/new` or `/reset` is sent alone, WednesdayAI runs a short “hello” greeting turn to confirm the reset.
 - Manual reset: delete specific keys from the store; the next message recreates them. The deleted
-  session's conversation rows stay in the database until enforce-mode retention ends the session
-  (see [Maintenance](#maintenance)).
+  session's conversation rows stay in the database forever — maintenance only retires index
+  entries and never deletes conversation rows (see [Maintenance](#maintenance)).
 - Isolated cron assistant-task jobs always mint a fresh `sessionId` per run (no idle reuse).
   Main-session cron jobs enqueue an `agent.turn` (`kind` cron) on the existing main session,
   except that main-session jobs with `payload.kind === "wakeGate"` route through `requestNudge`
@@ -561,7 +560,10 @@ Runtime override (owner only):
 The daily reset uses the gateway host's local time (default 4:00 AM). If the gateway host is in a different timezone than expected, the reset fires at the wrong wall-clock time. Adjust `session.reset.atHour` to match your preferred local time, or set the gateway host's timezone. Also verify the gateway restarted after the config change.
 
 **Session database grows very large**
-By default history is kept forever. Set `session.maintenance.mode: "enforce"` with both `pruneAfter` and `maxEntries` so whole idle sessions are removed on gateway start and manual cleanup. Running in `"warn"` mode only logs what would be pruned. Use `openclaw sessions cleanup --dry-run --json` to preview the impact before enforcing. To reclaim file size after mass pruning, stop the gateway and run `sqlite3 <state-dir>/sessions.db 'VACUUM'`.
+By default history is kept forever and is never deleted automatically — there is no automatic
+space reclamation. `session.maintenance` (`warn`/`enforce`, `pruneAfter`, `maxEntries`) only
+retires idle or over-cap sessions from the session index (tombstones); the conversation rows stay.
+Use `openclaw sessions cleanup --dry-run --json` to preview which index entries would be retired.
 
 ## Related
 

@@ -1,7 +1,7 @@
 ---
-summary: "Deep dive: session store + transcripts, lifecycle, and (auto)compaction internals"
+summary: "Deep dive: SQL session index and append-only history, lifecycle, and compaction internals"
 read_when:
-  - You need to debug session ids, transcript JSONL, or sessions.json fields
+  - You need to debug session ids, SQL conversation entries, or session metadata
   - You are changing auto-compaction behavior or adding “pre-compaction” housekeeping
   - You want to implement memory flushes or silent system turns
 title: "Session Management Deep Dive"
@@ -9,11 +9,11 @@ title: "Session Management Deep Dive"
 
 # Session Management & Compaction (Deep Dive)
 
-This document explains how OpenClaw manages sessions end-to-end:
+This document explains how WednesdayAI manages sessions end-to-end:
 
 - **Session routing** (how inbound messages map to a `sessionKey`)
-- **Session store** (`sessions.json`) and what it tracks
-- **Transcript persistence** (`*.jsonl`) and its structure
+- **Session index** (SQL) and what it tracks
+- **Conversation persistence** (append-only SQL entries) and its structure
 - **Transcript hygiene** (provider-specific fixups before runs)
 - **Context limits** (context window vs tracked tokens)
 - **Compaction** (manual + auto-compaction) and where to hook pre-compaction work
@@ -30,60 +30,63 @@ If you want a higher-level overview first, start with:
 
 ## Source of truth: the Gateway
 
-OpenClaw is designed around a single **Gateway process** that owns session state.
+WednesdayAI is designed around a single **Gateway process** that owns session state.
 
 - UIs (macOS app, web Control UI, TUI) should query the Gateway for session lists and token counts.
-- In remote mode, session files are on the remote host; “checking your local Mac files” won’t reflect what the Gateway is using.
+- CLI storage commands use gateway RPC while it runs; without a gateway, the CLI takes storage ownership for the command. In remote mode, local files do not reflect the gateway's database.
 
 ---
 
 ## Two persistence layers
 
-OpenClaw persists sessions in two layers:
+Both layers live in the same SQL database (SQLite by default, Postgres optional):
 
-1. **Session store (`sessions.json`)**
-   - Key/value map: `sessionKey -> SessionEntry`
-   - Small, mutable, safe to edit (or delete entries)
-   - Tracks session metadata (current session id, last activity, toggles, token counters, etc.)
+1. **Session index (`ctx_sessions`)**
+   - Maps an agent's `sessionKey` to the current `SessionEntry`.
+   - Tracks the current session id, activity, toggles, and token counters.
+   - Reset/delete use new session identities or tombstones, not transcript-file operations.
 
-2. **Transcript (`<sessionId>.jsonl`)**
-   - Append-only transcript with tree structure (entries have `id` + `parentId`)
-   - Stores the actual conversation + tool calls + compaction summaries
-   - Used to rebuild the model context for future turns
+2. **Conversation log (`ctx_session_entries`)**
+   - Append-only entries with `id` + `parentId` tree structure.
+   - Stores the conversation, full tool output, custom entries, and compaction summaries.
+   - Hydration rebuilds the active model context from these rows.
+
+Compaction events and context projections have their own indexed tables. Plugins use
+`getConversationReadQuery` from `wednesdayai/plugin-sdk`, including `listCompactions` and
+`loadLatestProjection`, rather than opening database or transcript files.
 
 ---
 
 ## On-disk locations
 
-Per agent, on the Gateway host:
+On the gateway host:
 
-- Store: `~/.openclaw/agents/<agentId>/sessions/sessions.json`
-- Transcripts: `~/.openclaw/agents/<agentId>/sessions/<sessionId>.jsonl`
-  - Telegram topic sessions: `.../<sessionId>-topic-<threadId>.jsonl`
+- Default SQLite database: `~/.openclaw/sessions.db`, with `-wal` / `-shm` sidecars.
+- Override: `session.storage.sqlitePath`; Postgres uses `session.storage.databaseUrl`.
+- Online SQLite snapshots: `~/.openclaw/backups/` via `openclaw session-storage backup`.
+- Legacy `agents/<agentId>/sessions/sessions.json` and `*.jsonl` are import sources only.
+  Imported sources move to `~/.openclaw/legacy-session-archive/`.
 
-OpenClaw resolves these via `src/config/sessions.ts`.
+See [Upgrading from JSON session files](/concepts/session#upgrading-from-json-session-files)
+for automatic import, archive retention, and safe rollback.
 
 ---
 
 ## Store maintenance and disk controls
 
-Session persistence has automatic maintenance controls (`session.maintenance`) for `sessions.json` and transcript artifacts:
+`session.maintenance` controls the SQL session index:
 
-- `mode`: `warn` (default) or `enforce`
-- `pruneAfter`: stale-entry age cutoff (default `30d`)
-- `maxEntries`: cap entries in `sessions.json` (default `500`)
-- `rotateBytes`: rotate `sessions.json` when oversized (default `10mb`)
-- `resetArchiveRetention`: retention for `*.reset.<timestamp>` transcript archives (default: same as `pruneAfter`; `false` disables cleanup)
-- `maxDiskBytes`: optional sessions-directory budget
-- `highWaterBytes`: optional target after cleanup (default `80%` of `maxDiskBytes`)
+- `mode`: `warn` (default) reports eligible index entries without retiring them; `enforce` enables index cleanup.
+- `pruneAfter`: index-entry age cutoff (default `30d`).
+- `maxEntries`: cap on the current session index (default `500`), not a transcript entry limit.
 
-Enforcement order for disk budget cleanup (`mode: "enforce"`):
+Conversation history is never deleted: `session.maintenance` only retires idle or over-cap sessions
+from the session index (tombstones, based on the index entry's last update), and the conversation
+rows stay readable. Compaction, tool trimming, and reset/delete do not erase stored conversation
+entries.
 
-1. Remove oldest archived or orphan transcript artifacts first.
-2. If still above the target, evict oldest session entries and their transcript files.
-3. Keep going until usage is at or below `highWaterBytes`.
-
-In `mode: "warn"`, OpenClaw reports potential evictions but does not mutate the store/files.
+The old file rotation and disk-budget settings are retired. Archive-only and rejected-line legacy
+sources are kept indefinitely; only fully imported copies with zero rejected lines can be purged.
 
 Run maintenance on demand:
 
@@ -96,9 +99,9 @@ openclaw sessions cleanup --enforce
 
 ## Cron sessions and run logs
 
-Isolated cron runs also create session entries/transcripts, and they have dedicated retention controls:
+Isolated cron runs also create SQL sessions:
 
-- `cron.sessionRetention` (default `24h`) prunes old isolated cron run sessions from the session store (`false` disables).
+- `cron.sessionRetention` (default `24h`) tombstones old isolated cron session index rows (`false` disables). Conversation entries are never deleted and stay readable.
 - `cron.runLog.maxBytes` + `cron.runLog.keepLines` prune `~/.openclaw/cron/runs/<jobId>.jsonl` files (defaults: `2_000_000` bytes and `2000` lines).
 
 ---
@@ -121,7 +124,7 @@ The canonical rules are documented at [/concepts/session](/concepts/session).
 
 ## Session ids (`sessionId`)
 
-Each `sessionKey` points at a current `sessionId` (the transcript file that continues the conversation).
+Each `sessionKey` points at a current `sessionId` (the database identity that continues the conversation).
 
 Rules of thumb:
 
@@ -134,17 +137,20 @@ Implementation detail: the decision happens in `initSessionState()` in `src/auto
 
 ---
 
-## Session store schema (`sessions.json`)
+## Session index schema
 
 The store’s value type is `SessionEntry` in `src/config/sessions.ts`.
 
 Key fields (not exhaustive):
 
-- `sessionId`: current transcript id (filename is derived from this unless `sessionFile` is set)
+- `sessionId`: current conversation id
 - `updatedAt`: last activity timestamp
-- `sessionFile`: optional explicit transcript path override
+- `lastReplyAt`: last assistant reply activity timestamp, also exposed by `openclaw sessions --json`
+- `sessionFile`: deprecated legacy path hint; not a live transcript path
 - `chatType`: `direct | group | room` (helps UIs and send policy)
 - `provider`, `subject`, `room`, `space`, `displayName`: metadata for group/channel labeling
+- `groupActivation`: group activation mode (`mention` | `always`) for group sessions; also
+  exposed by `openclaw sessions --json` alongside `providerOverride` / `modelOverride`
 - Toggles:
   - `thinkingLevel`, `verboseLevel`, `reasoningLevel`, `elevatedLevel`
   - `sendPolicy` (per-session override)
@@ -156,18 +162,16 @@ Key fields (not exhaustive):
 - `memoryFlushAt`: timestamp for the last pre-compaction memory flush
 - `memoryFlushCompactionCount`: compaction count when the last flush ran
 
-The store is safe to edit, but the Gateway is the authority: it may rewrite or rehydrate entries as sessions run.
+Update metadata through gateway APIs or owner-routed CLI commands, not direct database edits.
 
 ---
 
-## Transcript structure (`*.jsonl`)
+## Conversation entry structure
 
-Transcripts are managed by `@mariozechner/pi-coding-agent`’s `SessionManager`.
-
-The file is JSONL:
-
-- First line: session header (`type: "session"`, includes `id`, `cwd`, `timestamp`, optional `parentSession`)
-- Then: session entries with `id` + `parentId` (tree)
+The gateway hydrates an in-memory `SessionManager` from SQL and persists appended entries through
+the database write interceptor. Entries retain their `id` + `parentId` ancestry, including
+branches. Live derived event timestamps are monotonic even if the wall clock moves backwards;
+raw source timestamps are unchanged.
 
 Notable entry types:
 
@@ -177,7 +181,9 @@ Notable entry types:
 - `compaction`: persisted compaction summary with `firstKeptEntryId` and `tokensBefore`
 - `branch_summary`: persisted summary when navigating a tree branch
 
-OpenClaw intentionally does **not** “fix up” transcripts; the Gateway uses `SessionManager` to read/write them.
+Provider-specific fixups and tool-output trimming are request projections, never rewrites of
+stored rows. JSONL remains an export/import format: `sessions.export` synthesizes a session
+header and pages complete entries; it does not restore file-backed serving.
 
 ---
 
@@ -186,7 +192,7 @@ OpenClaw intentionally does **not** “fix up” transcripts; the Gateway uses `
 Two different concepts matter:
 
 1. **Model context window**: hard cap per model (tokens visible to the model)
-2. **Session store counters**: rolling stats written into `sessions.json` (used for /status and dashboards)
+2. **Session index counters**: rolling stats stored in SQL (used for /status and dashboards)
 
 If you’re tuning limits:
 
@@ -206,7 +212,10 @@ After compaction, future turns see:
 - The compaction summary
 - Messages after `firstKeptEntryId`
 
-Compaction is **persistent** (unlike session pruning). See [/concepts/session-pruning](/concepts/session-pruning).
+Compaction is **persistent** (unlike request-only session pruning): it appends a summary and a
+compaction event while retaining every earlier raw entry. `sessions.compact` runs model
+compaction; its deprecated `maxLines` parameter is ignored with a warning. See
+[/concepts/session-pruning](/concepts/session-pruning).
 
 ---
 
@@ -303,7 +312,7 @@ Config (`agents.defaults.compaction.memoryFlush`):
 Notes:
 
 - The default prompt/system prompt include a `NO_REPLY` hint to suppress delivery.
-- The flush runs once per compaction cycle (tracked in `sessions.json`).
+- The flush runs once per compaction cycle (tracked in SQL session metadata).
 - The flush runs only for embedded Pi sessions (CLI backends skip it).
 - The flush is skipped when the session workspace is read-only (`workspaceAccess: "ro"` or `"none"`).
 - See [Memory](/concepts/memory) for the workspace file layout and write patterns.
@@ -316,7 +325,7 @@ flush logic lives on the Gateway side today.
 ## Troubleshooting checklist
 
 - Session key wrong? Start with [/concepts/session](/concepts/session) and confirm the `sessionKey` in `/status`.
-- Store vs transcript mismatch? Confirm the Gateway host and the store path from `openclaw status`.
+- Missing history? Confirm the gateway host and storage/import status with `openclaw session-storage status`.
 - Compaction spam? Check:
   - model context window (too small)
   - compaction settings (`reserveTokens` too high for the model window can cause earlier compaction)

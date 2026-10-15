@@ -4,13 +4,15 @@ component: session-identity-keying
 sources:
   - dev-docs/adr/0081-config-independent-actor-identity.md
   - dev-docs/adr/0012-plugin-storage-read-access-boundary.md
+  - dev-docs/adr/0099-plugins-own-their-tables.md
   - src/config/sessions/storage-runtime.ts
   - src/config/sessions/read-query.ts
   - src/routing/session-key.ts
   - src/routing/resolve-route.ts
   - src/plugins/types.ts
   - src/plugin-sdk/index.ts
-generated: 2026-10-04
+  - scripts/check-extension-core-table-access.ts
+generated: 2026-10-15
 ---
 
 # Session Identity for Extension-Owned Storage
@@ -177,6 +179,33 @@ through the same clamp (same default and max).
 Both queries return `{ sessions: [] }` when the configured runtime has no lossless conversation
 log (`capabilities.losslessConversationLog === false`) — check for an empty result, not an
 exception, when degrading gracefully on that backend.
+
+## Own your tables; core tables are off-limits
+
+Store extension data in your own namespace, never in core session tables (ADR 0099,
+`dev-docs/adr/0099-plugins-own-their-tables.md`). Core owns every table its schema modules
+create: the `ctx_*` conversation tables plus the session-run, consumer-claim, task-run,
+task-budget, cron and verification tables. Your extension must not read, write, ALTER, index,
+attach triggers to, or otherwise reference any of them, in production code, tests or
+migrations. Columns a plugin adds to a core table are unsupported: any core migration or
+restore can drop them.
+
+Create and migrate your own tables instead:
+
+- Postgres: a dedicated schema named `plugin_<id>`, for example `plugin_learning_core`.
+- SQLite: tables prefixed `plugin_<id>_`.
+
+Read conversation data through the plugin-sdk, never through the database:
+`getConversationReadQuery` (above) for history reads, and the `storage.afterAppend` hook for
+write-side events projected into your own tables.
+
+`pnpm lint:extensions:no-core-tables` (part of `pnpm check`) enforces the rule for bundled
+extensions. `scripts/check-extension-core-table-access.ts` derives the core table set from the
+same schema builders storage init composes, so new core tables are covered automatically, and
+it fails on any core table reference under `extensions/` (`.ts`, `.tsx`, `.js`, `.mjs`,
+`.cjs`, `.sql`, `.py`). The script `ALLOWLIST` holds only test-harness hits with no
+plugin-sdk replacement yet; each entry names the finding that tracks its removal, and a hit
+in a production extension file is never allowlisted.
 
 ## What this does _not_ claim to fix (#646)
 

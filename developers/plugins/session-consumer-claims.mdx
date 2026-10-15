@@ -5,7 +5,6 @@ sources:
   - src/config/sessions/session-consumer-claim-schema.ts
   - src/config/sessions/session-consumer-claim-store.ts
   - src/config/sessions/session-consumer-claim-reconciler.ts
-  - src/config/sessions/session-consumer-claim-prune-gate.ts
   - src/config/sessions/session-consumer-claim-sweep.ts
   - src/config/sessions/read-query.ts
   - src/config/sessions/ctx-postgres.ts
@@ -28,18 +27,17 @@ generated: 2026-08-18
 # Session Consumer Claims
 
 The session-consumer claim ledger is a durable obligation-tracking primitive that
-prevents session pruning from deleting a session a registered consumer still owes
-work on. It is the foundation of the Cognitive Substrate program's session-lifecycle
-reliability layer (sub-project `0s`).
+records which ended sessions each registered consumer still owes work on. It is the
+foundation of the Cognitive Substrate program's session-lifecycle reliability layer
+(sub-project `0s`).
 
 ## How it works
 
 When a session ends (replaced via `/new` or `/reset`), a core-owned reconciler sweep
 materializes **claim rows** for every registered consumer that declares interest in
 `session.end` effects. Each claim represents an outstanding obligation: "consumer K
-still needs to process session S." The prune gate checks these obligations before
-deleting any session — a session is only pruned when all consumers have either
-processed, DLQ'd, or been released by the max-retention backstop.
+still needs to process session S." Conversation history is never deleted (ADR 0098);
+the ledger exists so consumers can resume exactly where they left off.
 
 The gateway sweep runs on a `sweepCadenceMs` timer and performs **two** operations
 per tick: (1) `reconcileSessionConsumerClaims` reads one row per `session_id` past each
@@ -87,7 +85,7 @@ precedence, matching the loader's `seenIds` logic.
   `pending → claimed → processed | dlq` (the reaper moves over-budget claims to
   `dlq`; under-budget expired leases return to `pending`). `processing` is a
   documented placeholder retained for forward compatibility — no transition sets
-  it today, but the prune gate pins it defensively as active work. Tracks lease
+  it today. Tracks lease
   owner, lease until, attempt count, last progress timestamp, last error.
 - **`session_consumer_watermarks`** — per-consumer per-lane watermark. PK
   `(consumer_id, lane_id)`. The watermark advances to `max(updated_at)` of
@@ -295,8 +293,6 @@ wildcard-authorised.
 session:
   storage:
     consumerClaims:
-      progressWindowMs: 86400000 # 24h — liveness ceiling
-      maxRetentionBackstopMs: 2592000000 # 30d — last-resort age cap
       sweepCadenceMs: 60000 # 1min — reconciler interval
       maxAttempts: 5 # DLQ threshold
       leaseMs: 30000 # 30s — claim lease
@@ -308,7 +304,7 @@ session:
 ```typescript
 type DiagnosticSessionConsumerClaimEvent = {
   type: "session_consumer_claim";
-  event: "dlq_terminal" | "backstop_released" | "skipped_backlog";
+  event: "dlq_terminal" | "skipped_backlog";
   consumerId: string;
   laneId: string;
   sessionId?: string;
@@ -320,22 +316,21 @@ type DiagnosticSessionConsumerClaimEvent = {
 Emitted via `emitDiagnosticEvent()`:
 
 - `dlq_terminal` — fires **once**, at the DLQ **transition** (when the lease reaper
-  moves a claim to `dlq` because `attempt_count >= maxAttempts`). Not emitted at
-  prune-evaluation time, so a surviving DLQ claim does not spam on every sweep.
+  moves a claim to `dlq` because `attempt_count >= maxAttempts`).
   Guarded by `rowCount` (Postgres) / `changes` (SQLite) to prevent duplicate
   events when the `MARK_SCC_FAILED` update is a no-op (stale lease).
-- `backstop_released` — fires at the prune-gate ceiling release, for a **non-terminal**
-  claim (`pending`/`claimed`) on a session past `maxRetentionBackstopMs`.
-- `skipped_backlog` — fires at the prune-gate ceiling release, for a claim whose
-  consumer watermark is **disabled** (`enabled = 0`) and the session is past the
-  backstop. Signals that re-enabling the consumer would have resumed from this
-  watermark but the backstop released the session first.
+- `skipped_backlog` — fires on the sweep that sees a consumer's watermark go from
+  disabled to enabled; `count` is how many sessions the consumer skipped while it
+  was disabled (bounded to one page, so a lower bound for larger backlogs).
+  Payload carries `consumerId` and `count`, no `sessionId`.
 
 ## Key design decisions
 
 - **D0s-2 (irreversible):** Idempotency key `(session_id, consumer_id, effect_kind, schema_version)`.
 - **D0s-3 (irreversible):** `consumerId` is loader-bound, not a parameter.
-- **D0s-4 (irreversible):** Prune transitions from age-based to obligation-gated.
+- **D0s-4 (irreversible, superseded):** Prune transitions from age-based to obligation-gated.
+  The prune gate and the age-based prune path were removed entirely (ADR 0098: conversation
+  history is never deleted); the claim ledger now only tracks resumable obligations.
 - **D0s-7:** jsonl-fs is degraded (no crash-durability); claim/lease ops throw.
 - **D0s-10:** No `lane_id`/`ended_at` on `ctx_sessions`; lane derived from `session_key`.
 
@@ -344,12 +339,9 @@ irreversible-decision record.
 
 ## Limitations (hardening items)
 
-1. The `sessions.claims.status` RPC only surfaces claims for sessions with
-   stalled leases — sessions with only terminal (`processed`/`dlq`) claims are
-   not returned. A broader `listAllClaims` query would require a new store method.
-2. `retryBaseMs` is resolved from config but not yet wired through to the claim
+1. `retryBaseMs` is resolved from config but not yet wired through to the claim
    store's retry-delay scheduling (hardcoded backoff in the reconcile/lease layer).
    `leaseMs` and `maxAttempts` are wired through (`src/gateway/server.impl.ts`).
-3. `dlq_terminal` and `backstop_released` diagnostics are emitted through the
-   global event system, not the session-consumer ring buffer — they are not
-   surfaced by `sessions.claims.status`.
+2. `dlq_terminal` diagnostics are emitted through the global event system, not
+   the session-consumer ring buffer, so `sessions.claims.status` does not
+   surface them. `skipped_backlog` appears in its `recentEvents`.

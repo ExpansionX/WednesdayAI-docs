@@ -204,18 +204,17 @@ When validation fails:
   </Accordion>
 
   <Accordion title="Configure session storage backend">
-    By default, session transcripts are stored in a local SQLite database at
-    `<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`). Set `session.storage.backend`
-    to switch backends or override the SQLite path:
+    By default, sessions and conversation history are stored in a local SQLite database at
+    `<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`). SQL session storage is the only
+    session storage: `backend` selects SQLite (default) or Postgres, and there is no JSONL backend
+    or file fallback. Override the SQLite path or switch to Postgres:
 
     ```json5
     {
       session: {
         storage: {
-          backend: "sqlite", // fs-jsonl | sqlite | postgres
-          mode: "primary",   // primary | mirror
+          backend: "sqlite", // sqlite (default) | postgres
           sqlitePath: "/var/lib/openclaw/sessions.db", // optional override; defaults to <state-dir>/sessions.db
-          fallbackToJsonlOnError: false,
           migration: { validateOnStart: true },
         },
       },
@@ -227,9 +226,7 @@ When validation fails:
       session: {
         storage: {
           backend: "postgres",
-          mode: "primary",
           databaseUrl: "${SESSION_DATABASE_URL}",
-          fallbackToJsonlOnError: false,
           cache: "redis",
           redisUrl: "${REDIS_URL}",
           migration: { validateOnStart: true },
@@ -240,31 +237,33 @@ When validation fails:
 
     Key behaviors:
 
-    - `backend` selects the single source of truth for transcript data. JSONL files are touched only
-      when `backend: "fs-jsonl"`.
-    - `mode`: `primary` means the selected backend is the sole writer. `mirror` keeps JSONL as a side
-      mirror while the selected backend serves reads.
-    - `fallbackToJsonlOnError`: when `true`, a failing database write falls back to JSONL for that
-      single write. This preserves availability but splits state; use with caution.
-    - `migration.validateOnStart`: when `true`, the gateway validates schema and may backfill legacy
-      JSONL content on first startup. Set to `false` for a clean database cut-over.
-    - With `backend: "postgres"` (or `sqlite`), the gateway converges the database schema on every
-      startup: tables and indexes are created with `IF NOT EXISTS`, and columns added in newer
-      versions are added idempotently — PostgreSQL emits `ALTER TABLE ... ADD COLUMN IF NOT
-      EXISTS`, while SQLite checks `PRAGMA table_info` and issues a plain `ALTER TABLE ... ADD
-      COLUMN` when the column is missing. Convergence is additive only; existing columns and data
-      are never dropped, renamed, or re-typed, and no manual SQL is required.
+    - `backend: "sqlite"` (default) stores everything in one SQLite database with WAL durability;
+      `backend: "postgres"` stores it in Postgres. `cache: "redis"` (Postgres only) adds a
+      write-through hot cache that is never authoritative — the database always wins.
+    - Legacy file-backend keys (`session.storage.backend: "fs-jsonl"`, `session.storage.mode`,
+      `session.storage.fallbackToJsonlOnError`) are retired: configs that still set them are
+      migrated automatically on load and the gateway logs the change at start. Existing JSONL
+      history is imported automatically (see
+      [Session Management / Upgrading from JSON session files](/concepts/session#upgrading-from-json-session-files)).
+    - `migration.validateOnStart`: when `true`, the gateway validates schema and data integrity at
+      startup before serving.
+    - The gateway converges the database schema on every startup: tables and indexes are created
+      with `IF NOT EXISTS`, and columns added in newer versions are added idempotently — PostgreSQL
+      emits `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, while SQLite checks `PRAGMA table_info` and
+      issues a plain `ALTER TABLE ... ADD COLUMN` when the column is missing. Convergence is
+      additive only; existing columns and data are never dropped, renamed, or re-typed, and no
+      manual SQL is required.
     - SQLite options under `storage.sqlite`: `wal`, `busyTimeoutMs`, `walAutocheckpointPages`.
     - Redis options under `storage.redis`: `keyPrefix`, `ttlSeconds`.
-    - `session.storage.recovery` bounds the outage probes and replay passes. The first probe
-      attempt after a start gets the larger of `probeTimeoutMs` (default 5s) and
-      `startupProbeTimeoutMs` (default 600s) because the first start after an upgrade applies
-      schema migrations. With the default `fallbackToJsonlOnError: false`, a failed storage start
-      rejects gateway startup instead of serving JSONL. See
-      [Session storage recovery](/gateway/session-storage-recovery).
+    - `session.storage.recovery.startupProbeTimeoutMs` (default `600s`) bounds how long the gateway
+      waits for session storage to open at startup before exiting. A failed or timed-out start is
+      fatal (the process exits with the cause and the service manager restarts it); the gateway
+      never serves a degraded file view.
+    - Exactly one process owns the database at a time (the gateway, or one CLI command when no
+      gateway runs). CLI storage commands go over the gateway RPC while it runs.
 
-    See [Session Management / External session storage](/concepts/session#external-session-storage)
-    for the configured-backend-only invariant and sub-agent output behavior.
+    See [Session Management / Session storage](/concepts/session#session-storage) for ownership,
+    backups, and the legacy upgrade path.
 
   </Accordion>
 
@@ -326,7 +325,7 @@ When validation fails:
     }
     ```
 
-    - `sessionRetention`: prune completed isolated run sessions from `sessions.json` (default `24h`; set `false` to disable).
+    - `sessionRetention`: tombstone completed isolated run session index rows from the session store (default `24h`; set `false` to disable).
     - `runLog`: prune `cron/runs/<jobId>.jsonl` by size and retained lines.
     - See [Cron jobs](/automation/cron-jobs) for feature overview and CLI examples.
 
