@@ -14,7 +14,6 @@ sources:
   - extensions/learning-core/src/lesson-store-factory.ts
   - extensions/learning-core/src/lesson-store-sqlite.ts
   - extensions/learning-core/src/lesson-store-postgres.ts
-  - extensions/learning-core/src/store.ts
   - extensions/learning-core/src/learning-schema.ts
   - extensions/learning-core/src/legacy-jsonl-readthrough.ts
   - extensions/learning-core/src/message-text.ts
@@ -53,10 +52,9 @@ resolve to the Postgres backend.
 | Module                        | Owns                                                                                               |
 | ----------------------------- | -------------------------------------------------------------------------------------------------- |
 | `lesson-record.ts`            | Record kind, durability, validity window, schema version.                                          |
-| `lesson-store-factory.ts`     | Backend selection, memoisation, and fallback wrapping.                                             |
+| `lesson-store-factory.ts`     | SQL backend selection, memoisation, and legacy read-through wrapping.                              |
 | `lesson-store-sqlite.ts`      | SQLite implementation of `LessonStore`.                                                            |
 | `lesson-store-postgres.ts`    | Postgres implementation plus the lazy pool.                                                        |
-| `store.ts`                    | `FileLearningStore`, the fs-jsonl implementation and fallback.                                     |
 | `learning-schema.ts`          | DDL for both SQL dialects; one of two schema-name checks (see below).                              |
 | `learning-gate.ts`            | The one fence-and-scope gate every learning writer and reader resolves its scope through.          |
 | `legacy-jsonl-readthrough.ts` | Read-only, bounded view of a pre-C0 log over a SQL store; SQL only after `repaired_at`.            |
@@ -85,7 +83,7 @@ validation would be bypassable.
 Backend selection lives in core and is exported from the plugin SDK:
 
 ```ts
-import { resolveDomainStorage, type DomainStoragePlacement } from "openclaw/plugin-sdk";
+import { resolveDomainStorage, type DomainStoragePlacement } from "wednesdayai/plugin-sdk";
 
 const placement = resolveDomainStorage({ domain: "learning-core", config });
 ```
@@ -95,8 +93,7 @@ const placement = resolveDomainStorage({ domain: "learning-core", config });
 ```ts
 type DomainStoragePlacement =
   | { backend: "postgres"; databaseUrl: string; schema: string }
-  | { backend: "sqlite"; path: string }
-  | { backend: "fs-jsonl"; dir: string };
+  | { backend: "sqlite"; path: string };
 ```
 
 The resolver is the **single** source of the selection rule. Do not re-derive "which backend"
@@ -106,7 +103,7 @@ default Postgres schema is derived as `plugin_<domain with dashes replaced by un
 
 ## The `LessonStore` contract
 
-One interface, three implementations, one conformance suite. Members:
+One interface, two SQL implementations, one conformance suite. Members:
 
 ```text
 Lessons     listLessons  getLesson  upsertLesson  insertLessonIfAbsent  mergeLesson
@@ -132,10 +129,8 @@ Backend     describeBackend  substrate
 `invalidAt`) without writing a successor. It is idempotent: an already-invalid lesson is
 returned unchanged. Inside a claim, a consolidation `delete` verdict without text applies the
 same invalidation through `applyVerdict` (effect `invalidate`), in the transaction that
-finalizes the candidate. The claim,
-budget, and distill members run only on SQLite and Postgres; `candidateClaimSupport()` reports
-`store_unsupported` on fs-jsonl, where `promotePendingCandidate` merges and finalizes one
-candidate atomically under the store lock instead.
+finalizes the candidate. Claim, budget, and distill operations are available on both SQL
+backends; an unopened store reports `store_unavailable` rather than serving a file store.
 
 Candidates live in `learning_records` with `record_type='candidate'`. `listLessons` must not
 return them. `searchLessons` returns lessons only.
@@ -151,12 +146,11 @@ await store.upsertLesson({ recordKind: "candidate", ...lesson });
 await store.upsertCandidate(candidate); // record_type='candidate' in the same table
 ```
 
-`describeBackend()` returns `{ backend, capability }` and is what `learning.overview` surfaces. On
-the fallback wrapper it reports the delegate **currently** in use, so a Postgres store that has
-degraded reports `fs-jsonl`.
+`describeBackend()` returns `{ backend, capability }`, surfaced by `learning.overview`.
+The backend stays `sqlite` or `postgres`; an outage does not switch the implementation.
 
-Adding a member means adding it to all three implementations and to the conformance suite. The
-suite is the contract; an implementation that passes it is portable by construction.
+Adding a member means adding it to both SQL implementations, the legacy read-through wrapper,
+and the conformance suite.
 
 ## Record lifecycle
 
@@ -173,7 +167,7 @@ export const LESSON_SCHEMA_VERSION = 1;
 - `isLessonActive` evaluates `valid_from` and `invalid_at` against a supplied `now`. Callers pass
   the clock in; the function does not read it.
 
-The extractor, the fixtures, the JSONL projection, and all three backends import from here. If you
+The extractor, fixtures, legacy read-through, and both SQL backends import from here. If you
 find yourself writing a durability literal anywhere else, that is the defect.
 
 **Supersede over delete.** `supersedeLesson` writes the successor, links `supersedes_id`, and
@@ -181,24 +175,22 @@ closes the predecessor's validity window. Nothing is removed. `getLessonChain` w
 This is exposed through the `learning` tool, so the path has a production caller and is not
 test-only code.
 
-## Backend selection and fallback
+## Backend selection and failures
 
 `createLessonStore` memoises by resolved location: SQLite databases by path, Postgres pools by
 URL. `index.ts` builds a store at three call sites, so without memoisation the same file would be
 opened three times and the same database pooled three times.
 
-Only **reads** fall back. A lesson, proposal, or audit write never lands on fs-jsonl while SQL is
-configured (ADR 0078 D8): it throws the retryable `store_unavailable`. The failure surfaces differ
-by backend:
+Neither reads nor writes fall back to files. The failure surfaces differ by backend:
 
-- **SQLite** can fail at open, so it is wrapped in a `try`. On failure the factory returns
-  `FirstFailureFallbackLessonStore` already swapped, over an unopened primary: reads go to
-  `FileLearningStore`, every write and claim is `store_unavailable`, and `substrate()` is
-  undefined.
-- **Postgres** does not connect at construction, so it is wrapped in
-  `FirstFailureFallbackLessonStore`. The first rejection swaps the delegate. A read is retried
-  once on the fallback, so the caller sees success; a write throws `store_unavailable`, and so
-  does every write after the swap.
+- **SQLite** can fail at open. The factory logs the cause and returns an unavailable SQL store:
+  data operations and claims report retryable `store_unavailable`, `substrate()` is undefined,
+  and `describeBackend()` still identifies SQLite.
+- **Postgres** does not connect at construction. A rejecting operation propagates its error;
+  the store remains SQL-backed and the passes re-probe it on subsequent work.
+
+The legacy JSONL read-through remains read-only for upgrades. It is not a second authoritative
+store and is never substituted for a failed SQL operation.
 
 ## Fence-and-scope gate
 
@@ -268,7 +260,7 @@ it as `<pluginId>.<passId>`. Effective (namespaced) ids are stable — do not re
 | -------------------------------- | ------- | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `learning-core.produce`          | `deep`  | `llm` or `deterministic` | The lesson producer the triggers enqueue (`produce-pass.ts`): runs the consolidation or the promote body, one producer per UTC bucket. Priority 110, consolidation's timeout and 14-attempt policy.   |
 | `learning-core.promote`          | `light` | `deterministic`          | Lessons from pending candidates whenever consolidation is not runnable (`runnable.ts`). Standalone and session-end inline use only; no candidate-state change at all while consolidation is runnable. |
-| `learning-core.consolidation`    | `deep`  | `llm` or `deterministic` | Lessons under `maxCallsPerAgentPerDay` (default 8). Claim-fenced; SQL stores only (`store_unsupported` on fs-jsonl). `llm` only when `consolidationStaticallyRunnable`.                               |
+| `learning-core.consolidation`    | `deep`  | `llm` or `deterministic` | Lessons under `maxCallsPerAgentPerDay` (default 8). Claim-fenced on both SQL backends. `llm` only when `consolidationStaticallyRunnable`.                                                             |
 | `learning-core.distill`          | `rem`   | `llm` or `deterministic` | Pending SkillProposals only. `llm` only when `distillStaticallyRunnable`.                                                                                                                             |
 | `learning-core.reconcile-skills` | `light` | `deterministic`          | Restores `SKILL.md` from `desiredState`. With `distill.enabled`, its completion queues `distill` keyed by its own fingerprint.                                                                        |
 | `learning-core.maintenance`      | `light` | `deterministic`          | Daily global singleton (`maintenance:<utcDay>`): `learning_budget` retention by row kind, per-scope recovery items, and its own next-day successor.                                                   |
@@ -309,7 +301,7 @@ finds its earlier effects even after midnight; the session-end inline promote us
 `learning-core.inline-promote` and `<agentId>:<workspaceId>:<sessionId>`.
 
 The SQL-only surface behind this lives on `LessonStore.substrate()` (`learning-substrate.ts`;
-`undefined` on fs-jsonl): the fence record and batches, canonical scope rows, bucket owner and
+`undefined` when the store could not open): the fence record and batches, canonical scope rows, bucket owner and
 effect reads, keyset scope pages (`listScopesWithPendingCandidates`, distill, applied proposals),
 and retention. Its procedures are generators over one SQL dialect kit (`learning-sql.ts`), driven
 synchronously inside SQLite's `BEGIN IMMEDIATE` and asynchronously on one pinned Postgres client.
@@ -335,8 +327,6 @@ synchronously inside SQLite's `BEGIN IMMEDIATE` and asynchronously on one pinned
   with the retryable `candidates busy` error after it finishes the rest.
 - **Owner fence.** Each finalization goes through `applyVerdict` with producer `promote`; a
   `producer_conflict` stands the run down with its claims released and nothing applied.
-- **fs-jsonl.** With no claims, each candidate is merged and finalized atomically with
-  `promotePendingCandidate`.
 
 ### Candidate claims and the budget ledger
 
@@ -353,9 +343,8 @@ synchronously inside SQLite's `BEGIN IMMEDIATE` and asynchronously on one pinned
 - `consumeBudget` and `refundBudget` run in one transaction each (`BEGIN IMMEDIATE` on SQLite,
   `pg_advisory_xact_lock` on Postgres). Denied consumes are recorded, so a retried reservation id
   always returns its first decision. A refund credits the day the reservation charged.
-- The fallback wrapper never replays claims, candidate capture, budget calls, or lesson,
-  proposal, and audit writes on fs-jsonl. After it has switched, they fail with the retryable
-  `store_unavailable`.
+- Claims, capture, budgets, lessons, proposals, and audit writes all require SQL. No operation
+  is replayed on a file fallback when the database fails.
 - Both producers key the producer bucket by the candidate **row's** agent (the claim handle's
   `agentId`, `bucketAgentId`). `applyVerdict` refuses any other `ownerBucket`, and an agent-less
   row is released rather than finalized.
@@ -376,7 +365,7 @@ Apply writes under `resolveManagedSkillsDir()` → `$OPENCLAW_STATE_DIR/skills` 
 rename, a later decision-write failure must not delete the file; reconcile repairs `desiredState`.
 
 `searchLessons(query, identity, k)` uses FTS5 (sqlite), `search_tsv` + GIN (postgres), or a
-substring scan (fs-jsonl / when optional search DDL is skipped). Hyphenated FTS5 queries are
+substring scan when optional search DDL is skipped. Hyphenated FTS5 queries are
 tokenized because hyphen is FTS `NOT`.
 
 ## Gateway and tool seams
@@ -460,10 +449,9 @@ export default function register(api: OpenClawPluginApi): void {
 
 | Suite                                            | Proves                                                                                 |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------- |
-| `lesson-store-conformance.test.ts`               | All three backends satisfy the same contract.                                          |
+| `lesson-store-conformance.test.ts`               | Both SQL backends satisfy the same contract.                                           |
 | `claim-to-store.reachability.test.ts`            | A `session.end` claim lands exactly one candidate (not a lesson) and acks `processed`. |
-| `lesson-store-factory.test.ts`                   | Selection, memoisation, and both fallback shapes.                                      |
-| `lesson-store-factory.fallback.test.ts`          | Reads survive a Postgres outage on fs-jsonl; writes are `store_unavailable`.           |
+| `lesson-store-factory.test.ts`                   | SQL selection, memoisation, unavailable-store errors, and legacy read-through.         |
 | `workspace-scope.reachability.test.ts`           | Two gateways on one DB: the mismatched one fails closed on every entry point.          |
 | `session-end-unconfigured.reachability.test.ts`  | An unconfigured agent's claim is deferred daily; the drain still captures the others.  |
 | `lesson-store-postgres.test.ts`                  | Refusal paths, transaction rollback, and the legacy-id migration branch.               |
@@ -506,8 +494,7 @@ Run the extension's tests with the standard battery; there is no separate learni
 3. Add the backend to the union in `src/config/storage/domain-storage.ts` and to
    `SessionStorageBackendKind`, so selection stays in one place.
 4. Add it to `BACKENDS` in the conformance suite and make the suite pass unmodified.
-5. Decide the failure surface - open-time or first-operation - and wire the matching fallback shape
-   in the factory.
+5. Surface open-time and operation failures without changing the authoritative backend.
 
 ## Related
 
