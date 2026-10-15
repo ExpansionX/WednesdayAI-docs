@@ -105,8 +105,9 @@ surviving `session.storage.recovery` keys are:
 | `session.storage.recovery.hydrationClosureMaxPages` | `20`     | Max ancestor-closure pages during hydration. Restart-only.                            |
 
 `session.storage.mode`, `session.storage.fallbackToJsonlOnError`, and the retired
-`session.storage.recovery.*` and `session.maintenance.*` keys are removed automatically when a
-legacy config loads; the gateway logs each change at start.
+`session.storage.recovery.*`, `session.maintenance.*`, and prune-only
+`session.storage.consumerClaims.progressWindowMs` / `maxRetentionBackstopMs` keys are removed
+automatically when a legacy config loads; the gateway logs each change at start.
 
 ## Legacy JSONL import
 
@@ -124,11 +125,15 @@ per-session `*.jsonl` transcripts are import sources only, never served or writt
   sources retry on the next owner open, imported-but-unarchived sources finish archiving, and only
   completed sources are skipped. A failing source never fails startup.
   `openclaw session-storage import` runs the sweep to completion on demand and retries sources past
-  their attempt cap. Containment compares real (symlink-resolved) paths, so a state dir reached
-  through a symlink (a symlinked `~/.openclaw`, or the macOS `/var` -> `/private/var` link) no
-  longer drops transcripts named by an index entry's `sessionFile`. Discovered transcripts are
-  still recorded under the configured path spelling, so each file keeps a single import receipt;
-  a sessions-dir symlink that points outside the dir is still rejected.
+  their attempt cap. When a sweep pass finishes (not aborted) with actual work, the gateway logs
+  one `legacy import completed` line summarizing the pass: `sources` (sources processed),
+  `failed`, `rejected` (rejected legacy lines), and `pendingArchive` (imported sources whose
+  archive move is still pending). A pass with nothing to import logs no summary line.
+  Containment compares real (symlink-resolved) paths, so a state dir reached through a symlink
+  (a symlinked `~/.openclaw`, or the macOS `/var` -> `/private/var` link) no longer drops
+  transcripts named by an index entry's `sessionFile`. Discovered transcripts are still recorded
+  under the configured path spelling, so each file keeps a single import receipt; a sessions-dir
+  symlink that points outside the dir is still rejected.
 
 Archives: every imported source is moved — fingerprint-verified — to
 `<stateDir>/legacy-session-archive/<agentId>/` (files 0600, dirs 0700). Reset, deleted, and
@@ -246,8 +251,10 @@ terminates the process, since serving without ownership could admit a second wri
 
 - **Gateway exits at startup with `FatalConfiguredStorageStartError`:** the configured backend did
   not open within `startupProbeTimeoutMs`, or the open failed. The fatal error carries the cause —
-  connectivity, credentials, or a Postgres schema lock. Fix the cause and let the service manager
-  restart the gateway. No JSONL was served or written.
+  connectivity, credentials, or a Postgres schema lock — and the CLI prints it as one redacted
+  line: `Gateway failed to start: <full cause chain>` (nested causes included, e.g.
+  `connect ECONNREFUSED 127.0.0.1:5432` for an unreachable Postgres). Fix the cause and let the
+  service manager restart the gateway. No JSONL was served or written.
 - **`session storage is owned by...`:** another process owns the database. For a `cli` holder,
   retry when it finishes; for a gateway on another host or config, run the command where that
   gateway runs so it can proxy over RPC.

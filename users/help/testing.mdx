@@ -58,7 +58,7 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 ### Unit / integration (default `pnpm test`)
 
 - Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/reference/test).
-- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, and the control-UI suite under `ui/src/**`
+- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, the gateway-browser-client suite under `packages/gateway-browser-client/src/**`, and the classic control-UI suite under `ui/src/**`
 - Scope:
   - Pure unit tests
   - In-process integration tests (gateway auth, routing, tooling, parsing, config)
@@ -77,19 +77,47 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 - Scope: the `openclaw-user-client` React app — gateway connection and pairing/setup-code handling, the runs view (grouping/controller/model), the attachments/preferences/voice/runtime-config providers, the theme provider, the app shell, and the native component layer under `apps/web/src/ui/`
 - Run one file on its own with `pnpm --dir apps/web exec vitest run --config vitest.config.ts <file>`
 
+### Control UI v2 app
+
+- Command: `pnpm test:control` (also runs as the `control` lane of `pnpm test`)
+- Config: `apps/control/vitest.config.ts` — a single jsdom project
+- Files: `apps/control/src/**/*.test.ts`, `apps/control/src/**/*.test.tsx`
+- Setup: `apps/control/vitest.setup.ts`
+- Scope: the `openclaw-control-ui` React console (Control UI v2) — the runtime-config parser, the
+  gateway, runs, fleet and approvals stores and the theme, the shell (sign-in, sidebar, command
+  palette), and the Overview, Sessions, Runs, Usage and Logs views over the shared `src/ui`
+  component set. Gateway connection behaviour comes from `packages/gateway-browser-client`, faked
+  with the fake connection and socket its `test-support` export provides.
+- Run one file on its own with `pnpm --dir apps/control exec vitest run --config vitest.config.ts <file>`
+
+### Gateway browser client
+
+- Command: `pnpm test:gateway-browser-client` (also runs as the `gateway-browser-client` lane of `pnpm test`)
+- Config: `packages/gateway-browser-client/vitest.config.ts` — a single jsdom project
+- Files: `packages/gateway-browser-client/src/**/*.test.ts`
+- Setup: `packages/gateway-browser-client/vitest.setup.ts`
+- Scope: the private browser WebSocket client that `apps/web` and `apps/control` share — the
+  connect handshake and device-identity signing, the bounded device-credential store, and the
+  runs controller, model and grouping. Its `gateway-browser-client/test-support` export is the
+  fake connection and socket both app suites import.
+- Run one file on its own with `pnpm --dir packages/gateway-browser-client exec vitest run --config vitest.config.ts <file>`
+
 ### Web client and brand e2e suites
 
 Component tests in jsdom cannot see scrolling, fonts, `color-scheme`, or the frames the browser
-actually sends. These suites drive the built web client in real Chromium against a real gateway
-(harness: `test/helpers/user-client-web-harness.ts`). They are part of the e2e lane and need
+actually sends. These suites drive the built web client or console in real Chromium against a real
+gateway (harness: `test/helpers/user-client-web-harness.ts`; the packaging suite checks the
+packaged bundle without a browser). They are part of the e2e lane and need
 `pnpm build` first.
 
-| File                                                 | Covers                                                                                                                                                                                                                                             |
-| ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist |
-| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                             |
-| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller, markdown styling under `.prose`, `color-scheme` following the theme, the live Runs badge, high-contrast text on the accent colour                                                                              |
-| `test/console-brand-parity.e2e.test.ts`              | Control UI computed tokens and font loading identical between a pinned base commit and the branch (slow: builds two Control UIs, up to 10 minutes)                                                                                                 |
+| File                                                 | Covers                                                                                                                                                                                                                                                                                                                            |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                                                |
+| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                                            |
+| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller, markdown styling under `.prose`, `color-scheme` following the theme, the live Runs badge, high-contrast text on the accent colour                                                                                                                                                             |
+| `test/console-brand-parity.e2e.test.ts`              | Control UI computed tokens and font loading identical between a pinned base commit and the branch (slow: builds two Control UIs, up to 10 minutes)                                                                                                                                                                                |
+| `test/control-ui-v2-packaging.e2e.test.ts`           | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default `/v2/control` mount                                                                                                  |
+| `test/control-ui-v2.e2e.test.ts`                     | The console in real Chromium: gateway-hosted sign-in with a seeded session, the classic-console link and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
 
 The unit-level guard `test/brand-tokens-contrast.test.ts` (contrast ratios and `color-scheme` per
 theme) runs in the normal `pnpm test` lane and needs no browser. See
@@ -108,7 +136,7 @@ pnpm exec vitest run --config vitest.e2e.config.ts test/user-client-web-brand.e2
 If a filtered run also fails, treat it as a real failure.
 </Warning>
 
-### Control UI
+### Control UI (classic `ui/`)
 
 - Command: `pnpm test:ui` (also runs as the `ui` lane of `pnpm test`)
 - Config: `ui/vitest.config.ts`, which composes two projects:
@@ -172,6 +200,21 @@ If a filtered run also fails, treat it as a real failure.
   - `OPENCLAW_ANDROID_NODE_ID` or `OPENCLAW_ANDROID_NODE_NAME`.
   - `OPENCLAW_ANDROID_GATEWAY_URL` / `OPENCLAW_ANDROID_GATEWAY_TOKEN` / `OPENCLAW_ANDROID_GATEWAY_PASSWORD`.
 - Full Android setup details: [Android App](/platforms/android)
+
+## Live: web client deploy verification
+
+- Script: `node scripts/verify-client-chat-v3-p2-live.mjs --live` (network-free contract test: `scripts/verify-client-chat-v3-p2-live.test.mjs`)
+- Goal: verify a deployed gateway plus its web client against the client-chat-v3-p2 contract end to end: assistant picker and chats, model/Think/reasoning controls, queue and steer, rename and Suggest, reply quotes, history paging and search, the active-leaf guard, narrow-scope patch refusals, assistant colours, and the delivery-mirror dedupe.
+- Run against a real, running gateway; it costs real model calls:
+  - `OPENCLAW_GATEWAY_TOKEN` is required (take it from the gateway unit env; the script never prints it). `OPENCLAW_GATEWAY_URL` overrides the default `ws://127.0.0.1:18789`.
+  - A headless Chromium pairs a throwaway `/v2/client` device (`PLAYWRIGHT_BROWSERS_PATH` overrides `~/.cache/ms-playwright`).
+- Flags:
+  - `--only SC7,SC8` runs a subset (pairing and throwaway chats still happen, unasserted).
+  - `--fix-proof --fix-proof-session <key>` sends three real probe messages through that routed direct chat (required; the script never picks one) and asserts no `active-leaf-changed` refusals, no duplicate mirror rows and a leaf that rests on each turn's own last message.
+  - `--keep` skips cleanup.
+- Safety and cleanup: throwaway sessions are labelled with the run id and deleted on exit, the paired device is removed, and the fix-proof target chat is written but never deleted. SIGINT/SIGTERM/SIGHUP run the same cleanup and exit 130. Operator direct chats other than the fix-proof target are never touched.
+- Exit codes: `0` all selected checks pass, `1` any check fails or cleanup could not remove a resource (`CLEANUP FAIL`), `2` usage error (missing `--live` or token, unknown check id, `--fix-proof` without `--fix-proof-session`) or preflight failure.
+- Output: one `=== SC<id> ===` evidence block per check ending in `SC<id> PASS`, then `VERIFY PASS (<n> checks)` or `VERIFY FAIL: <ids>`.
 
 ## Live: model smoke (profile keys)
 

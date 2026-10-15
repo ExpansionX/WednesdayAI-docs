@@ -916,9 +916,24 @@ Higher values preserve more visual detail.
 }
 ```
 
+### `agents.defaults.envelopeTimestamp`
+
+Timestamp handling for messages. Default: `"on"`.
+
+When `"off"`, absolute timestamps are removed from inbound envelope headers, user turns are not
+stamped at the model boundary, and the timestamp prevention line is dropped from the system
+prompt.
+
+```json5
+{
+  agents: { defaults: { envelopeTimestamp: "on" } }, // "on" | "off"
+}
+```
+
 ### `agents.defaults.userTimezone`
 
-Timezone for system prompt context (not message timestamps). Falls back to host timezone.
+Timezone for system prompt context and for the `[Ddd YYYY-MM-DD HH:MM GMT±H]` stamp rendered on
+every user turn. Falls back to the host timezone.
 
 ```json5
 {
@@ -1686,10 +1701,6 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
       mode: "warn", // warn | enforce
       pruneAfter: "30d",
       maxEntries: 500,
-      rotateBytes: "10mb",
-      resetArchiveRetention: "30d", // duration or false
-      maxDiskBytes: "500mb", // optional hard budget
-      highWaterBytes: "400mb", // optional cleanup target
     },
     threadBindings: {
       enabled: true,
@@ -1721,22 +1732,26 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
 - **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
-- **`maintenance`**: session-store cleanup + retention controls.
-  - `mode`: `warn` emits warnings only; `enforce` applies cleanup.
-  - `pruneAfter`: age cutoff for stale entries (default `30d`).
-  - `maxEntries`: maximum number of entries in `sessions.json` (default `500`).
-  - `rotateBytes`: rotate `sessions.json` when it exceeds this size (default `10mb`).
-  - `resetArchiveRetention`: retention for `*.reset.<timestamp>` transcript archives. Defaults to `pruneAfter`; set `false` to disable.
-  - `maxDiskBytes`: optional sessions-directory disk budget. In `warn` mode it logs warnings; in `enforce` mode it removes oldest artifacts/sessions first.
-  - `highWaterBytes`: optional target after budget cleanup. Defaults to `80%` of `maxDiskBytes`.
+- **`store`**: per-agent session store identity (supports the `{agentId}` template); also where
+  legacy JSON session files are found for the one-time import. See
+  [Sessions](/concepts/session#upgrading-from-json-session-files).
+- **`maintenance`**: session index cleanup + retention controls. Conversation history is never
+  deleted by maintenance: it only retires idle or over-cap sessions from the session index
+  (tombstones), and there is no automatic space reclamation (ADR 0098).
+  - `mode`: `warn` emits warnings only (default); `enforce` applies cleanup.
+  - `pruneAfter`: index entries whose `updatedAt` is older than this are retired (tombstoned) in
+    enforce mode (default `30d`).
+  - `maxEntries`: maximum number of session index rows to keep; the oldest are tombstoned beyond
+    the cap (default `500`).
+  - The file-only controls `rotateBytes`, `resetArchiveRetention`, `maxDiskBytes`, and
+    `highWaterBytes` are retired (they applied to JSONL transcript files) and are removed from
+    config automatically on load.
 - **`threadBindings`**: global defaults for thread-bound session features.
   - `enabled`: master default switch (providers can override; Discord uses `channels.discord.threadBindings.enabled`)
   - `idleHours`: default inactivity auto-unfocus in hours (`0` disables; providers can override)
   - `maxAgeHours`: default hard max age in hours (`0` disables; providers can override)
-- **`consumerClaims`**: session-consumer claim ledger settings (obligation-gated pruning).
+- **`consumerClaims`**: session-consumer claim ledger settings.
   See [Session Consumer Claims](/gateway/session-consumer-claims) for full details.
-  - `progressWindowMs`: liveness ceiling for pinned sessions (default `86400000` = 24h).
-  - `maxRetentionBackstopMs`: last-resort age cap before forced release (default `2592000000` = 30d).
   - `sweepCadenceMs`: reconciler sweep interval (default `60000` = 1min).
   - `maxAttempts`: DLQ threshold (default `5`).
   - `leaseMs`: claim lease duration (default `30000` = 30s).
@@ -3366,7 +3381,7 @@ idle monitor consumed by plugins such as [Dream Cycle](/plugins/dream-cycle).
 }
 ```
 
-- `sessionRetention`: how long to keep completed isolated cron run sessions before pruning from `sessions.json`. Also controls cleanup of archived deleted cron transcripts. Default: `24h`; set `false` to disable.
+- `sessionRetention`: how long to keep completed isolated cron run sessions before their index rows are tombstoned from the session store. Default: `24h`; set `false` to disable.
 - `runLog.maxBytes`: max size per run log file (`cron/runs/<jobId>.jsonl`) before pruning. Default: `2_000_000` bytes.
 - `runLog.keepLines`: newest lines retained when run-log pruning is triggered. Default: `2000`.
 - `webhookToken`: bearer token used for cron webhook POST delivery (`delivery.mode = "webhook"`), if omitted no auth header is sent.

@@ -128,6 +128,13 @@ Current migrations:
   → `agents.defaults.models` + `agents.defaults.model.primary/fallbacks` + `agents.defaults.imageModel.primary/fallbacks`
 - `browser.ssrfPolicy.allowPrivateNetwork` → `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`
 
+Keys that lost their only consumer are removed rather than migrated. `session.storage.consumerClaims.progressWindowMs`
+and `session.storage.consumerClaims.maxRetentionBackstopMs` only fed the removed automatic
+history pruning (ADR 0098), so doctor deletes them and logs one message per key, for example:
+`Removed session.storage.consumerClaims.progressWindowMs: it applied to automatic history
+pruning, which was removed (auto-migrated on load).` The gateway applies the same removal
+automatically when a legacy config loads, so a stale key never blocks startup.
+
 ### 2b) OpenCode Zen provider overrides
 
 If you’ve added `models.providers.opencode` (or `opencode-zen`) manually, it
@@ -261,6 +268,20 @@ Notes:
 - `openclaw doctor --repair` applies recommended fixes without prompts.
 - `openclaw doctor --repair --force` overwrites custom supervisor configs.
 - You can always force a full rewrite via `openclaw gateway install --force`.
+
+Since this release the generated systemd unit uses `KillMode=mixed`: systemd sends `SIGTERM`
+to the gateway only, and once it exits, `SIGKILL`s any child process still left in the unit's
+cgroup. Units written by earlier releases used `KillMode=process`, which left gateway children
+(MCP servers, CLI backends) running after every stop and restart. Existing installs pick up the
+change with `wednesdayai gateway install --force`, `openclaw update`, or `wednesdayai doctor`
+(accept the repair); a bare `systemctl --user restart openclaw-gateway` does not rewrite the unit.
+The previous unit is kept as `openclaw-gateway.service.bak`. A `KillMode=` line in a drop-in
+overrides the unit, and reinstalling does not touch drop-ins. Doctor reads the drop-ins beside the
+unit (`~/.config/systemd/user/openclaw-gateway.service.d/*.conf`) and names the one that
+overrides it; for drop-ins in other systemd search paths, `systemctl --user show -p KillMode
+openclaw-gateway` reports the effective value. The gateway still gets its 20-second stop window
+for in-flight work; a child still running when the gateway exits is killed mid-task, where
+`KillMode=process` left it running with no gateway to receive its result.
 
 ### 16) Gateway runtime + port diagnostics
 

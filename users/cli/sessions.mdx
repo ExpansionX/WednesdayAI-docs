@@ -53,11 +53,54 @@ JSON examples:
   "count": 2,
   "activeMinutes": null,
   "sessions": [
-    { "agentId": "main", "key": "agent:main:main", "model": "gpt-5" },
+    {
+      "agentId": "main",
+      "key": "agent:main:main",
+      "sessionId": "3f2a…",
+      "kind": "direct",
+      "model": "gpt-5",
+      "modelProvider": "openai",
+      "modelOverride": null,
+      "providerOverride": null,
+      "groupActivation": null,
+      "updatedAt": 1760434020000,
+      "lastReplyAt": 1760434088000,
+      "totalTokens": 18250
+    },
     { "agentId": "work", "key": "agent:work:main", "model": "claude-opus-4-5" }
   ]
 }
 ```
+
+Each entry in `sessions` is one session index row. Fields (optional ones may be absent):
+
+| Field                                                              | Type    | Meaning                                                              |
+| ------------------------------------------------------------------ | ------- | -------------------------------------------------------------------- |
+| `agentId`                                                          | string  | Store the row came from.                                             |
+| `key`                                                              | string  | Session key.                                                         |
+| `sessionId`                                                        | string  | Current conversation id for the key.                                 |
+| `kind`                                                             | string  | Key class: `direct`, `group`, `global`, or `unknown`.                |
+| `updatedAt`                                                        | number  | Last session activity (epoch ms).                                    |
+| `lastReplyAt`                                                      | number  | Last assistant reply activity (epoch ms).                            |
+| `ageMs`                                                            | number  | Derived age (`now - updatedAt`) at listing time.                     |
+| `model`                                                            | string  | Resolved model (override applied).                                   |
+| `modelProvider`                                                    | string  | Resolved provider.                                                   |
+| `modelOverride`                                                    | string  | Per-session model override, if set.                                  |
+| `providerOverride`                                                 | string  | Per-session provider override, if set.                               |
+| `groupActivation`                                                  | string  | Group activation mode: `mention` or `always` (group sessions).       |
+| `systemSent`                                                       | boolean | Whether the session has its system prompt bootstrap.                 |
+| `abortedLastRun`                                                   | boolean | Whether the last run was aborted.                                    |
+| `thinkingLevel`, `verboseLevel`, `reasoningLevel`, `elevatedLevel` | string  | Per-session toggles.                                                 |
+| `responseUsage`                                                    | string  | Per-session usage metadata policy: `on`, `off`, `tokens`, or `full`. |
+| `inputTokens`, `outputTokens`, `totalTokens`                       | number  | Token counters (best effort, provider-dependent).                    |
+| `totalTokensFresh`                                                 | boolean | Whether `totalTokens` was recomputed from current entry data.        |
+| `contextTokens`                                                    | number  | Context window used for percentage display.                          |
+
+Notes:
+
+- `modelOverride`, `providerOverride`, and `groupActivation` come from the session index row, so
+  they appear whenever the underlying entry carries them — both when the listing is served by the
+  gateway (`sessions.list`) and for a local in-process listing.
 
 ## Cleanup maintenance
 
@@ -79,7 +122,10 @@ openclaw sessions cleanup --json
 - `--dry-run`: preview how many entries would be pruned/capped without writing.
   - In text mode, dry-run prints a per-session action table (`Action`, `Key`, `Age`, `Model`, `Flags`) so you can see what would be kept vs removed.
 - `--enforce`: apply maintenance even when `session.maintenance.mode` is `warn`.
-- `--active-key <key>`: protect a specific active key from disk-budget eviction.
+- `--active-key <key>`: treats `<key>` as the active session. In warn mode, when that key is old
+  enough to prune or falls over the `maxEntries` cap, the cleanup logs a
+  `session maintenance would evict active session` warning. With `--enforce` the key is kept:
+  it is never retired, and the cap is applied to the other rows.
 - `--agent <id>`: run cleanup for one configured agent store.
 - `--all-agents`: run cleanup for all configured agent stores.
 - `--store <path>`: run against a specific agent's store path. The path must name a configured
@@ -91,16 +137,17 @@ openclaw sessions cleanup --json
   prints `--fix-missing has no effect with SQL session storage and will be removed in the next release`.
 - `--json`: print a JSON summary. With `--all-agents`, output includes one summary per store.
 
-Cleanup deletes whole sessions only: `--enforce` removes idle sessions whose newest entry is older
-than `session.maintenance.pruneAfter` (and caps the index at `maxEntries`). It never deletes
-individual entries, and with the default `warn` mode it deletes nothing.
+Cleanup only retires session index rows (tombstones): `--enforce` drops index entries whose
+`updatedAt` is older than `session.maintenance.pruneAfter` (and caps the index at `maxEntries`).
+Conversation history is never deleted and stays readable. With the default `warn` mode it retires
+nothing.
 
-`openclaw sessions cleanup --all-agents --dry-run --json`:
+`openclaw sessions cleanup --all-agents --enforce --dry-run --json`:
 
 ```json
 {
   "allAgents": true,
-  "mode": "warn",
+  "mode": "enforce",
   "dryRun": true,
   "stores": [
     {
@@ -123,6 +170,10 @@ individual entries, and with the default `warn` mode it deletes nothing.
 }
 ```
 
+With `--dry-run`, `pruned` and `capped` are the index keys that would be retired; nothing changes.
+`storePath` identifies the agent's session index; under SQL storage no `sessions.json` file is
+read or written.
+
 ## Claims status
 
 View session consumer claim ledger status — what work is owed, stalled, or dead-lettered:
@@ -135,12 +186,13 @@ openclaw sessions claims status --json
 
 The command calls the gateway RPC `sessions.claims.status`. Text output shows:
 
-- **Consumers** table: consumer ID, lane, effect kind, enabled flag, and counts
-  by status (`pending`, `claimed`, `processing`, `dlq`, `processed`).
-- **Stalled leases** table: expired claims still in `claimed`/`processing` state.
+- **Consumers** table: one row per consumer lane — consumer ID, lane, effect kind, enabled flag,
+  and counts by claim status (`pending`, `claimed`, `processing`, `dlq`).
+- **Stalled leases** table: expired leases still in `claimed`/`processing` state (claim ID,
+  consumer, session, lease-until timestamp).
 - **Last sweep** timestamp (when the reconciler last ran).
 - **Recent events** table: last diagnostic events from the in-memory ring buffer
-  (event type, consumer ID, reason, count, timestamp).
+  (timestamp, kind, consumer, session, count).
 
 `--json` outputs the raw RPC response:
 
@@ -149,34 +201,45 @@ The command calls the gateway RPC `sessions.claims.status`. Text output shows:
   "consumers": [
     {
       "consumerId": "learning-core:session.end",
-      "lane": "main",
-      "effectKind": "session.end",
-      "enabled": true,
       "agentId": "main",
-      "counts": { "pending": 3, "claimed": 0, "processing": 0, "dlq": 1, "processed": 120 }
+      "effectKind": "session.end",
+      "lanes": [
+        {
+          "laneId": "main",
+          "since": 1751820000000,
+          "enabled": true,
+          "pending": 3,
+          "claimed": 0,
+          "processing": 0,
+          "dlq": 1
+        }
+      ]
     }
   ],
   "stalledLeases": [
     {
-      "sessionId": "abc123",
+      "claimId": "c-42",
       "consumerId": "learning-core:session.end",
-      "lane": "main",
-      "consumedMs": 45000,
-      "attemptCount": 2
+      "sessionId": "abc123",
+      "leaseUntil": 1751821230000
     }
   ],
   "lastSweepTs": 1751821200000,
   "recentEvents": [
     {
-      "event": "skipped_backlog",
+      "ts": 1751820600000,
+      "kind": "skipped_backlog",
       "consumerId": "old-plugin:session.end",
-      "reason": "backstop release, consumer disabled",
-      "count": 3,
-      "timestamp": 1751820900000
+      "count": 12
     }
   ]
 }
 ```
+
+`recentEvents` currently carries `skipped_backlog` events (emitted when a sweep observes a
+consumer's watermark transition from disabled to enabled). `dlq_terminal` events go through the
+global diagnostic event stream instead, so they appear in logs and diagnostics exports but not in
+this RPC.
 
 Related:
 
