@@ -21,14 +21,45 @@ openclaw devices list
 openclaw devices list --json
 ```
 
-`--json` returns `pending` and `paired` arrays; each `paired` entry carries a `deviceId`.
+`--json` returns `pending` and `paired` arrays; each `paired` entry carries a `deviceId` and, when
+the device is linked to a person, an `identity` field holding the `session.identityLinks` key.
 Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`, and assistants
 with [workspace lanes](/concepts/workspace-lanes#linking-gateway-devices) require that value in the
-person's `session.identityLinks` entry.
+person's `session.identityLinks` entry. The paired-device table also shows an `Identity` column
+with the linked key.
+
+### `openclaw devices link <deviceId> --identity <key>`
+
+Link a paired device to a `session.identityLinks` identity (see #981's operator path, ADR 0102).
+The key must already exist; unknown keys are never created:
+
+```
+openclaw devices link <deviceId> --identity Alice
+openclaw devices link <deviceId> --identity Alice --json
+```
+
+Prints `Linked <deviceId> to <Identity>.`; when the device is already linked to that identity it
+prints `<deviceId> is already linked to <Identity>.` and writes nothing. A device belongs to one
+person: linking moves the `device:<deviceId>` value from any other key to the target. The
+identities `prototype`, `constructor` and `__proto__` are reserved and refused; rename them in
+`session.identityLinks` first.
+
+### `openclaw devices unlink <deviceId>`
+
+Remove the device's `device:<deviceId>` value from every `session.identityLinks` key:
+
+```
+openclaw devices unlink <deviceId>
+openclaw devices unlink <deviceId> --json
+```
+
+Prints `Unlinked <deviceId> from <keys>.`, or `<deviceId> is not linked.` The running gateway's
+live config is updated even when the config file already had no link.
 
 ### `openclaw devices remove <deviceId>`
 
-Remove one paired device entry.
+Remove one paired device entry. If the device was linked, the removal also unlinks it and prints
+`Unlinked from <keys>.`
 
 ```
 openclaw devices remove <deviceId>
@@ -94,6 +125,7 @@ Pass `--token` or `--password` explicitly. Missing explicit credentials is an er
 ## Notes
 
 - Token rotation returns a new token (sensitive). Treat it like a secret.
-- These commands require `operator.pairing` (or `operator.admin`) scope.
+- The pairing and token commands (`list`/`approve`/`reject`/`remove`/`clear`/`rotate`/`revoke`) require `operator.pairing` (or `operator.admin`) scope. `devices link` and `devices unlink` require `operator.admin`: linking grants a person's identity.
 - `devices clear` is intentionally gated by `--yes`.
 - If pairing scope is unavailable on local loopback (and no explicit `--url` is passed), list/approve can use a local pairing fallback.
+- Successful bootstrap redemptions (including the bounded-profile ids `openclaw-even-g2-node`, `openclaw-mentra-node`, `openclaw-user-client`) are approved silently and appear under `paired`; non-bootstrap pairing and role or scope upgrade requests can still appear under `pending`. To cut a device off, `devices revoke --device <id> --role <role>` prevents subsequent reconnects but does not close an existing connection: restart the gateway (or otherwise close its socket) for immediate containment. `devices remove <id>` deletes the row so the device must scan a new setup code (see [MentraOS glasses](/platforms/mentra-glass)).
