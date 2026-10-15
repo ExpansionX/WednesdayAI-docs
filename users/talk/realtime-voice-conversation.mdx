@@ -1,6 +1,6 @@
 ---
 title: "Cascaded voice conversation sessions"
-description: "Configure and operate the stt-tts cascaded and realtime speech-to-speech Voice engines behind Dictate and Voice mode."
+description: "Configure and operate the stt-tts cascaded voice conversation loop behind Dictate and Voice mode."
 audience: admin
 component: talk/realtime-voice-conversation
 sources:
@@ -19,44 +19,38 @@ sources:
   - dev-docs/adr/0086-voice-admission-for-the-narrow-web-client.md
   - dev-docs/adr/0087-cascaded-voice-contracts.md
   - dev-docs/adr/0088-cascaded-voice-wire-and-policy-fixes.md
-  - dev-docs/adr/0102-session-bound-realtime-voice-for-the-narrow-web-client.md
-  - src/gateway/server-methods/talk-session-realtime.ts
-  - src/gateway/talk-realtime-session-projection.ts
-  - src/gateway/talk-realtime-session-seed.ts
 generated: 2026-10-04
 ---
 
 # Cascaded voice conversation sessions
 
-This page covers the Talk session modes behind the `/v2/client` web client's **Dictate** and
-**Voice mode** controls: cascaded `stt-tts`, streaming-`transcription`, and session-bound
-`realtime`. Most of it describes the cascaded design: a streaming speech-to-text provider, then an
-ordinary agent turn in the owning session, then a streaming text-to-speech provider. The
-`realtime` engine runs speech-to-speech instead: the same gateway relay and bundled OpenAI Realtime
-provider that the Control UI's **Talk** tab uses, but session-bound and driven through
-`talk.session.*`. See [Realtime Voice gateway relay](/talk/realtime-voice) for the relay and the
-provider itself.
+This page covers the `stt-tts` and streaming-`transcription` Talk session modes: the cascaded
+voice conversation loop behind the `/v2/client` web client's **Dictate** and **Voice mode**
+controls. It is a separate feature from the gateway-relay realtime bridge described in
+[Realtime Voice gateway relay](/talk/realtime-voice) — that page covers the classic console's
+**Talk** tab (at `/classic`; the Control UI v2 console has no Talk tab) and the bundled OpenAI
+Realtime provider (a single provider that is both the speech and the
+brain). This page covers a cascaded design: a streaming speech-to-text provider, then an ordinary
+agent turn in the owning session, then a streaming text-to-speech provider.
 
 For end-user instructions, see [Using the web client](/web/using-the-web-client#dictate-and-voice).
 For the underlying session wire, see
 [Narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist).
 
-## Three session modes, one admission path
+## Two session modes, one admission path
 
 `talk.session.create` accepts `mode: "transcription"` (streaming Dictate: STT only, no agent turn,
-final-only-on-close like the pre-existing ADR 0065 batch dictation), `mode: "stt-tts"` (Voice
+final-only-on-close like the pre-existing ADR 0065 batch dictation) or `mode: "stt-tts"` (Voice
 mode: streaming STT, then a normal agent turn in the owning session under a voice profile, then
-streaming TTS), or `mode: "realtime"` (Voice mode on the speech-to-speech engine, ADR 0102 — see
-[Realtime engine](#realtime-engine)). All three modes, plus `talk.catalog` (read-only), are
-narrow-admitted: a `/v2/client` connection holding only
-`operator.sessions.read`/`operator.sessions.write` can create and drive these sessions without
-`operator.read`/`operator.write`. See
+streaming TTS). Both modes, plus `talk.catalog` (read-only), are narrow-admitted: a `/v2/client`
+connection holding only `operator.sessions.read`/`operator.sessions.write` can create and drive
+these sessions without `operator.read`/`operator.write`. See
 [Narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist) for the exact
 method list.
 
 ## Turn on voice conversation
 
-All voice modes are off until the operator enables the master gate:
+Both modes are off until the operator enables the master gate:
 
 ```json5
 {
@@ -68,66 +62,19 @@ All voice modes are off until the operator enables the master gate:
 }
 ```
 
-With the gate off, every `talk.session.create` call for any voice mode (`transcription`,
-`stt-tts`, `realtime`) — narrow or operator-scope — fails
-`UNAVAILABLE: voice conversation disabled`, before any provider is resolved. `talk.catalog`
+With the gate off, every `talk.session.create` call for either mode — narrow or operator-scope —
+fails `UNAVAILABLE: voice conversation disabled`, before any provider is resolved. `talk.catalog`
 still reports provider availability in both gate states (via its `conversationEnabled` field) so a
 client can render Dictate/Voice as available-but-off rather than hidden.
 
-A session additionally needs a configured streaming speech-to-text provider (Dictate), both a
-configured streaming speech-to-text **and** streaming text-to-speech provider (cascaded Voice), or
-an active realtime provider with its credential (realtime Voice — see
-[Realtime engine](#realtime-engine)). Without one, `talk.session.create` fails
-`UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
+A session additionally needs a configured streaming speech-to-text provider (Dictate), or both a
+configured streaming speech-to-text **and** streaming text-to-speech provider (Voice). Without
+one, `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
 (or the transcription-mode equivalent). Configure the provider under `talk.providers.<id>` and
 enable its plugin — see [ElevenLabs streaming voice](/providers/elevenlabs).
 
 Changes to `talk.conversation.*` apply without a gateway restart to new sessions; existing
 sessions keep the configuration resolved when they started.
-
-## Realtime engine
-
-Voice mode can run speech-to-speech instead of the cascaded loop (ADR 0102):
-
-```json5
-{
-  talk: {
-    conversation: {
-      enabled: true,
-      engine: "realtime",
-    },
-  },
-}
-```
-
-With `engine: "realtime"`, the web client's Voice button creates `talk.session.create`
-`{ mode: "realtime" }`. The gateway relays 24 kHz PCM16 audio to the active talk realtime provider
-(`talk.catalog` `realtime.activeProvider`, for example `openai-realtime`), so it needs that
-provider's credential (`talk.providers.<id>.apiKey`, or the provider's own default such as
-`OPENAI_API_KEY`) rather than an STT and TTS pair. Voice shows as available
-only when the gate is on and a realtime provider is active. `mode: "realtime"` fails
-`UNAVAILABLE: realtime voice conversation disabled` while `engine` is `"stt-tts"`.
-
-The session stays bound to the chat:
-
-- The realtime model is seeded with the last 16 messages of the chat, quoted as history, not
-  instructions.
-- Each final user and assistant utterance is written to the chat, so the thread shows the spoken
-  conversation. An assistant reply cut off by barge-in is written as `[interrupted]` only; the
-  user's utterance is always written.
-- Voice obeys the chat's send policy: a session whose `chat.send` is refused refuses voice too
-  (`send blocked by session policy`).
-- Tools run through the agent consult. For `/v2/client` users the consult is read-only, so a spoken
-  request that needs write tools gets a "can't do that by voice" answer. The cascaded engine keeps
-  the full agent turn.
-- `talk.conversation.maxTurnSeconds` caps continuous speech with the same
-  `turn-seconds-exceeded` close the cascaded engine uses. `maxSessionMinutes` bounds the relay
-  session's lifetime instead of the cascaded loop's timer, so reaching it closes the session as a
-  normal close rather than `session-minutes-exceeded`.
-- The chat's recent history and every consult result go to the realtime provider, even when the
-  chat's agent uses a different (for example local-only) model. Keep `engine: "stt-tts"` where
-  that matters.
-- `talk.realtime.*` stays operator-only; the session is driven through `talk.session.*`.
 
 ## `talk.catalog`
 
@@ -162,18 +109,14 @@ The session stays bound to the chat:
     ]
   },
   "realtime": { "activeProvider": null, "rows": [] },
-  "conversationEnabled": true,
-  "conversationEngine": "stt-tts"
+  "conversationEnabled": true
 }
 ```
 
-- `streamingTranscription` backs Dictate; `speech` backs cascaded Voice mode (Voice additionally
-  needs a configured `streamingTranscription` row). `activeProvider` is the id named by
+- `streamingTranscription` backs Dictate; `speech` backs Voice mode (Voice additionally needs a
+  configured `streamingTranscription` row). `activeProvider` is the id named by
   `talk.conversation.sttProvider` (STT) / `talk.provider` (TTS) when a matching row exists, else
   `null` — there is no auto-detect order for either seam.
-- `conversationEngine` mirrors `talk.conversation.engine` (`"stt-tts"` default). With
-  `"realtime"`, the web client's Voice control runs on the `realtime` section: it shows Voice as
-  available when `realtime.activeProvider` is set and the gate is on, without any STT/TTS row.
 - `realtime` reports the gateway-relay realtime providers (for example `openai-realtime`) with the
   same row shape, so a client can show a named diagnostic for that bridge too, even though
   `talk.realtime.*` itself stays operator-only.
@@ -181,11 +124,7 @@ The session stays bound to the chat:
   `streamingTranscription`/`speech`/`realtime` are not hidden while the gate is off — so a narrow
   client can render "available but disabled by your administrator" instead of nothing.
 - A row's `configured` is resolved from `talk.providers.<id>.apiKey` through the secret resolver
-  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. A `realtime` row
-  is the exception: it uses the same resolution `talk.session.create { mode: "realtime" }` uses
-  (the provider's config defaults and environment, then its `isConfigured()`), so an
-  environment-only key counts; an unresolvable `apiKey` secret ref still reports its diagnostic.
-  A `speech` row
+  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. A `speech` row
   is additionally unconfigured when the provider cannot resolve a voice: the config has no
   `voiceId` and the plugin declares no `defaultVoiceId`. `diagnostic`, present only when
   `configured` is `false` and a cause is known, is one of `missing-api-key`,
@@ -195,8 +134,7 @@ The session stays bound to the chat:
 ## Audio framing
 
 Input (client to gateway) is base64 PCM16, mono, 16 kHz — half the realtime relay's 24 kHz input,
-matching ElevenLabs Scribe v2 Realtime's expected rate. (A `realtime` voice session captures and
-relays 24 kHz in both directions instead; its create response advertises the rate.) `talk.session.appendAudio` rejects a frame
+matching ElevenLabs Scribe v2 Realtime's expected rate. `talk.session.appendAudio` rejects a frame
 over 512 KB of base64 text, non-canonical base64, and (hardening) a non-PCM16-aligned (odd) byte
 count or a frame sent after the session closed, without poisoning the connection. Output (gateway
 to client) `output.audio.*` events carry PCM16 mono 24 kHz, tagged `kind: "speech" | "filler" |
@@ -206,10 +144,8 @@ to client) `output.audio.*` events carry PCM16 mono 24 kHz, tagged `kind: "speec
 
 - 2 active Talk relay sessions per connection, 64 globally — shared across every session kind
   (`transcription`, `stt-tts`, and the realtime bridge), not a separate stt-tts-only budget.
-- `talk.conversation.maxSessionMinutes` (default 30): the cascaded `stt-tts` loop closes the
-  session with `session.closed { reason: "session-minutes-exceeded" }` once reached. The realtime
-  engine uses the value as the relay session's TTL instead; an expired realtime voice session
-  closes as a normal close, with no `session-minutes-exceeded` reason.
+- `talk.conversation.maxSessionMinutes` (default 30): the relay closes the session with
+  `session.closed { reason: "session-minutes-exceeded" }` once reached.
 - `talk.conversation.maxTurnSeconds` (default 60): a hard ceiling on one turn's continuous user
   speech. The relay closes the session with `session.closed { reason: "turn-seconds-exceeded" }`.
 - A disconnected client's session closes the same way a realtime-bridge session does.
@@ -269,10 +205,7 @@ The first turn of a new Talk session stops a leftover voice run left by a closed
 ## Metrics
 
 `talk.metrics` (operator-only; narrow clients are refused `missing scope: operator.read`) reports a
-bounded in-process rolling window (500 turns per STT/TTS provider pair) for the cascaded `stt-tts`
-loop's turns. Realtime engine voice sessions are not recorded in this ring; realtime relay
-lifecycle facts stay in the logs listed on
-[Realtime Voice gateway relay](/talk/realtime-voice#session-observability):
+bounded in-process rolling window (500 turns per STT/TTS provider pair):
 
 ```json
 {
@@ -340,24 +273,6 @@ turn-taking thresholds, session limits, and the filler/acknowledgement phrases.
 Set `talk.conversation.enabled: true`. This gate is checked before any provider is resolved, so a
 fully configured provider does not matter until it is on.
 
-### `talk.session.create` fails `UNAVAILABLE: realtime voice conversation disabled`
-
-`talk.conversation.engine` is not `"realtime"`. Set it and keep `talk.conversation.enabled: true`
-(both keys live in the same block and apply to new sessions without a restart). A realtime create
-also fails `UNAVAILABLE` with the provider's message when no talk realtime provider resolves:
-check that the plugin is enabled (`plugins.entries.openai-realtime.enabled`) and that a key
-resolves — `talk.providers.openai-realtime.apiKey`, the plugin's defaults, or `OPENAI_API_KEY`.
-`talk.catalog`'s `realtime.activeProvider` shows what create would select.
-
-### The web client's Voice button is dimmed
-
-Voice is dimmed when `talk.catalog` reports it unavailable to that connection: the
-`talk.conversation.enabled` gate is off, or — with `engine: "realtime"` —
-`realtime.activeProvider` is `null` because no realtime provider resolved its credential. With the
-cascaded engine, Voice also needs a configured STT and TTS pair, and a missing voice id or
-unresolved key shows in the `speech` row's `diagnostic` (see below). Dictate is dimmed and enabled
-independently of the engine.
-
 ### `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
 
 When the message ends with `<transcription|speech> provider "<id>" is not configured; check
@@ -401,9 +316,8 @@ A previous Voice session may have left a voice run in flight. The next session's
 
 ## Related
 
-- [Realtime Voice gateway relay](/talk/realtime-voice) — the relay and the bundled OpenAI
-  Realtime provider; the `realtime` engine drives the same relay session-bound through
-  `talk.session.*`
+- [Realtime Voice gateway relay](/talk/realtime-voice) — the separate single-provider relay bridge
+  behind the classic console's Talk tab
 - [ElevenLabs streaming voice](/providers/elevenlabs) — the first streaming STT/TTS provider pair
 - [Using the web client](/web/using-the-web-client#dictate-and-voice) — end-user instructions
 - [Configuration reference](/gateway/configuration-reference#talkconversation) — full field table

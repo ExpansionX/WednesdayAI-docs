@@ -11,12 +11,11 @@ sources:
   - src/talk/agent-consult-tool.ts
   - src/talk/agent-consult-runtime.ts
   - src/gateway/server-methods/talk.ts
-  - src/gateway/server-methods/talk-session-realtime.ts
   - src/gateway/talk-realtime-relay.ts
   - extensions/openai-realtime/src/provider.ts
   - extensions/openai-realtime/src/openai-bridge.ts
   - extensions/openai-realtime/src/playback-mark-tracker.ts
-generated: 2026-10-15
+generated: 2026-08-26
 ---
 
 # Realtime Voice Provider API
@@ -331,17 +330,13 @@ audio can refill the queue after the clear.
 
 ## Close reasons
 
-| Reason                       | When                                                                                                                             |
-| ---------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| `"completed"`                | Session ended normally (TTL expired, stop requested)                                                                             |
-| `"error"`                    | Fatal provider or connect error                                                                                                  |
-| `"cancelled"`                | Client disconnected or cancelled before the session completed                                                                    |
-| `"session-minutes-exceeded"` | Cascaded `stt-tts` session hit `talk.conversation.maxSessionMinutes`                                                             |
-| `"turn-seconds-exceeded"`    | Voice conversation session (cascaded or session-bound realtime) hit `talk.conversation.maxTurnSeconds` of continuous user speech |
-
-A session-bound realtime session (ADR 0102) whose `talk.conversation.maxSessionMinutes` relay TTL
-expires closes as `"completed"`, not `"session-minutes-exceeded"` — only the cascaded loop emits
-that reason.
+| Reason                       | When                                                                 |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `"completed"`                | Session ended normally (TTL expired, stop requested)                 |
+| `"error"`                    | Fatal provider or connect error                                      |
+| `"cancelled"`                | Client disconnected or cancelled before the session completed        |
+| `"session-minutes-exceeded"` | Cascaded session hit `talk.conversation.maxSessionMinutes`           |
+| `"turn-seconds-exceeded"`    | Cascaded session hit `talk.conversation.maxTurnSeconds` of one burst |
 
 ## Tool calls
 
@@ -419,13 +414,9 @@ authorized (see [Consult tool policies](#consult-tool-policies)).
 ### Who installs it (not the provider)
 
 Your provider does not merge, reserve, or opt into this tool. For gateway-relay transport, the
-gateway handlers that create a relay session — `talk.realtime.session` and, since ADR 0102, the
-session-bound `talk.session.create {mode: "realtime"}` — resolve the effective policy
-(`resolveRealtimeVoiceAgentConsultTools` / `resolveTalkRealtimeConsultPolicy` in
-`src/gateway/server-methods/talk-session-realtime.ts`) and merge the built-in descriptor into the
-tool list **before** your `createBridge()` is ever called. For a session-bound realtime voice
-session the consult runs against the owning chat session (its agent and tool session), with
-transcript persistence suppressed. Your provider receives the already-merged `req.tools` like any
+`talk.realtime.session` gateway handler (`src/gateway/server-methods/talk.ts`) resolves the
+effective policy and merges the built-in descriptor into the tool list **before** your
+`createBridge()` is ever called. Your provider receives the already-merged `req.tools` like any
 other tool and does not see which entries are gateway-reserved. Non-relay (`createBrowserSession`)
 sessions do not receive this merge — the built-in is a `gateway-relay`-only feature.
 
