@@ -304,8 +304,9 @@ Notes:
 
 - `api.runtime.tasks.pipelineStatus()` returns
   `{ state: "booting" | "running" | "disabled" | "stopped", running, startupEntryId }`.
-  `running` is `true` only in the `running` state; `disabled` means the pipeline did not boot (`tasks.enabled: false`, or a session store without
-  durable task storage, such as fs-jsonl).
+  `running` is `true` only in the `running` state; `disabled` means the pipeline did not boot
+  (`tasks.enabled: false`, or the active SQL session storage runtime does not supply the task
+  stores the pipeline requires — task runs, budget, or bus work).
   `startupEntryId` is stable for one pipeline start and new on every later start, so it can key
   once-per-start work. Use it to decide whether work queued with `api.enqueueTaskWork` will run
   (Learning Core runs promote inline when the pipeline is not running).
@@ -1012,6 +1013,12 @@ task dispatcher's completion paths and the subagent completion path with
 `{ taskRunId?, agentId?, source: "task" | "subagent" | "session", outcome: "completed" | "failed" | "preempted" | "cancelled", quality?, meta? }`.
 The [Dream Cycle](/plugins/dream-cycle) plugin is the reference consumer of both.
 
+`PluginHookBeforeCompactionEvent.sessionFile` and `PluginHookAfterCompactionEvent.sessionFile`
+are `@deprecated`: SQL session storage keeps transcripts in the database, so core never sets
+them, and they are removed in the next release. Read the session's history with
+`getConversationReadQuery` from the plugin SDK instead. `PluginHookSessionEndEvent.sessionFile`
+is a separate contract and is unaffected.
+
 `session_start` and `session_end` carry `runtimeIdentity` when the session has real identity:
 the session's actor (channel, account id, peer kind/id, canonical identity) and
 `isMainSession: true` only for the agent's main session key. `runtimeIdentity.sessionKind`
@@ -1042,8 +1049,9 @@ LINE and Zalo inbound replies do not fire these hooks.
   with `success: false` and `error`. `ctx.messageId` is the platform id of the last message sent
   for the payload; it is absent when the platform returns none. A payload that ends up as a
   provable no-send — `message_sending` cancelled it, rewrote it to empty, or the channel
-  suppressed it (e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: no delivery result, no
-  transcript mirror, no queue receipt id, and no `message_sent` event.
+  suppressed it (e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: the assistant message
+  the turn generated is already stored, but the delivery itself adds no transcript entry, no
+  queue receipt id, no delivery result, and no `message_sent` event.
 
 ```ts
 import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";

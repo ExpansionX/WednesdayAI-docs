@@ -392,16 +392,16 @@ Plugin hooks registered via `api.on(hookName, handler)` intercept the agent pipe
 | `transform_llm_input`  | Before messages are sent to the LLM; handlers execute sequentially, each receiving the prior handler's output                   | `PluginHookAgentContext`                             | `{ messages: AgentMessage[] }`                                                               |
 | `transform_llm_output` | After the LLM returns; handlers execute sequentially                                                                            | `PluginHookAgentContext`                             | `{ assistantTexts?: string[] }`                                                              |
 | `agent_end`            | When an agent run completes (success or error)                                                                                  | `PluginHookAgentContext`                             | void                                                                                         |
-| `before_compaction`    | Before compaction begins                                                                                                        | `PluginHookAgentContext`                             | void                                                                                         |
-| `after_compaction`     | After compaction completes                                                                                                      | `PluginHookAgentContext`                             | void                                                                                         |
+| `before_compaction`    | Before compaction begins                                                                                                        | `PluginHookAgentContext`                             | void; the payload's `sessionFile` is deprecated and never set (see below)                    |
+| `after_compaction`     | After compaction completes                                                                                                      | `PluginHookAgentContext`                             | void; the payload's `sessionFile` is deprecated and never set (see below)                    |
 | `before_reset`         | When `/new` or `/reset` clears a session                                                                                        | `PluginHookAgentContext`                             | void                                                                                         |
 | `message_received`     | Inbound message received                                                                                                        | `PluginHookMessageContext`                           | void                                                                                         |
 | `message_sending`      | Outbound payload about to be sent (inbound channel replies and CLI/cron)                                                        | `PluginHookMessageContext`                           | `{ content?, cancel? }` or void                                                              |
 | `message_sent`         | Outbound payload was dispatched to the platform (inbound channel replies and CLI/cron); suppressed no-sends fire nothing        | `PluginHookMessageContext`                           | void                                                                                         |
 | `before_tool_call`     | Before a tool is invoked                                                                                                        | `PluginHookToolContext`                              | `{ params?, block?, blockReason? }` or void                                                  |
 | `after_tool_call`      | After a tool returns                                                                                                            | `PluginHookToolContext`                              | void                                                                                         |
-| `tool_result_persist`  | Before a tool result is written to the JSONL transcript (synchronous)                                                           | `PluginHookToolResultPersistContext`                 | `{ message? }` or void                                                                       |
-| `before_message_write` | Before any agent message is written to the JSONL                                                                                | `{ agentId?, sessionKey?, runtimeIdentity?, turn? }` | `{ block?, message? }` or void                                                               |
+| `tool_result_persist`  | Before a tool result is written to session storage (synchronous)                                                                | `PluginHookToolResultPersistContext`                 | `{ message? }` or void                                                                       |
+| `before_message_write` | Before any agent message is written to session storage                                                                          | `{ agentId?, sessionKey?, runtimeIdentity?, turn? }` | `{ block?, message? }` or void                                                               |
 | `model_call_ended`     | After an agent model-call attempt finishes                                                                                      | `PluginHookAgentContext`                             | void; handlers may update `usage` (`event.proxyMetadata` is deprecated — removed next minor) |
 | `storage.afterAppend`  | After a conversation entry is appended to context storage                                                                       | `ContextLifecycleContext`                            | void                                                                                         |
 | `context.collect`      | During context construction, before prompt assembly                                                                             | `ContextLifecycleContext`                            | `PromptContribution` or void                                                                 |
@@ -424,6 +424,13 @@ Both were added for background engines like [Dream Cycle](/plugins/dream-cycle);
 monitor only runs when `tasks.idle.enabled` is true or `tasks.schedule.windows` is non-empty
 (see [Task operations](/gateway/tasks)).
 
+The `before_compaction` and `after_compaction` payloads used to carry a `sessionFile` path to the
+JSONL transcript. SQL session storage keeps transcripts in the database, so the field is
+deprecated, never set, and is removed in the next release. Read the session's history with
+`getConversationReadQuery` from the plugin SDK instead (see
+[Session identity keying](/plugins/session-identity-keying)); `session_end.sessionFile` is a
+separate contract and is unaffected here.
+
 ### Inbound channel replies
 
 Inbound replies fire plugin `message_sending` then `message_sent` once per payload on Telegram,
@@ -441,8 +448,9 @@ the original payload is sent. Telegram chunking does not re-run the hook.
 `success: false` and `error`. `ctx.messageId` is the platform id of the last message sent for the
 payload; it is absent when the platform returns none. A payload that ends up as a provable
 no-send — `message_sending` cancelled it, rewrote it to empty, or the channel suppressed it
-(e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: no delivery result, no transcript
-mirror, no queue receipt id, and no `message_sent` event.
+(e.g. the Slack `NO_REPLY` guard) — is a terminal no-op: the assistant message the turn generated
+is already stored, but the delivery itself adds no transcript entry, no queue receipt id, no
+delivery result, and no `message_sent` event.
 
 Inbound `message_sending` context is `channelId` and `accountId` only. It does not set
 `sessionKey` or `trigger`. Plugin `message_sent` still fires after a successful inbound send.

@@ -15,11 +15,11 @@ generated: 2026-07-06
 
 # `openclaw sessions`
 
-List stored conversation sessions. The command reads the per-agent `sessions.json` store file
-and (when session metadata includes a transcript path) may read transcript content. With a database
-session backend (`session.storage.backend: "sqlite" | "postgres"`), transcript content is served from
-the configured database; with `backend: "fs-jsonl"`, transcripts are read from local JSONL files.
-See [Session Management / External session storage](/concepts/session#external-session-storage).
+List stored conversation sessions. The command reads session data through SQL session storage: it
+asks the running gateway for the rows (zero direct database access), or — with no gateway running —
+takes session-storage ownership and reads the configured database in-process. The per-agent
+`sessions.json` path is that agent's store identity; the session index itself lives in the database.
+See [Session Management / Session storage](/concepts/session#session-storage).
 
 ```bash
 openclaw sessions
@@ -34,7 +34,9 @@ Scope selection:
 - default: configured default agent store
 - `--agent <id>`: one configured agent store
 - `--all-agents`: aggregate all configured agent stores
-- `--store <path>`: explicit store path (cannot be combined with `--agent` or `--all-agents`)
+- `--store <path>`: explicit store path (cannot be combined with `--agent` or `--all-agents`).
+  The path must name a configured agent's session store; an unknown path exits with an error
+  telling you to use `--agent`.
 
 JSON examples:
 
@@ -72,7 +74,7 @@ openclaw sessions cleanup --json
 
 `openclaw sessions cleanup` uses `session.maintenance` settings from config:
 
-- Scope note: `openclaw sessions cleanup` maintains session stores/transcripts only. It does not prune cron run logs (`cron/runs/<jobId>.jsonl`), which are managed by `cron.runLog.maxBytes` and `cron.runLog.keepLines` in [Cron configuration](/automation/cron-jobs#configuration) and explained in [Cron maintenance](/automation/cron-jobs#maintenance).
+- Scope note: `openclaw sessions cleanup` maintains the session index and retention only. It does not prune cron run logs (`cron/runs/<jobId>.jsonl`), which are managed by `cron.runLog.maxBytes` and `cron.runLog.keepLines` in [Cron configuration](/automation/cron-jobs#configuration) and explained in [Cron maintenance](/automation/cron-jobs#maintenance).
 
 - `--dry-run`: preview how many entries would be pruned/capped without writing.
   - In text mode, dry-run prints a per-session action table (`Action`, `Key`, `Age`, `Model`, `Flags`) so you can see what would be kept vs removed.
@@ -80,8 +82,18 @@ openclaw sessions cleanup --json
 - `--active-key <key>`: protect a specific active key from disk-budget eviction.
 - `--agent <id>`: run cleanup for one configured agent store.
 - `--all-agents`: run cleanup for all configured agent stores.
-- `--store <path>`: run against a specific `sessions.json` file.
+- `--store <path>`: run against a specific agent's store path. The path must name a configured
+  agent's session store; an unknown path exits with an error telling you to use `--agent`.
+  `--store` cannot be combined with `--agent` or `--all-agents`: the conflicting combination is
+  rejected with an error before anything is routed, so the refusal is identical locally and when
+  a gateway owns the store (no request is sent in that case).
+- `--fix-missing`: accepted for compatibility and does nothing under SQL session storage; the CLI
+  prints `--fix-missing has no effect with SQL session storage and will be removed in the next release`.
 - `--json`: print a JSON summary. With `--all-agents`, output includes one summary per store.
+
+Cleanup deletes whole sessions only: `--enforce` removes idle sessions whose newest entry is older
+than `session.maintenance.pruneAfter` (and caps the index at `maxEntries`). It never deletes
+individual entries, and with the default `warn` mode it deletes nothing.
 
 `openclaw sessions cleanup --all-agents --dry-run --json`:
 

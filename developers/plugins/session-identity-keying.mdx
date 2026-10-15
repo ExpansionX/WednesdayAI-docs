@@ -135,13 +135,44 @@ colons; it does not split tokens into invented channel/peer components. Private 
 keys leave the stored raw facts and the public actor-query contract unchanged. Canonical references
 whose persisted channel is NULL omit `channel` instead of inventing a channel name.
 
+### `listCompactions` and `loadLatestProjection`
+
+Both are derived-output reads over one session — session-level facts, not transcript entry
+ranges — with the same ownership scoping as every other session-id read (a session the
+scoped agent does not own throws `StorageReadAccessError`):
+
+```typescript
+// Recorded compaction events for a session, newest first, on the (session_id, compaction_seq)
+// index — no transcript scan. `beforeCompactionSeq` pages strictly older rows.
+const events = await query.listCompactions({ sessionId, limit: 100 });
+for (const event of events) {
+  event.payload.result; // { summary, tokensBefore, firstKeptEntryId }
+}
+
+// The latest saved `context.project` payload (or any other projection type) for a session.
+const projection = await query.loadLatestProjection({
+  sessionId,
+  projectionType: "context.project",
+});
+```
+
+`listCompactions` reads the `ctx_compaction_events` table that compaction runs record; a session
+compacted before that table existed reports no events (callers that must see those fall back to
+transcript scans, as `sessions.compaction.list` does). Event-backed checkpoints have no
+transcript entry id, so only `createdAt`, `tokensBefore` and `firstKeptEntryId` are populated.
+`loadLatestProjection` returns `undefined` when nothing was ever persisted for that
+`(sessionId, projectionType)` pair. Both answers come from their own indexed tables, so neither
+touches the conversation log.
+
 ### Limits
 
-Both queries clamp `limit` through the same read-limit clamp every other store read uses:
+Both identity queries (`listSessionsByActor`, `listSessionsByCanonicalIdentity`) clamp `limit`
+through the same read-limit clamp every other store read uses:
 default 100, max 1000. A `limit` above 1000 is truncated to 1000 and logged as a warning. A
 non-numeric, zero, or negative `limit` falls back to 100 without a warning. Neither case is
 rejected. Page with the returned `nextCursor` until it is absent; pages are keyset-ordered on
-`(updated_at, session_id)` with no duplicates across pages.
+`(updated_at, session_id)` with no duplicates across pages. `listCompactions` clamps `limit`
+through the same clamp (same default and max).
 
 Both queries return `{ sessions: [] }` when the configured runtime has no lossless conversation
 log (`capabilities.losslessConversationLog === false`) — check for an empty result, not an
