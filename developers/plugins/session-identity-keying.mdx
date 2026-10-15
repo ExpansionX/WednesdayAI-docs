@@ -74,6 +74,23 @@ precedence rules, and `canonicalIdentity` is set only when the operator linked t
 lane-enabled agent denies turns it cannot attribute to a linked identity
 (`WorkspaceLaneDeniedError`; see [Workspace Lanes](/concepts/workspace-lanes#linking-gateway-devices)).
 
+For a linked device (ADR 0103) the person is the sender name: `ctx.senderName` and the model's
+Sender block resolve to the identityLinks key (`DavidRudduck (device:…)`), while `senderId` stays
+the raw `device:<id>` as provenance. The client's display name (for example `MentraOS glasses`)
+is a Sender-block `client` field, never a person name. So: resolve people from
+`ctx.runtimeIdentity.canonicalIdentity` (or `ctx.senderName` for gateway turns); treat `senderId`
+as a credential id, never a person.
+
+System agent-turns (cron systemEvent/wake, nudge, work, announce) are never `user` turns. They
+report `ctx.trigger` of `cron`/`heartbeat` on run hooks, and their persisted entries carry
+`entry.triggerSource` of `cron`/`heartbeat` with `entry.isAutomated: true` on
+`storage.afterAppend` — including shared sessions such as `agent:main:main`. The reverse holds:
+a human `chat.send` into an existing cron or heartbeat session key is stamped `user` explicitly,
+so it persists as a person turn even inside an isolated cron session (a direct peer id that
+merely contains `:cron:` is also never cron). An entry without those markers on a non-system
+turn is a person's turn; `canonicalIdentity` undefined then means an unknown person: fail
+closed.
+
 ## Reading identity-scoped history
 
 Your extension receives a `ConversationReadQuery` (ADR 0012), either injected into a context
