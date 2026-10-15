@@ -1896,13 +1896,12 @@ Defaults for Talk mode (macOS/iOS/Android).
 
 ### `talk.conversation`
 
-Settings for the voice conversation behind the `/v2/client` web client's Dictate and Voice mode
-controls. `engine` selects how Voice runs: the cascaded `stt-tts` loop or the session-bound
-`realtime` speech-to-speech engine. See
+Settings for the cascaded `stt-tts` voice conversation loop behind the `/v2/client` web client's
+Dictate and Voice mode controls. See
 [Cascaded voice conversation sessions](/talk/realtime-voice-conversation) for the full behavior;
-cascaded text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block
-configures the STT seam, the engine choice, turn-taking thresholds, session limits, and
-filler/acknowledgement phrases.
+text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block only
+configures the STT seam, turn-taking thresholds, session limits, and filler/acknowledgement
+phrases.
 
 ```json5
 {
@@ -1923,28 +1922,26 @@ filler/acknowledgement phrases.
       ackPhrases: { en: ["Working on that.", "Looking that up.", "On it."] },
       maxSessionMinutes: 30,
       maxTurnSeconds: 60,
-      engine: "stt-tts",
     },
   },
 }
 ```
 
-| Field                 | Default                | Meaning                                                                                                                                                                                                                                   |
-| --------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every voice session (`stt-tts`, streaming-`transcription`, `realtime`) while this is `false`.                                                                                                  |
-| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                                                                                                                              |
-| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                                                                                                                             |
-| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                                                                                                                                       |
-| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.                                                                                                                     |
-| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                                                                                                                                        |
-| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.                                                                                                                        |
-| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                                                                                                                                   |
-| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                                                                                                                                       |
-| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                                                                                                                          |
-| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`.                                                                                                           |
-| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. A cascaded `stt-tts` session closes with `session.closed { reason: "session-minutes-exceeded" }`; the `realtime` engine uses the value as the relay session TTL and closes as a normal close when reached. |
-| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.                                                                                                                      |
-| `engine`              | `"stt-tts"`            | Voice mode engine. `"realtime"` runs speech-to-speech through the active talk realtime provider, bound to the chat session.                                                                                                               |
+| Field                 | Default                | Meaning                                                                                                                         |
+| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every `stt-tts`/streaming-`transcription` session while this is `false`.             |
+| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                    |
+| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                   |
+| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                             |
+| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.           |
+| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                              |
+| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.              |
+| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                         |
+| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                             |
+| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                |
+| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`. |
+| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. Closes with `session.closed { reason: "session-minutes-exceeded" }`.                             |
+| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.            |
 
 Numeric fields (`endOfTurnSilenceMs`, `recallDeadlineMs`, `fillerAfterMs`, `falseInterruptionMs`, `maxSessionMinutes`, `maxTurnSeconds`) must be positive integers. `0`, negatives, and non-integers fail config validation.
 
@@ -2781,8 +2778,8 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
       resetOnExit: false,
     },
     controlUi: {
-      enabled: true,
-      basePath: "/openclaw",
+      enabled: true, // deprecated classic console; served at basePath (/classic by default)
+      // basePath: "/classic", // default; an explicit "/" keeps classic at the root
       // root: "dist/control-ui",
       // allowedOrigins: ["https://control.example.com"], // required for non-loopback Control UI
       // dangerouslyAllowHostHeaderOriginFallback: false, // dangerous Host-header origin fallback mode
@@ -2796,8 +2793,8 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
       // root: "/srv/wednesdayai-web", // optional; defaults to the packaged dist/web-client
     },
     controlUiV2: {
-      // enabled: false, // serve the control UI v2 console from this gateway (default off)
-      // basePath: "/v2/control", // default; must not collide with another SPA mount
+      // enabled: true, // default; the v2 console owns the gateway root
+      // basePath: "/", // default: the gateway root; yields to /v2/control when another SPA explicitly owns the root
       // root: "/srv/wednesdayai-control", // optional; defaults to the packaged dist/control-ui-v2
     },
     remote: {
@@ -2841,8 +2838,8 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `webClient.enabled`: serve the built web client bundle from this gateway, same-origin, at `webClient.basePath`. Default `false`: the client is normally hosted separately (`wednesdayai web serve`, a CDN, or the container image). Enabling it does not admit the client - the origin allowlist above still applies, so add the gateway's own origin. See [Web client hosting](/web/user-client).
 - `webClient.basePath`: public path the gateway-served client is mounted under. Default `/v2/client`. It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`gateway.controlUi.basePath`, `gateway.controlUiV2.basePath` when the v2 console is enabled); a collision is rejected when the config loads, naming both keys. Earlier builds defaulted to `/client`; on a deployment that never set `basePath`, an old `/client/` bookmark no longer reaches the client (there is no redirect), and with the Control UI at the gateway root that path is answered by the Control UI. Set `basePath: "/client"` to keep the old address. `gateway.*` changes need a gateway restart. See [Web client hosting](/web/user-client#gateway-route).
 - `webClient.root`: directory holding the built bundle (`index.html` plus `assets/`). Optional: with `webClient.enabled` true and no `root`, the gateway serves the bundle packaged with this install (`dist/web-client`), and answers `503` naming the build command only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason rather than silently falling back.
-- `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `false` (opt-in while the classic Control UI stays the default console). The console connects as the classic console's `openclaw-control-ui` client, so admission, scopes and auth modes are the classic console's: browser origins are governed by `controlUi.allowedOrigins`, and there is no separate allowlist. A non-loopback bind with only this console enabled still requires `controlUi.allowedOrigins` at startup, exactly as for the classic console. See [Control UI v2](/web/control-ui-v2).
-- `controlUiV2.basePath`: public path the console is mounted under. Default `/v2/control`; must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`, `controlUi.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
+- `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `true`: the v2 console is the daily console and owns the gateway root, while the classic console (deprecated) serves at `/classic`. Set it to `false` only to run the classic console alone. The console connects as the classic console's `openclaw-control-ui` client, so admission, scopes and auth modes are the classic console's: browser origins are governed by `controlUi.allowedOrigins`, and there is no separate allowlist. A non-loopback bind with a console enabled still requires `controlUi.allowedOrigins` at startup. See [Control UI v2](/web/control-ui-v2).
+- `controlUiV2.basePath`: public path the console is mounted under. Default: the gateway root; the v2 console mounts at `/v2/control` instead when the root is already claimed (an explicit `basePath: "/"` on the classic console or an enabled web client, or the classic console keeping the root because another mount explicitly uses `/classic`), so configs valid before v2 became the default keep serving the same SPA at the root. Must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`, `controlUi.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
 - `controlUiV2.root`: directory holding the built console (`index.html` plus `assets/`). Optional: unset, the gateway serves the bundle packaged with this install (`dist/control-ui-v2`) and answers `503` naming `pnpm control:build:packaged` only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason.
 - `remote.transport`: `ssh` (default) or `direct` (ws/wss). For `direct`, `remote.url` must be `ws://` or `wss://`.
 - `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`: client-side break-glass override that allows plaintext `ws://` to trusted private-network IPs; default remains loopback-only for plaintext.
