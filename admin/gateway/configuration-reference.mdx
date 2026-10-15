@@ -1905,12 +1905,14 @@ Defaults for Talk mode (macOS/iOS/Android).
 
 ### `talk.conversation`
 
-Settings for the cascaded `stt-tts` voice conversation loop behind the `/v2/client` web client's
-Dictate and Voice mode controls. See
-[Cascaded voice conversation sessions](/talk/realtime-voice-conversation) for the full behavior;
-text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block only
-configures the STT seam, turn-taking thresholds, session limits, and filler/acknowledgement
-phrases.
+Settings for the voice conversation behind the `/v2/client` web client's Dictate and Voice mode
+controls. `engine` selects how Voice runs: the cascaded `stt-tts` loop or the session-bound
+`realtime` speech-to-speech engine. See
+[Voice conversation sessions](/talk/realtime-voice-conversation) for the full behavior;
+cascaded text-to-speech output reuses `talk.provider`/`talk.providers.<id>` above, so this block
+configures the STT seam, the engine choice, turn-taking thresholds, session limits, and
+filler/acknowledgement phrases. The `realtime` engine uses the realtime provider's own voice:
+neither `messages.tts` nor the `talk.provider`/`talk.providers.<id>` TTS settings apply to it.
 
 ```json5
 {
@@ -1931,26 +1933,28 @@ phrases.
       ackPhrases: { en: ["Working on that.", "Looking that up.", "On it."] },
       maxSessionMinutes: 30,
       maxTurnSeconds: 60,
+      engine: "stt-tts",
     },
   },
 }
 ```
 
-| Field                 | Default                | Meaning                                                                                                                         |
-| --------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every `stt-tts`/streaming-`transcription` session while this is `false`.             |
-| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                    |
-| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                   |
-| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                             |
-| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.           |
-| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                              |
-| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.              |
-| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                         |
-| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                             |
-| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                |
-| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`. |
-| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. Closes with `session.closed { reason: "session-minutes-exceeded" }`.                             |
-| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.            |
+| Field                 | Default                | Meaning                                                                                                                                                                                                                                   |
+| --------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`             | `false`                | Master gate. `talk.session.create` refuses every voice session (`stt-tts`, streaming-`transcription`, `realtime`) while this is `false`.                                                                                                  |
+| `sttProvider`         | `"elevenlabs"`         | Streaming speech-to-text provider id; must match a row in `talk.catalog`'s `streamingTranscription` section.                                                                                                                              |
+| `sttModel`            | `"scribe_v2_realtime"` | STT model id, passed through to the provider.                                                                                                                                                                                             |
+| `endOfTurnSilenceMs`  | `500`                  | Silence window used to estimate end-of-turn when the provider reports no `speechEndedAt` timestamp.                                                                                                                                       |
+| `recallDeadlineMs`    | `250`                  | Deadline a voice turn's `context.collect` memory-recall hook races against. Typed chat turns never use this deadline.                                                                                                                     |
+| `fillerAfterMs`       | `1200`                 | Delay after end-of-turn before the cached filler phrase plays, if no assistant speech has started.                                                                                                                                        |
+| `falseInterruptionMs` | `700`                  | Window a qualifying STT word has, after a client-reported barge-in, to confirm the interruption before it resumes.                                                                                                                        |
+| `backchannels`        | built-in `"en"` list   | Per-locale short phrases (keyed by lowercase BCP-47 tag) that never confirm a barge-in.                                                                                                                                                   |
+| `fillerPhrases`       | built-in `"en"` list   | Per-locale phrases played when no speech output has started within `fillerAfterMs`.                                                                                                                                                       |
+| `ackPhrases`          | built-in `"en"` list   | Per-locale phrases played when a tool call starts during a turn.                                                                                                                                                                          |
+| `locale`              | `"en"`                 | BCP-47 locale selecting `backchannels`/`fillerPhrases`/`ackPhrases` for a session. An unrecognised locale falls back to `"en"`.                                                                                                           |
+| `maxSessionMinutes`   | `30`                   | Hard session duration ceiling. A cascaded `stt-tts` session closes with `session.closed { reason: "session-minutes-exceeded" }`; the `realtime` engine uses the value as the relay session TTL and closes as a normal close when reached. |
+| `maxTurnSeconds`      | `60`                   | Hard ceiling on one turn's continuous user speech. Closes with `session.closed { reason: "turn-seconds-exceeded" }`.                                                                                                                      |
+| `engine`              | `"stt-tts"`            | Voice mode engine. `"realtime"` runs speech-to-speech through the active talk realtime provider, bound to the chat session.                                                                                                               |
 
 Numeric fields (`endOfTurnSilenceMs`, `recallDeadlineMs`, `fillerAfterMs`, `falseInterruptionMs`, `maxSessionMinutes`, `maxTurnSeconds`) must be positive integers. `0`, negatives, and non-integers fail config validation.
 

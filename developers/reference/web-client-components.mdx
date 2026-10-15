@@ -303,7 +303,7 @@ provider module per concern, each testable without a gateway connection.
 | Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                      | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                                                                             |
 | Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`                                    | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
-| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `app/use-voice.ts`                                        | `talk.catalog`, `talk.session.*` mode `stt-tts`                                                            |
+| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
 | Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`            | `tts.readAloud.status`, `tts.speak`                                                                        |
 | Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                    | none                                                                                                       |
 
@@ -553,7 +553,7 @@ Dictate and Voice mode are Composer controls (test ids `composer-dictate` and `c
 not phase placeholders. When `talk.catalog` does not offer a control it renders through
 `DisabledControl` with `reason="unavailable on this gateway"`; when it is offered it is a real
 toggle button: `aria-pressed` plus the `cl-composer-btn--active` style while it is on
-(`recording` for Dictate; `listening` or `speaking` for Voice mode), and a
+(`recording` for Dictate; `listening`, `thinking` or `speaking` for Voice mode), and a
 `data-dictate-status` / `data-voice-status` attribute mirroring the hook state — the `error` value
 gets the danger outline from `client.css`, and the next click retries. `features.voice` is
 ignored.
@@ -562,7 +562,11 @@ Availability comes from `talk.catalog`, and updates on reconnect:
 
 - Dictate is live when `conversationEnabled` is true and `streamingTranscription` has a
   `configured: true` row.
-- Voice is live only when Dictate's conditions hold and `speech` also has a configured row.
+- Voice follows `conversationEngine`. With `"stt-tts"` (the default, also used when the field is
+  absent) Voice is live only when Dictate's conditions hold and `speech` also has a configured row.
+  With `"realtime"` Voice is live when `conversationEnabled` is true and `realtime.activeProvider`
+  is not null; `talk.session.create` then sends `mode: "realtime"` and capture runs at the
+  result's `inputSampleRateHz` (24 kHz).
 
 `useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
 `transcript` while recording, `commit: { text: string; nonce: number } | null`, `consumeCommit(): void`,
@@ -572,15 +576,31 @@ textarea height cap. When dictation stops or encounters a capture error, `commit
 last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
 calls `onDictateCommitConsumed` to clear the commit.
 
-`useVoice` returns `status` `unavailable | idle | listening | speaking | error`. Voice does not
-fill the composer. Toggle starts or stops the cascaded session. A start rejection is swallowed
-here; the seam's `error` status is what the button shows.
+`useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error` and
+`captions: { user, assistant }`. Voice does not fill the composer. Toggle starts or stops the
+session; `thinking` counts as on. A start rejection is swallowed here; the seam's `error` status
+is what the button shows.
+
+While Voice is `listening`, `thinking` or `speaking`, the Composer renders `VoiceCaptions`
+(`ui/VoiceCaptions.tsx`, `data-testid="voice-captions"`, `aria-live="polite"`) above the input
+row: an orb `cl-voice-orb` with a `--listening`, `--thinking` or `--speaking` modifier (its pulse
+stops under `prefers-reduced-motion`), the status label, and two caption lines,
+`cl-voice-caption--user` and `cl-voice-caption--assistant`. The caption region
+(`cl-voice-captions__scroll`) is height-capped at `min(45vh, 18rem)` and scrolls instead of
+growing the composer; its `column-reverse` layout pins the scroll origin to the newest line, so
+an active conversation stays in view without yanking a reader who scrolled up. The user caption
+is replaced by each
+`transcript.delta`/`transcript.done`; the assistant caption is cleared on `turn.started` and
+appended from `output.text.delta` (cascaded deltas are trimmed clauses joined with a single
+space; realtime deltas are raw increments concatenated verbatim). `tool.call` sets `thinking`. On
+`transcript.persisted` the
+runtime re-reads the active chat, so the persisted turns appear in the thread without a reload.
 
 While either feature is live, switching chats is locked. The runtime derives the lock
 synchronously from the live talk seams (`navigationLockReason`: a dictate take from its first
 toggle click, including the lazy create of a first chat, until its stop settles, whether the
 stop succeeds, fails, or the gateway drops; a Voice conversation while `listening` or
-`speaking`; dictation wins when both are live), so a guard holds in the same tick the feature
+`speaking` (or `thinking`); dictation wins when both are live), so a guard holds in the same tick the feature
 starts — no React effect latency. A user-initiated switch — a `sidebar-session` row, the unread
 bell, an assistant chip, New chat or the picker — is then refused: no session change and no
 `sessions.create`/history traffic, plus a `role="alert"` notice (`chat-switch-blocked`) saying
@@ -608,7 +628,10 @@ not disarm it in the gap between speech chunks. Voice uses a 150 ms minimum burs
 default is 250 ms) at the package's −45 dBFS threshold. On detection, pause playback locally
 before `talk.session.bargeIn`. Those two timestamps are `performance.now()`. Speech
 `talk.session.mark` timestamps are played-audio milliseconds on the turn timeline (0 at the first
-speech sample), attached when the chunk is enqueued, not at `turn.ended`.
+speech sample), attached when the chunk is enqueued, not at `turn.ended`. Realtime sessions
+differ: attach the mark once, at `output.audio.done`, and acknowledge with a session-monotonic
+timestamp that never decreases — per-turn offsets would drop every ack after the first
+(shorter) reply.
 
 If the gateway socket drops, stop the microphone immediately and return Voice to `idle`, including
 when the drop happens while start is still in flight. Do not wait on `talk.session.close`: that
@@ -619,8 +642,9 @@ Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
 
 ## Read aloud
 
-The Read aloud action on assistant messages speaks that reply through the gateway TTS config
-(ADR 0102, wire shapes in [TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
+The Read aloud action on assistant messages speaks that reply through the gateway's per-agent TTS
+config (`messages.tts` merged with `agents.list[].tts`; ADR 0102, wire shapes in
+[TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
 owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
 `ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, phase, error, toggle}`
 value. `AssistantMessage` takes it as `readAloud` plus `readAloudKey` (a stable key per message,

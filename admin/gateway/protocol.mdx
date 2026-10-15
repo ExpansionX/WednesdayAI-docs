@@ -208,10 +208,12 @@ read or write groups later are refused until they are allowlisted.
   `talk.session.bargeIn`. `sessions.patch`/`sessions.title.prepare` joined with client-chat-v3 P2
   (ADR 0083): `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no
   guard because it changes no session state. The six `talk.session.*` methods joined with ADR
-  0086/0087/0088 (cascaded voice admission): they let a narrow client run the `stt-tts` and
-  `transcription` Talk session modes Dictate and Voice mode use. Admission is independent of
+  0086/0087/0088 (cascaded voice admission): they let a narrow client run the `stt-tts`,
+  `transcription` and (ADR 0103) `realtime` Talk session modes Dictate and Voice mode use.
+  Admission is independent of
   `talk.conversation.enabled`. That gate is checked inside `talk.session.create`, not by this
-  table: `mode: "stt-tts"` is refused `UNAVAILABLE` (`voice conversation disabled`) for every
+  table: `mode: "stt-tts"` and `mode: "realtime"` are refused `UNAVAILABLE`
+  (`voice conversation disabled`) for every
   caller while the gate is off, and a narrow connection is refused the same way for
   `mode: "transcription"` too. An operator-scope `transcription` create is not gated. Request
   and event shapes are under [Talk sessions](#talk-sessions). `tts.speak` joined with ADR 0102
@@ -242,7 +244,7 @@ is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods a
 `talk.*` methods allowlisted; every other `talk.*` method (`talk.realtime.*`, `talk.config`,
 `talk.mode`, `talk.metrics`) stays refused with `missing scope: operator.read` or
 `missing scope: operator.write`. Behaviour of the admitted methods is in
-[Cascaded voice conversation sessions](/talk/realtime-voice-conversation); the frames are under
+[Voice conversation sessions](/talk/realtime-voice-conversation); the frames are under
 [Talk sessions](#talk-sessions).
 
 #### Narrow scope event allowlist
@@ -1048,25 +1050,29 @@ Turn-scoped types always carry `turnId`. Do not treat a missing `payload` as a z
 
 Params (all required except `provider`):
 
-| Field        | Type                             | Required |
-| ------------ | -------------------------------- | -------- |
-| `sessionKey` | string, min length 1             | yes      |
-| `mode`       | `"transcription"` or `"stt-tts"` | yes      |
-| `transport`  | `"gateway-relay"`                | yes      |
-| `brain`      | `"none"`                         | yes      |
-| `provider`   | string                           | no       |
+| Field        | Type                                            | Required |
+| ------------ | ----------------------------------------------- | -------- |
+| `sessionKey` | string, min length 1                            | yes      |
+| `mode`       | `"transcription"`, `"stt-tts"`, or `"realtime"` | yes      |
+| `transport`  | `"gateway-relay"`                               | yes      |
+| `brain`      | `"none"`                                        | yes      |
+| `provider`   | string                                          | no       |
 
 `brain` stays `"none"` on this method. Voice still runs an agent turn; that pairing is handler
 logic, not a second enum value on create.
 
-Result: `{sessionId, audio: {inputEncoding: "pcm16", inputSampleRateHz: 16000, channels: 1}}`.
-The response is written before `session.ready`. Audio appended before `session.ready` is dropped,
-not rejected. Input is base64 PCM16 mono at 16 kHz. Output audio events are PCM16 mono at 24 kHz.
+Result: `{sessionId, audio: {inputEncoding: "pcm16", inputSampleRateHz, channels: 1}}`.
+`inputSampleRateHz` is `16000` for `transcription` and `stt-tts`, and `24000` for `realtime`;
+capture at the advertised rate. The response is written before `session.ready`. Audio appended
+before `session.ready` is dropped, not rejected. Input is base64 PCM16 mono. Output audio events
+are PCM16 mono at 24 kHz.
 
 Gate and provider errors are `UNAVAILABLE`:
 
 - `voice conversation disabled` — gate off, for every `stt-tts` caller and for every narrow
-  caller.
+  caller, and for every `realtime` caller.
+- `realtime voice conversation disabled` — `mode: "realtime"` while
+  `talk.conversation.engine` is not `"realtime"`, for every caller.
 - `stt-tts requires a configured STT and TTS provider` — Voice has no registered streaming
   transcription and streaming speech provider pair for the configuration.
 - `stt-tts requires a configured STT and TTS provider: <transcription|speech> provider "<id>" is not configured; check talk.providers.<id>.apiKey`
@@ -1079,6 +1085,25 @@ Voice opens STT with `providerConfig.commitStrategy: "vad"` and
 `providerConfig.endOfTurnSilenceMs` from `talk.conversation.endOfTurnSilenceMs`. Keys already set
 on `talk.providers.<id>` win. Dictate does not inject those defaults.
 
+`mode: "realtime"` (ADR 0103) runs speech-to-speech through the auto-selected talk realtime
+provider (`talk.catalog` `realtime.activeProvider`) over the gateway relay, bound to `sessionKey`.
+The realtime model speaks with the realtime provider's own voice; neither `messages.tts` nor the
+cascaded `talk.providers.<id>` TTS settings apply. A provider resolution failure is `UNAVAILABLE`
+with the provider's message. The model is seeded with
+recent session history and reaches tools only through the agent consult, which is read-only for
+narrow callers. The session is driven only by the `talk.session.*` methods; `talk.realtime.*` calls
+on it are rejected, and its owner receives `talk.event` frames only. A session `chat.send` would
+refuse for this connection (`send blocked by session policy`) is refused here too, and an empty
+`sessionKey` is `INVALID_REQUEST`. Each final user utterance is written to the session. An
+assistant reply is written once its audio has played; a reply interrupted by barge-in is written
+as `[interrupted]` only. A consult emits `tool.call {name: "openclaw_agent_consult"}` with no
+arguments. A `talk.session.bargeIn` the provider rejects (below its acknowledged-playback
+floor) emits no `output.audio.cleared`; the relay answers with `output.audio.resumed
+{markName}` instead, so the client un-pauses the playback it suspended on detection.
+Speech marks are `rt-<n>`: attach each once at `output.audio.done` and acknowledge it
+with `talk.session.mark` when its audio has played, using a playback timestamp that never
+decreases within the session (unlike `stt-tts` per-turn offsets).
+
 ### `talk.session.appendAudio`, `close`, `cancelTurn`
 
 | Method                     | Params                                                              | Result |
@@ -1089,7 +1114,10 @@ on `talk.providers.<id>` win. Dictate does not inject those defaults.
 
 `appendAudio` is `INVALID_REQUEST` when the base64 text is longer than 512 KiB, is not canonical
 base64, or decodes to an odd byte count (PCM16 samples are 2 bytes). `close` answers before the
-drain emits terminal events.
+drain emits terminal events for `transcription` and `stt-tts` sessions. A session-bound realtime
+session's `close` resolves after its drain: the session retires and audio stops at once, but
+transcript admission stays open while the commit queue settles (bounded by the 3 s user-settle
+window plus a 2 s commit grace), then the provider closes and the RPC resolves.
 
 ### `talk.session.mark`
 
@@ -1121,12 +1149,17 @@ Canonical names, in order: `session.started`, `session.ready`, `session.closed`,
 `session.replaced`, `turn.started`, `turn.ended`, `turn.cancelled`, `capture.started`,
 `capture.stopped`, `capture.cancelled`, `capture.once`, `input.audio.delta`,
 `input.audio.committed`, `transcript.delta`, `transcript.done`, `output.text.delta`,
-`output.text.done`, `output.audio.started`, `output.audio.delta`, `output.audio.done`,
-`output.audio.resumed`, `output.audio.cleared`, `tool.call`, `tool.progress`, `tool.result`,
-`tool.error`, `usage.metrics`, `latency.metrics`, `health.changed`.
+`output.text.done`, `transcript.persisted`, `output.audio.started`, `output.audio.delta`,
+`output.audio.done`, `output.audio.resumed`, `output.audio.cleared`, `tool.call`,
+`tool.progress`, `tool.result`, `tool.error`, `usage.metrics`, `latency.metrics`,
+`health.changed`.
 
 `transcript.delta` `payload.text` is the cumulative text of the in-progress segment. Replace the
 stored caption; do not append.
+
+`transcript.persisted` (realtime sessions) is `{role: "user" | "assistant"}` with no `turnId`. It
+arrives after that utterance was written to the session; reload the thread on it. It never
+carries the text.
 
 `output.audio.started`, `output.audio.delta`, and `output.audio.done` carry `markName` and
 `kind` (`"speech"`, `"filler"`, or `"ack"`). `output.audio.delta` also carries `audioBase64`,
@@ -1150,8 +1183,9 @@ waiting on the model is not a stall), `tts-error`, `barge-in`, `turn-resumed`, a
 close reasons below when they cancel the active turn (`session-closed` when the close reason was
 `completed`).
 
-`session.ready` is emitted once, when the first STT connect succeeds. That includes the one
-allowed reconnect after an initial connect failure. A later reconnect of an already-ready session
+`session.ready` is emitted once: for `stt-tts`, when the first STT connect succeeds (including
+the one allowed reconnect after an initial connect failure); for a realtime session, when the
+provider bridge signals ready. A later reconnect of an already-ready session
 does not emit `session.ready` again. A second STT fault emits `session.error` (empty payload) and
 then `session.closed`. For `stt-tts`, `session.closed` payload is
 `{reason: "completed" | "error" | "cancelled" | "session-minutes-exceeded" | "turn-seconds-exceeded"}`.
@@ -1167,7 +1201,8 @@ when the turn did not reach that stage), and booleans `recallDeadlineExceeded`, 
 
 Params: `{}`. Result fields: required `transcription` (`activeProvider` string or null, `rows`,
 and `providers` — the same rows: `{id, label, configured, modes: ["transcription"], transports: ["gateway-relay"], brains: ["none"]}`), optional `streamingTranscription`, `speech`,
-`realtime`, and `conversationEnabled`. Streaming transcription and speech rows are
+`realtime`, `conversationEnabled`, and `conversationEngine` (`"stt-tts"` or `"realtime"`, the
+resolved `talk.conversation.engine`). Streaming transcription and speech rows are
 `{id, label, configured, diagnostic?, modes, transports}` plus `brains: ["agent-consult"]` on
 streaming transcription only. `modes` is `["streaming"]`. `transports` is `["gateway-relay"]`.
 `diagnostic`, present only when `configured` is false and a cause is known, is
