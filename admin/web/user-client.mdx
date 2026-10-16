@@ -281,7 +281,8 @@ Fields, all public by construction - never put a token or any per-user value her
 `features.voice` is deprecated and has no effect; leave it unset. Dictate's and Voice mode's
 availability are both driven by `talk.catalog` — Dictate needs a configured streaming
 transcription provider and the operator's `talk.conversation.enabled` gate on; Voice additionally
-needs a configured streaming speech provider — not by a client feature flag; see ADR 0088 item 12
+needs a configured streaming speech provider (cascaded engine) or an active realtime provider
+(`realtime` engine) — not by a client feature flag; see ADR 0088 item 12
 as amended. Setting `features.voice`/`--voice`/`OPENCLAW_WEB_FEATURE_VOICE` changes nothing users
 can see; it is kept as a no-op alias for one release (AGENTS.md's deprecated-alias rule) and will
 be removed in a later release.
@@ -342,10 +343,10 @@ Methods the client calls with `operator.sessions.write`:
 | `sessions.steer`           | While a reply streams, Send (or Enter on desktop) adds to the current turn (`inject`, falling back to `queue`). With a file attached, Send queues (`queue`). Send after reply and desktop Ctrl/Cmd+Enter queue. On touch devices Enter inserts a newline and Ctrl/Cmd+Enter does what Send does |
 | `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                                                                                                                                                                |
 | `sessions.title.prepare`   | Suggest a title                                                                                                                                                                                                                                                                                 |
-| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`). Refused while `talk.conversation.enabled` is false                                                                                                                                                                                   |
+| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`, or `realtime` — the operator-chosen speech-to-speech engine). Refused while `talk.conversation.enabled` is false; a `realtime` create is also refused while `talk.conversation.engine` is not `"realtime"`                            |
 | `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                                                                                                                                       |
 | `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                                                                                                                                       |
-| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn                                                                                                                                                                                                                   |
+| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline  |
 | `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                   |
 | `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                       |
 | `tts.speak`                | The **Read aloud** button on replies: synthesizes a reply's text into inline audio to play                                                                                                                                                                                                      |
@@ -363,7 +364,9 @@ Gateway settings that decide what users can do with those methods:
 - **Read aloud.** `messages.tts.readAloud.enabled` (default on) decides whether users see the
   **Read aloud** button; an assistant's own `agents.list[].tts.readAloud.enabled` overrides it for
   that assistant. With the gate on but no TTS provider configured, the button still shows as
-  unavailable. See [Text-to-speech](/tts).
+  unavailable. While a Voice conversation is active (listening, thinking or speaking), it is
+  unavailable, and starting Voice mode stops any playback in progress. See
+  [Text-to-speech](/tts).
 - **Suggest a title.** Each use sends the chat's first message (up to 1000 characters) to the
   assistant's default model - the agent's configured model, not the model picked for the chat. The
   limit is 3 calls per 60 seconds per device and address, and it cannot be changed.
@@ -394,7 +397,7 @@ denial message in the chat telling you which id to add:
 List device ids with `openclaw devices list --json` (the `deviceId` field of each entry under
 `paired`). Link a device with `wednesdayai devices link <deviceId> --identity <key>` instead of
 editing this file by hand, or pair with `wednesdayai qr --client openclaw-user-client --identity <key>`
-so the first connect links it (`devices remove` also unlinks). After ADR 0103 the person is the
+so the first connect links it (`devices remove` also unlinks). After ADR 0104 the person is the
 sender name: turns from a linked device show `Alice (device:…)` to the model, with the browser's
 display name as a separate provenance field. See
 [Workspace Lanes](/concepts/workspace-lanes#linking-gateway-devices) and [devices](/cli/devices).
@@ -510,7 +513,7 @@ They are not gated by any setting, so there is nothing to enable. If users ask, 
 **Dictate** and **Voice mode** are not on this list: they render live or disabled per connection,
 driven by `talk.catalog` and the operator's `talk.conversation.enabled` gate (see
 [config.json](#configjson) above and
-[Cascaded voice conversation sessions](/talk/realtime-voice-conversation)), not by a fixed release
+[Voice conversation sessions](/talk/realtime-voice-conversation)), not by a fixed release
 phase.
 
 **Read aloud** on replies is not on this list either. It is live by default and needs no
