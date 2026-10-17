@@ -1538,6 +1538,47 @@ export default function (api: OpenClawPluginApi) {
 }
 ```
 
+### Register the assistant UI provider
+
+`api.registerUiSurfaceProvider(provider)` registers your plugin as the owner of the assistant UI
+surface store (ADR 0106). Call it during `register()`. The seam is **single owner**: the first
+plugin in load order wins, and a second registration is rejected with a `PLUGIN_REGISTER_ERROR`
+diagnostic. Core never touches surface storage itself — it resolves `sessionKey -> sessionId`,
+enforces admission and turn binding, and reads the provider from the registry.
+
+```ts
+import type { OpenClawPluginApi, UiSurfaceProvider } from "wednesdayai/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi) {
+  const provider: UiSurfaceProvider = {
+    list(sessionId) {
+      /* return UiSurfaceSummary[] */
+    },
+    get(sessionId, surfaceId, revision?) {
+      /* return UiSurfaceRecord | undefined */
+    },
+    setPinned(sessionId, surfaceId, pinned) {
+      /* false = not found */
+    },
+    bindAction(sessionId, action) {
+      /* atomic consume, see below */
+    },
+  };
+  api.registerUiSurfaceProvider(provider);
+}
+```
+
+`bindAction` is an **atomic consume**: it derives the submit schema for that revision
+(`deriveSubmitSchema` from `ui-contract`), strips unknown keys, validates the values, and consumes
+the revision in the same transaction. Two concurrent submits for one revision yield exactly one
+`ok` and one `"ui-action-consumed"` refusal. The refusal reasons are the `UiActionProviderRefusal`
+union: `ui-action-unknown-surface`, `ui-action-stale`, `ui-action-undeclared`,
+`ui-action-invalid-data`, `ui-action-consumed`.
+
+Tool exposure is opt-in per connection: a `show_ui` tool factory reads `ctx.clientCaps` (the
+originating connection's advertised caps) and `ctx.sessionId` from its
+`OpenClawPluginToolContext` and returns `null` when either is missing.
+
 ### Register CLI commands
 
 ```ts

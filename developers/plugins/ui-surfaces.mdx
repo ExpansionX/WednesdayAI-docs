@@ -1,0 +1,124 @@
+---
+summary: "ui-surfaces plugin: the show_ui tool, the plugin-owned surface store, and the registerUiSurfaceProvider seam"
+read_when:
+  - You want to know how the assistant UI plugin is put together
+  - You are implementing another UiSurfaceProvider or reusing the seam
+  - You need the store placement or the bindAction refusal contract
+title: "ui-surfaces plugin"
+audience: developer
+sources:
+  - extensions/ui-surfaces/index.ts
+  - extensions/ui-surfaces/src/provider.ts
+  - extensions/ui-surfaces/src/store-factory.ts
+  - extensions/ui-surfaces/src/tool.ts
+  - packages/ui-contract/src/index.ts
+  - src/plugins/registry.ts
+generated: 2026-10-16
+---
+
+# ui-surfaces plugin
+
+The bundled `ui-surfaces` plugin (ADR 0106) gives the WednesdayAI web chat its assistant-composed
+UI: the `show_ui` agent tool, the plugin-owned store behind the `chat.surfaces.list|get|pin`
+gateway methods, and the `UiSurfaceProvider` seam core reads. It is off by default (ADR 0034);
+enablement, the per-agent `tools.deny` opt-out and what end users see are covered from the
+operator side in [Web client hosting](/web/user-client#assistant-ui-and-canvas).
+
+Everything the agent can put on screen is declarative JSON validated by the private
+`ui-contract` package (`validateSurface`) before anything is stored. The schemas, the component
+catalog and the budget constants are re-exported from `openclaw/plugin-sdk` (alias
+`wednesdayai/plugin-sdk`), so the plugin imports core only through the SDK:
+
+```ts
+import type { UiSurfaceProvider } from "openclaw/plugin-sdk";
+```
+
+## The provider seam
+
+The plugin registers exactly one provider:
+
+```ts
+api.registerUiSurfaceProvider(provider);
+```
+
+The seam is single-owner, mirroring the context-owner pattern in `src/plugins/registry.ts`: a
+second registration is rejected with a `PLUGIN_REGISTER_ERROR` diagnostic and the first
+registration stands. Core reads the provider from the global registry and never touches surface
+storage itself - it owns the protocol, admission, turn binding and history projection, while the
+plugin owns the tool and the storage (ADR 0106 D13).
+
+The provider contract (`UiSurfaceProvider` from `ui-contract`, re-exported by the SDK) is keyed
+by **session id**, never by session key: core resolves `sessionKey -> sessionId` the same way
+`chat.history` does before every call, which keeps the canonical-key rules in AGENTS.md out of
+the plugin:
+
+```ts
+type UiSurfaceProvider = {
+  list(sessionId: string): Promise<UiSurfaceSummary[]>;
+  get(
+    sessionId: string,
+    surfaceId: string,
+    revision?: number,
+  ): Promise<UiSurfaceRecord | undefined>;
+  setPinned(sessionId: string, surfaceId: string, pinned: boolean): Promise<boolean>;
+  bindAction(
+    sessionId: string,
+    action: UiAction,
+  ): Promise<
+    | { ok: true; label: string; title: string; data: Record<string, unknown> }
+    | { ok: false; reason: UiActionProviderRefusal }
+  >;
+};
+```
+
+`bindAction` is an **atomic consume**: it derives the submit schema for that revision
+(`deriveSubmitSchema`), strips unknown keys, validates the values, and consumes the revision in
+the same transaction. Two concurrent submits for one revision yield exactly one `ok` and one
+`"ui-action-consumed"` refusal. The refusal reasons are the `UiActionProviderRefusal` union
+(`ui-action-unknown-surface`, `ui-action-stale`, `ui-action-undeclared`,
+`ui-action-invalid-data`, `ui-action-consumed`); core maps them onto `chat.send` refusals and
+never lets one authorize anything - the accepted action only starts the next chat turn.
+
+## The show_ui tool
+
+The tool factory receives the `OpenClawPluginToolContext` and returns `null` - offering nothing -
+unless all of these hold:
+
+- the plugin is enabled;
+- `ctx.clientCaps` (the originating connection's advertised caps) contains `"ui-surfaces"`;
+- `ctx.sessionId` is present.
+
+Otherwise the run's model never sees the tool. `tools.deny: ["show_ui"]` applies as usual on top.
+A rejection is `isError: true` with text `show_ui rejected: <rule>: <detail>` and stores nothing;
+every cap is a refusal, never a prune.
+
+## Storage
+
+Placement follows the shared domain resolver (`resolveDomainStorage`, domain `ui-surfaces`), the
+same rule as every other plugin-owned store: sqlite by default, or Postgres in the
+`plugin_ui_surfaces` schema; overrides live under
+`plugins.entries["ui-surfaces"].config.storage`. The store is append-only - no DELETE anywhere -
+and keyed by `sessionId`, so a reset or `/new` starts an empty Canvas without touching old rows
+(ADR 0098).
+
+## Transcript carriers
+
+Surfaces and actions ride two transcript carriers, never free-form markdown:
+
+- `__openclaw.ui` — carries the surface snapshot the client renderer reads.
+- `__openclaw.uiAction` — carries the submit a user taps (surface id, revision, action id, data).
+
+Both must survive a reload, so they persist as history rows rather than in a scratch store.
+
+## show_ui parameters
+
+The tool takes a flattened payload validated by `packages/ui-contract` (`validateSurface`):
+
+- `surfaceId` (optional; mints one when omitted, adds a revision when present).
+- `title` (1..80 chars).
+- `components` — the node list from the 14-component catalog
+  (`Column`, `Row`, `Card`, `Divider`, `Text`, `Image`, `Progress`, `Table`, `Chart`,
+  `TextField`, `CheckBox`, `ChoicePicker`, `DateTimeInput`, `Button`).
+
+On success it renders the surface inline and in Canvas. On failure it rejects with
+`show_ui rejected: <rule>: <detail>` and stores nothing.

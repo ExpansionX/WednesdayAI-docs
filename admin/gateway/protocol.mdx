@@ -12,12 +12,14 @@ sources:
   - src/gateway/protocol/index.ts
   - src/gateway/protocol/schema.ts
   - src/gateway/protocol/schema/sessions.ts
+  - src/gateway/protocol/schema/chat-surfaces.ts
+  - src/gateway/protocol/schema/logs-chat.ts
   - src/gateway/session-utils.ts
   - src/gateway/session-utils.fs.ts
   - src/gateway/session-reply-activity.ts
   - src/gateway/server-methods/chat.ts
   - src/shared/session-visibility.ts
-generated: 2026-10-11
+generated: 2026-10-17
 ---
 
 # Gateway protocol (WebSocket)
@@ -194,18 +196,27 @@ read or write groups later are refused until they are allowlisted.
 
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
-  `sessions.resolve`, `sessions.subscribe`, `chat.history`, `sessions.runs.list`,
+  `sessions.resolve`, `sessions.subscribe`, `chat.history`, `chat.surfaces.list`,
+  `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
   ADR 0086 (cascaded voice admission) so a narrow client can render Dictate/Voice as available or
   disabled; it reports provider/gate state only, never a secret. `tts.readAloud.status` joined with
   ADR 0102 (read aloud): it reports the read-aloud gate and `maxTextLength` for the requested agent,
-  never a secret.
-- `operator.sessions.write`: `chat.send`, `chat.abort`, `sessions.create`, `sessions.steer`,
+  never a secret. `chat.surfaces.list` and `chat.surfaces.get` joined with ADR 0106 (assistant UI
+  surfaces): they read the session's assistant-composed surfaces for the web client's Canvas
+  panel. The `ui-surfaces` plugin seam answers `enabled: false` when the plugin is off, so
+  admission is unconditional; the methods report the plugin's state rather than the absence of the
+  capability. See [Assistant UI surfaces](#assistant-ui-surfaces).
+- `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
   `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark` and
-  `talk.session.bargeIn`. `sessions.patch`/`sessions.title.prepare` joined with client-chat-v3 P2
+  `talk.session.bargeIn`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
+  the one surfaces write, flipping the pinned boolean on a surface the session already owns.
+  Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
+  and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
+  `sessions.patch`/`sessions.title.prepare` joined with client-chat-v3 P2
   (ADR 0083): `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no
   guard because it changes no session state. The six `talk.session.*` methods joined with ADR
   0086/0087/0088 (cascaded voice admission): they let a narrow client run the `stt-tts`,
@@ -256,6 +267,7 @@ events:
 | Event              | Requires                 |
 | ------------------ | ------------------------ |
 | `chat`             | `operator.sessions.read` |
+| `chat.activity`    | `operator.sessions.read` |
 | `sessions.changed` | `operator.sessions.read` |
 | `runs.invalidated` | `operator.sessions.read` |
 | `talk.event`       | `operator.sessions.read` |
@@ -271,6 +283,46 @@ registered later, is not delivered. Operator connections are unaffected.
 
 Chat events are not filtered per session owner: every session stays visible to every operator-role
 connection on a gateway.
+
+### Assistant UI surfaces
+
+Assistant-composed inline UI (ADR 0106) travels the same chat and session methods, with one new
+event and a small method family. Everything lives behind the bundled `ui-surfaces` plugin
+([docs/plugins/ui-surfaces.md](/plugins/ui-surfaces)); when the plugin is off, `chat.surfaces.list`
+answers `enabled: false` and the methods never surface a `show_ui` output.
+
+- `chat.surfaces.list` (`operator.sessions.read`) with `{sessionKey}` answers
+  `{ "ok": true, "enabled": <boolean>, "surfaces": [...] }`. Each summary row is
+  `{ "surfaceId": "...", "title": "...", "revision": <int>, "pinned": <boolean>, "updatedAt": <epoch ms> }`.
+- `chat.surfaces.get` (`operator.sessions.read`) with `{sessionKey, surfaceId, revision?}` answers
+  `{ "ok": true, "surfaceId": "...", "revision": <int>, "latestRevision": <int>, "pinned": <boolean>,
+"title": "...", "protocol": "...", "catalogId": "...", "components": [...], "consumedActionId": "..." }`.
+  Omitting `revision` fetches the latest revision. `components` is the stored A2UI surface
+  (catalog `wednesdayai.dev:client/1`); it is not re-encoded here - the `ui-contract` package owns
+  that schema. A revision that no longer exists answers `INVALID_REQUEST` naming the surface.
+- `chat.surfaces.pin` (`operator.sessions.write`) with `{sessionKey, surfaceId, pinned}` flips the
+  pinned boolean and answers `{ "ok": true, "surfaceId": "...", "pinned": <boolean> }`. Pinning is
+  a display-only flag: it controls Canvas ordering, never session state.
+- `chat.send` accepts an optional `uiAction` param that submits a form or choice on a stored
+  surface: `{ "surfaceId": "...", "revision": <int>, "actionId": "...", "data": {...} }`. The
+  handler refuses a `message` body alongside the action (`ui-action-with-message`), a serialized
+  `data` object over the size cap (`ui-action-too-large`), and - through the plugin's provider -
+  an unknown surface (`ui-action-unknown-surface`), a revision older than the surface's latest
+  (`ui-action-stale`), an `actionId` the surface does not declare (`ui-action-undeclared`), values
+  that fail the action's schema (`ui-action-invalid-data`), and a submit action that has already
+  been consumed (`ui-action-consumed`). Each accepted action turns into one normal turn: the
+  gateway composes
+  the `[ui-action]` text with the sender's `chat.send` identity and appends it to the transcript
+  before the user message, so it is stored, replayed and audited like any other turn. The turn is
+  command-inert - a submitted value of `/new` never resets the session, and the turn never
+  resolves a pending exec approval.
+- `chat.activity` (`operator.sessions.read`) streams a bounded tool-activity rail per turn. The
+  event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
+"status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
+"durationMs": <epoch ms>? }`; when the step published a surface, an extra `ui` object is present
+  (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
+  and results are never included. It is broadcast ordered with the session's `chat` frames and is
+  droppable under backpressure rather than blocking the turn.
 
 ### Client identity
 
