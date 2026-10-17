@@ -10,6 +10,7 @@ audience: admin
 component: web-user-client
 sources:
   - src/user-client/runtime-config.ts
+  - src/user-client/serve.ts
   - src/config/gateway-spa-mounts.ts
   - src/config/types.gateway.ts
   - src/gateway/web-client-route.ts
@@ -28,7 +29,10 @@ sources:
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/state/types.ts
   - apps/web/index.html
-generated: 2026-10-11
+  - apps/web/src/ui/ActivityRail.tsx
+  - extensions/ui-surfaces/index.ts
+  - packages/ui-contract/src/index.ts
+generated: 2026-10-17
 ---
 
 # Web client hosting
@@ -92,15 +96,16 @@ balancer as you like. Flags win over environment variables, which win over defau
 packaged `dist/web-client` bundle is the default root. Add `--root apps/web/dist` (or any other
 directory) to serve a bundle of your own.
 
-| Flag                      | Environment variable          | Default                | Meaning                                  |
-| ------------------------- | ----------------------------- | ---------------------- | ---------------------------------------- |
-| `--root <dir>`            | `OPENCLAW_WEB_ROOT`           | packaged bundle        | Directory holding the built bundle       |
-| `--gateway-url <url>`     | `OPENCLAW_WEB_GATEWAY_URL`    | required               | Absolute `ws://` or `wss://` gateway URL |
-| `--port <port>`           | `OPENCLAW_WEB_PORT`           | `8787`                 | TCP port                                 |
-| `--host <host>`           | `OPENCLAW_WEB_HOST`           | `127.0.0.1`            | Bind host                                |
-| `--base-path <path>`      | `OPENCLAW_WEB_BASE_PATH`      | `/`                    | Public path the bundle is mounted under  |
-| `--client-id <id>`        | `OPENCLAW_WEB_CLIENT_ID`      | `openclaw-user-client` | Gateway client id                        |
-| `--assistant-name <name>` | `OPENCLAW_WEB_ASSISTANT_NAME` | unset                  | Name the client displays                 |
+| Flag                      | Environment variable          | Default                | Meaning                                                                                                                         |
+| ------------------------- | ----------------------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| `--root <dir>`            | `OPENCLAW_WEB_ROOT`           | packaged bundle        | Directory holding the built bundle                                                                                              |
+| `--gateway-url <url>`     | `OPENCLAW_WEB_GATEWAY_URL`    | required               | Absolute `ws://` or `wss://` gateway URL                                                                                        |
+| `--port <port>`           | `OPENCLAW_WEB_PORT`           | `8787`                 | TCP port                                                                                                                        |
+| `--host <host>`           | `OPENCLAW_WEB_HOST`           | `127.0.0.1`            | Bind host                                                                                                                       |
+| `--base-path <path>`      | `OPENCLAW_WEB_BASE_PATH`      | `/`                    | Public path the bundle is mounted under                                                                                         |
+| `--client-id <id>`        | `OPENCLAW_WEB_CLIENT_ID`      | `openclaw-user-client` | Gateway client id                                                                                                               |
+| `--assistant-name <name>` | `OPENCLAW_WEB_ASSISTANT_NAME` | unset                  | Name the client displays                                                                                                        |
+| `--image-origin <origin>` | `OPENCLAW_WEB_IMAGE_ORIGINS`  | unset                  | Exact `https://` origin remote markdown images may load from; repeatable on the CLI, comma-separated as an environment variable |
 
 `http://` and `https://` gateway URLs are accepted and upgraded to `ws://` and `wss://`. Anything
 else - a relative URL, a query string, an unknown scheme, a missing bundle, a port outside
@@ -321,35 +326,37 @@ which its setup code mints and its device token is bound to (see
 
 Methods the client calls with `operator.sessions.read`:
 
-| Method                        | What it powers                                                                                                                |
-| ----------------------------- | ----------------------------------------------------------------------------------------------------------------------------- |
-| `status`, `models.authStatus` | Start-up checks: the connection is alive, and the gateway has a model provider credential                                     |
-| `agents.list`                 | The assistant picker, the sidebar's assistants and their colours                                                              |
-| `models.list`                 | The model menu, the new chat picker's model choice, and whether Think is available for the chat's model                       |
-| `sessions.list`               | The chat list, with the assistant filter, search and paging                                                                   |
-| `sessions.describe`           | The open chat's own row: title, model and Think level                                                                         |
-| `sessions.subscribe`          | Live `sessions.changed` events, so the list refreshes when another device changes a chat                                      |
-| `chat.history`                | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere |
-| `talk.catalog`                | Whether Dictate and Voice mode are available for this connection                                                              |
-| `tts.readAloud.status`        | Whether the **Read aloud** button is available, and the text limit it sends with                                              |
+| Method                                    | What it powers                                                                                                                                                             |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`, `models.authStatus`             | Start-up checks: the connection is alive, and the gateway has a model provider credential                                                                                  |
+| `agents.list`                             | The assistant picker, the sidebar's assistants and their colours                                                                                                           |
+| `models.list`                             | The model menu, the new chat picker's model choice, and whether Think is available for the chat's model                                                                    |
+| `sessions.list`                           | The chat list, with the assistant filter, search and paging                                                                                                                |
+| `sessions.describe`                       | The open chat's own row: title, model and Think level                                                                                                                      |
+| `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a chat                                                                                   |
+| `chat.history`                            | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere                                              |
+| `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection                                                                                                           |
+| `tts.readAloud.status`                    | Whether the **Read aloud** button is available, and the text limit it sends with                                                                                           |
+| `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas)) |
 
 Methods the client calls with `operator.sessions.write`:
 
-| Method                     | What it powers                                                                                                                                                                                                                                                                                  |
-| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`)                                                                                                                                               |
-| `chat.abort`               | Stop                                                                                                                                                                                                                                                                                            |
-| `sessions.create`          | New chat, for the chosen assistant and optionally a model                                                                                                                                                                                                                                       |
-| `sessions.steer`           | While a reply streams, Send (or Enter on desktop) adds to the current turn (`inject`, falling back to `queue`). With a file attached, Send queues (`queue`). Send after reply and desktop Ctrl/Cmd+Enter queue. On touch devices Enter inserts a newline and Ctrl/Cmd+Enter does what Send does |
-| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                                                                                                                                                                |
-| `sessions.title.prepare`   | Suggest a title                                                                                                                                                                                                                                                                                 |
-| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`, or `realtime` — the operator-chosen speech-to-speech engine). Refused while `talk.conversation.enabled` is false; a `realtime` create is also refused while `talk.conversation.engine` is not `"realtime"`                            |
-| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                                                                                                                                       |
-| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                                                                                                                                       |
-| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline  |
-| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                   |
-| `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                       |
-| `tts.speak`                | The **Read aloud** button on replies: synthesizes a reply's text into inline audio to play                                                                                                                                                                                                      |
+| Method                     | What it powers                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`). The `uiAction` parameter submits an assistant-composed form: it carries no message body and starts the next turn (see [Assistant UI and Canvas](#assistant-ui-and-canvas)) |
+| `chat.surfaces.pin`        | Pinning a surface to the top of the Canvas panel                                                                                                                                                                                                                                                                              |
+| `chat.abort`               | Stop                                                                                                                                                                                                                                                                                                                          |
+| `sessions.create`          | New chat, for the chosen assistant and optionally a model                                                                                                                                                                                                                                                                     |
+| `sessions.steer`           | While a reply streams, Send (or Enter on desktop) adds to the current turn (`inject`, falling back to `queue`). With a file attached, Send queues (`queue`). Send after reply and desktop Ctrl/Cmd+Enter queue. On touch devices Enter inserts a newline and Ctrl/Cmd+Enter does what Send does                               |
+| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                                                                                                                                                                                              |
+| `sessions.title.prepare`   | Suggest a title                                                                                                                                                                                                                                                                                                               |
+| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`, or `realtime` — the operator-chosen speech-to-speech engine). Refused while `talk.conversation.enabled` is false; a `realtime` create is also refused while `talk.conversation.engine` is not `"realtime"`                                                          |
+| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                                                                                                                                                                     |
+| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                                                                                                                                                                     |
+| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline                                |
+| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                                                 |
+| `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                                                     |
+| `tts.speak`                | The **Read aloud** button on replies: synthesizes a reply's text into inline audio to play                                                                                                                                                                                                                                    |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -402,6 +409,84 @@ sender name: turns from a linked device show `Alice (device:…)` to the model, 
 display name as a separate provenance field. See
 [Workspace Lanes](/concepts/workspace-lanes#linking-gateway-devices) and [devices](/cli/devices).
 
+## Assistant UI and Canvas
+
+The assistant can compose interactive UI for the web chat: forms, choice pickers, tables, simple
+charts and progress, rendered inline under the reply that produced them. Each chat also gets a
+**Canvas** panel (the top-bar toggle) listing every surface the assistant published in that chat
+at its latest revision; pins survive a reload and a gateway restart. Under the reply, an activity
+rail shows each tool step live with its name, status and duration, and collapses to a
+"Worked for `<duration>` · `<n>` step" summary once the turn ends (or "`<n>` steps" when n is not
+
+1. - also after a reload, because
+     it is derived from the stored transcript, not from the live connection.
+
+This is the bundled `ui-surfaces` plugin, and it is **off by default** (ADR 0034). Enable it
+explicitly, then restart the gateway:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "ui-surfaces": { enabled: true },
+    },
+  },
+}
+```
+
+- **Per-agent opt-out.** An agent never offers the tool while its `tools.deny` list contains
+  `"show_ui"`; the usual tool policy precedence applies.
+- **What users see.** With the plugin on, a `show_ui` step renders inline and in Canvas, a submit
+  shows a "You submitted" chip and starts the next chat turn, and a pinned surface lists first.
+  While a submit is in flight the button label switches to "Queued"; once accepted the form locks,
+  the button reads "Submitted", and the thread shows the chip `You submitted "<button label>"`.
+  A stale revision renders the banner "Updated: open latest in Canvas"; Canvas always shows the
+  latest revision. Refusals render as one of: "This action could not be sent.", "This response is
+  too large to submit.", "Assistant UI is off.", "This surface is unavailable.", "This form has
+  been updated. Open the latest in Canvas to continue.", "This action is no longer available.",
+  "Some values were not accepted. Check the fields and try again.", "This form was already
+  submitted.", "Could not reach the assistant. Try again." With the plugin off,
+  `chat.surfaces.list` answers `enabled: false` and the Canvas toggle reads
+  "Assistant UI is off". The tool is also absent from runs whose connection did not advertise the
+  `ui-surfaces` client cap - the web client always advertises it. The developer contract, the
+  storage placement and the config overrides are in [ui-surfaces plugin](/plugins/ui-surfaces).
+- **Storage.** Surfaces live in the plugin's own tables on the configured session backend
+  (sqlite by default, Postgres in the `plugin_ui_surfaces` schema), keyed by session id and never
+  deleted, so `/new` and a session reset start an empty Canvas without touching old rows.
+
+### What it never does
+
+- **No agent-authored code reaches the browser.** Everything on screen is declarative JSON
+  validated against a fixed component catalog before it is stored: no expressions, no functions,
+  no remote catalogs, and the client performs no remote fetch beyond the image origins below.
+- **A submit never authorizes anything.** It only starts the next chat turn with the submitted
+  values as input. A submitted value of `/new` (or any other slash command) is inert text - it
+  does not reset the session.
+- **Every budget is a refusal, never a silent prune.** An oversized or malformed surface is
+  rejected whole (`show_ui rejected: <rule>: <detail>`), and a submit is accepted once per
+  surface revision; a replayed or forged submit is refused with a reason and starts nothing.
+
+### Remote images
+
+Assistant output can include images. Only these render: images served by the gateway itself
+(same-origin media), inline `data:image/` attachments, and remote `https://` origins you allow
+explicitly. Everything else renders as a plain link - labelled with the image's alt text, or the
+URL when there is no alt - and the browser never requests it, so agent output cannot turn a
+remote image into a tracking or exfiltration channel.
+
+Each entry must be an exact `https://host[:port]` origin with no path, query or fragment. There
+is one source per hosting shape:
+
+| Shape         | Where                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------- |
+| Gateway route | `gateway.webClient.imageOrigins` in the gateway config                                       |
+| `web serve`   | Repeatable `--image-origin <origin>` flag, or `OPENCLAW_WEB_IMAGE_ORIGINS` (comma-separated) |
+| Container     | The same `OPENCLAW_WEB_IMAGE_ORIGINS` environment variable                                   |
+
+The client's `Content-Security-Policy` `img-src` is extended by exactly these origins. The
+packaged servers send that policy automatically; a self-hosted bundle should match it (see
+[Rules the host must follow](#rules-the-host-must-follow)).
+
 ## Themes and appearance
 
 The client has four theme modes, chosen by each user from the account menu at the bottom of the
@@ -426,7 +511,7 @@ sidebar. You do not configure them; there is no `config.json` or gateway setting
   served from the same base path, so a deployment needs no font CDN. The host's
   `Content-Security-Policy` still has to allow them: `font-src 'self'` is enough (see
   [Rules the host must follow](#rules-the-host-must-follow)). They come from the same shared token
-  package as the [Control UI](/web/control-ui); developers see [Brand tokens](/reference/brand-tokens).
+  package as the [Control UI v2](/web/control-ui-v2) console; developers see [Brand tokens](/reference/brand-tokens).
 
 ## Navigation and transcript preferences
 
@@ -492,20 +577,23 @@ enabling the preference shows nothing because the transcript has no reasoning co
 
 ## What users see that is not live yet
 
-Some controls are drawn but switched off, with a tooltip naming the release phase (or a tracked
-finding) that enables them (for example "Canvas — coming in phase P4"). Selecting one sends nothing
-to the gateway. They are: **Canvas** in the top bar; **Search** in the message box; the
-**Feedback** and **Regenerate** actions on replies; **Settings** and
-**Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and **Add extension** cite
-the extension panel roadmap item (GitHub #634) instead of a phase; **Feedback**, **Regenerate**,
-**Settings**, **Keyboard shortcuts** and the message-box **Search** cite their own tracked finding
-(GitHub #696-#700) instead. The assistant
-picker, per-assistant colour, chat filter and search, paging past the first page, the model
-switcher and Think, queue/steer while a reply streams, rename and Suggest, and replying to a
-message are live (client-chat-v3 P2). Replies appearing on every open device without a reload, the
-busy and unread indicators, the desktop-notification opt-in, Dictate and Voice mode's on/off
-state, and the automatic resend into a chat changed elsewhere are also live; see
+Some controls are drawn but switched off, with a tooltip naming the tracked finding that enables
+them (for example "Search — GitHub #698"). Selecting one sends nothing to the gateway. They are:
+**Search** in the message box; the **Feedback** and **Regenerate** actions on replies;
+**Settings** and **Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and
+**Add extension** cite the extension panel roadmap item (GitHub #634) instead; **Feedback**,
+**Regenerate**, **Settings**, **Keyboard shortcuts** and the message-box **Search** cite their
+own tracked finding (GitHub #696-#700) instead. The assistant picker, per-assistant colour,
+chat filter and search, paging past the first page, the model switcher and Think, queue/steer
+while a reply streams, rename and Suggest, and replying to a message are live (client-chat-v3
+P2). Replies appearing on every open device without a reload, the busy and unread indicators,
+the desktop-notification opt-in, Dictate and Voice mode's on/off state, and the automatic
+resend into a chat changed elsewhere are also live; see
 [Using the web client](/web/using-the-web-client) for what users see.
+
+**Canvas** in the top bar is no longer on this list: it is live with the `ui-surfaces` plugin
+enabled and explains itself when it is not (see
+[Assistant UI and Canvas](#assistant-ui-and-canvas)).
 
 They are not gated by any setting, so there is nothing to enable. If users ask, point them at
 [Using the web client](/web/using-the-web-client#controls-that-are-not-available-yet).
@@ -561,7 +649,7 @@ client at the previous gateway.
 ## Related
 
 - [Using the web client](/web/using-the-web-client) - what your users see: pairing, chat, and runs
-- [Control UI](/web/control-ui) - the operator console, a separate app with its own route
+- [Control UI v2](/web/control-ui-v2) - the operator console at the gateway root, a separate app with its own route
 - [Brand tokens](/reference/brand-tokens) - the shared colour and font package (developers)
 - [Web client components](/reference/web-client-components) - how the client UI is built (developers)
 - [Gateway protocol](/gateway/protocol) - client identity, scopes and the connect handshake
