@@ -11,6 +11,9 @@ read_when:
   - You open the web client on several devices and want to know when replies and unread replies show up, or how desktop notifications work
   - You want to install the web client to your device's home screen
   - You want to know what the bell in the top bar counts, or why a chat shows an unread dot
+  - Your assistant sends a form, a choice list, a table, a chart or a progress bar
+  - You want to fill in a form, submit it, or find it again in the Canvas panel
+  - You want to know why a picture shows as a link instead of an image
 title: "Using the web client"
 description: "Chat with your WednesdayAI assistant, manage conversations, and choose what the web client displays."
 audience: user
@@ -23,6 +26,14 @@ sources:
   - apps/web/src/ui/ToolDisplay.tsx
   - apps/web/src/providers/navigation-preferences.ts
   - apps/web/src/app/AppShell.tsx
+  - apps/web/src/ui/surface/InlineSurface.tsx
+  - apps/web/src/ui/surface/SurfaceSubmitError.tsx
+  - apps/web/src/ui/canvas/CanvasPanel.tsx
+  - apps/web/src/ui/ActivityRail.tsx
+  - apps/web/src/ui/TopBar.tsx
+  - apps/web/src/ui/RightPanel.tsx
+  - apps/web/src/ui/UserMessage.tsx
+  - apps/web/src/ui/url-policy.ts
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/app/use-chat-send.ts
@@ -41,7 +52,7 @@ sources:
   - apps/web/src/state/chat.ts
   - apps/web/index.html
   - apps/web/public/manifest.webmanifest
-generated: 2026-10-11
+generated: 2026-10-17
 ---
 
 # Using the web client
@@ -595,6 +606,108 @@ before the restart is kept, not dropped: it shows up again once the server is ba
 [Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming)). The
 browser tab keeps such a message for up to 24 hours; after a longer outage it is discarded.
 
+## Forms and other assistant screens
+
+Your assistant can do more than write text: it can build small screens - a form to fill in, a list
+of buttons to choose from, a table, a simple chart, or a progress bar - and show them right in the
+conversation, under the reply that produced them.
+
+### Fill in a form and send it
+
+When your assistant needs an answer, it may show a form instead of asking a plain question.
+
+<Steps>
+
+<Step title="Read the screen">
+The form appears under the assistant's message, with a title and the fields your assistant
+chose - text boxes, checkboxes, a date picker, a table or a chart. You can change any field before
+you send.
+</Step>
+
+<Step title="Select the button">
+Select the button the form provides, for example **Book**. Your answer is sent to your assistant
+and its next reply takes your answer into account.
+
+If your assistant is still busy with a reply, the button's label changes to **Queued** until the
+answer can be sent.
+</Step>
+
+</Steps>
+
+After your answer is delivered, the screen is locked so it cannot be sent twice: the fields stop
+accepting input, the button stays dimmed, the form shows **Submitted**, and your answer shows in the thread as a chip
+that reads **You submitted "Book"** (the button's label). One form accepts one answer; if you need
+to change it, ask your assistant for a new form.
+
+If the button is dimmed while your assistant is still working, it may be waiting for the answer to
+be accepted; it unlocks again on its own. If sending fails, a short message explains why - for
+example **Could not reach the assistant. Try again.** or **This form was already submitted.** Ask
+your assistant for a fresh form if the message stays.
+
+### When a form is out of date
+
+Your assistant may update a form while you are still looking at an older copy of it. The older
+copy keeps your place but shows a banner that reads **Updated: open latest in Canvas**. The newest
+version of the screen always lives in the Canvas panel (see below), and answering the old copy is
+refused with a message that says the form has been updated. Open Canvas, find the newest version
+there, and answer that one instead.
+
+## The Canvas panel
+
+The **Canvas** button in the top bar opens a panel beside the chat that collects every screen your
+assistant has sent in this conversation - including older ones you scrolled past. Select **Canvas**
+again to close it.
+
+<Steps>
+
+<Step title="Open the panel">
+Select **Canvas** in the top bar.
+
+The panel opens showing the screens your assistant has published in this chat, newest first, and
+any screen you pinned at the top.
+</Step>
+
+<Step title="Work with the screens">
+Each screen shows its title and the same fields as the copy in the chat. Fill one in and select
+its button to send your answer the same way as inline.
+
+You should see the same **Queued** and **Submitted** labels and the same messages as in the chat.
+</Step>
+
+</Steps>
+
+- **Pin a screen** with its **Pin** button to keep it at the top of the panel. **Unpin** puts it
+  back in date order. Your pins are kept even after you reload the page.
+- **Open in Canvas** - the button on a screen in the chat - jumps to that screen in the panel and
+  highlights it, so you can find a specific form quickly.
+- On a phone or narrow window, the panel opens as an overlay over the conversation; select the
+  close button (or press Escape) to return to the chat.
+- A new conversation starts with an empty Canvas: **No assistant UI in this chat yet.**
+
+## Watch your assistant work
+
+While your assistant works on a reply, the steps it takes appear in the chat as they happen: the
+name of each tool, its state (**Running**, **Waiting for approval**, **Done** or **Failed**) and
+how long it took. You do not see the details of the work - only the step names and timings.
+
+When the reply is finished, the steps collapse into one summary line, for example
+**Worked for 20s · 3 steps** (or **Worked for 1m 30s · 1 step** when there was only one). The
+summary stays in the conversation, so reloading the page still shows how long the work took. A
+turn that used no tools shows no steps and no summary.
+
+## Screens with images
+
+Replies can contain images, and the web client is careful about which ones it loads:
+
+- Images your assistant serves itself, and images attached to the conversation, are shown as
+  pictures.
+- Images from other websites are not loaded on their own - they appear as a link you can follow,
+  labelled with their web address. This keeps an image from silently reporting your visit to a
+  third party.
+- The person who manages WednesdayAI can allow specific trusted websites, so images from those
+  load as pictures too. If a picture you expect is showing as a link, ask them whether that site
+  is on the allow list.
+
 ## Choose a theme
 
 Select your name at the bottom of the sidebar to open the account menu, then pick a **Theme**:
@@ -614,19 +727,23 @@ page. Animations are skipped if your device is set to reduce motion.
 ## Controls that are not available yet
 
 Some controls are visible but switched off because the feature behind them is not ready. They look
-dimmed. Hover over one (or focus it with the keyboard) to see a tooltip such as "Canvas — coming in
-phase P4". Selecting one does nothing and sends nothing to your assistant. (**Think** can also be
-dimmed, but for a different reason: see [Choose a model and Think](#choose-a-model-and-think).)
+dimmed. Hover over one (or focus it with the keyboard) to see what it is waiting for. Selecting one
+does nothing and sends nothing to your assistant. (**Think** can also be dimmed, but for a
+different reason: see [Choose a model and Think](#choose-a-model-and-think).)
 
 | Where            | Controls                                    |
 | ---------------- | ------------------------------------------- |
-| Top bar          | **Canvas**                                  |
 | Sidebar          | **Calendar**, **Memory**, **Add extension** |
 | Account menu     | **Settings**, **Keyboard shortcuts**        |
 | Message box      | **Search**                                  |
 | Under each reply | **Feedback**, **Regenerate**                |
 
-The tooltip for **Canvas** names a numbered phase. The tooltips for **Calendar**,
+**Canvas** in the top bar is not on this list: it opens the Canvas panel. If it is dimmed instead,
+the tooltip reads **Canvas — Assistant UI is off** - the person who manages WednesdayAI has not
+turned assistant screens on yet; see
+[Forms and other assistant screens](#forms-and-other-assistant-screens).
+
+The tooltips for **Calendar**,
 **Memory**, **Add extension**, **Settings**, **Keyboard shortcuts**, **Search** in the message
 box, **Feedback** and **Regenerate** read "coming with the extension panel SDK" followed by a
 tracked issue number. The **⌘N** label beside **New chat** is only a hint for now: no keyboard

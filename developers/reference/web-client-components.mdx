@@ -122,9 +122,7 @@ The contract:
   is `talk.catalog`-driven (ADR 0088 item 12, amended): Dictate needs a configured streaming
   transcription provider and the gate on, Voice additionally needs a configured streaming speech
   provider.
-- The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `phase` for
-  the one client-roadmap phase left (`dev-docs/workstreams/client-chat-v3/strategy/`; P4 widgets
-  and Canvas — the P3 phases were retired when dictation, voice mode and read aloud went live). Use `finding` for controls that wait on a tracked finding rather
+- The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `finding` for controls that wait on a tracked finding rather
   than a phase: Calendar, Memory and Add extension cite `"F1, GitHub #634"`, and the P2 retags (message
   feedback, message regenerate, account-menu settings, account-menu keyboard shortcuts, composer
   search) each cite their own finding (`"F-2026-09-29-1x, GitHub #69x"`, ADR 0085 M9); the
@@ -140,15 +138,65 @@ The contract:
   a tooltip naming its phase, finding or reason, and sends no gateway frame when activated.
 
 ```tsx
-// Do this: visible, inert, and honest about when it lands
-<DisabledControl phase="P4" label="Canvas" icon="canvas" testId="top-bar-canvas" />
+// Do this: the TopBar Canvas toggle is live while the Assistant UI plugin may be available
+// (canvasEnabled !== false), and a DisabledControl carrying the availability reason when the
+// feature is off.
+{
+  canvasEnabled === false ? (
+    <DisabledControl
+      label="Canvas"
+      icon="canvas"
+      className="cl-tb-btn"
+      testId="top-bar-canvas"
+      reason="Assistant UI is off"
+    />
+  ) : (
+    <button
+      type="button"
+      className="cl-tb-btn cl-tb-canvas"
+      data-testid="top-bar-canvas"
+      aria-pressed={canvasOpen}
+      title="Canvas"
+      onClick={onToggleCanvas}
+    >
+      <Icon name="canvas" />
+      <span className="cl-tb-btn__label">Canvas</span>
+    </button>
+  );
+}
 
 // Not this: a live-looking button that calls a method this client is refused
-<button onClick={() => gateway.request("talk.metrics", {})}>Metrics</button>
+<button onClick={() => gateway.request("talk.metrics", {})}>Metrics</button>;
 ```
 
 To enable a control when its phase ships, replace the `DisabledControl` with a real element, update
 the allowlist ADR if it needs a new method, and update the disabled-control e2e in the same change.
+
+## Assistant UI surfaces and the renderer registry
+
+The assistant can compose inline UI (`show_ui`, the `ui-surfaces` plugin, ADR 0106) using the 14
+declarative components from the shared contract catalog. The renderer that maps those component
+names to React lives under `apps/web/src/ui/surfaces/`.
+
+**Import rule.** `apps/web` imports only `ui-contract/types` — never the zod-bearing modules and
+never another validator library. The contract package owns the shape and the budgets; the browser
+only consumes the parsed snapshot.
+
+**How to add a component.**
+
+1. Add the component to the catalog in `packages/ui-contract/src/types.ts` (`COMPONENT_NAMES` and
+   the node interface) and its prop checks to `packages/ui-contract/src/catalog.ts` and
+   `surface.ts`.
+2. Map it to a React component in `apps/web/src/ui/surfaces/` and register it in the renderer
+   registry under the same `component` name.
+3. Add tests: the contract package test proves the catalog + validation, and the web e2e proves
+   the render (`test/user-client-web-surfaces.e2e.test.ts` via
+   `test/helpers/user-client-web-harness.ts`).
+
+**Transcript carriers.** Surfaces and actions ride two transcript carriers, never free-form
+markdown: `__openclaw.ui` carries the surface snapshot the renderer reads, and
+`__openclaw.uiAction` carries the submit a user taps. Both must survive a reload, which is why
+they persist as history rows rather than in a scratch store.
 
 ## Session vocabulary
 
