@@ -539,6 +539,51 @@ Related:
 - [/logging](/logging)
 - [/concepts/session](/concepts/session)
 
+## Tool output caps and context pruning log lines
+
+Use this when the gateway logs `tool result exceeded source cap`,
+`tool-result context guard reduced tool output`, or
+`prompt ledger unavailable; recomputing projections`, or when you want to
+confirm that context pruning and the tool-output cap are working.
+
+```bash
+openclaw logs --follow
+openclaw sessions list
+```
+
+Common signatures:
+
+- `tool result exceeded source cap` → a single tool result exceeded the
+  in-memory source cap (`400,000` text chars). The agent keeps a head-and-tail
+  excerpt; the full raw bytes are stored out-of-band when database write-through
+  is on. Expected once per oversized result, not per call.
+- `tool-result context guard reduced tool output` → one line per eviction
+  batch, carrying `toolNames`. Expected after a cache-TTL pruning round or an
+  aggregate eviction, not on every call.
+- `prompt ledger unavailable; recomputing projections` → the stored pruning
+  ledger row for a session could not be read (corrupt, timed out, or written by a
+  future build). The session recomputes projections from stored history and logs
+  this warning once. A corrupt or unknown-version row is overwritten; a timed-out
+  read leaves the row for the next run. Repeated warnings on the same session
+  point at storage corruption.
+
+Fix options:
+
+1. Large `tool result exceeded source cap` volume: cap output at the tool level
+   or return less per call; the in-memory context is bounded by design.
+2. No `tool-result context guard reduced tool output` lines and large
+   `cacheWrite` after idle gaps: check `agents.defaults.contextPruning` (mode
+   `cache-ttl`) and that the session actually went idle past `ttl`.
+3. Repeated `prompt ledger unavailable` warnings on the same session: check
+   session storage health with `openclaw doctor --deep` and
+   [Session storage recovery](/gateway/session-storage-recovery).
+
+Related:
+
+- [/concepts/session-pruning](/concepts/session-pruning)
+- [/concepts/compaction](/concepts/compaction)
+- [/reference/session-management-compaction](/reference/session-management-compaction)
+
 ## If you upgraded and something suddenly broke
 
 Most post-upgrade breakage is config drift or stricter defaults now being enforced.
