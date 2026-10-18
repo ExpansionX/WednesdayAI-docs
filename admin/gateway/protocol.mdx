@@ -289,7 +289,9 @@ connection on a gateway.
 Assistant-composed inline UI (ADR 0106) travels the same chat and session methods, with one new
 event and a small method family. Everything lives behind the bundled `ui-surfaces` plugin
 ([docs/plugins/ui-surfaces.md](/plugins/ui-surfaces)); when the plugin is off, `chat.surfaces.list`
-answers `enabled: false` and the methods never surface a `show_ui` output.
+answers `enabled: false` and the methods never surface a `show_ui` output;
+`chat.surfaces.get` and `chat.surfaces.pin` answer `UNAVAILABLE` with
+`details.reason: "ui-surfaces-disabled"`.
 
 - `chat.surfaces.list` (`operator.sessions.read`) with `{sessionKey}` answers
   `{ "ok": true, "enabled": <boolean>, "surfaces": [...] }`. Each summary row is
@@ -299,7 +301,8 @@ answers `enabled: false` and the methods never surface a `show_ui` output.
 "title": "...", "protocol": "...", "catalogId": "...", "components": [...], "consumedActionId": "..." }`.
   Omitting `revision` fetches the latest revision. `components` is the stored A2UI surface
   (catalog `wednesdayai.dev:client/1`); it is not re-encoded here - the `ui-contract` package owns
-  that schema. A revision that no longer exists answers `INVALID_REQUEST` naming the surface.
+  that schema. A `surfaceId` or `revision` that no longer exists answers `INVALID_REQUEST` with
+  `details.reason: "surface-not-found"`.
 - `chat.surfaces.pin` (`operator.sessions.write`) with `{sessionKey, surfaceId, pinned}` flips the
   pinned boolean and answers `{ "ok": true, "surfaceId": "...", "pinned": <boolean> }`. Pinning is
   a display-only flag: it controls Canvas ordering, never session state.
@@ -319,7 +322,7 @@ answers `enabled: false` and the methods never surface a `show_ui` output.
 - `chat.activity` (`operator.sessions.read`) streams a bounded tool-activity rail per turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
-"durationMs": <epoch ms>? }`; when the step published a surface, an extra `ui` object is present
+"durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
   (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
   and results are never included. It is broadcast ordered with the session's `chat` frames and is
   droppable under backpressure rather than blocking the turn.
@@ -330,14 +333,15 @@ answers `enabled: false` and the methods never surface a `show_ui` output.
 the v3 signature proves the device signed the id it declared, so altering the id after signing (or
 replaying a signature produced for another id) fails signature verification.
 
-Three client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
+Four client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
 at pairing time:
 
-| Client id               | Roles              | Scopes                                                                           |
-| ----------------------- | ------------------ | -------------------------------------------------------------------------------- |
-| `openclaw-even-g2-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
-| `openclaw-mentra-node`  | `operator`         | `operator.read`, `operator.write`                                                |
-| `openclaw-user-client`  | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
+| Client id                | Roles              | Scopes                                                                           |
+| ------------------------ | ------------------ | -------------------------------------------------------------------------------- |
+| `openclaw-even-g2-node`  | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
+| `openclaw-mentra-node`   | `operator`         | `operator.read`, `operator.write`                                                |
+| `openclaw-user-client`   | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
+| `wednesdayai-glass-node` | `node`, `operator` | `operator.read`, `operator.write`                                                |
 
 Rules that apply to bootstrap redemption:
 
@@ -365,6 +369,19 @@ identity metadata, not an authorization ceiling, and an administrator-approved p
 can still grant the device more. One scan pairs the glasses: the setup code is single-use,
 redemption approves the pairing silently, and later reconnects authenticate with the minted
 operator device token. Setup and device management: [MentraOS Glasses](/platforms/mentra-glass).
+
+`openclaw-even-g2-node` pairs the third-party Even G2 node client. It connects as both
+roles: a node socket (role `node`, no scopes, `canvas` capability) that answers the `glass.*` HUD
+command family granted by device family `glasses` (`glass.hud.show`, `glass.hud.dismiss`,
+`glass.app.open`, `glass.state.get`), and an operator socket with `operator.read` +
+`operator.write`. It also pulls plugin glance widgets via `glance.widgets.list`.
+
+`wednesdayai-glass-node` pairs WednesdayAI Glass (ADR 0107) as both roles. The node socket is role
+`node` with no scopes, `canvas` capability, and answers the `glass.*` family (`glass.hud.show`,
+`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`) granted by device family `glasses`. The
+operator socket has `operator.read` + `operator.write` and pulls `glance.widgets.list`. Its profile
+mints only those two scopes, so setup codes for other client ids, including the default
+`openclaw qr` code, cannot be redeemed by it.
 
 `openclaw-user-client` carries two further admission rules:
 
