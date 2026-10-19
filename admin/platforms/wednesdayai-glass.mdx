@@ -1,0 +1,127 @@
+---
+summary: "WednesdayAI on Even G2 glasses: pair the WednesdayAI Glass app, the least-privilege node commands it may run, glance widgets, and device management"
+read_when:
+  - Pairing the WednesdayAI Glass app to a gateway
+  - Checking the least-privilege profile of the glasses client
+  - Revoking or removing a paired glasses device
+title: "WednesdayAI Glass"
+---
+
+# WednesdayAI Glass
+
+WednesdayAI Glass is an iOS app for Even Realities G2 glasses. It is a GPLv3 hard fork of
+MentraOS with faceclaw custom firmware (CFW) support: on stock firmware it uses the stock G2
+driver and a text display; on faceclaw CFW (`Faceclaw/<n>`) it renders the full WednesdayAI HUD
+(dashboard, launcher, assistant view and glance widgets). WednesdayAI agents are the assistant.
+
+## Support snapshot
+
+- Role: gateway client app (`wednesdayai-glass-node`), node + operator roles.
+- Gateway required: yes.
+- Install: dev build or internal TestFlight.
+- Transport: the app connects to the gateway over `wss://` (for example via Tailscale Serve).
+
+## Pairing
+
+1. On the gateway host, print a setup code:
+
+   ```bash
+   openclaw qr --client wednesdayai-glass-node
+   ```
+
+2. In WednesdayAI Glass, open Settings → WednesdayAI → **Pair with gateway** and scan the QR
+   (or paste the setup code).
+3. The first connect redeems the setup code and approves the pairing silently, so there is no
+   `openclaw devices approve` step. The app shows the gateway host once it is connected.
+
+The setup code is single-use and expires. Reconnects do not need it: the gateway mints device
+tokens at first connect and the app reuses them. If the device was removed or pairing must be
+redone, generate a fresh setup code.
+
+## What the client may do
+
+The setup code stores the `wednesdayai-glass-node` bootstrap profile: roles `node` and
+`operator`. Pairing approval mints the operator device token with the profile's scope set —
+`operator.read` + `operator.write` — and the node token with no scopes. The operator socket
+connects with scopes `operator.read` and `operator.write` only, and the node socket connects
+with role `node`, no scopes and a `canvas` capability.
+
+Node commands (invoked by agents and the Control UI, answered on the node socket):
+
+| Command             | Params                                                | Behavior                                                       |
+| ------------------- | ----------------------------------------------------- | -------------------------------------------------------------- |
+| `system.notify`     | `{title?, body?}`                                     | Shows a card (10 s TTL)                                        |
+| `canvas.present`    | canvas params                                         | Shows the text canvas as a card (15 s TTL); text canvases only |
+| `glass.hud.show`    | `{id?, title?, body, ttlMs?}` (1 s - 600 s, def 15 s) | Shows a HUD card; CFW only for full HUD, text on stock         |
+| `glass.hud.dismiss` | `{id}`                                                | Dismisses the card                                             |
+| `glass.app.open`    | `{app: "dashboard"\|"assistant"\|"launcher"}`         | Opens the HUD app; requires CFW (otherwise `UNSUPPORTED`)      |
+| `glass.state.get`   | `{}`                                                  | Returns firmware, CFW revision, battery, wearing state         |
+
+These `glass.*` commands are granted by device family: any node whose `deviceFamily` contains
+`glasses` receives them (ADR 0107 D3). `gateway.nodes.denyCommands` still wins.
+
+Tokens minted by this bootstrap profile never include `operator.admin`, `operator.pairing`,
+`operator.approvals` or `operator.talk.secrets`. The client id is identity metadata, not an
+authorization ceiling: an administrator-approved pairing request for the device can still grant
+it more.
+
+An invalid or revoked token on either socket clears both tokens and the app reports `unpaired`
+without retrying; re-pair with a fresh setup code.
+
+## Glance widgets
+
+Plugins contribute dashboard widgets with `api.registerGlanceWidget(...)` (see
+[Plugins](/tools/plugin#register-a-glance-widget)). The app pulls them with the gateway method
+`glance.widgets.list` (scope `operator.read`):
+
+```bash
+openclaw gateway call glance.widgets.list
+```
+
+Each widget is rendered server-side (5 s timeout), normalized to at most 6 lines of 64 chars,
+and cached for the plugin-declared `refreshMs` (default 300 s). Response:
+
+```json
+{
+  "widgets": [
+    {
+      "key": "learning-core/learning",
+      "pluginId": "learning-core",
+      "id": "learning",
+      "title": "Learning",
+      "lines": ["3 proposals pending", "12 lessons", "7 applied"],
+      "updatedAtMs": 1760745600000
+    }
+  ]
+}
+```
+
+A widget whose render throws or times out reports `{ "lines": [], "error": "unavailable" }` for
+30 s. A widget whose render returns `null` is omitted until its next refresh.
+
+## Device management
+
+```bash
+openclaw devices list --json                              # deviceFamily "glasses", roles node + operator
+openclaw devices revoke --device <deviceId> --role operator
+openclaw devices revoke --device <deviceId> --role node
+openclaw devices remove <deviceId>
+```
+
+Revoke both roles (`operator` and `node`) to cut the device off fully. `revoke` prevents
+subsequent reconnects but does not close an existing connection: restart the gateway (or
+otherwise close its socket) for immediate containment. After `remove`, the app must scan a new
+setup code to pair again. See [devices](/cli/devices) and [qr](/cli/qr).
+
+## Troubleshooting
+
+- **Setup-code mismatch (`bootstrap_profile_violation`):** the setup code was issued for a
+  different client id, for example the default `openclaw qr` code instead of
+  `openclaw qr --client wednesdayai-glass-node`. Print a fresh code with the right `--client`
+  and pair again; the refused token is neither consumed nor device-bound.
+
+## Notes and limits
+
+- Custom firmware flashing is initiated from the app (Settings → Device → Firmware) and voids
+  the glasses warranty; reinstalling stock firmware from the app restores stock behavior.
+- A transcription provider must be configured on the gateway for voice turns.
