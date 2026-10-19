@@ -196,7 +196,8 @@ read or write groups later are refused until they are allowlisted.
 
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
-  `sessions.resolve`, `sessions.subscribe`, `chat.history`, `chat.surfaces.list`,
+  `sessions.resolve`, `sessions.subscribe`, `sessions.direct`, `chat.history`,
+  `chat.surfaces.list`,
   `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
@@ -289,7 +290,9 @@ connection on a gateway.
 Assistant-composed inline UI (ADR 0106) travels the same chat and session methods, with one new
 event and a small method family. Everything lives behind the bundled `ui-surfaces` plugin
 ([docs/plugins/ui-surfaces.md](/plugins/ui-surfaces)); when the plugin is off, `chat.surfaces.list`
-answers `enabled: false` and the methods never surface a `show_ui` output.
+answers `enabled: false` and the methods never surface a `show_ui` output;
+`chat.surfaces.get` and `chat.surfaces.pin` answer `UNAVAILABLE` with
+`details.reason: "ui-surfaces-disabled"`.
 
 - `chat.surfaces.list` (`operator.sessions.read`) with `{sessionKey}` answers
   `{ "ok": true, "enabled": <boolean>, "surfaces": [...] }`. Each summary row is
@@ -299,7 +302,8 @@ answers `enabled: false` and the methods never surface a `show_ui` output.
 "title": "...", "protocol": "...", "catalogId": "...", "components": [...], "consumedActionId": "..." }`.
   Omitting `revision` fetches the latest revision. `components` is the stored A2UI surface
   (catalog `wednesdayai.dev:client/1`); it is not re-encoded here - the `ui-contract` package owns
-  that schema. A revision that no longer exists answers `INVALID_REQUEST` naming the surface.
+  that schema. A `surfaceId` or `revision` that no longer exists answers `INVALID_REQUEST` with
+  `details.reason: "surface-not-found"`.
 - `chat.surfaces.pin` (`operator.sessions.write`) with `{sessionKey, surfaceId, pinned}` flips the
   pinned boolean and answers `{ "ok": true, "surfaceId": "...", "pinned": <boolean> }`. Pinning is
   a display-only flag: it controls Canvas ordering, never session state.
@@ -319,7 +323,7 @@ answers `enabled: false` and the methods never surface a `show_ui` output.
 - `chat.activity` (`operator.sessions.read`) streams a bounded tool-activity rail per turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
-"durationMs": <epoch ms>? }`; when the step published a surface, an extra `ui` object is present
+"durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
   (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
   and results are never included. It is broadcast ordered with the session's `chat` frames and is
   droppable under backpressure rather than blocking the turn.
@@ -876,11 +880,11 @@ fallbacks, and an unavailable preview is omitted; these flags do not request a f
 - Omitted (`undefined`) preserves legacy operator behavior and filters only cron run keys recognized
   by `isCronRunSessionKey`.
 - `false` hides any key for which `isUserFacingSessionKey(key)` is false, plus persisted isolated
-  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`,
+  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`, `hook`,
   `heartbeat`, and `subagent` as internal. It also hides `main:heartbeat`,
   `dashboard:*:heartbeat`, and keys matching the persisted `heartbeatIsolatedBaseSessionKey`.
   Unknown key shapes remain visible.
-- `true` includes internal cron, ACP, heartbeat, and subagent sessions.
+- `true` includes internal cron, ACP, hook, heartbeat, and subagent sessions.
 
 When `includeAgentActivity` is true, the result initializes every agent returned by
 `listAgentsForGateway(cfg)` to `null`. It then maps each normalized agent id to the newest non-null
@@ -927,6 +931,11 @@ mirrors an assistant reply into the session (`src/infra/outbound/deliver.ts`,
 `outbound-send-service.ts`); the session entry carries the same field. The field is monotonic and
 distinct from `updatedAt`, which other writes such as renames and inbound routing also move. It is
 `null` when the session has had no such reply.
+
+Rows that are not user-facing carry `internal: true` (`GatewaySessionRow.internal`): the
+structural classifier treats the root segments `acp`, `cron`, `hook`, `heartbeat`, and `subagent`
+as internal, as do the built-in isolated-heartbeat shapes and persisted isolated-heartbeat
+sessions. The same rows survive the `true` value of `includeInternal` and are hidden by `false`.
 
 For example, these are complete RPC `params` objects; they require no imports:
 

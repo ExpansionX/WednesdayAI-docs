@@ -53,7 +53,7 @@ configuration see [Web client hosting](/web/user-client).
 
 ```text
 apps/web/src/
-  app/         App (boot phases), AppShell (connected shell) and the use-chat-* / use-session-creation hooks it composes, onboarding and config-error views
+  app/         App (boot phases), AppShell (connected shell) and the use-chat-* hooks it composes, onboarding and config-error views
   ui/          the component layer: Shell, Sidebar, TopBar, Thread, Composer, ... + client.css
   state/       chat.ts (zustand store), types.ts
   providers/   gateway and events seams, WebClientRuntime, theme, attachments, preferences, and the chat runtime modules (leaf tracking, queued turns, chat list)
@@ -62,7 +62,7 @@ apps/web/src/
 ```
 
 The components in `ui/` are `Shell`, `Sidebar`, `NavigationMenus`, `TopBar`, `ModelMenu`, `ThinkMenu`,
-`DisplayMenu`, `ToolDisplay`, `NewChatPicker`, `AccountMenu`, `AttentionMenu` (the top-bar unread
+`DisplayMenu`, `ToolDisplay`, `AssistantPicker`, `AccountMenu`, `AttentionMenu` (the top-bar unread
 bell), `Thread`, `TypingIndicator`,
 `AssistantMessage`, `UserMessage`, `EmptyState`, `Composer`, `RightPanel`, `DisabledControl`,
 `Icon` and `markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile
@@ -176,7 +176,8 @@ the allowlist ADR if it needs a new method, and update the disabled-control e2e 
 
 The assistant can compose inline UI (`show_ui`, the `ui-surfaces` plugin, ADR 0106) using the 14
 declarative components from the shared contract catalog. The renderer that maps those component
-names to React lives under `apps/web/src/ui/surfaces/`.
+names to React lives under `apps/web/src/ui/surface/` (registry in `SurfaceView.tsx`,
+components in `components/`).
 
 **Import rule.** `apps/web` imports only `ui-contract/types` — never the zod-bearing modules and
 never another validator library. The contract package owns the shape and the budgets; the browser
@@ -187,16 +188,21 @@ only consumes the parsed snapshot.
 1. Add the component to the catalog in `packages/ui-contract/src/types.ts` (`COMPONENT_NAMES` and
    the node interface) and its prop checks to `packages/ui-contract/src/catalog.ts` and
    `surface.ts`.
-2. Map it to a React component in `apps/web/src/ui/surfaces/` and register it in the renderer
-   registry under the same `component` name.
-3. Add tests: the contract package test proves the catalog + validation, and the web e2e proves
-   the render (`test/user-client-web-surfaces.e2e.test.ts` via
-   `test/helpers/user-client-web-harness.ts`).
+2. Map it to a React component in `apps/web/src/ui/surface/components/` and register it in the
+   registry in `apps/web/src/ui/surface/SurfaceView.tsx` under the same `component` name.
+3. Add tests: the contract package test proves the catalog + validation, per-component tests
+   `apps/web/src/ui/surface/components/*.test.tsx` prove keyboard operability and axe
+   accessibility (SC11), and the web e2e proves the render (`test/user-client-web-surfaces.e2e.test.ts`
+   via `test/helpers/user-client-web-harness.ts`).
 
 **Transcript carriers.** Surfaces and actions ride two transcript carriers, never free-form
-markdown: `__openclaw.ui` carries the surface snapshot the renderer reads, and
-`__openclaw.uiAction` carries the submit a user taps. Both must survive a reload, which is why
-they persist as history rows rather than in a scratch store.
+markdown: `__openclaw.ui` = `{surfaceId, revision}` is projected from the `show_ui` tool result's
+`details.ui` at `chat.history` read time, and the snapshot itself is fetched via
+`chat.surfaces.get`. `__openclaw.uiAction` = `{surfaceId, revision, actionId, label, title}` rides
+the user turn (stored as the `openclaw:ui-action` custom entry) and renders as the
+"You submitted" chip; the submitted data is not in it — it reaches the model only in the composed
+`[ui-action]` text. Both must survive a reload, which is why they persist as history rows rather
+than in a scratch store.
 
 ## Session vocabulary
 
@@ -205,15 +211,16 @@ sees as chats.
 
 | User-facing                  | Code                                                                                                                                                              |
 | ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Chat, Chats                  | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                     |
-| New chat                     | `createSession(label)`, `sidebar-new-chat`; labels "New chat", "New chat 2"...                                                                                    |
+| Session, Sessions            | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                     |
+| Open a session               | `sessions.direct {agentId?}` → `{key}`; picking an assistant calls it; a first send with no active session resolves it too                                        |
 | Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                              |
 | Switch chat locked           | `navigationLockReason` / `onNavigationBlocked` / `onNavigationLockChanged` (`web-client-runtime.ts`); notice `chat-switch-blocked` while Dictate or Voice is live |
 | Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                                  |
 | Source tag on a row          | `deriveSourceTag(key)` in `ui/session-key-shape.ts`                                                                                                               |
-| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `new-chat-picker-option`                                                  |
+| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `assistant-picker-option`                                                 |
 | Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                                   |
-| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimal / full`                                                          |
+| Mobile header session key    | `TopBar` (`top-bar-session-key`): the active session key shows under the model menu on mobile only; the title (and rename) render on desktop widths               |
+| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimum / collapsed / full`                                              |
 | Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                       |
 | Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                      |
 | Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                     |
@@ -231,16 +238,16 @@ Data flows in one direction.
 ```text
 GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zustand store --> ui/*
                     ^                |
-                    +--- requests ---+  (gateway seam: sendMessage, createSession, ...)
+                    +--- requests ---+  (gateway seam: sendMessage, switchSession, ...)
 ```
 
 - `providers/web-client-runtime.ts` (`WebClientRuntime`) owns the connection and implements both
   seams: the `GatewayContextValue` (`providers/gateway.tsx`, request-style calls such as
-  `sendMessage`, `switchSession`, `createSession`, `uploadFile`, `abortMessage`) and the
+  `sendMessage`, `switchSession`, `listSessions`, `uploadFile`, `abortMessage`) and the
   `EventsContextValue` (`providers/events.tsx`, subscriptions such as `onChatChunk`,
   `onSessionChanged`, `onSessionsList`, `onConnectionStatus`). It also has WednesdayAI-native
   members the vendored seams have no room for, which the `app/` hooks call directly: `listAgents`,
-  `listModels`, `patchSession`, `prepareSessionTitle`, `createSessionForAgent`, `sendChatMessage`
+  `listModels`, `patchSession`, `prepareSessionTitle`, `resolveDirectSession`, `sendChatMessage`
   (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`, the `sessionList`
   runtime, and the `onSidebarSessionsChange`, `onActiveSessionRowChange`, `onQueuedRunStarted`,
   `onAssistantReply` and `onActiveLeafConflict` subscriptions.
@@ -340,7 +347,7 @@ provider module per concern, each testable without a gateway connection.
 
 | Concern                          | Code                                                                                            | Gateway calls                                                                                              |
 | -------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Assistant picker, new chat       | `ui/NewChatPicker.tsx`, `app/use-session-creation.ts`                                           | `agents.list`, `models.list`, `sessions.create`                                                            |
+| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                        | `agents.list`, `sessions.direct`                                                                           |
 | Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                  | `models.list`, `sessions.patch {model}`                                                                    |
 | Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                  | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
 | Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                     | none; browser-local preferences                                                                            |
@@ -431,11 +438,15 @@ Navigation and transcript preferences are per connection:
   `includeInternal: false`, `chatSortBy: "updatedAt"`, `chatSortOrder: "desc"`,
   `selectedAgentId: null`, and `lastChatByAgent: {}`.
 - Transcript display uses the `openclaw.web.transcript-display.v1` object, keyed within that object
-  by `<gatewayUrl>|<clientId>`. Defaults are `showReasoning: false` and `tools: "minimal"`.
+  by `<gatewayUrl>|<clientId>`. Defaults are `showReasoning: false` and `tools: "minimum"`. A stored
+  legacy `tools: "minimal"` preference loads as `"collapsed"`.
 
-Display is not delivery. `showReasoning` and `tools: "hide" | "minimal" | "full"` are strictly
-browser-local presentation state in `DisplayMenu`; they do not alter Gateway execution or the
-session's `reasoningLevel`. Tool failures remain visible even in `"hide"` mode:
+Display is not delivery. `showReasoning` and `tools: "hide" | "minimum" | "collapsed" | "full"` are
+strictly browser-local presentation state in `DisplayMenu`; they do not alter Gateway execution or the
+session's `reasoningLevel`. Tool detail strings render through the shared `shortenHomePaths` helper
+(`src/agents/tool-display-common.ts`), which shortens absolute user-home paths to `~` (POSIX and
+Windows) without Node-only APIs; both this app and the TUI `ui` package import it. Tool failures
+remain visible even in `"hide"` mode:
 
 ```tsx
 <div className="cl-tool-error" role="alert">
@@ -488,13 +499,10 @@ Contracts worth keeping when you change them:
   id and the first user message currently loaded (its first 1000 characters), and only fills the
   field (60 characters at most). Enter or blur saves through `sessions.patch {label}`. A refusal, the
   rate limit or a `null` title shows `rename-error`.
-- **Assistant picker.** `NewChatPicker` is opened by `sidebar-new-chat-with` and
-  `sidebar-browse-assistants`. A pick sends exactly one `sessions.create` (a ref guard, not just
-  React state, stops a double click), carrying the optional model from `models.list`; a failing
-  `models.list` never blocks creating with "Assistant default". `sidebar-new-chat` creates in one
-  step for the filtered assistant, else the open chat's. Both number the default label ("New chat",
-  "New chat 2", ...) against the labels on screen and retry on `label already in use`, at most 20
-  attempts.
+- **Assistant picker.** `AssistantPicker` is opened by `sidebar-browse-assistants`. A pick sends
+  exactly one `sessions.direct {agentId}` (a ref guard, not just React state, stops a double
+  click); the gateway returns the caller's dmScope-correct direct session key (ADR 0109). There is
+  no model select and no create step.
 - **History and the chat leaf.** `useChatHistory` loads the newest page (`HISTORY_PAGE_SIZE`, 50)
   and pages older with the returned `cursor`. `WebClientRuntime` records the chat's leaf from its
   newest-page `chat.history` reads (the thinking reconcile opts out with `noteLeaf: false`); a
@@ -541,7 +549,10 @@ Contracts worth keeping when you change them:
   row is fetched separately, so the top bar stays live when a filter or search hides the chat from
   the list.
   Rows show the exact session key instead of a message preview; the client no longer requests
-  unused last-message previews. Internal sessions are hidden by default (`includeInternal: false`).
+  unused last-message previews. `sessions.list` rows carry `internal: true` for internal sessions
+  (cron, hook, heartbeat, subagent and acp keys), and the Sidebar groups those rows under an
+  **Internal** label. They are hidden by default (`includeInternal: false`); the toggle includes
+  them again.
   Gateway sorting precedes pagination; title sort uses labels before derived titles. Global title
   enrichment caps transcript reads at 16 at a time and yields between batches; normalized sort keys
   are computed once and are not returned. `includeDerivedTitles` remains opt-in: callers displaying
@@ -549,10 +560,11 @@ Contracts worth keeping when you change them:
   `agentActivity` aggregates the newest eligible session timestamp before
   assistant, search, activity-window and pagination narrowing. The assistant list defaults to a
   4-hour window, pins the selected assistant, and refreshes its cutoff once per minute.
-- **Assistant navigation.** Clicking an assistant scopes Chats and restores its last explicitly
-  selected eligible chat, independently of the loaded page. Otherwise it opens the newest
-  user-facing chat or clears the runtime selection without creating a chat. Explicit creation and
-  first-send creation remember the new chat too. Every actual activation invalidates older
+- **Assistant navigation.** Clicking an assistant scopes Sessions and restores its last explicitly
+  selected eligible session, independently of the loaded page. Otherwise it opens the newest
+  user-facing session or clears the runtime selection without creating one. Picking an assistant
+  in the picker and first-send `sessions.direct` resolution keep the assistant selected too. Every
+  actual activation invalidates older
   restoration callbacks, so delayed startup lookups cannot replace a newly created or selected chat.
   The selection is visible during lookup; the draft remains editable, but submission waits for
   lookup to finish or be superseded. Changing visibility only refilters a settled chat; an already
@@ -561,7 +573,7 @@ Contracts worth keeping when you change them:
   navigation, but not on `All assistants`, the already-selected assistant, or the same open chat.
   `All assistants` explicitly clears the scope. Navigation preferences and remembered selections
   are scoped by gateway URL and client ID in browser storage; malformed remembered entries are discarded.
-- **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimal"`
+- **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimum"`
   by default, separately from `reasoningLevel`. `extractTranscriptBlocks` preserves ordered text,
   thinking, tool calls, results and media; `Thread` pairs tools by call ID across loaded pages.
   Legacy `tool` roles and snake_case result metadata remain tools, not assistant prose.
@@ -650,13 +662,13 @@ toggle click, including the lazy create of a first chat, until its stop settles,
 stop succeeds, fails, or the gateway drops; a Voice conversation while `listening` or
 `speaking` (or `thinking`); dictation wins when both are live), so a guard holds in the same tick the feature
 starts — no React effect latency. A user-initiated switch — a `sidebar-session` row, the unread
-bell, an assistant chip, New chat or the picker — is then refused: no session change and no
-`sessions.create`/history traffic, plus a `role="alert"` notice (`chat-switch-blocked`) saying
+bell, an assistant chip or the assistant picker — is then refused: no session change and no
+`sessions.direct`/history traffic, plus a `role="alert"` notice (`chat-switch-blocked`) saying
 exactly what to stop: "Stop dictation to switch chats." or "Turn off voice to switch chats.".
 The runtime emits `onNavigationBlocked` for every refusal and `onNavigationLockChanged` when the
 lock changes; the notice's reason follows the lock (a dictation→voice handoff re-labels it), and
-it clears when the runtime lock clears. A create whose
-`sessions.create` response lands after the lock leaves the created row unselected in the sidebar
+it clears when the runtime lock clears. A `sessions.direct`
+response that lands after the lock leaves the resolved row unselected in the sidebar
 instead of switching. The lock only gates user intent: startup restore (`forceSwitchSession`),
 send-create of a first message, and a chat deleted elsewhere still switch — a live Voice
 conversation is stopped cleanly when its chat is deleted elsewhere, while a Dictation take
@@ -790,7 +802,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
   elsewhere is dropped by tombstoning it seen and forgetting the key, both from the live
   `sessionDeleted` event and from a completed read (`completeAt`) whose window no longer lists it.
 - `providers/attention-runtime.ts` is the attention window the unread owner reconciles against.
-  In the default Chats view it adopts the sidebar's own completed page (`SESSIONS_LIST_LIMIT`, 100
+  In the default Sessions view it adopts the sidebar's own completed page (`SESSIONS_LIST_LIMIT`, 100
   rows); anywhere else `refresh()` reads the newest `ATTENTION_LIST_LIMIT` (50) user-facing chats
   with `includeDerivedTitles`, coalescing to one fetch in flight plus one trailing and never
   emitting on failure. The runtime publishes `attentionRows { sessions, completeAt }`; `completeAt`
