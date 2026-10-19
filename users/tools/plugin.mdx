@@ -150,8 +150,8 @@ export default plugin;
   implies `canonicalIdentity` but not the reverse
 - `sessionKind` — structural classification of the session derived from the
   session key: `"user"` (a normal conversation session, including the main
-  session), `"cron"`, `"heartbeat"`, `"subagent"`, `"acp"`, or `"unknown"`
-  (missing or malformed session key). Never guessed from message text.
+  session), `"cron"`, `"heartbeat"`, `"hook"`, `"subagent"`, `"acp"`, or
+  `"unknown"` (missing or malformed session key). Never guessed from message text.
 - `accountId` — provider account id for multi-account setups.
 - `peerKind` and `peerId` — the actual input peer's kind (`"direct"`,
   `"group"`, `"channel"`) and id, exposed under every `dmScope` value.
@@ -1022,7 +1022,7 @@ is a separate contract and is unaffected.
 `session_start` and `session_end` carry `runtimeIdentity` when the session has real identity:
 the session's actor (channel, account id, peer kind/id, canonical identity) and
 `isMainSession: true` only for the agent's main session key. `runtimeIdentity.sessionKind`
-classifies the session as `"user"`, `"cron"`, `"heartbeat"`, `"subagent"`, `"acp"`, or
+classifies the session as `"user"`, `"cron"`, `"heartbeat"`, `"hook"`, `"subagent"`, `"acp"`, or
 `"unknown"`, derived structurally from the session key — never guessed from message text.
 
 ### Inbound channel replies
@@ -1538,6 +1538,47 @@ export default function (api: OpenClawPluginApi) {
 }
 ```
 
+### Register the assistant UI provider
+
+`api.registerUiSurfaceProvider(provider)` registers your plugin as the owner of the assistant UI
+surface store (ADR 0106). Call it during `register()`. The seam is **single owner**: the first
+plugin in load order wins, and a second registration is rejected with a `PLUGIN_REGISTER_ERROR`
+diagnostic. Core never touches surface storage itself — it resolves `sessionKey -> sessionId`,
+enforces admission and turn binding, and reads the provider from the registry.
+
+```ts
+import type { OpenClawPluginApi, UiSurfaceProvider } from "wednesdayai/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi) {
+  const provider: UiSurfaceProvider = {
+    list(sessionId) {
+      /* return UiSurfaceSummary[] */
+    },
+    get(sessionId, surfaceId, revision?) {
+      /* return UiSurfaceRecord | undefined */
+    },
+    setPinned(sessionId, surfaceId, pinned) {
+      /* false = not found */
+    },
+    bindAction(sessionId, action) {
+      /* atomic consume, see below */
+    },
+  };
+  api.registerUiSurfaceProvider(provider);
+}
+```
+
+`bindAction` is an **atomic consume**: it derives the submit schema for that revision
+(`deriveSubmitSchema` from `ui-contract`), strips unknown keys, validates the values, and consumes
+the revision in the same transaction. Two concurrent submits for one revision yield exactly one
+`ok` and one `"ui-action-consumed"` refusal. The refusal reasons are the `UiActionProviderRefusal`
+union: `ui-action-unknown-surface`, `ui-action-stale`, `ui-action-undeclared`,
+`ui-action-invalid-data`, `ui-action-consumed`.
+
+Tool exposure is opt-in per connection: a `show_ui` tool factory reads `ctx.clientCaps` (the
+originating connection's advertised caps) and `ctx.sessionId` from its
+`OpenClawPluginToolContext` and returns `null` when either is missing.
+
 ### Register CLI commands
 
 ```ts
@@ -1718,29 +1759,6 @@ Contract:
   provider-bound message before the call leaves the process.
 - If your handler throws or times out, core renders that run instead and warns once; the next
   attempt retries your plugin.
-
-### Register a context owner (compaction)
-
-The `compaction` stage hands compaction for a session to your plugin. For the sessions it claims,
-core skips every compaction path: automatic compaction on overflow, `/compact`, and run-loop
-overflow recovery. Other sessions keep core compaction.
-
-```ts
-api.registerContextOwner({
-  stages: ["compaction"],
-  ownsSession: ({ sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
-});
-```
-
-Contract:
-
-- No hook registration is required. Prune context yourself, for example in `context.prune`.
-- When an owned session still overflows the model window, core retries once with tighter
-  tool-result bounds and then returns a context-overflow error for that run.
-- `compaction.plan` is not delivered to owners: core does not summarise owned sessions.
-- The definition flag `ownsCompaction: true` still works but is deprecated and logs a warning at
-  load. It claims compaction for every session, and while any plugin sets it, an explicit
-  `compaction` claim by another plugin is ignored and logged once.
 
 ## Naming conventions
 
