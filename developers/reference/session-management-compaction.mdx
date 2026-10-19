@@ -182,8 +182,24 @@ Notable entry types:
 - `branch_summary`: persisted summary when navigating a tree branch
 
 Provider-specific fixups and tool-output trimming are request projections, never rewrites of
-stored rows. JSONL remains an export/import format: `sessions.export` synthesizes a session
-header and pages complete entries; it does not restore file-backed serving.
+stored rows. Once a pruning decision is recorded, the trimmed view is sticky for the rest of the
+session: later requests keep the trimmed bytes instead of re-sending the original output. JSONL
+remains an export/import format: `sessions.export` synthesizes a session header and pages
+complete entries; it does not restore file-backed serving.
+
+## Tool output caps
+
+Tool output is bounded before it ever reaches long-lived memory or storage:
+
+- **In-memory source cap**: a single tool result is truncated to at most
+  `400,000` text characters when the agent receives it. Oversized text keeps a head-and-tail
+  excerpt plus a size note; capped error results also keep short `status`/`error` fields.
+- **Raw storage fallback**: when database write-through is enabled, the full raw bytes are
+  stored out-of-band, so the storage layer keeps the original output even though the model view
+  is capped. Tool results are never unbounded in memory.
+- **Pruning projection**: on top of the source cap, session pruning can further trim old tool
+  results in the request view. These trims are sticky per session (see
+  [Session pruning](/concepts/session-pruning)).
 
 ---
 

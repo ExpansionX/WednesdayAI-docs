@@ -298,9 +298,14 @@ What decides whether the button is available:
 
 Behavior and limits:
 
+- Read aloud and Voice mode never overlap: while a Voice conversation is active (listening,
+  thinking or speaking), the button is unavailable (`unavailable during Voice mode`), and starting
+  Voice mode stops any playback in progress.
 - The client skips code blocks, tables and raw HTML when it decides what to speak, packs the rest
-  into chunks of at most `maxTextLength` (default 4096) characters, and plays the chunks in
-  sequence, so a long reply still plays in full.
+  into short chunks — at most 200 characters for the first chunk so playback starts after one
+  short synthesis, 600 for later chunks, each still under `maxTextLength` (default 4096) — and
+  plays them in sequence, synthesizing the next chunk while the current one plays, so a long reply
+  still plays in full.
 - Text longer than `maxTextLength` is refused with `text_too_long`; a synthesized clip larger than
   16 MiB is refused with `audio_too_large`.
 - There is no rate limit; the gate and `maxTextLength` are the controls.
@@ -486,6 +491,13 @@ does not affect auto-TTS, `/tts` or the `tts` tool. A request whose text exceeds
 `messages.tts.maxTextLength` fails with `text_too_long`, and a clip larger than 16 MiB fails with
 `audio_too_large`. Config changes need a gateway restart.
 
+**Read aloud sounds different from the configured provider, or is slow**
+
+When a configured provider fails, the gateway falls back to the next one and logs a warning naming
+which provider served the request: `tts.speak: served by <provider> after N failed provider(s) in
+<latency>ms: <provider>: <error>…`. The error text is redacted of credentials, so it is safe to
+paste into support requests; the failing provider's error says what to fix.
+
 **TTS is enabled but no audio is sent — only text arrives**
 Check that `messages.tts.auto` is set to `"always"`, `"inbound"`, or `"tagged"` (not `"off"`). The `/tts status` command shows the active mode for the current session. Also confirm at least one provider is available: ElevenLabs or OpenAI API key in config or env vars, or Edge TTS enabled (`messages.tts.edge.enabled` defaults to `true`). Replies shorter than 10 characters and replies that already contain media are always sent as text.
 
@@ -506,10 +518,12 @@ Edge TTS connects to Microsoft's online endpoints and has no published SLA. Tran
 
 <Note>
 This page covers `messages.tts`: one-shot, whole-utterance audio attached to an outbound chat
-reply. It is a separate system from the live, streaming voice conversation loop behind the
+reply. It is a separate system from the live voice conversation behind the
 `/v2/client` web client's Dictate and Voice mode controls, which uses `talk.conversation`/
 `talk.providers.<id>` instead — see
-[Cascaded voice conversation sessions](/talk/realtime-voice-conversation) and
+[Voice conversation sessions](/talk/realtime-voice-conversation) and
 [ElevenLabs streaming voice](/providers/elevenlabs). The two keep separate ElevenLabs config even
-when both point at the same vendor: Voice mode reads `talk.providers.<id>`, not `messages.tts.elevenlabs`, and an unset Voice model falls back to `eleven_flash_v2_5` rather than this page's `eleven_multilingual_v2`.
+when both point at the same vendor: cascaded Voice mode reads `talk.providers.<id>`, not
+`messages.tts.elevenlabs`, and an unset cascaded Voice model falls back to `eleven_flash_v2_5`
+rather than this page's `eleven_multilingual_v2`. The `realtime` Voice engine uses neither.
 </Note>

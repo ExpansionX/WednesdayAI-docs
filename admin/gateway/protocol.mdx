@@ -196,7 +196,8 @@ read or write groups later are refused until they are allowlisted.
 
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
-  `sessions.resolve`, `sessions.subscribe`, `chat.history`, `chat.surfaces.list`,
+  `sessions.resolve`, `sessions.subscribe`, `sessions.direct`, `chat.history`,
+  `chat.surfaces.list`,
   `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
@@ -893,11 +894,11 @@ fallbacks, and an unavailable preview is omitted; these flags do not request a f
 - Omitted (`undefined`) preserves legacy operator behavior and filters only cron run keys recognized
   by `isCronRunSessionKey`.
 - `false` hides any key for which `isUserFacingSessionKey(key)` is false, plus persisted isolated
-  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`,
+  heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`, `hook`,
   `heartbeat`, and `subagent` as internal. It also hides `main:heartbeat`,
   `dashboard:*:heartbeat`, and keys matching the persisted `heartbeatIsolatedBaseSessionKey`.
   Unknown key shapes remain visible.
-- `true` includes internal cron, ACP, heartbeat, and subagent sessions.
+- `true` includes internal cron, ACP, hook, heartbeat, and subagent sessions.
 
 When `includeAgentActivity` is true, the result initializes every agent returned by
 `listAgentsForGateway(cfg)` to `null`. It then maps each normalized agent id to the newest non-null
@@ -944,6 +945,11 @@ mirrors an assistant reply into the session (`src/infra/outbound/deliver.ts`,
 `outbound-send-service.ts`); the session entry carries the same field. The field is monotonic and
 distinct from `updatedAt`, which other writes such as renames and inbound routing also move. It is
 `null` when the session has had no such reply.
+
+Rows that are not user-facing carry `internal: true` (`GatewaySessionRow.internal`): the
+structural classifier treats the root segments `acp`, `cron`, `hook`, `heartbeat`, and `subagent`
+as internal, as do the built-in isolated-heartbeat shapes and persisted isolated-heartbeat
+sessions. The same rows survive the `true` value of `includeInternal` and are hidden by `false`.
 
 For example, these are complete RPC `params` objects; they require no imports:
 

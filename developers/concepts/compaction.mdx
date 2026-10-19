@@ -17,7 +17,7 @@ Compaction **summarizes older conversation** into a compact summary entry and ke
 - The compaction summary
 - Recent messages after the compaction point
 
-Compaction **persists** in the session’s JSONL history.
+Compaction **appends** its summary to SQL session history; it does not rewrite or delete earlier entries.
 
 ## Configuration
 
@@ -37,7 +37,7 @@ Use the `agents.defaults.compaction` object in your `openclaw.json` to control c
 | `identifierInstructions`                | string                              | —             | Custom preservation text used when `identifierPolicy` is `"custom"`.                                                                                                                          |
 | `memoryFlush.enabled`                   | boolean                             | `true`        | Run a silent pre-compaction memory flush turn before heavy context reduction.                                                                                                                 |
 | `memoryFlush.softThresholdTokens`       | number                              | —             | How close to the compaction threshold (in tokens) to trigger the flush.                                                                                                                       |
-| `memoryFlush.forceFlushTranscriptBytes` | number \| string                    | —             | Force flush when the transcript file reaches this size (e.g. `"2mb"`). Set to `0` to disable.                                                                                                 |
+| `memoryFlush.forceFlushTranscriptBytes` | number \| string                    | —             | Force flush when serialized conversation entries in SQL reach this size (e.g. `"2mb"`). Set to `0` to disable.                                                                                |
 | `memoryFlush.prompt`                    | string                              | —             | Custom user-prompt for the memory flush turn.                                                                                                                                                 |
 | `memoryFlush.systemPrompt`              | string                              | —             | System-prompt override for the memory flush turn.                                                                                                                                             |
 
@@ -94,6 +94,15 @@ You’ll see:
 Before compaction, OpenClaw can run a **silent memory flush** turn to store
 durable notes to disk. See [Memory](/concepts/memory) for details and config.
 
+The memory-flush size check reads a stored byte total and the latest usable token
+usage from SQL, rather than loading the transcript into the agent process. The first
+check aggregates existing rows; later checks aggregate only newly appended rows.
+Existing history contributes immediately after an upgrade, without waiting for
+background token-column backfills. Entries with no usable prompt or output usage
+do not hide the last usable usage record.
+`memoryFlush.forceFlushTranscriptBytes` measures serialized UTF-8 bytes, including
+one newline per entry, without changing the configured threshold behavior.
+
 ## Manual compaction
 
 Use `/compact` (optionally with instructions) to force a compaction pass:
@@ -102,13 +111,28 @@ Use `/compact` (optionally with instructions) to force a compaction pass:
 /compact Focus on decisions and open questions
 ```
 
+## Compaction ownership
+
+Sessions claimed by a **compaction-stage context owner** suppress core compaction: the owner's
+`session_before_compact` hook cancels SDK auto-compaction (including run-loop overflow recovery)
+and core `/compact` for the claimed session, so the owner — not WednesdayAI — decides when and how
+history is compacted.
+
+For operators:
+
+- Do not expect `🧹 Auto-compaction complete` or the `/compact` command to fire on sessions owned
+  by a compaction-stage owner. The owner is responsible for keeping that session under its window.
+- A claimed session can still hit its context window if the owner never compacts; monitor owned
+  sessions through the owner's own reporting rather than WednesdayAI's compaction counters.
+- Unclaimed (core-owned) sessions behave exactly as described in the sections above.
+
 ## Context window source
 
 Context window is model-specific. OpenClaw uses the model definition from the configured provider catalog to determine limits.
 
 ## Compaction vs pruning
 
-- **Compaction**: summarises and **persists** in JSONL.
+- **Compaction**: summarises and **appends** the summary to SQL history.
 - **Session pruning**: trims old **tool results** only, **in-memory**, per request.
 
 See [/concepts/session-pruning](/concepts/session-pruning) for pruning details.
@@ -119,16 +143,29 @@ OpenClaw also supports OpenAI Responses server-side compaction hints for
 compatible direct OpenAI models. This is separate from local OpenClaw
 compaction and can run alongside it.
 
-- Local compaction: OpenClaw summarizes and persists into session JSONL.
+- Local compaction: OpenClaw summarizes and appends the summary to SQL session history.
 - Server-side compaction: OpenAI compacts context on the provider side when
   `store` + `context_management` are enabled.
 
 See [OpenAI provider](/providers/openai) for model params and overrides.
 
+## Tool output is capped before it accumulates
+
+Tool results are capped **in memory** at `400,000` text characters at the tool seam and again
+when a session hydrates from storage. Oversized results keep a head-and-tail excerpt plus a size
+note. When database write-through is enabled, the full raw bytes are stored out-of-band, so the
+storage layer still holds the original output even though the model view is capped. Long sessions
+do not accumulate multi-megabyte tool output in memory.
+
+If a prune or compaction decision cannot be replayed from its stored ledger row, the session logs
+`prompt ledger unavailable; recomputing projections` and repairs itself by recomputing the
+projection from stored history. This is a one-time, self-repairing warning — not a data loss.
+
 ## Tips
 
 - Use `/compact` when sessions feel stale or context is bloated.
-- Large tool outputs are already truncated; pruning can further reduce tool-result buildup.
+- Large tool outputs are already truncated (tool results are capped at 400k chars in memory);
+  pruning can further reduce tool-result buildup in the request view.
 - If you need a fresh slate, `/new` or `/reset` starts a new session id.
 
 ## Troubleshooting
@@ -143,6 +180,6 @@ The default `identifierPolicy: "strict"` adds built-in guidance, but identifiers
 Config is read at gateway start. Restart the gateway after changing `compaction.enabled`. Also verify the config is under `agents.defaults.compaction`, not a top-level key.
 
 **Memory flush runs unexpectedly or too often**
-The flush fires when the transcript file reaches `memoryFlush.forceFlushTranscriptBytes`. Set it to `0` to disable size-based triggers, or increase the value. Set `memoryFlush.enabled: false` to turn off pre-compaction memory flushes entirely.
+The flush fires when serialized conversation entries in SQL reach `memoryFlush.forceFlushTranscriptBytes`. Set it to `0` to disable size-based triggers, or increase the value. Set `memoryFlush.enabled: false` to turn off pre-compaction memory flushes entirely.
 
 _Related: [Session pruning](/concepts/session-pruning) · [Memory](/concepts/memory) · [Session management](/concepts/session) · [OpenAI provider](/providers/openai)_
