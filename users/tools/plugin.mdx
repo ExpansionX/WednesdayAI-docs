@@ -1715,6 +1715,47 @@ Use display transforms for output cleanup on gateway consumers (UI streams, hist
 events). Display transforms do not run on channel sends: to rewrite channel-bound payloads, use
 the `message_sending` hook.
 
+### Register a glance widget
+
+`api.registerGlanceWidget` lets a plugin contribute a widget to glass clients (WednesdayAI
+Glass, ADR 0107). The client pulls registered widgets through the `glance.widgets.list` gateway
+method (`operator.read`) when its dashboard opens and on a refresh interval; there is no push.
+
+```ts
+export default function (api) {
+  api.registerGlanceWidget({
+    id: "myplugin.status",
+    title: "My Plugin",
+    refreshMs: 300_000, // cache TTL; clamped to >= 30s, default 300s
+    render: async ({ signal }) => {
+      // Abort after 5s if the client-facing render takes too long.
+      const res = await fetch("https://example.com/status", { signal });
+      const data = await res.json();
+      return { lines: [`up: ${data.up}`, `latency: ${data.latencyMs}ms`], updatedAtMs: Date.now() };
+    },
+  });
+}
+```
+
+The type is `PluginGlanceWidget` (with `GlanceWidgetContent`), both exported from
+`wednesdayai/plugin-sdk`.
+
+Contract:
+
+- The `id` is required, unique per plugin, and must match
+  `/^[a-z0-9][a-z0-9._-]{0,63}$/`; the widget is keyed `<pluginId>/<id>` in responses.
+- The `title` is required, 1-24 chars after trim.
+- `refreshMs`, if set, must be a finite number > 0; it is clamped to >= 30 s.
+- `render` receives an `AbortSignal` and resolves with `{ lines, updatedAtMs? }` or `null`.
+  Widgets render concurrently, each bounded by the 5 s timeout.
+- A `null` result omits the widget until its next refresh.
+- Lines are normalized: trimmed, cut to 64 chars, empty lines dropped, at most 6 lines.
+- A render that throws or times out reports `lines: []` with `error: "unavailable"` for 30 s.
+- `render` gets no caller context, and its cached result is returned to every `operator.read`
+  caller. Never return per-person or per-session data.
+- An invalid id, title or refreshMs, a missing `render`, or a duplicate registration is rejected
+  with a `PLUGIN_REGISTER_ERROR` diagnostic.
+
 ### Register a context owner (message-render)
 
 `api.registerContextOwner` claims a context pipeline stage for a session. The first stage is

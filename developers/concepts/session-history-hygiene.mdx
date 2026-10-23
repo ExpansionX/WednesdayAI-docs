@@ -39,6 +39,18 @@ Legacy rows (written before the carrier existed) keep the older derived path: `c
 
 At the model boundary, every user turn is stamped `[Ddd YYYY-MM-DD HH:MM GMT±H]` and inbound framing is composed on the current turn only. From the next turn on, the same message renders byte-stable as `stamp + raw text` — see [Date & Time](/date-time).
 
+### Speech input provenance
+
+When some or all of a turn's text is produced by speech-to-text, the gateway composes a user-role `Speech input (untrusted metadata): { "transcribed": true, "note": "…" }` block onto the current model turn only. It is never rendered on later turns, never baked into storage, and never sent to clients: `chat.history` returns the raw user text with no metadata stripping, so the block is absent there as well.
+
+The block is recorded in the `__openclaw.ingress.untrusted.speechInput` carrier field on the user message. Its triggers are:
+
+- Composer dictation: the web client sets `dictated: true` on `chat.send` and `sessions.steer` when the submitted text came from speech-to-text.
+- Talk stt-tts turns: Talk-mode voice turns whose text was transcribed.
+- Transcribed channel audio: audio or voice notes transcribed into text.
+
+The block is a provenance note only. It tells the model that the text may contain transcription errors, including similar-sounding substitutions in names, spellings, numbers, and technical terms, so it can tolerate a mis-heard name it already knows.
+
 ### Turn provenance columns (SC3)
 
 Every row written to `ctx_session_entries` gains four new columns that record where the turn came from:

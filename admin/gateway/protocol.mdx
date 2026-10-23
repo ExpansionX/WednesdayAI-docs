@@ -334,14 +334,15 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
 the v3 signature proves the device signed the id it declared, so altering the id after signing (or
 replaying a signature produced for another id) fails signature verification.
 
-Three client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
+Four client ids declare a **bootstrap profile**, which is the role + scope set their setup code mints
 at pairing time:
 
-| Client id               | Roles              | Scopes                                                                           |
-| ----------------------- | ------------------ | -------------------------------------------------------------------------------- |
-| `openclaw-even-g2-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
-| `openclaw-mentra-node`  | `operator`         | `operator.read`, `operator.write`                                                |
-| `openclaw-user-client`  | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
+| Client id                | Roles              | Scopes                                                                           |
+| ------------------------ | ------------------ | -------------------------------------------------------------------------------- |
+| `openclaw-even-g2-node`  | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
+| `openclaw-mentra-node`   | `operator`         | `operator.read`, `operator.write`                                                |
+| `openclaw-user-client`   | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
+| `wednesdayai-glass-node` | `node`, `operator` | `operator.read`, `operator.write`                                                |
 
 Rules that apply to bootstrap redemption:
 
@@ -357,6 +358,10 @@ Rules that apply to bootstrap redemption:
   connect requesting anything outside that set is refused; `details.code` is
   `AUTH_DEVICE_TOKEN_MISMATCH` with the additive `details.deviceTokenReason = "scope-mismatch"`.
   A subset of the approved scopes connects normally.
+- **Redeemed under ambient auth.** A presented bootstrap token is redeemed even when the connect is
+  already admitted by `none`, `tailscale` or `trusted-proxy` auth or a shared secret, so a client
+  pairing through Tailscale Serve still gets the full profile silently. If redemption fails there,
+  the earlier admission stands and the connect proceeds as it would without the token.
 
 `openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
 ([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
@@ -369,6 +374,19 @@ identity metadata, not an authorization ceiling, and an administrator-approved p
 can still grant the device more. One scan pairs the glasses: the setup code is single-use,
 redemption approves the pairing silently, and later reconnects authenticate with the minted
 operator device token. Setup and device management: [MentraOS Glasses](/platforms/mentra-glass).
+
+`openclaw-even-g2-node` pairs the third-party Even G2 node client. It connects as both
+roles: a node socket (role `node`, no scopes, `canvas` capability) that answers the `glass.*` HUD
+command family granted by device family `glasses` (`glass.hud.show`, `glass.hud.dismiss`,
+`glass.app.open`, `glass.state.get`), and an operator socket with `operator.read` +
+`operator.write`. It also pulls plugin glance widgets via `glance.widgets.list`.
+
+`wednesdayai-glass-node` pairs WednesdayAI Glass (ADR 0107) as both roles. The node socket is role
+`node` with no scopes, `canvas` capability, and answers the `glass.*` family (`glass.hud.show`,
+`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`) granted by device family `glasses`. The
+operator socket has `operator.read` + `operator.write` and pulls `glance.widgets.list`. Its profile
+mints only those two scopes, so setup codes for other client ids, including the default
+`openclaw qr` code, cannot be redeemed by it.
 
 `openclaw-user-client` carries two further admission rules:
 
@@ -523,7 +541,7 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   `UNAVAILABLE`. A run the gateway expires on its own timer is announced at once (`stopReason`
   `timeout`) and saves nothing.
 - Operators may call `sessions.steer` (`operator.write`) with
-  `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?}` to deliver
+  `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?, dictated?}` to deliver
   a message to a session that may already be running a turn. `mode` is `inject` (default),
   `interrupt` or `queue`; legacy queue names such as `steer`, `steer-backlog`, `followup` and
   `collect` are rejected. When `mode` is omitted the gateway default
@@ -559,6 +577,10 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   - A `message` that is blank once trimmed returns `INVALID_REQUEST`, as does a session whose send
     policy denies the send. `sessions.steer` has no `replyToId` and no `expectedLeafEntryId`: a
     steered or queued message carries neither a reply reference nor a leaf guard.
+  - `dictated` (optional boolean) marks speech-to-text provenance: some or all of `message` was
+    dictated. The turn gets a user-role "Speech input (untrusted metadata)" note so the model can
+    tolerate mis-transcribed names (for example a homophone of a person it knows); the note is
+    never persisted into the message text.
   - `runId` and `targetRunId` always name a real run, never an id the gateway minted for a call
     that started no run. For `injected`, `started` and `interrupted` the id is a live gateway run:
     it can be passed to `sessions.abort` and is reported by `sessions.runs.list`. For `queued` it is
@@ -765,12 +787,12 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   reference is stored as a custom transcript entry written just before the user turn, so it never
   enters the model context.
 - `chat.send` (`operator.write`; narrow-admitted) takes
-  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?}`
+  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?, dictated?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
   running). When an embedded run is already active in the session and the queue policy enqueues the
   turn behind it, the answer is `{ runId, status: "queued" }`, sent once the policy decides (at
   most 30 s). No empty `final` is broadcast for a queued turn; its events stream under `runId` when
-  the queue drains. P2 added the last two params:
+  the queue drains. P2 added the last two params, and `dictated` (described below) is also optional:
   - `replyToId` is the entry id of the message being replied to (the `__openclaw.id` of a
     `chat.history` message). The gateway looks it up in this session's own transcript and gives the
     turn's prompt the quoted message as reply context: its text (at most 2000 characters) and its
@@ -805,6 +827,10 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     `attachment <fileName>: exceeds size limit (N > 5000000 bytes)`. A retry or in-flight replay
     of the same `idempotencyKey` is answered without re-parsing, so a replay never writes
     duplicate media-store files.
+  - `dictated` (optional boolean) marks speech-to-text provenance: some or all of `message` was
+    dictated. The turn gets a user-role "Speech input (untrusted metadata)" note so the model can
+    tolerate mis-transcribed names; the note is never persisted into the message text. It is
+    ignored for `uiAction` submits, and a turn with the flag stays command-capable.
 - A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
   starts, from run start to run end (never from the moment it was merely enqueued). From then it
   is exactly as abortable and listable as a run started any other way - see the `queued` outcome
