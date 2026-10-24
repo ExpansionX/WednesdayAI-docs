@@ -685,7 +685,9 @@ Group messages default to **require mention** (metadata mention or regex pattern
 }
 ```
 
-Resolution: per-DM override → provider default → no limit (all retained).
+Resolution: per-DM override → provider default → no limit (all retained). The DM's channel and
+peer id come from the session's stored identity, not the session key text: a session with no
+stored identity gets no limit (all retained), and a per-DM override never matches it.
 
 Supported: `telegram`, `whatsapp`, `discord`, `slack`, `signal`, `imessage`, `msteams`.
 
@@ -1125,6 +1127,7 @@ Periodic heartbeat runs.
       compaction: {
         mode: "safeguard", // default | safeguard
         reserveTokensFloor: 24000,
+        summaryTimeoutMs: 300000, // per summarization call; raise for slow local models
         identifierPolicy: "strict", // strict | off | custom
         identifierInstructions: "Preserve deployment IDs, ticket IDs, and host:port pairs exactly.", // used when identifierPolicy=custom
         memoryFlush: {
@@ -1741,7 +1744,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - If parent `totalTokens` is above this value, OpenClaw starts a fresh thread session instead of inheriting parent transcript history.
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
-- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
+- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. `channel` and `chatType` compare against the session's stored identity (the channel and peer kind recorded when the conversation arrived, or the session's recorded channel), never the session key text; `keyPrefix` and `rawKeyPrefix` match the key itself. A contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
 - **`store`**: per-agent session store identity (supports the `{agentId}` template); also where
   legacy JSON session files are found for the one-time import. See
   [Sessions](/concepts/session#upgrading-from-json-session-files).
@@ -2862,6 +2865,7 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `webClient.enabled`: serve the built web client bundle from this gateway, same-origin, at `webClient.basePath`. Default `false`: the client is normally hosted separately (`wednesdayai web serve`, a CDN, or the container image). Enabling it does not admit the client - the origin allowlist above still applies, so add the gateway's own origin. See [Web client hosting](/web/user-client).
 - `webClient.basePath`: public path the gateway-served client is mounted under. Default `/v2/client`. It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`gateway.controlUi.basePath`, `gateway.controlUiV2.basePath` when the v2 console is enabled); a collision is rejected when the config loads, naming both keys. Earlier builds defaulted to `/client`; on a deployment that never set `basePath`, an old `/client/` bookmark no longer reaches the client (there is no redirect), and with the Control UI at the gateway root that path is answered by the Control UI. Set `basePath: "/client"` to keep the old address. `gateway.*` changes need a gateway restart. See [Web client hosting](/web/user-client#gateway-route).
 - `webClient.root`: directory holding the built bundle (`index.html` plus `assets/`). Optional: with `webClient.enabled` true and no `root`, the gateway serves the bundle packaged with this install (`dist/web-client`), and answers `503` naming the build command only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason rather than silently falling back.
+- `webClient.imageOrigins`: exact `https://host[:port]` origins that remote markdown images may load from in the gateway-served web client, extended into its CSP `img-src`. Default empty: remote images render as links and never auto-load, so agent output cannot turn them into a tracking or exfiltration channel. Each entry must be an exact https origin with no path, query or fragment. See [Web client hosting](/web/user-client).
 - `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `true`: the v2 console is the daily console and owns the gateway root, while the classic console (deprecated) serves at `/classic`. Set it to `false` only to run the classic console alone. The console connects as the classic console's `openclaw-control-ui` client, so admission, scopes and auth modes are the classic console's: browser origins are governed by `controlUi.allowedOrigins`, and there is no separate allowlist. A non-loopback bind with a console enabled still requires `controlUi.allowedOrigins` at startup. See [Control UI v2](/web/control-ui-v2).
 - `controlUiV2.basePath`: public path the console is mounted under. Default: the gateway root; the v2 console mounts at `/v2/control` instead when the root is already claimed (an explicit `basePath: "/"` on the classic console or an enabled web client, or the classic console keeping the root because another mount explicitly uses `/classic`), so configs valid before v2 became the default keep serving the same SPA at the root. Must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`, `controlUi.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
 - `controlUiV2.root`: directory holding the built console (`index.html` plus `assets/`). Optional: unset, the gateway serves the bundle packaged with this install (`dist/control-ui-v2`) and answers `503` naming `pnpm control:build:packaged` only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason.
