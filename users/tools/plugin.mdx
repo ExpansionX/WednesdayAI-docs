@@ -1148,6 +1148,9 @@ loop (see [Voice conversation sessions](/talk/realtime-voice-conversation)):
   cascaded loop's STT half (Dictate and Voice mode both use it).
 - `api.registerStreamingSpeechProvider(provider)` — a streaming text-to-speech seam for the
   cascaded loop's TTS half (Voice mode only).
+- `api.registerSpeechProvider(provider)` — a batch (whole-utterance) text-to-speech seam for the
+  `messages.tts` stack (read aloud, voice notes, auto-TTS, the `tts` tool); see
+  [`SpeechProviderPlugin` (batch TTS)](#speechproviderplugin-batch-tts) below.
 
 ```ts
 import type {
@@ -1320,7 +1323,103 @@ createSession(req) {
 **Do this instead:** defer every callback until after `createSession` / `openStream` returns, and
 guard callbacks that can settle after `close()`.
 
-All four registrars — these two, `registerRealtimeVoiceProvider`, and the unrelated
+### `SpeechProviderPlugin` (batch TTS)
+
+`api.registerSpeechProvider(provider)` registers a batch (whole-utterance) text-to-speech provider
+next to the built-in `openai`, `elevenlabs` and `edge` TTS providers (ADR 0111). It serves the
+`messages.tts` stack: read aloud (`tts.speak`), voice notes, auto-TTS and the `tts` agent tool —
+not the Voice-conversation loop, which uses `registerStreamingSpeechProvider`. The built-in
+`BuiltinTtsProvider` union is `elevenlabs | openai | edge`; anything else a config names must be a
+registered plugin id. Registering a plugin provider under a built-in id is rejected with a
+`PLUGIN_REGISTER_ERROR` diagnostic, because those ids always dispatch to the built-ins.
+
+```ts
+import type { OpenClawPluginApi, SpeechProviderPlugin } from "wednesdayai/plugin-sdk";
+
+const provider: SpeechProviderPlugin = {
+  id: "my-tts",
+  label: "My TTS",
+  models: ["my-voice-v1"],
+  isConfigured: ({ providerConfig }) => typeof providerConfig.apiKey === "string",
+  synthesize: async ({ text, providerConfig, target, timeoutMs }) => {
+    const response = await fetch("https://tts.example.invalid/v1/audio/speech", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: providerConfig.model ?? "my-voice-v1",
+        input: text,
+        voice: providerConfig.voice ?? "default",
+        response_format: target === "voice-note" ? "opus" : "mp3",
+      }),
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!response.ok) {
+      // Never echo the URL or response body: the base URL can carry credentials.
+      throw new Error(`TTS request failed (HTTP ${response.status})`);
+    }
+    const audio = Buffer.from(await response.arrayBuffer());
+    return {
+      audio,
+      fileExtension: target === "voice-note" ? ".opus" : ".mp3",
+      outputFormat: target === "voice-note" ? "opus" : "mp3",
+      voiceCompatible: target === "voice-note",
+    };
+  },
+};
+
+export default function register(api: OpenClawPluginApi): void {
+  api.registerSpeechProvider(provider);
+}
+```
+
+```ts
+type SpeechProviderPlugin = {
+  id: string;
+  label: string;
+  models?: readonly string[];
+  isConfigured: (ctx: { providerConfig: Record<string, unknown> }) => boolean;
+  synthesize: (req: SpeechSynthesisRequest) => Promise<SpeechSynthesisResult>;
+};
+
+type SpeechSynthesisRequest = {
+  text: string;
+  /** Merged `messages.tts.providers.<id>` + `agents.list[].tts.providers.<id>`. */
+  providerConfig: Record<string, unknown>;
+  /** "voice-note" when the channel needs a voice bubble (Ogg/Opus). */
+  target: SpeechSynthesisTarget; // "audio-file" | "voice-note"
+  timeoutMs: number;
+};
+
+type SpeechSynthesisResult = {
+  audio: Buffer;
+  // Must stay within the key set of the gateway's speech mime map so tts.speak can
+  // always map the result to a mime type.
+  fileExtension: ".mp3" | ".opus" | ".ogg" | ".wav" | ".webm";
+  outputFormat: string;
+  voiceCompatible: boolean;
+};
+```
+
+`synthesize` runs per request and owns its own timeout from `req.timeoutMs`. `target` tells you the
+delivery: return Ogg/Opus (`voiceCompatible: true`) for `voice-note` so channels like Telegram can
+show the round voice bubble, and any mapped format for `audio-file`. `fileExtension` must be one of
+the five listed values — the gateway maps it to a mime type and refuses anything else. Operator
+settings reach you merged through `req.providerConfig`: `messages.tts.providers.<id>` deep-merged
+under the per-agent `agents.list[].tts.providers.<id>`. Built-in ids (`openai`, `elevenlabs`,
+`edge`) are rejected in that config block, so your id never collides with a built-in.
+
+Plugin providers join the automatic fallback chain after the built-ins, but they are never
+auto-selected as the primary provider: the operator sets `messages.tts.provider` (or the per-agent
+block) to your id. `isConfigured` decides whether the fallback chain skips you; it must stay
+synchronous and must not make network calls.
+
+Ids are matched case-insensitively: a config key, directive value or `tts.setProvider` argument
+whose only difference from your id is casing resolves to your registered id. Batch providers
+resync with the active plugin registry whenever plugins reload, so a reconfigured plugin's new
+instance replaces the old one and a disabled plugin's provider stops being selectable; an
+add-only registry would keep stale instances, because duplicate ids are ignored.
+
+All five registrars — these three, `registerRealtimeVoiceProvider`, and the unrelated
 `registerMediaUnderstandingProvider` — share one id registrar for the missing-id and duplicate-id
 diagnostic, so every kind reports the same `PLUGIN_REGISTER_ERROR` shape for the same mistake.
 A duplicate id is refused: the second registration is not stored, and the diagnostic names the
@@ -1800,6 +1899,29 @@ Contract:
   provider-bound message before the call leaves the process.
 - If your handler throws or times out, core renders that run instead and warns once; the next
   attempt retries your plugin.
+
+### Register a context owner (compaction)
+
+The `compaction` stage hands compaction for a session to your plugin. For the sessions it claims,
+core skips every compaction path: automatic compaction on overflow, `/compact`, and run-loop
+overflow recovery. Other sessions keep core compaction.
+
+```ts
+api.registerContextOwner({
+  stages: ["compaction"],
+  ownsSession: ({ sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
+});
+```
+
+Contract:
+
+- No hook registration is required. Prune context yourself, for example in `context.prune`.
+- When an owned session still overflows the model window, core retries once with tighter
+  tool-result bounds and then returns a context-overflow error for that run.
+- `compaction.plan` is not delivered to owners: core does not summarise owned sessions.
+- The definition flag `ownsCompaction: true` still works but is deprecated and logs a warning at
+  load. It claims compaction for every session, and while any plugin sets it, an explicit
+  `compaction` claim by another plugin is ignored and logged once.
 
 ## Naming conventions
 

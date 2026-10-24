@@ -82,6 +82,12 @@ an active realtime provider with its credential (realtime Voice — see
 (or the transcription-mode equivalent). Configure the provider under `talk.providers.<id>` and
 enable its plugin — see [ElevenLabs streaming voice](/providers/elevenlabs).
 
+The voice the cascaded engine speaks with resolves per agent: the session agent's
+`agents.list[].tts` voice for the speech provider wins, then `talk.providers.<id>.voiceId`, then
+`messages.tts.providers.<id>.voice` (plugin providers such as Kokoro only), then the provider's
+default voice. Selecting an agent in the web client therefore selects its voice — see
+[Custom and local providers](/tts#custom-and-local-providers).
+
 Changes to `talk.conversation.*` apply without a gateway restart to new sessions; existing
 sessions keep the configuration resolved when they started.
 
@@ -182,14 +188,17 @@ The session stays bound to the chat:
 - `conversationEnabled` mirrors `talk.conversation.enabled`. It is reported unconditionally —
   `streamingTranscription`/`speech`/`realtime` are not hidden while the gate is off — so a narrow
   client can render "available but disabled by your administrator" instead of nothing.
-- A row's `configured` is resolved from `talk.providers.<id>.apiKey` through the secret resolver
-  (`src/secrets/resolve.ts`), not from the provider plugin's own `isConfigured()`. A `realtime` row
-  is the exception: it uses the same resolution `talk.session.create { mode: "realtime" }` uses
-  (the provider's config defaults and environment, then its `isConfigured()`), so an
-  environment-only key counts; an unresolvable `apiKey` secret ref still reports its diagnostic.
-  A `speech` row
-  is additionally unconfigured when the provider cannot resolve a voice: the config has no
-  `voiceId` and the plugin declares no `defaultVoiceId`. `diagnostic`, present only when
+- A `streamingTranscription` row's `configured` is resolved from `talk.providers.<id>.apiKey`
+  through the secret resolver (`src/secrets/resolve.ts`), not from the provider plugin's own
+  `isConfigured()`. The `speech` and `realtime` rows instead resolve readiness the way
+  `talk.session.create` does: secret-ref and environment credentials first, then the provider's
+  own `isConfigured()`, so a keyless provider (a local TTS plugin such as Kokoro) counts as
+  configured as soon as its `isConfigured()` says so. An operator-supplied but unusable `apiKey`
+  (a whitespace string, or a secret ref that resolves empty) keeps the missing-key diagnostic, so
+  a keyed provider never reads as ready without usable key material. A `speech` row is
+  additionally unconfigured when the provider cannot resolve a voice: no
+  `talk.providers.<id>.voiceId`, no plugin `defaultVoiceId`, and no
+  `messages.tts.providers.<id>.voice`. `diagnostic`, present only when
   `configured` is `false` and a cause is known, is one of `missing-api-key`,
   `secret-ref-unresolved`, `provider-error`, or `missing-voice-id` — the causes a `talk.catalog`
   reader can safely show an operator without a stack trace.
@@ -365,9 +374,12 @@ independently of the engine.
 ### `talk.session.create` fails `UNAVAILABLE: stt-tts requires a configured STT and TTS provider`
 
 When the message ends with `<transcription|speech> provider "<id>" is not configured; check
-talk.providers.<id>.apiKey`, that provider's key is missing or does not resolve. Without the
-suffix, no registered provider matches `talk.conversation.sttProvider` or `talk.provider`. Either
-way, `talk.catalog`'s `streamingTranscription`/`speech` rows show the same cause in their
+talk.providers.<id>.apiKey`, that provider is not ready: its key is missing, does not resolve, or
+the provider's own `isConfigured()` rejects the resolved config (the same credential chain
+`talk.catalog`'s `speech`/`realtime` rows use, so a keyless provider such as Kokoro passes here
+while the plugin is enabled). Without the suffix, no registered provider matches
+`talk.conversation.sttProvider` or `talk.provider`. Either way, `talk.catalog`'s
+`streamingTranscription`/`speech` rows show the same cause in their
 `configured`/`diagnostic` fields: `missing-api-key` and `secret-ref-unresolved` both mean the
 gateway could not read a usable key for `talk.providers.<id>.apiKey`. See
 [ElevenLabs streaming voice](/providers/elevenlabs#troubleshooting).
@@ -375,9 +387,12 @@ gateway could not read a usable key for `talk.providers.<id>.apiKey`. See
 ### `talk.session.create` fails `UNAVAILABLE: stt-tts requires talk.providers.<id>.voiceId`
 
 `talk.catalog`'s speech row shows `diagnostic: "missing-voice-id"` for the same condition: the
-provider has a usable key, its config has no `voiceId`, and the speech provider ships no default
-voice. A missing key is reported first. Set `talk.providers.<id>.voiceId` (ElevenLabs ships a
-default, so this only affects third-party speech providers without one).
+provider is ready but no voice resolves. The voice for the turn comes, in order, from the session
+agent's `agents.list[].tts` voice for this provider, `talk.providers.<id>.voiceId`,
+`messages.tts.providers.<id>.voice` (plugin providers only), or the speech provider's default
+voice. A missing key is reported first. Set one of those (ElevenLabs ships a default, so this only
+affects third-party speech providers without one). The agent voice follows the canonical session
+store key, so a session alias such as `agent:ops:main` speaks with the default agent's voice.
 
 ### A turn never speaks, or speaks very late
 
