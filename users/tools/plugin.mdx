@@ -1801,6 +1801,29 @@ Contract:
 - If your handler throws or times out, core renders that run instead and warns once; the next
   attempt retries your plugin.
 
+### Register a context owner (compaction)
+
+The `compaction` stage hands compaction for a session to your plugin. For the sessions it claims,
+core skips every compaction path: automatic compaction on overflow, `/compact`, and run-loop
+overflow recovery. Other sessions keep core compaction.
+
+```ts
+api.registerContextOwner({
+  stages: ["compaction"],
+  ownsSession: ({ sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
+});
+```
+
+Contract:
+
+- No hook registration is required. Prune context yourself, for example in `context.prune`.
+- When an owned session still overflows the model window, core retries once with tighter
+  tool-result bounds and then returns a context-overflow error for that run.
+- `compaction.plan` is not delivered to owners: core does not summarise owned sessions.
+- The definition flag `ownsCompaction: true` still works but is deprecated and logs a warning at
+  load. It claims compaction for every session, and while any plugin sets it, an explicit
+  `compaction` claim by another plugin is ignored and logged once.
+
 ## Naming conventions
 
 - Gateway methods: `pluginId.action` (example: `voicecall.status`)

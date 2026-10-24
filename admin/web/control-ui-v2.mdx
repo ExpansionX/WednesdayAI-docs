@@ -1,33 +1,37 @@
 ---
-summary: "Run the WednesdayAI Control UI v2 operator console from the gateway, a standalone server, or a container"
+summary: "The default WednesdayAI operator console (Control UI v2), served at the gateway root, a standalone server, or a container"
 read_when:
-  - You want the new operator console beside the classic Control UI
+  - You want to use or host the default operator console at the gateway root
   - You want to host the operator console on its own origin, a container, or a CDN
   - Sign-in to Control UI v2 says the origin is not allowed or the device needs approval
-  - The gateway refuses to start after enabling `gateway.controlUiV2`
+  - The gateway refuses to start over a console basePath collision
   - The console shows a configuration error before sign-in
 title: "Control UI v2"
-description: "Deploy and sign in to the WednesdayAI Control UI v2 operator console."
+description: "Use, deploy and sign in to the WednesdayAI Control UI v2 operator console."
 audience: admin
 component: control-ui-v2
 sources:
-  - apps/control/src/config/runtime-config.ts
+  - apps/control/src/app/routes.ts
   - apps/control/src/app/SignIn.tsx
   - apps/control/src/app/sign-in-errors.ts
+  - apps/control/src/app/url-credential.ts
+  - apps/control/src/config/runtime-config.ts
   - src/control-ui-v2/runtime-config.ts
   - src/control-ui-v2/serve.ts
   - src/gateway/control-ui-v2-route.ts
   - src/config/gateway-spa-mounts.ts
   - apps/control/Dockerfile
-generated: 2026-10-13
+generated: 2026-10-15
 ---
 
 # Control UI v2
 
-Control UI v2 is the new WednesdayAI operator console. It covers the **Monitor** pages - Overview,
-Sessions, Runs, Usage and Logs - plus pending exec approvals, a command palette (⌘K or Ctrl+K) and
-light and dark themes. The [classic Control UI](/web/control-ui) is unchanged and stays the default
-console; the two run side by side, and Control UI v2 links back to the classic console.
+Control UI v2 is the WednesdayAI operator console and the **default console**: the gateway serves
+it at the root (`/`). It covers the full operator surface, grouped in the sidebar as **Monitor**,
+**Configure**, **Fleet** and **Learning** (see [What the pages show](#what-the-pages-show)), plus
+a command palette (⌘K or Ctrl+K) and light and dark themes. The [classic Control
+UI](/web/control-ui) is deprecated: it serves at `/classic` for one more release and is removed in
+the next release.
 
 Like the [web client](/web/user-client), the console is a **static bundle**. It contains no gateway
 address and no credentials: everything environment-specific arrives at runtime from a small
@@ -52,22 +56,24 @@ pnpm control:build             # writes apps/control/dist (for a CDN or your own
 
 ## Gateway route
 
-The gateway can serve the console itself. This is **off by default**.
+The gateway serves the console itself, **on by default**: the v2 console owns the gateway root
+(`/`), and the deprecated classic console serves at `/classic`. To pin the v2 console to a
+sub-path instead, set `basePath`.
 
 ```json5
 {
   gateway: {
     controlUiV2: {
-      enabled: true,
-      // basePath: "/v2/control",  // default
+      enabled: true, // default; set to false to serve only the classic console
+      // basePath: "/",  // default: the gateway root
       // root: "/srv/wednesdayai-control",  // optional: defaults to the packaged bundle
     },
   },
 }
 ```
 
-Restart the gateway, then open `http://127.0.0.1:18789/v2/control/` (or your gateway's own
-address).
+Restart the gateway, then open `http://127.0.0.1:18789/` (or your gateway's own address); with an
+explicit `basePath`, open that path instead.
 
 - `config.json` is generated per request: the console connects back to the origin it was loaded
   from, and links to the web client and classic console that this gateway serves.
@@ -78,6 +84,18 @@ address).
   rejected when the config loads, naming both keys.
 - With no `root`, a missing packaged bundle answers `503` naming `pnpm control:build:packaged`, and
   the gateway logs a warning at startup. A broken explicit `root` answers `503` with that reason.
+- Configs that were valid before v2 became the default keep working. The classic console moves to
+  `/classic` unless another mount explicitly uses that path, in which case classic keeps the root.
+  v2 takes the root unless something already claims it: an explicit
+  `gateway.controlUi.basePath: "/"` on an active classic console, an explicit
+  `gateway.webClient.basePath: "/"` on an enabled web client, or classic keeping the root as
+  above. Then v2 mounts at `/v2/control`; if that path is taken too (for example an enabled web
+  client at `/v2` or `/v2/control`), v2 stays inactive — exactly its pre-upgrade state —
+  rather than rejecting the config. Asking for it explicitly (`enabled: true`) keeps the error.
+- `gateway.controlUiV2.enabled: false` turns the v2 console off; `wednesdayai dashboard` then
+  points at the classic console (`/classic` by default).
+- Bookmarks to `/v2/control/...` are not redirected: with v2 at the root, the request falls
+  through to the root console, which opens **Overview**. Update saved links.
 
 ## Standalone server
 
@@ -133,6 +151,13 @@ screen. Select **Sign out** to forget the device token.
 The token or password is held in memory only for the connection attempt - it is never written to
 browser storage. Only the device identity, the device token and the theme are stored, under the
 `openclaw.control-v2.` prefix.
+
+`wednesdayai dashboard` opens the console with the gateway token in the URL fragment
+(`…/#token=<token>`; the macOS app passes `?token=`). The console takes the token from either spot,
+signs in with it only when it has no connected device token, and immediately strips `token` and
+`password` from the address bar - the credential is never written to browser storage, and a
+password in a URL is never used. A stored device token wins: the console reconnects with it and
+discards the URL token.
 
 ### Origins
 
@@ -199,19 +224,65 @@ configuration error instead of connecting anywhere.
 
 ## What the pages show
 
+The sidebar groups the screens into four sections: **Monitor**, **Configure**, **Fleet** and
+**Learning**. Screens whose gateway RPC is missing - Storage, Learning and Dreams - stay out of
+the sidebar and the command palette, and a direct URL shows "This feature is not enabled on this
+gateway" instead.
+
+### Monitor
+
 - **Overview**: gateway connection and version, channel accounts connected, active runs, spend for
   today, 7 days or 30 days, upcoming automations, nodes and pending approvals. Refreshes every 30
   seconds and on reconnect.
 - **Sessions**: every session with its channel, model, context use (flagged at 80%) and last
   activity. Select one to see its runs.
-- **Runs**: agent turns and task runs, filtered by Queued, Running, Needs attention, Failed or Done. Select a
-  run for its details and timeline, abort a running turn, decide an interrupted run, or answer an
-  approval that belongs to it. Queued and task runs need SQLite or Postgres session storage
-  (`session.storage.backend`).
-- **Usage**: spend and tokens for the range, a daily token chart and the ten sessions that spent the
-  most (USD).
+- **Runs**: agent turns and task runs, filtered by Queued, Running, Needs attention, Failed or
+  Done. Select a run for its details and timeline, abort a running turn, decide an interrupted
+  run, or answer an approval that belongs to it. Queued and task runs need SQLite or Postgres
+  session storage (`session.storage.backend`).
+- **Usage**: spend and tokens for the range, a daily token chart and the ten sessions that spent
+  the most (USD).
 - **Logs**: the gateway file log, following new lines every 2 seconds while the tab is visible,
   with a minimum-level filter, a text filter and Pause.
+- **Debug**: JSON snapshots of gateway status, health, the last heartbeat and available models,
+  the security-audit summary with the read-only event log, and a manual RPC box (calls run with
+  this console's operator scopes).
+
+### Configure
+
+- **Agents**: per-agent identity header, config editing, workspace files, the tool catalog with
+  profile and per-tool overrides, per-agent skills, channel and cron panels, and a nudge dialog.
+- **Automations**: cron jobs - schedule, payload (system event, agent turn or wake-gate check),
+  delivery and failure alerting; create, edit, clone, run now, enable or disable; run history.
+- **Channels**: one card per gateway channel with probe, per-account rows and logout; WhatsApp QR
+  login, the Telegram fleet panel and the Nostr profile editor; per-channel config through the
+  schema form.
+- **Skills**: workspace, built-in and installed skills with eligibility at a glance; enable or
+  disable a skill, set its API key, or install one.
+- **Settings**: the gateway config as a schema-driven form or a raw JSON5 editor, with a base-hash
+  guard against concurrent edits, save or save-and-restart (a drain confirmation when runs are
+  active), and a package or git update.
+
+### Fleet
+
+- **Nodes & devices**: fleet nodes and pending node or device pairing approvals, device tokens
+  (rotate, revoke, remove), and exec-approval allowlists for the gateway or a node.
+- **Instances**: live presence of the running WednesdayAI instances.
+- **Storage** (needs `sessions.storage.status`): session storage status, legacy JSONL import
+  progress, storage validation, backups on SQLite, and retrying failed imports.
+
+### Learning
+
+- **Learning** (needs `learning.overview`): lesson proposals with inspect, approve, reject or
+  quarantine (single or bulk), and the lesson index with search.
+- **Dreams** (needs `dream.status`): dream state, weights and lesson candidates, health, and
+  dream and learning run budgets.
+
+Two things the classic console had are not part of v2. Chat with the assistant happens in the
+[web client](/web/user-client) (`/v2/client/` by default; the sidebar's **Client** link opens the
+one this gateway serves). Talk lives only in the deprecated classic console at `/classic` and is
+removed with it; the web client's Dictate and Voice mode buttons are a separate feature (see
+[Using the web client](/web/using-the-web-client#dictate-and-voice)).
 
 Approvals requested before the console connected are not listed; the bell counts the ones that
 arrived since.
