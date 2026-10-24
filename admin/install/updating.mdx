@@ -72,7 +72,9 @@ wednesdayai update --channel stable
 Use `--tag <dist-tag|version>` for a one-off install tag/version.
 
 See [Release channels](/install/development-channels) for channel semantics,
-promotion checks, and support expectations.
+promotion checks, and support expectations. Chat users who only need to know
+what an update should look like can start at
+[How WednesdayAI updates reach you](/install/trusted-npm-publishing-user).
 
 Note: on npm installs, the gateway logs an update hint on startup (checks the current channel tag). Disable via `update.checkOnStart: false`.
 
@@ -135,7 +137,7 @@ If you installed via **npm/pnpm** (no git metadata), `wednesdayai update` will t
 
 ## Update (Control UI / RPC)
 
-The Control UI has **Update & Restart** (RPC: `update.run`). It:
+The Control UI has an **Update** button in **Settings** (RPC: `update.run`). It:
 
 1. Runs the same source-update flow as `wednesdayai update` (git checkout only).
 2. Writes a restart sentinel with a structured report (stdout/stderr tail).
@@ -186,6 +188,37 @@ Typical things it does:
 - On Linux, ensure systemd user lingering (so the Gateway survives logout).
 
 Details: [Doctor](/gateway/doctor)
+
+## One-time session actor backfill
+
+On the first gateway start after upgrading to this build, the session store backfills a stored
+actor (channel, account, peer kind/id, canonical identity, DM scope) onto existing session rows
+from identity columns the gateway already persisted at write time. There is no operator step and
+no CLI command: the backfill runs at storage open (Postgres: inside the startup initialization
+lease; SQLite: at worker init), pages large stores in batches of 500 rows, skips tombstoned rows,
+never overwrites an existing actor, and records completion as the `actor-meta-v1` marker row in
+`ctx_schema_backfills` — later starts skip it entirely.
+
+Rows that cannot yield a complete actor (invalid DM scope, or a group row with no group peer)
+stay actorless, as do internal buckets that have no external counterpart (cron, subagent, ACP
+sessions). An actorless session gets no identity guessed from its session key: no group tool
+policy, no per-DM history limit, no `session.sendPolicy` rule that requires `channel` or
+`chatType` (prefix rules on the key still match). `openclaw sessions` classifies the row's
+`kind` from the stored actor (then `chatType`); the Control UI labels the row from the actor,
+falling back to the raw key when the actor has no channel. The next inbound message in that
+conversation re-establishes identity from the live message and the row is written normally
+again.
+
+Source-install operators can verify the result against the live database:
+
+```bash
+OPENCLAW_DATABASE_URL=postgres://<user>:<password>@<host>/<db> node scripts/verify-context-schema-consumers.mjs
+```
+
+On success it prints `verify-context-schema-consumers: PASS`. It fails unless the
+`actor-meta-v1` marker exists, no eligible row still lacks an actor, and the sessionKey
+identity-parse guard prints `check-no-sessionkey-identity-parse: PASS`
+(`pnpm lint:sessions:no-sessionkey-identity-parse` runs the same guard in `pnpm check`).
 
 ## Start / stop / restart the Gateway
 
@@ -254,10 +287,6 @@ If you want to go back to latest later:
 git checkout main
 git pull
 ```
-
-<Note>
-End users never publish packages. A WednesdayAI install only consumes published releases (stable, beta, or dev channels); npm publishing is a maintainer-side, OIDC-trusted workflow. See [RELEASING](/developers/contributing/release).
-</Note>
 
 ## If you’re stuck
 
