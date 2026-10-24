@@ -1,0 +1,266 @@
+---
+summary: "Ship a Control UI v2 plugin: a browser entry module that adds console pages and Session and Run inspector panels"
+read_when:
+  - You want to add pages or panels to the operator console from a plugin
+  - You are porting an existing admin UI into a WednesdayAI plugin
+  - The console does not load your plugin UI and you need the failure rules
+title: "Control UI plugins"
+audience: developer
+sources:
+  - src/plugin-sdk/control-ui.ts
+  - src/plugins/manifest.ts
+  - src/gateway/plugin-control-ui.ts
+  - src/config/types.gateway-consoles.ts
+  - apps/control/src/plugins/plugin-ui-store.ts
+  - apps/control/src/plugins/control-ui-host.ts
+generated: 2026-10-25
+---
+
+# Control UI plugins
+
+A Control UI v2 plugin ships **one browser ES module**. After the operator allows the plugin, the
+console imports the module, calls its `activate(host)`, and the plugin mounts its own DOM into
+host-owned slots: pages in a **Plugins** sidebar group, panels in the **Session inspector**, and
+panels in the **Run inspector**. The contract is a strict subset of upstream OpenClaw
+`plugin-sdk/control-ui` apiVersion 1 plus one field (`ControlUiPanel.placement`); it is **not
+drop-in compatible** with upstream plugins (ADR 0111).
+
+Everything below applies to Control UI v2 (the operator console). The web client does not load
+plugin UI.
+
+## Declare the entry in the manifest
+
+Add an optional `controlUi` object to `openclaw.plugin.json`:
+
+```json
+{
+  "id": "console-ui-probe",
+  "configSchema": { "type": "object" },
+  "controlUi": { "entry": "ui/index.js" }
+}
+```
+
+- `entry` is a **relative** `.js` or `.mjs` path in a subdirectory of the plugin root, for
+  example `dist/control-ui/index.js`. Root-level entries, absolute paths, `..` segments,
+  intermediate `.` segments, and `.ts` sources are rejected when the manifest loads.
+- The gateway serves the entry's directory **and everything under it** at
+  `/__openclaw__/plugin-ui/<plugin-id>/<path>` on the gateway origin, without authentication.
+  Put only browser assets there: use a dedicated output directory such as `dist/control-ui/`,
+  never a directory that also holds server code. Paths through `node_modules` or dot-prefixed
+  segments, files resolving outside the plugin root (symlinks included), and extensions other
+  than `.js`, `.mjs`, `.css`, `.svg`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.woff` and `.woff2`
+  answer 404. No plugin HTTP route can shadow the reserved prefix.
+
+## Install the SDK import
+
+The browser contract is a dedicated subpath, so the gateway side and the browser side share the
+types without pulling in Node-only SDK code:
+
+```ts
+import { defineControlUiPlugin } from "wednesdayai/plugin-sdk/control-ui";
+```
+
+(`openclaw/plugin-sdk/control-ui` is the legacy alias for the same subpath.)
+
+## The contract
+
+A plugin module default-exports `defineControlUiPlugin({ id, activate })`:
+
+```js
+export default defineControlUiPlugin({
+  id: "console-ui-probe",
+  activate(host) {
+    const disposePage = host.ui.registerPage({
+      id: "home",
+      label: "Probe home",
+      mount(el, { host, signal, props }) {
+        const button = document.createElement("button");
+        button.textContent = "Ping";
+        button.addEventListener("click", () => host.request("console-ui-probe.ping"), {
+          signal,
+        });
+        el.append(button);
+      },
+    });
+    const disposePanel = host.ui.registerPanel({
+      id: "facts",
+      label: "Probe facts",
+      placement: "session",
+      mount(el, { signal, props }) {
+        el.textContent = `Session ${props.sessionKey}`;
+      },
+    });
+    return () => {
+      disposePage();
+      disposePanel();
+    };
+  },
+});
+```
+
+The essentials:
+
+- `id` **must equal the plugin manifest id**; activation fails otherwise.
+- `activate(host)` may be async and may return a disposer. It must finish within **10 seconds**;
+  a slower activation is aborted and reported as a failure. All failures are isolated: one broken
+  plugin never breaks the console, and the reason is listed in the console **Debug** view.
+- `mount(container, { host, signal, props })` builds DOM inside the given element and returns an
+  optional `dispose()`. The host **remounts the view when props change** and never calls an update
+  hook; `signal` is aborted when the host unmounts the view. This is deliberately framework-free:
+  bundle your own framework (React, Vue, Lit) inside the module. Native look comes from the
+  [brand tokens](#styling), not from host internals.
+- Registration inputs are validated: page and panel `id` match `/^[a-z0-9][a-z0-9._-]{0,63}$/`,
+  `label` is 1 to 48 characters after trim, and a duplicate id is rejected — page ids are unique
+  per plugin, panel ids are unique per `(plugin, placement)`, so the same panel id may be used
+  once for a `session` panel and once for a `run` panel.
+
+### The host
+
+`ControlUiHost` (from the same subpath) carries:
+
+| Member                                    | Behaviour                                                                                                                                                                                                           |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `apiVersion`                              | Always `1`.                                                                                                                                                                                                         |
+| `pluginId`                                | The manifest plugin id.                                                                                                                                                                                             |
+| `signal`                                  | Aborted when the console resets the plugin: on sign-out, on a gateway disconnect/reconnect, or on activation failure. After it aborts, `request` rejects and `onEvent` no-ops.                                      |
+| `basePath`                                | The console base path, for example `/` or `/v2/control/`.                                                                                                                                                           |
+| `request(method, params)`                 | Calls a gateway method with the signed-in operator's authority. The gateway enforces scopes; a read-only operator still gets read-scope refusals, so declare per-method scopes for your own methods where possible. |
+| `onEvent(event, listener)`                | Subscribes to gateway events; returns a disposer. The subscription also ends when the host `signal` aborts, even if the plugin never calls the disposer.                                                            |
+| `navigation.openPage({ pageId, params })` | Opens one of this plugin's pages. `params` must not use the keys `plugin` or `page`.                                                                                                                                |
+| `navigation.openSession(key)`             | Opens the Session inspector for a session key.                                                                                                                                                                      |
+| `ui.registerPage(page)`                   | Adds a page. Returns a disposer.                                                                                                                                                                                    |
+| `ui.registerPanel(panel)`                 | Adds a panel. Returns a disposer.                                                                                                                                                                                   |
+
+### Placements and props
+
+| Placement | Registered with         | Mount props                                                    |
+| --------- | ----------------------- | -------------------------------------------------------------- |
+| `page`    | `host.ui.registerPage`  | Every route parameter except `plugin` and `page` (string map). |
+| `session` | `host.ui.registerPanel` | `{ sessionKey: string }`.                                      |
+| `run`     | `host.ui.registerPanel` | `{ sessionKey, runId, sessionRunId }`, each `string \| null`.  |
+
+Pages render as their own route (`?plugin=<id>&page=<pageId>` plus your params) under the
+**Plugins** sidebar group and the command palette. Session panels render inside the Session
+inspector; run panels render at the end of the Run inspector after the timeline.
+
+## The operator allowlist
+
+Plugin UI is opt-in per plugin. The operator lists trusted plugin ids:
+
+```json5
+{
+  gateway: {
+    controlUiV2: {
+      pluginUi: {
+        allow: ["console-ui-probe"],
+      },
+    },
+  },
+}
+```
+
+Default is **none**: a plugin with a manifest `controlUi.entry` but no allow entry contributes
+nothing (no nav entries, no panels, and its UI assets answer 404). The allowlist gate re-reads
+when gateway config changes; see
+[Configuration reference](/gateway/configuration-reference) under `gateway.controlUiV2.pluginUi.allow`.
+
+Trust model: plugin browser code runs with the signed-in operator's console authority, the same
+trust class as the plugin's in-process gateway code. Only allow plugins you trust.
+
+## Same-origin only
+
+Plugin modules load only when the console is **served by the gateway** (`gateway.controlUiV2` or a
+reverse proxy in front of it). `import()` cannot send credentials, so asset requests are
+unauthenticated, which is acceptable because they are as public as the console bundle itself and
+limited to allowlisted plugins' UI directories; the responses carry
+`Cross-Origin-Resource-Policy: same-origin`. On a cross-origin console (standalone server or CDN,
+different origin from the gateway) plugin UI does not load at all; the console reports the gateway
+origin it would need. Support for cross-origin plugin UI is tracked separately.
+
+## Styling
+
+Style your DOM with the documented brand-token CSS custom properties, which the console defines
+globally: `--bg`, `--card`, `--border`, `--text`, `--muted`, `--accent`, `--ok`, `--warn`,
+`--danger`, and the `--radius-*` radii. They flip automatically with the light and dark themes.
+
+The console's internal `ct-` class names are **not** a contract. Do not depend on them; a console
+update may rename them at any time.
+
+## Keep the entry small
+
+The entry module is fetched after the console connects, before first use of any slot, but it
+blocks your first panel render. Keep it small: register pages, panels and listeners, and
+lazy-load heavy code (framework runtimes, charts) inside `mount` with a dynamic `import()` of
+your own module chunks.
+
+Bundle your own framework. For React, build the entry as a library with Vite:
+
+```ts
+// vite.config.ts
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  build: {
+    lib: {
+      entry: "src/entry.ts",
+      formats: ["es"],
+      fileName: "index",
+    },
+    rollupOptions: { external: [] },
+    outDir: "ui",
+  },
+});
+```
+
+Point the manifest at the built file (`ui/index.js`) and import the contract types as types only
+(`import type`), so no core code is bundled.
+
+## Fetch data through your own methods
+
+Do not reach around the gateway. Register your own gateway methods from the plugin's Node side
+and call them from the browser side with `host.request`:
+
+```js
+// Node side (the plugin runtime module)
+export default function register(api) {
+  api.registerGatewayMethod("console-ui-probe.ping", async ({ respond }) =>
+    respond(true, { pong: "probe-pong" }),
+  );
+}
+```
+
+```js
+// Browser side
+const result = await host.request("console-ui-probe.ping");
+```
+
+This keeps data access inside the plugin trust boundary and lets the gateway enforce scopes.
+Plugin methods that are not scope-declared currently require `operator.admin`; see the
+[scope note](#the-host) above.
+
+## Updating a plugin
+
+The browser caches loaded plugin modules. After you change or redeploy a plugin's UI, **reload
+the browser tab**; there is no live hot-reload. Changing the allowlist config takes effect when
+the gateway applies the new config, plus a tab reload.
+
+The console also **resets and re-activates** plugin modules whenever the gateway connection drops
+and reconnects (not only on sign-out): the activation disposer runs, `host.signal` aborts, and
+`activate` runs again on a fresh host. Register all pages, panels and event listeners from
+`activate` (or in response to its signal), and never rely on module state kept across
+activations.
+
+## Troubleshooting
+
+**The Plugins group is missing.** The gateway does not advertise `plugins.controlUi.list` (older
+gateway), no plugin is allowlisted under `gateway.controlUiV2.pluginUi.allow`, or the console is
+not served by the gateway origin.
+
+**The plugin page shows "This plugin page is not available."** Activation failed or the page id
+is wrong. Open **Debug** and check the plugin UI status panel: it lists each plugin as loaded or
+with its failure message (import error, missing or mismatched default export, activation throw,
+or activation timeout).
+
+**A panel is blank.** The `mount` call may have thrown after registering; the console replaces a
+throwing mount with an error state, but an async failure after the first paint is your plugin's
+error handling to surface. Wrap mount work in try/catch and render the error into the container.
