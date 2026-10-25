@@ -88,7 +88,8 @@ type PluginNudgeInput = {
 There is **no `sessionKey`**: plugins always target the target agent's main session. The call
 resolves `agentId` to the main session and renders `text` plus any `data` into the turn message
 under an untrusted-author header — `Untrusted nudge from plugin "<id>" (not gateway-generated):`
-followed by the body with every continuation line indented — and resolves to an
+followed by the body with every continuation line indented. The target turn receives it in its
+**untrusted context** block, never in the trusted runtime-events block. The call resolves to an
 `AuthorizedNudgeResult`:
 
 ```ts
@@ -137,11 +138,13 @@ grant hint (`Grant it with plugins.entries.<id>.grants.agentTurn.agents.`), not 
 `{ ok: false }` result, and nothing is enqueued. The same denial emits the
 `backbone.authz.rejected` diagnostic event.
 
-The same outcome is reachable from the CLI ([`openclaw agent nudge`](/cli/agent-nudge)), from
-cron, and from a heartbeat wake-gate — see
+The CLI ([`openclaw agent nudge`](/cli/agent-nudge)) goes through the same authorized seam with
+the operator principal. Cron and the heartbeat wake-gate are different: they are trusted internal
+producers on the legacy `requestNudge` path, so they need no grant, are fire-and-forget, and do
+not report the refusal reasons above — see
 [Heartbeat](/gateway/heartbeat#nudge-wake-the-main-persona). The equivalent agent-side tool is
 `agents_nudge` (gated by `tools.agentToAgent` plus the cross-agent
-`tools.sessions.visibility="all"` bar, with the sandbox clamp).
+`tools.sessions.visibility="all"` bar, with the default sandbox clamp).
 
 When the nudge crosses the Gateway protocol boundary (`agent.nudge`), input is schema-validated:
 `text` is required, `data` must be an object, and unknown fields are rejected. `reason`, `source`,
