@@ -1,0 +1,288 @@
+# Agent Signals
+
+Agent Signals are WednesdayAI's lean Plugin SDK surface for non-user stimuli. They let a plugin publish structured meta-input without pretending that input came from a human conversation.
+
+Use signals for small pieces of intent such as watcher output, commitment reminders, inbox summaries, context hints, or background service findings. Keep domain behavior in your plugin. Core only owns flow control, dedupe, admission, and heartbeat dispatch.
+
+## Modes
+
+The current implementation supports four modes:
+
+- `context`: stores the signal for plugin subscribers and future context collection. It does not wake a model turn.
+- `heartbeat`: stores the signal, queues a session-scoped system event summary, and requests a targeted heartbeat wake.
+- `notify`: delivers the signal `summary` to the user as an outbound message with no model turn. A `notify` signal requires a non-empty `summary` and a target. The target is resolved from `sessionKey` (last channel/sender for that session) or from an explicit `deliveryTarget` (`{ channel, to, accountId?, threadId? }`, which overrides the session). Delivery reuses the existing operator gates: `showAlerts` (permanent suppression), active-hours, and channel readiness. Set `recordAwareness: true` to also enqueue a neutral runtime note — `Notification delivered (<source>/<type>) via <channel>.`, never the summary body — that the next turn can see (requires a `sessionKey`; it is a no-op for a `deliveryTarget`-only notify). Transient gate failures (active-hours, channel-not-ready, delivery-failed) leave the signal retryable via `requestWake`.
+- `background`: runs an isolated model turn off to the side that does not touch the live conversation. Results go to memory/log; the turn can hand off to the user only via an explicit `notify` signal published through the restricted `signals` tool. See [Background mode](#background-mode) below.
+
+The following mode is reserved for future plumbing and currently returns `unsupported-mode`:
+
+- `steer`
+
+## Runtime API
+
+Plugins access the API through `api.runtime.signals`.
+
+```ts
+const result = api.runtime.signals.publish({
+  type: "commitment.due",
+  source: "my-plugin",
+  sessionKey: "agent:main:telegram:direct:user-id",
+  mode: "heartbeat",
+  summary: "Review the follow-up promised to the operations team.",
+  dedupeKey: "commitment:ops-follow-up:2026-05-26",
+  ttlMs: 30 * 60 * 1000,
+  payload: {
+    commitmentId: "ops-follow-up",
+  },
+});
+
+if (!result.accepted && result.reason !== "duplicate") {
+  api.logger.warn("signal was not accepted", { reason: result.reason });
+}
+```
+
+Available helpers:
+
+```ts
+api.runtime.signals.publish(signal);
+api.runtime.signals.subscribe(filter, handler);
+api.runtime.signals.getAvailability({ agentId, sessionKey });
+api.runtime.signals.requestWake({ signalId });
+api.runtime.signals.nudge(input);
+```
+
+`publish()` is synchronous and never calls the model directly.
+
+## Nudge
+
+`api.runtime.signals.nudge(input)` is async and grant-gated. It goes through the authorized
+coordination seam (`requestAuthorizedNudge`) and, when allowed, enqueues one durable `agent.turn`
+with `kind=nudge` on the target agent's main session. Use it when your plugin has done a cheap
+check and found something worth the persona's attention. Do not hand-build a `heartbeat`-mode
+`publish()` call for this. See [Agent coordination](/concepts/agent-coordination) for the model,
+grants, and dedupe semantics.
+
+```ts
+const result = await api.runtime.signals.nudge({
+  agentId: "ops",
+  text: "Inbox: 3 new high-priority emails.",
+  data: { count: 3, queue: "sev1" }, // optional structured payload
+  dedupeKey: "inbox-sev1", // optional stable identity across retries
+});
+
+if (!result.ok) {
+  api.logger.warn("nudge was not accepted", { reason: result.reason });
+}
+```
+
+Input is `PluginNudgeInput`:
+
+```ts
+type PluginNudgeInput = {
+  text: string;
+  data?: Record<string, unknown>;
+  agentId?: string; // target agent (default: the default agent)
+  dedupeKey?: string;
+};
+```
+
+There is **no `sessionKey`**: plugins always target the target agent's main session. The call
+resolves `agentId` to the main session and renders `text` plus any `data` into the turn message
+under an untrusted-author header — `Untrusted nudge from plugin "<id>" (not gateway-generated):`
+followed by the body with every continuation line indented — and resolves to an
+`AuthorizedNudgeResult`:
+
+```ts
+type AuthorizedNudgeResult =
+  | { ok: true; agentId: string; sessionKey: string; workId: string; status: "queued" | "delayed" }
+  | {
+      ok: false;
+      reason:
+        | "empty-text"
+        | "unknown-agent"
+        | "self-target"
+        | "session-agent-mismatch"
+        | "depth-exceeded"
+        | "rejected-overflow"
+        | "enqueue-failed";
+    };
+```
+
+The call is async but admits durably: a resolved `ok: true` means the `agent.turn` row is
+persisted (`status` reports `queued` when the claim chain starts immediately, `delayed` when the
+nudge waits behind an in-flight main turn), not that the turn has run. `workId` is the
+`agent-turn:nudge:plugin:<pluginId>:<runId>` idempotency key — requester-scoped, so one plugin
+can never suppress another's nudge. The persona stays silent-unless-it-decides.
+
+**Grant required.** Nudging is denied unless the operator granted your plugin the agents it may
+wake:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "my-plugin": {
+        grants: {
+          agentTurn: {
+            agents: ["ops"], // default deny; ids or "*"
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+An ungranted call **rejects with `AuthorizationError`** — a denial is a thrown error carrying a
+grant hint (`Grant it with plugins.entries.<id>.grants.agentTurn.agents.`), not an
+`{ ok: false }` result, and nothing is enqueued. The same denial emits the
+`backbone.authz.rejected` diagnostic event.
+
+The same outcome is reachable from the CLI ([`openclaw agent nudge`](/cli/agent-nudge)), from
+cron, and from a heartbeat wake-gate — see
+[Heartbeat](/gateway/heartbeat#nudge-wake-the-main-persona). The equivalent agent-side tool is
+`agents_nudge` (gated by `tools.agentToAgent` plus the cross-agent
+`tools.sessions.visibility="all"` bar, with the sandbox clamp).
+
+When the nudge crosses the Gateway protocol boundary (`agent.nudge`), input is schema-validated:
+`text` is required, `data` must be an object, and unknown fields are rejected. `reason`, `source`,
+`ttlMs`, `priority`, and `requiresIdle` are still accepted for compatibility and ignored: a nudge is
+an `agent.turn` with the `delay` busy policy — it is accepted only after it is persisted in
+`bus_work_items`, then delivers once the lane goes idle (parked delayed turns are capped at 32
+per session — a nudge that would be the 33rd is rejected). `publish()` stays ephemeral and is not queued
+across a restart. Only `nudge()` creates durable `agent.turn` work: on Gateway
+restart, recovery re-arms producer-accepted pending nudge rows; it does not
+execute at boot and it does not recover `publish()` signals. Keep payloads small and prefer
+event-derived `dedupeKey` values when a watcher may report the same finding repeatedly: dedupe is
+scoped to (requester, target session, key) and holds for the life of the durable row, not a time
+window.
+
+## Heartbeat Dispatch
+
+Heartbeat-mode signals bridge into the existing heartbeat system:
+
+1. The signal is accepted into a bounded in-memory store.
+2. Core enqueues a system event on the target `sessionKey`.
+3. Core requests `requestHeartbeatNow({ reason: "signal:<type>", sessionKey })`.
+4. The existing heartbeat runner decides whether to run, skip, or retry based on active hours, heartbeat configuration, main lane activity, cron lane activity, target session activity, and nested lane activity.
+5. When the heartbeat runs, the signal summary is framed as signal-event context so isolated heartbeat sessions still see the base-session signal content.
+
+Signal dispatch does not bypass heartbeat isolation or `skipWhenBusy`.
+
+## Prompt Visibility
+
+Signals are meta-input, not user messages. Core only exposes the signal summary to the prompt-visible system-event queue:
+
+```text
+Signal (my-plugin/commitment.due): Review the follow-up promised to the operations team.
+```
+
+Raw signal payloads are not written into normal transcripts by default. They also should not be treated as user-authored memory unless your plugin explicitly opts into that behavior through its own hooks.
+
+## Availability
+
+Use `getAvailability()` when your plugin wants to decide whether to publish now, defer, or drop:
+
+```ts
+const availability = api.runtime.signals.getAvailability({ sessionKey });
+
+if (!availability.canWakeHeartbeat) {
+  api.logger.debug("deferring signal until the agent is less busy", {
+    mainBusy: availability.mainBusy,
+    sessionBusy: availability.sessionBusy,
+    cronBusy: availability.cronBusy,
+    subagentBusy: availability.subagentBusy,
+    nestedBusy: availability.nestedBusy,
+  });
+}
+```
+
+Availability is advisory. The heartbeat runner remains the final admission gate. If a heartbeat signal sets `requiresIdle: true`, core refuses immediate dispatch while availability reports busy and leaves the signal stored for a later `requestWake()`. The first slice does not run a separate idle watcher; plugins that need guaranteed idle delivery should keep durable state and retry `requestWake()` or republish a concise signal.
+
+## Dedupe And Bounds
+
+The in-memory store applies conservative limits:
+
+- 100 signals globally
+- 20 signals per target session, agent, or source
+- duplicate suppression by `dedupeKey`, scoped to the target session, agent, or source — the same `dedupeKey` published against two different targets will not collide
+- duplicate suppression by `source:type:agentId:sessionKey` when `dedupeKey` is omitted
+- lowest-priority oldest-signal eviction when a bounded target or global store is full; the incoming signal is rejected with `queue-full` if every eviction candidate is of strictly higher priority
+
+Signals are ephemeral. They are not a durable queue. Plugins that need guaranteed delivery should keep their own durable state and republish a concise signal when the runtime is available.
+
+## Background mode
+
+`background` runs an isolated model turn in a dedicated `:background` sibling session using the `Analysis` lane — separate from the main conversation, heartbeat, cron, and subagent lanes.
+
+The turn's transcript never enters the main conversation. Results go to memory (via allowlisted tools) or to the user only through an explicit `notify` hand-off.
+
+### Signal shape
+
+```ts
+api.runtime.signals.publish({
+  mode: "background",
+  sessionKey: "agent:main:telegram:direct:yourHandle", // or agentId
+  type: "dreaming.pass",
+  source: "memory-plugin",
+  summary: "Nightly memory consolidation.", // frames the isolated turn prompt
+  toolsAllow: ["memory", "read-file"], // per-signal allowlist (conservative default if absent)
+  model: "claude-haiku-4-5", // optional model override
+  notBeforeMs: Date.now() + 60_000, // optional deferral (in-process timer)
+  requiresIdle: true, // hold until main lane is idle
+  recordAwareness: true, // write neutral metadata to main session (opt-in)
+});
+```
+
+### Isolation and delivery suppression
+
+- Runs in `<sessionKey>:background` — a new session created fresh (`forceNew`) with cleared delivery context. The isolated turn has no implicit route back to any user channel.
+- `disableMessageTool: true` and `requireExplicitMessageTarget: true` are always set. The turn cannot message the user directly.
+- `disablePluginHooks: true` prevents recursive background/analysis spawning through prompt hooks.
+
+### Tool allowlist
+
+The per-signal `toolsAllow` decides the turn's capabilities. When absent, a conservative default (`BACKGROUND_DEFAULT_TOOLS_ALLOW`) is applied: read-file, list-files, memory, sessions-history. The message tool is never available regardless.
+
+### Notify hand-off
+
+The only user-facing reach from a background turn is publishing a `notify` signal through the restricted `signals` tool (only available when the caller includes it in `toolsAllow`):
+
+```text
+signals: { mode: "notify", type: "analysis.complete", summary: "Memory consolidation finished." }
+```
+
+This routes through the existing notify delivery handler with all its gates (visibility, active-hours, channel readiness).
+
+### Deferral and requiresIdle
+
+- `notBeforeMs`: an in-process timer fires dispatch at the specified time. Pending timers are lost on process restart.
+- `requiresIdle: true`: dispatch is held until the main, session, cron, subagent, and nested lanes are all idle, checked on a bounded backoff (up to 30 attempts × 1 s).
+
+### Awareness record
+
+When `recordAwareness: true` and the run succeeds, a neutral metadata note is enqueued into the main session:
+
+```text
+Background turn (<source>/<type>) completed.
+```
+
+with `contextKey: background:<dedupeKey>`. Only this fixed string — not the turn output or `summary` body — is recorded.
+
+### Lifecycle events
+
+- `accepted`: signal stored.
+- `dispatched`: isolated turn completed (`ran: true`).
+- `dropped`: reasons: `no-handler`, `not-idle`, `no-session`, `run-failed`. Transient drops are retryable via `requestWake({ signalId })`.
+
+## Recommended Pattern
+
+Use Agent Signals as plumbing, not product policy:
+
+- Put domain logic in the plugin.
+- Publish concise summaries.
+- Use `context` mode for passive context.
+- Use `heartbeat` mode when the agent should consider acting soon.
+- Use `background` mode when the agent should think about something without interrupting the current conversation — idle review, dreaming passes, batch analysis, context pre-compute.
+- Add `dedupeKey` for recurring or retried stimuli.
+- Add `ttlMs` for stale alerts.
+- Avoid including secrets or large payloads.
