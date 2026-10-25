@@ -685,7 +685,9 @@ Group messages default to **require mention** (metadata mention or regex pattern
 }
 ```
 
-Resolution: per-DM override → provider default → no limit (all retained).
+Resolution: per-DM override → provider default → no limit (all retained). The DM's channel and
+peer id come from the session's stored identity, not the session key text: a session with no
+stored identity gets no limit (all retained), and a per-DM override never matches it.
 
 Supported: `telegram`, `whatsapp`, `discord`, `slack`, `signal`, `imessage`, `msteams`.
 
@@ -1110,6 +1112,7 @@ Periodic heartbeat runs.
 - `wakeGate`: optional command/model gate checked before the heartbeat turn; on a positive gate the isolated heartbeat turn is enqueued and the main session is additionally nudged (`kind` nudge). Default `timeoutMs` is 30000. Gates the heartbeat producer only.
 - `activeHours`: optional window (`start`/`end`/`timezone`) — heartbeat ticks outside the window are skipped.
 - `lightContext`: when true, runs the heartbeat turn with a reduced context payload.
+- `toolsAllow`: exact tool names an isolated heartbeat may use (`[]` = no tools; matching is case- and alias-insensitive; when set the skills list is also omitted and skill-declared environment overrides are not applied; only with `isolatedSession: true` — ignored with a warn on a shared-session heartbeat; can only narrow the tool surface, policy `tools.allow` still applies; an entry matching no tool logs a `toolsAllow names matched no tool` warn; unset keeps the full tool surface).
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
 - `identity`: optional `session.identityLinks` key (matched case-insensitively). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`); unmatched values leave runs unattributed. Honoured per-agent via `agents.list[].heartbeat.identity`.
@@ -1742,7 +1745,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - If parent `totalTokens` is above this value, OpenClaw starts a fresh thread session instead of inheriting parent transcript history.
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
-- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
+- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. `channel` and `chatType` compare against the session's stored identity (the channel and peer kind recorded when the conversation arrived, or the session's recorded channel), never the session key text; `keyPrefix` and `rawKeyPrefix` match the key itself. A contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
 - **`store`**: per-agent session store identity (supports the `{agentId}` template); also where
   legacy JSON session files are found for the one-time import. See
   [Sessions](/concepts/session#upgrading-from-json-session-files).
@@ -2821,7 +2824,6 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
       // /v2/control when the classic console or an enabled web client explicitly owns "/" —
       // setting basePath: "/" explicitly in that case is a collision the config load rejects.
       // root: "/srv/wednesdayai-control", // optional; defaults to the packaged dist/control-ui-v2
-      // pluginUi: { allow: ["console-ui-probe"] }, // plugin ids allowed to run browser code in the console
     },
     remote: {
       url: "ws://gateway.tailnet:18789",
@@ -2868,7 +2870,6 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `true`: the v2 console is the daily console and owns the gateway root, while the classic console (deprecated) serves at `/classic`. Set it to `false` only to run the classic console alone. The console connects as the classic console's `openclaw-control-ui` client, so admission, scopes and auth modes are the classic console's: browser origins are governed by `controlUi.allowedOrigins`, and there is no separate allowlist. A non-loopback bind with a console enabled still requires `controlUi.allowedOrigins` at startup. See [Control UI v2](/web/control-ui-v2).
 - `controlUiV2.basePath`: public path the console is mounted under. Default: the gateway root; the v2 console mounts at `/v2/control` instead when the root is already claimed (an explicit `basePath: "/"` on the classic console or an enabled web client, or the classic console keeping the root because another mount explicitly uses `/classic`), so configs valid before v2 became the default keep serving the same SPA at the root. Must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`, `controlUi.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
 - `controlUiV2.root`: directory holding the built console (`index.html` plus `assets/`). Optional: unset, the gateway serves the bundle packaged with this install (`dist/control-ui-v2`) and answers `503` naming `pnpm control:build:packaged` only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason.
-- `controlUiV2.pluginUi.allow`: plugin ids whose browser module (manifest `controlUi.entry`) the console may load. Default **none**: an unlisted plugin contributes no pages or panels and its UI assets answer 404. Plugin UI shares your console session's gateway access; allow only plugins you trust. Take effect when the gateway applies the config, plus a console tab reload. See [Control UI v2](/web/control-ui-v2) and the developer guide [Control UI plugins](/plugins/control-ui).
 - `remote.transport`: `ssh` (default) or `direct` (ws/wss). For `direct`, `remote.url` must be `ws://` or `wss://`.
 - `OPENCLAW_ALLOW_INSECURE_PRIVATE_WS=1`: client-side break-glass override that allows plaintext `ws://` to trusted private-network IPs; default remains loopback-only for plaintext.
 - `gateway.remote.token` / `.password` are remote-client credential fields. They do not configure gateway auth by themselves.
