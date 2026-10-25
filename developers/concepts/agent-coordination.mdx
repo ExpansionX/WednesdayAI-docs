@@ -1,0 +1,216 @@
+---
+summary: "How operators, plugins, and agents wake each other through authorized, durable nudges"
+read_when:
+  - Configuring who may wake an agent (operator, plugin, or agent-to-agent)
+  - Debugging a denied nudge (`AuthorizationError`) or an unexpected duplicate or missing nudge
+  - Setting up agent-to-agent handoffs with `agents_nudge`
+audience: admin
+component: agent-coordination
+sources:
+  - src/infra/nudge.ts
+  - src/infra/nudge-grants.ts
+  - src/infra/coordination-depth.ts
+  - src/agents/tools/agents-nudge-tool.ts
+  - src/plugins/runtime/runtime-signals.ts
+  - src/plugins/registry.ts
+generated: "2026-10-25"
+title: "Agent coordination"
+---
+
+# Agent coordination
+
+Coordination between agents is a **nudge**: one durable `agent.turn` with `kind: "nudge"` per
+accepted request. There is no mailbox, no inbox, and no new bus topic. A nudge is claimed and
+executed exactly once through the standard agent-turn machinery, so restart recovery, dedupe, and
+observability come from the existing durable row — nothing is kept only in memory. While a main
+turn is in flight, the nudge is accepted with the `delay` busy policy (persisted, delivered once
+the turn completes); parked delayed turns are capped at 32 per session, and a nudge that would be the 33rd is rejected.
+
+Every accepted request goes through one core seam, `requestAuthorizedNudge`
+(`src/infra/nudge.ts`), which authorizes the caller before anything is enqueued and records who
+requested the turn in the durable row (`payload.coordination.requestedBy`).
+
+## The three surfaces
+
+| Surface                            | Caller identity | Grant source                                              |
+| ---------------------------------- | --------------- | --------------------------------------------------------- |
+| CLI / RPC / UI (`agent.nudge`)     | operator        | the `operator.admin` method scope                         |
+| Plugin `api.runtime.signals.nudge` | `plugin:<id>`   | `plugins.entries.<id>.grants.agentTurn.agents`            |
+| Agent tool `agents_nudge`          | `agent:<id>`    | `tools.agentToAgent.enabled` + `tools.agentToAgent.allow` |
+
+The caller identity is bound by core at the call site (the RPC scope check, the plugin registry,
+the agent tool wiring) — it is never taken from caller-supplied arguments, so a caller cannot
+borrow another principal's grant.
+
+Plugin and agent callers always target the target agent's **main session**
+(`agent:<agentId>:main`); they cannot choose another session. Only an operator may override the
+session key (CLI `--session`), and the override must still name the target agent
+(`session-agent-mismatch` otherwise).
+
+## Grants
+
+### Operator (CLI / RPC / UI)
+
+The `agent.nudge` RPC requires the `operator.admin` method scope. There is no nudge-specific
+config key: an operator connection already holding that scope may nudge any agent.
+
+An operator may override the target session with `--session` (RPC `sessionKey`), but the override
+must name the same agent as `agentId` — a key whose agent segment differs (e.g.
+`--session agent:ops:main` with `--agent main`) is refused with `session-agent-mismatch`.
+
+```json5
+{
+  // No nudge grant to configure: agent.nudge is gated by the operator.admin
+  // method scope. Operators may pass --session, but it must still name the
+  // target agent's session (session-agent-mismatch otherwise).
+}
+```
+
+### Plugin
+
+Default deny. A plugin may nudge only the agents you list (agent ids, or `"*"` for all):
+
+```json5
+{
+  plugins: {
+    entries: {
+      "inbox-watcher": {
+        enabled: true,
+        grants: {
+          agentTurn: {
+            // Agents this plugin may wake through api.runtime.signals.nudge.
+            // Each wake is a durable agent.turn; the key is checked on every call.
+            agents: ["main", "ops"], // or ["*"]
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+An unlisted plugin (or a call targeting an agent not in the list) is denied and nothing is
+enqueued. Config changes require a gateway restart.
+
+### Agent
+
+`agents_nudge` clears the same two bars as a cross-agent `sessions_send`: the session-visibility
+bar, then the agent-to-agent policy. Both the caller and the target agent must be allowed:
+
+```json5
+{
+  tools: {
+    // Cross-agent nudges (like cross-agent sessions_send) need "all".
+    // The default is "tree", which refuses them.
+    sessions: { visibility: "all" },
+    agentToAgent: {
+      // Same policy as sessions_send. Pattern entries ("ops-*") are allowed;
+      // an empty allow list means "all agents".
+      enabled: true,
+      allow: ["main", "ops"],
+    },
+  },
+  session: {
+    agentToAgent: {
+      // Caps chained nudge hops (0-5, default 5). See "Hop cap" below.
+      maxPingPongTurns: 5,
+    },
+  },
+}
+```
+
+Sandboxed sessions are clamped further: `agents.defaults.sandbox.sessionToolsVisibility` defaults
+to `"spawned"`, which forces an effective visibility of `"tree"`, so a sandboxed session cannot
+nudge across agents at all. That keeps a sandboxed session handling untrusted input from waking an
+unsandboxed main session.
+
+A plugin-grant entry must be an exact agent id or `"*"`. Glob-shaped entries such as `"ops-*"` are
+ignored rather than coerced to a real agent id.
+
+## Dedupe
+
+A nudge with a `dedupeKey` is deduplicated by the idempotency key
+`agent-turn:nudge:<requesterId>:<runId>`, i.e. the triple **(requester, target session,
+`dedupeKey`)**. With a key, `runId` is `dedupe:` plus the first 32 hex characters of
+`sha256(requesterId + "\n" + sessionKey + "\n" + dedupeKey)`; without a key, `runId` is a random
+UUID and every request is a new turn.
+
+- The dedupe scope is **the life of the durable row, not a time window**. Processed `agent.turn`
+  rows are not pruned, so the same requester can never re-admit the same key. There is no TTL and
+  no window reset.
+- One requester's key can never suppress another requester's nudge: the key is requester-scoped.
+  Two plugins that both send `dedupeKey: "deploy-finished"` each admit their own turn.
+- Prefer keys derived from the triggering event (a commit id, a ticket id, a timestamp bucket) so
+  retries of the same event collapse but a new event always wakes the agent.
+- The `agents_nudge` tool defaults `dedupeKey` to the caller's session key plus the tool call id,
+  so a model that re-executes the same tool call cannot double-wake the target. Providers that omit
+  tool-call ids get a synthesized id that repeats across runs; those are ignored, so each call
+  admits its own turn rather than being silently suppressed forever.
+
+## Hop cap
+
+Chained agent-to-agent nudges are capped. The requester's active coordination depth is tracked
+per session (`src/infra/coordination-depth.ts`) — as a **multiset** of admissions, because two
+turns can be active on one session at once; the cap reads the maximum active depth. An agent
+caller whose session is already above `session.agentToAgent.maxPingPongTurns` (0–5, default 5)
+gets `depth-exceeded`. Non-agent requesters start at depth 1. Each accepted nudge stores its
+depth in the durable row (`payload.coordination.depth`), so chains are auditable.
+
+## Denials
+
+A denied nudge throws the typed `AuthorizationError` — a denial is an exception, not a
+`{ ok: false }` result. The error message carries a grant hint for the caller's kind, for
+example:
+
+- plugin: `Grant it with plugins.entries.<id>.grants.agentTurn.agents.`
+- agent: `Enable tools.agentToAgent.enabled and list both agents in tools.agentToAgent.allow.`
+
+Every denial also emits the existing `backbone.authz.rejected` diagnostic event, and nothing is
+enqueued. Structural refusals that happen before the authorization check return
+`{ ok: false, reason }` with reasons `empty-text`, `unknown-agent`, `self-target` (an agent
+nudging itself), `session-agent-mismatch` (an operator `sessionKey` naming a different agent than
+`agentId`), `depth-exceeded`, `rejected-overflow`, or `enqueue-failed`. Over the Gateway RPC
+(`agent.nudge`) these refusals surface as `INVALID_REQUEST`, except the two backpressure
+outcomes: `enqueue-failed` answers `UNAVAILABLE`, and `rejected-overflow` — the target session
+already holds its cap of 32 parked delayed turns — answers `UNAVAILABLE` with
+`retryable: true`, because it clears once the lane drains.
+
+## Operator command
+
+The operator surface is the CLI command (also reachable over the Gateway RPC `agent.nudge` from
+the Web UI and automation clients):
+
+```bash
+openclaw agent nudge "standup" --agent main --dedupe-key standup-2026-10-25
+```
+
+Output:
+
+```text
+Nudge accepted for session agent:main:main (work agent-turn:nudge:operator:dedupe:99a9adce02b7215ea34ab00eb9e162c4).
+```
+
+The response confirms durable admission: the work id is the idempotency key of the persisted
+`agent.turn` row. Running the same command a second time with the same `--dedupe-key` prints the
+same work id, and the store still holds exactly one row:
+
+```text
+$ sqlite3 "$OPENCLAW_STATE_DIR/sessions.db" \
+    "select idempotency_key, status from ctx_bus_work_items where topic='agent.turn'"
+agent-turn:nudge:operator:dedupe:99a9adce02b7215ea34ab00eb9e162c4|processed
+```
+
+Nudging an unknown agent id fails with `unknown-agent` and a non-zero exit code:
+
+```text
+$ openclaw agent nudge "x" --agent nope
+Error: unknown-agent
+```
+
+## Related
+
+- [CLI reference: `agent nudge`](/cli/agent-nudge)
+- [Agent Signals: nudge](/plugins/agent-signals#nudge)
+- [Agent Turn Runner](/plugins/agent-turn-runner) — the durable consumer
+- [Session tools](/concepts/session-tool) — `sessions_send` and `agents_nudge`
+- ADR 0115 (`dev-docs/adr/0115-agent-coordination-authorized-nudges.md`)
