@@ -8,10 +8,11 @@ read_when:
 audience: admin
 sources:
   - src/config/types.base.ts
+  - src/config/types.plugins.ts
   - src/config/zod-schema.ts
   - src/config/schema.help.ts
   - src/logging/file-log-writer.ts
-generated: 2026-06-16
+generated: 2026-10-25
 ---
 
 # Configuration Reference
@@ -1112,6 +1113,7 @@ Periodic heartbeat runs.
 - `wakeGate`: optional command/model gate checked before the heartbeat turn; on a positive gate the isolated heartbeat turn is enqueued and the main session is additionally nudged (`kind` nudge). Default `timeoutMs` is 30000. Gates the heartbeat producer only.
 - `activeHours`: optional window (`start`/`end`/`timezone`) — heartbeat ticks outside the window are skipped.
 - `lightContext`: when true, runs the heartbeat turn with a reduced context payload.
+- `toolsAllow`: exact tool names an isolated heartbeat may use (`[]` = no tools; matching is case- and alias-insensitive; when set the skills list is also omitted and skill-declared environment overrides are not applied; only with `isolatedSession: true` — ignored with a warn on a shared-session heartbeat; can only narrow the tool surface, policy `tools.allow` still applies; an entry matching no tool logs a `toolsAllow names matched no tool` warn; unset keeps the full tool surface).
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
 - `identity`: optional `session.identityLinks` key (matched case-insensitively). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`); unmatched values leave runs unattributed. Honoured per-agent via `agents.list[].heartbeat.identity`.
@@ -1997,27 +1999,27 @@ sessions keep the configuration resolved when they started.
 
 Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved).
 
-| Profile     | Includes                                                                                  |
-| ----------- | ----------------------------------------------------------------------------------------- |
-| `minimal`   | `session_status` only                                                                     |
-| `coding`    | `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`                    |
-| `messaging` | `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `session_status` |
-| `full`      | No restriction (same as unset)                                                            |
+| Profile     | Includes                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `minimal`   | `session_status` only                                                                                     |
+| `coding`    | `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`                                    |
+| `messaging` | `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `session_status` |
+| `full`      | No restriction (same as unset)                                                                            |
 
 ### Tool groups
 
-| Group              | Tools                                                                                    |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                            |
-| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                   |
-| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
-| `group:memory`     | `memory_search`, `memory_get`                                                            |
-| `group:web`        | `web_search`, `web_fetch`                                                                |
-| `group:ui`         | `browser`, `canvas`                                                                      |
-| `group:automation` | `cron`, `gateway`                                                                        |
-| `group:messaging`  | `message`                                                                                |
-| `group:nodes`      | `nodes`                                                                                  |
-| `group:openclaw`   | All built-in tools (excludes provider plugins)                                           |
+| Group              | Tools                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                            |
+| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                                   |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
+| `group:memory`     | `memory_search`, `memory_get`                                                                            |
+| `group:web`        | `web_search`, `web_fetch`                                                                                |
+| `group:ui`         | `browser`, `canvas`                                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                                        |
+| `group:messaging`  | `message`                                                                                                |
+| `group:nodes`      | `nodes`                                                                                                  |
+| `group:openclaw`   | All built-in tools (excludes provider plugins)                                                           |
 
 ### `tools.allow` / `tools.deny`
 
@@ -2298,7 +2300,7 @@ Tool-policy defaults for spawned sub-agents. Controls which **tools** sub-agents
 - `tools.allow`: if set, becomes allow-only (deny still wins).
 - `tools.alsoAllow`: additional allowlist entries merged into allow and/or default sub-agent denylist.
 - `tools.deny`: denied tools (deny wins over allow).
-- Sub-agents always start with all tools except session tools (`sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
+- Sub-agents always start with all tools except session tools (`sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
 
 For runtime tuning (depth, concurrency, timeouts, archive), see `agents.defaults.subagents.*` above.
 
@@ -2660,6 +2662,9 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
 - `plugins.entries.<id>.apiKey`: plugin-level API key convenience field (when supported by the plugin).
 - `plugins.entries.<id>.env`: plugin-scoped env var map.
 - `plugins.entries.<id>.config`: plugin-defined config object (validated by plugin schema).
+- `plugins.entries.<id>.grants.agentTurn.agents`: agent ids (or `"*"`) this plugin may wake
+  through `api.runtime.signals.nudge`; default deny. Each wake is a durable `agent.turn` nudge.
+  See [Agent coordination](/concepts/agent-coordination).
 - `plugins.slots.memory`: pick the active memory plugin id, or `"none"` to disable memory plugins.
 - `plugins.hookTimeouts`: per-hook timeout in milliseconds. Keys are hook names or `default`.
   Unset hooks use 30000 ms. Registration `api.on(..., { timeoutMs })` still wins. Restart required.
