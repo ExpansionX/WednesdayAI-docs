@@ -685,7 +685,9 @@ Group messages default to **require mention** (metadata mention or regex pattern
 }
 ```
 
-Resolution: per-DM override → provider default → no limit (all retained).
+Resolution: per-DM override → provider default → no limit (all retained). The DM's channel and
+peer id come from the session's stored identity, not the session key text: a session with no
+stored identity gets no limit (all retained), and a per-DM override never matches it.
 
 Supported: `telegram`, `whatsapp`, `discord`, `slack`, `signal`, `imessage`, `msteams`.
 
@@ -1742,7 +1744,7 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - If parent `totalTokens` is above this value, OpenClaw starts a fresh thread session instead of inheriting parent transcript history.
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
-- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
+- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. `channel` and `chatType` compare against the session's stored identity (the channel and peer kind recorded when the conversation arrived, or the session's recorded channel), never the session key text; `keyPrefix` and `rawKeyPrefix` match the key itself. A contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
 - **`store`**: per-agent session store identity (supports the `{agentId}` template); also where
   legacy JSON session files are found for the one-time import. See
   [Sessions](/concepts/session#upgrading-from-json-session-files).
@@ -1865,8 +1867,12 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
       },
       openai: {
         apiKey: "openai_api_key",
+        baseUrl: "https://api.openai.com/v1", // OpenAI-compatible endpoint; replaces the deprecated OPENAI_TTS_BASE_URL env var
         model: "gpt-4o-mini-tts",
         voice: "alloy",
+      },
+      providers: {
+        kokoro: { voice: "af_heart", model: "kokoro" }, // plugin-registered speech providers only
       },
     },
   },
@@ -1876,6 +1882,14 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
 - `auto` controls auto-TTS. `/tts off|always|inbound|tagged` overrides per session.
 - `summaryModel` overrides `agents.defaults.model.primary` for auto-summary.
 - `modelOverrides` is enabled by default; `modelOverrides.allowProvider` defaults to `false` (opt-in).
+- `openai.baseUrl`: OpenAI-compatible endpoint for OpenAI TTS (default `https://api.openai.com/v1`),
+  overridable per agent with `agents.list[].tts.openai.baseUrl`. The `OPENAI_TTS_BASE_URL` env var
+  is deprecated and is only used when no config value is set. A non-default endpoint relaxes the
+  OpenAI model and voice validators. See [Text-to-speech](/tts).
+- `providers`: per-provider settings for plugin-registered speech providers (such as the bundled
+  Kokoro plugin), keyed by provider id. Built-in ids (`openai`, `elevenlabs`, `edge`) are rejected
+  here. Plugin providers join the fallback order after the built-ins and are never auto-selected as
+  primary. See [Custom and local providers](/tts#custom-and-local-providers).
 - `readAloud.enabled`: gate for chat clients reading replies aloud on demand through the
   `tts.speak` gateway RPC (default `true`). Turn it off to stop on-demand synthesis spend; auto-TTS
   and `/tts` are unaffected. Overridden per agent by `agents.list[].tts.readAloud.enabled`. See
