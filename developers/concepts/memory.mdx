@@ -214,14 +214,24 @@ out to QMD for retrieval. Key points:
 - `scope`: same schema as [`session.sendPolicy`](/gateway/configuration#session).
   Default is DM-only (`deny` all, `allow` direct chats); loosen it to surface QMD
   hits in groups/channels.
+  - `match.channel` and `match.chatType` compare against the session's stored
+    identity (the channel and peer kind recorded when the conversation arrived),
+    never against session key text. The agent main session counts as a direct
+    chat, as do its isolated heartbeat child (`<main key>:heartbeat`), cron
+    (`agent:<id>:cron:<job>`) and ACP (`agent:<id>:acp:<...>`) sessions. A
+    missing channel or chat type cannot satisfy a rule that requires that
+    specific field: a `match.chatType: "direct"` rule matches these
+    actorless sessions (whose chat type is derived structurally, not from a
+    stored actor), while a rule that also requires `match.channel` stays
+    unsatisfied until that field is present too.
   - `match.keyPrefix` matches the **normalized** session key (lowercased, with any
     leading `agent:<id>:` stripped). Example: `discord:channel:`.
   - `match.rawKeyPrefix` matches the **raw** session key (lowercased), including
     `agent:<id>:`. Example: `agent:main:discord:`.
   - Legacy: `match.keyPrefix: "agent:..."` is still treated as a raw-key prefix,
     but prefer `rawKeyPrefix` for clarity.
-- When `scope` denies a search, OpenClaw logs a warning with the derived
-  `channel`/`chatType` so empty results are easier to debug.
+- When `scope` denies a search, OpenClaw logs a warning with the session's
+  `channel`/`chatType` (`unknown` when not stored) so empty results are easier to debug.
 - Snippets sourced outside the workspace show up as
   `qmd/<collection>/<relative-path>` in `memory_search` results; `memory_get`
   understands that prefix and reads from the configured QMD collection root.
