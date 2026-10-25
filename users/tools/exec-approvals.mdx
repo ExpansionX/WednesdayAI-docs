@@ -42,7 +42,7 @@ Approvals live in a local JSON file on the execution host:
 
 `~/.openclaw/exec-approvals.json`
 
-Example schema:
+### v1 schema (legacy on-disk format, still accepted)
 
 ```json
 {
@@ -77,6 +77,52 @@ Example schema:
 }
 ```
 
+### v2 schema (canonical execution model)
+
+The v2 schema adds a `policies` array (compiled execution policies evaluated deny-first) and an
+`approvals` array (anti-tamper binding records). It is a **super-set** of v1: the `socket`,
+`defaults`, and per-agent `agents` fields are preserved so the legacy enforcement surfaces
+(IPC token, security/ask defaults, per-agent allowlists) continue to work alongside the policy
+engine. v1 is migrated to v2 in memory on every load; the on-disk file is not auto-overwritten.
+
+```json
+{
+  "version": 2,
+  "policies": [
+    {
+      "id": "allow-pnpm-test",
+      "effect": "allow",
+      "source": "user",
+      "namespace": "exec.argv",
+      "match": { "executableName": "pnpm", "argvPattern": "test", "matchAnyTrailingArgs": true }
+    },
+    {
+      "id": "deny-rm",
+      "effect": "deny",
+      "source": "managed",
+      "namespace": "exec.argv",
+      "match": { "executableName": "rm" }
+    }
+  ],
+  "approvals": [
+    {
+      "id": "approval-uuid",
+      "requestHash": "sha256-hex-of-canonical-request",
+      "scope": { "agentId": "main", "sessionKey": "sess-1" },
+      "boundAt": 1737150000000
+    }
+  ],
+  "socket": { "path": "~/.openclaw/exec-approvals.sock", "token": "base64url-token" },
+  "defaults": { "security": "allowlist", "ask": "on-miss" },
+  "agents": { "main": { "allowlist": [{ "pattern": "/opt/homebrew/bin/rg" }] } }
+}
+```
+
+The policy engine is **opt-in**: when zero policies are loaded (the default), the pipeline is a
+no-op and the pre-policy-engine behaviour is preserved. Deny-first enforcement only activates when
+at least one policy is present. See [Exec Tool (developer)](/tools/exec-developer#canonical-execution-model)
+for the full type definitions, evaluator semantics, and wiring status.
+
 ## Policy knobs
 
 ### Security (`exec.security`)
@@ -98,6 +144,36 @@ If a prompt is required but no UI is reachable, fallback decides:
 - **deny**: block.
 - **allowlist**: allow only if allowlist matches.
 - **full**: allow.
+
+### Exec policy presets
+
+The `tools.exec.preset` key sets a named baseline for `security`, `ask`, `safeBins`, and a built-in allowlist pack. Explicit `tools.exec` fields override preset values. Per-agent `tools.exec.preset` overrides the global preset. Omitting the key means no preset (inherit defaults).
+
+| Preset ID | Security  | Ask     | Safe bins                                     |
+| --------- | --------- | ------- | --------------------------------------------- |
+| readonly  | allowlist | on-miss | jq, cut, uniq, head, tail, tr, wc, grep, sort |
+| minimal   | allowlist | on-miss | jq, cut, uniq, head, tail, tr, wc             |
+| coding    | allowlist | on-miss | jq, cut, uniq, head, tail, tr, wc, grep, sort |
+| full      | full      | off     | (all)                                         |
+
+Each preset also includes an **allowlist pack** of exact absolute paths:
+
+- **readonly**: `ls`, `cat`, `df`, `du`, `ps`, `uname`, `whoami`, `hostname`, `date`, `pwd`, `which`, `file`, `stat` at `/usr/bin`, `/bin`, `/usr/local/bin` (39 paths total).
+- **minimal**: no pack.
+- **coding**: readonly pack plus `git`, `node`, `npm`, `pnpm`, `python3`, `rg` at `/usr/bin`, `/bin`, `/usr/local/bin`, `/opt/homebrew/bin`, `/home/linuxbrew/.linuxbrew/bin` (69 paths total). Warning: node, python3, npm, and pnpm execute arbitrary code with no argument constraints — the coding preset is equivalent to full code-execution capability for the agent; grant it only to agents that would otherwise warrant tools.exec security "full".
+- **full**: no pack (all tools allowed).
+
+Pack entries are exact absolute paths, not glob patterns. The allowlist engine matches path patterns against the resolved executable path; bare names never match. Exact paths prevent accidentally allowing neighbor binaries in the same directory.
+
+**find is deliberately NOT in the readonly pack.** The `find` utility can mutate with `-exec` and `-delete`. Allowlist entries constrain the executable, not its arguments. Add `find` to your own allowlist only if you accept that risk.
+
+Pack entries are **never materialized** in `~/.openclaw/exec-approvals.json`. Presets are unioned at evaluation time only; the per-agent allowlist in the approvals file remains authoritative. The approvals file can still floor the security level via `minSecurity`.
+
+Unknown preset ids are ignored with a logged warning. Explicit `tools.exec` fields still apply.
+
+Per-agent allowlist entries from `~/.openclaw/exec-approvals.json` apply **alongside** the preset pack (they are unioned at evaluation time, and remain editable per agent); see [v2 schema (canonical)](#v2-schema-canonical-execution-model) for the file format.
+
+**Agent mapping suggestion:** messaging/non-technical agents → `readonly`; developer/research agents → `coding`.
 
 ## Allowlist (per agent)
 
@@ -234,10 +310,11 @@ Custom profile example:
 
 ## Control UI editing
 
-Use the **Control UI → Nodes → Exec approvals** card to edit defaults, per‑agent
-overrides, and allowlists. Pick a scope (Defaults or an agent), tweak the policy,
+Use the **Control UI v2 → Fleet → Nodes & devices → Exec approvals** panel to edit defaults,
+per‑agent overrides, and allowlists. Pick a scope (Defaults or an agent), tweak the policy,
 add/remove allowlist patterns, then **Save**. The UI shows **last used** metadata
-per pattern so you can keep the list tidy.
+per pattern so you can keep the list tidy. (The deprecated classic console has the same card
+under its Nodes tab; see [Control UI](/web/control-ui).)
 
 The target selector chooses **Gateway** (local approvals) or a **Node**. Nodes
 must advertise `system.execApprovals.get/set` (macOS app or headless node host).
