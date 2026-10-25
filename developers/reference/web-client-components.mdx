@@ -18,6 +18,15 @@ sources:
   - apps/web/src/app/use-chat-history.ts
   - apps/web/src/app/use-chat-send.ts
   - apps/web/src/ui/Composer.tsx
+  - apps/web/src/ui/use-composer-paste.ts
+  - apps/web/src/ui/use-dictate-autosend.ts
+  - apps/web/src/ui/clipboard-html.ts
+  - apps/web/src/ui/markdown/html-to-markdown.ts
+  - apps/web/src/providers/image-resize.ts
+  - apps/web/src/providers/auto-read-preference.ts
+  - apps/web/src/providers/read-aloud-stream.ts
+  - apps/web/src/app/auto-read-driver.ts
+  - packages/talk-client/src/silence-endpointer.ts
   - apps/web/src/state/chat.ts
   - apps/web/src/gateway/message-text.ts
   - apps/web/src/providers/session-list-runtime.ts
@@ -39,7 +48,7 @@ sources:
   - apps/web/src/ui/EmptyState.tsx
   - apps/web/src/ui/AttentionMenu.tsx
   - src/gateway/session-utils.ts
-generated: 2026-10-11
+generated: 2026-10-25
 ---
 
 # Web client components
@@ -69,6 +78,11 @@ bell), `Thread`, `TypingIndicator`,
 breakpoint at 860px, sidebar open and collapsed state) so `AppShell` supplies data, not chrome. The
 assistant and chat controls client-chat-v3 P2 made live (model, Think, assistant picker, queue,
 reply, rename) are covered under [Chat controls and hooks](#chat-controls-and-hooks).
+`MarkdownRenderer` renders streaming content through `useDeferredValue` and memoises the parsed
+markdown subtree on the deferred string (`MarkdownBody`), so each streamed delta parses the
+markdown exactly once and the urgent pass reuses the previous parse - composer interactions stay
+responsive while a long reply streams. Keep that shape when touching the renderer: a memo miss on
+the urgent pass costs a second synchronous parse per delta.
 
 ## Styling conventions
 
@@ -83,6 +97,11 @@ reply, rename) are covered under [Chat controls and hooks](#chat-controls-and-ho
   glyph to `IconName` rather than an icon-library dependency.
 - Markdown replies render under a `.prose` wrapper. Style prose elements under `.prose`, not by
   element selector on the page.
+- Wide content never widens the chat column. `.cl-conv-col`, `.cl-thread`, `.cl-msg-body` and
+  `.cl-bubble` carry `min-width: 0`, and `.prose` wraps (`overflow-wrap: anywhere`); code blocks
+  and tables scroll inside their own boxes (`.prose pre`, `.prose [data-table-wrap]` get
+  `overflow-x: auto`) and images cap at `max-width: 100%`. Any new message-level content must
+  contain its own width, or the phone layout overflows horizontally.
 - Honour `prefers-reduced-motion`: entrance animation is disabled under it.
 - Tests and e2e suites select by `data-testid` and `data-role`, never by `cl-` class. Keep an
   existing hook stable when you restyle; rename it in the same change as the suites that use it.
@@ -223,6 +242,7 @@ sees as chats.
 | Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimum / collapsed / full`                                                                                                                            |
 | Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                                                                                                     |
 | Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                                                                                                    |
+| Picked assistants            | `SessionListRuntime.selectAgent` records `pickedAgentIds` (session-only); `Sidebar` always lists them past the activity window                                                                                                                  |
 | Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                                                                                                   |
 | This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`                                                                                        |
 
@@ -345,22 +365,24 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
 client-chat-v3 P2 made the assistant and chat controls live and split `AppShell.tsx` into one hook or
 provider module per concern, each testable without a gateway connection.
 
-| Concern                          | Code                                                                                            | Gateway calls                                                                                              |
-| -------------------------------- | ----------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------- |
-| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                        | `agents.list`, `sessions.direct`                                                                           |
-| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                  | `models.list`, `sessions.patch {model}`                                                                    |
-| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                  | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
-| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                     | none; browser-local preferences                                                                            |
-| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                     | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
-| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`      | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort`                                                 |
-| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts` | `sessions.steer`, `sessions.runs.list`                                                                     |
-| History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                         | `chat.history {before}`                                                                                    |
-| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                      | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
-| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                         | `agents.list` `identity.color`                                                                             |
-| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`                                    | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
-| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
-| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`            | `tts.readAloud.status`, `tts.speak`                                                                        |
-| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                    | none                                                                                                       |
+| Concern                          | Code                                                                                                                                       | Gateway calls                                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                                                                   | `agents.list`, `sessions.direct`                                                                           |
+| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                                                             | `models.list`, `sessions.patch {model}`                                                                    |
+| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                                                             | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
+| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                                                                | none; browser-local preferences                                                                            |
+| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                                                                | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
+| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                 | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort`                                                 |
+| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                            | `sessions.steer`, `sessions.runs.list`                                                                     |
+| History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                                                                    | `chat.history {before}`                                                                                    |
+| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                 | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
+| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                    | `agents.list` `identity.color`                                                                             |
+| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                 | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
+| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                           | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
+| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                       | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts` | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Paste, rich copy, image prep     | `ui/use-composer-paste.ts`, `ui/markdown/html-to-markdown.ts`, `ui/clipboard-html.ts`, `providers/image-resize.ts`                         | none (browser clipboard and canvas APIs)                                                                   |
+| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                                                               | none                                                                                                       |
 
 ### Completed history boundary and transcript controls
 
@@ -560,6 +582,11 @@ Contracts worth keeping when you change them:
   `agentActivity` aggregates the newest eligible session timestamp before
   assistant, search, activity-window and pagination narrowing. The assistant list defaults to a
   4-hour window, pins the selected assistant, and refreshes its cutoff once per minute.
+  An agent-filtered page merges its `agentActivity` into the existing map (only the requested
+  agent's slot is refreshed) instead of replacing it, so filtering never blanks the other
+  assistants' activity. `selectAgent` also records the id in `pickedAgentIds`, a session-only
+  list that is never written to preferences; the `Sidebar` always lists picked assistants past
+  the activity cutoff, whatever the current filter, and only a reload clears the record.
 - **Assistant navigation.** Clicking an assistant scopes Sessions and opens that assistant's
   dmScope direct session (`sessions.direct { agentId }`). The resolved key becomes the remembered
   session that startup restore reopens. Re-clicking while already on that key re-affirms the filter
@@ -630,12 +657,33 @@ Availability comes from `talk.catalog`, and updates on reconnect:
   result's `inputSampleRateHz` (24 kHz).
 
 `useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
-`transcript` while recording, `commit: { text: string; nonce: number } | null`, `consumeCommit(): void`,
+`transcript` while recording, `commit: { text: string; nonce: number; autoSend: boolean } | null`,
+`consumeCommit(): void`,
 and `errorMessage` (mic denied or no input device). The live transcript previews in the textarea as a
 read-only draft with an accent border and muted text (`.cl-composer--dictating`), without breaking the
 textarea height cap. When dictation stops or encounters a capture error, `commit` receives the final or
 last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
 calls `onDictateCommitConsumed` to clear the commit.
+
+**One-tap dictation (`useDictate(runtime, { autoSend })`).** The option is the take-start snapshot of
+the auto-read preference (`AppShell` passes `readAloud.autoRead`); `DictateCommit.autoSend` records that
+value, so toggling the preference mid-take cannot change what happens to text the take already produced.
+While `autoSend` is true at take start:
+
+- `packages/talk-client`'s `createSilenceEndpointer` (exported from the package index) ends the take
+  without a second tap. `providers/voice.ts` creates it per recording and feeds every PCM16 capture
+  frame; it fires `onEndpoint` once, after at least 250 ms of above-threshold speech (`pcm16RmsDbfs` at
+  the same −45 dBFS threshold the barge-in detector uses) is followed by 1500 ms of silence. A burst
+  shorter than the minimum never endpoints, and `reset()` re-arms for a fresh utterance. The endpointer
+  is advisory capture-side timing only - the transcription stream and the gateway session are untouched.
+- `ui/use-dictate-autosend.ts` submits the committed text exactly once per commit, and only when three
+  things hold: the commit's text is non-empty and not whitespace (a denied mic or an empty take never
+  sends, and never sends the user's pre-existing draft), the dictated text is observable in the draft
+  (the insertion is staged asynchronously, so the armed send waits for the re-render that contains it),
+  and the composer is sendable - `isStreaming`, `submissionDisabled` or `uploading` leave the text in
+  the draft instead of queueing it.
+- The composer marks the draft dictated before the auto-send runs, so the send carries
+  `{ dictated: true }` provenance like a manual send after dictation.
 
 `useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error` and
 `captions: { user, assistant }`. Voice does not fill the composer. Toggle starts or stops the
@@ -701,6 +749,75 @@ for a transcript that can no longer arrive.
 
 Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
 
+## Composer paste, rich copy and attachment prep
+
+Four composer-side contracts shipped with the 2026-10-25 chat-flow slice. None adds a gateway
+method; they shape what the browser sends on the existing `chat.send` attachments and composer
+draft paths.
+
+### Paste: `use-composer-paste.ts` and `html-to-markdown.ts`
+
+`ui/use-composer-paste.ts` returns the composer's `onPaste` handler with a fixed priority order:
+HTML → markdown at the caret, files → the same `uploadFiles` staging path the picker and drop
+use, anything else → the browser default (the event is not prevented, so paste without
+`text/html` — Shift+Cmd+V — and plain-text paste keep working).
+
+- The HTML conversion resolves asynchronously, so the paste captures the active session key and
+  the draft at paste time (`getSessionKey`) and drops the completion if either changed: a chat
+  switch during the wait would otherwise insert into the destination chat's draft at the source
+  chat's caret.
+- The undo-preserving insert path is `document.execCommand("insertText")` — a real editing
+  transaction that keeps Cmd/Ctrl+Z history and fires `input` for the controlled draft. It needs
+  a focused element and is absent in jsdom, so the fallback writes the controlled value with
+  `setText`: same text and caret, but no undo history. The caret is restored after the inserted
+  text once React has committed (next frame) in both paths.
+- `ui/markdown/html-to-markdown.ts` converts clipboard HTML to GFM markdown: it parses with
+  `DOMParser`, prunes comment nodes plus `script, style, meta, link, title, template, iframe,
+object` (the walker must come from the parsed `Document` itself — a `Document.ownerDocument`
+  is null, so walking a bare node yields no walker and nothing would be pruned), drops images
+  whose `src` is not `http(s)`, then converts through
+  `hast-util-from-dom`/`hast-util-to-mdast`/`mdast-util-to-markdown`/`mdast-util-gfm` with
+  `-` bullets, `_` emphasis and backtick fences, collapsing 3+ newlines.
+
+**Lazy-chunk rule.** Those four libraries are loaded through one `Promise.all` of dynamic
+`import()`s inside `html-to-markdown.ts`; only `import type` references may appear anywhere else
+in the app graph. A static import would pull them into the entry chunk and break the lazy-chunk
+budget (V5): `hast-util-from-dom` and `hast-util-to-mdast` must stay out of `index.html`'s
+transitive static imports and reachable only via `dynamicImports`.
+
+### Rich copy: `clipboard-html.ts`
+
+- `cleanClipboardHtml(source: DocumentFragment | Element[])` clones the copied prose and strips
+  everything non-semantic: only `href`, `src`, `alt`, `colspan` and `rowspan` survive as
+  attributes, `href`/`src` only for `http(s)` and `mailto:` URLs (`SAFE_URL_PATTERN`), and
+  `button, svg, script, style, [aria-hidden='true'], .cl-msg-actions` chrome is dropped. The
+  result pastes into Outlook or Docs with the structure (headings, lists, tables, bold) and the
+  receiving document's own styling — no colours or fonts from the chat.
+- `writeRichClipboard({ html, text })` writes `text/html` plus `text/plain` through
+  `ClipboardItem` when the browser supports it and falls back to `writeText` when it does not —
+  or when the rich write itself is rejected. Best effort in both directions; a failed copy is
+  never surfaced as an error. The plain slot carries the reply's markdown source, not the
+  rendered text.
+
+### Attachment prep: `image-resize.ts`
+
+`prepareImageAttachment(file, codec?)` runs at the top of `Composer`'s `uploadFiles`, before the
+byte reservation, and returns a possibly re-encoded `File`:
+
+- Only `image/(jpe?g|png|webp|heic|heif|avif)` MIME types are touched; everything else — GIFs
+  included — attaches untouched.
+- A failed decode returns the original file unchanged (the ordinary over-cap checks then apply).
+- Downscale to fit 2048 px on the long edge; never upscale — a small image over the byte cap
+  (a huge 1×1 PNG) re-encodes at its own dimensions.
+- PNG and WebP encode as PNG first; a PNG result still over `CHAT_ATTACHMENT_MAX_BYTES` re-encodes
+  as JPEG at the same size. JPEG quality is 0.85 (`IMAGE_JPEG_QUALITY`).
+- The output keeps the original name with the matching extension (`photo.png` can come back as
+  `photo.jpg`). An over-cap image that no codec run can bring under the cap is returned
+  unchanged and is then rejected by the ordinary checks (finding #1330 tracks a real upload
+  path for those).
+- The codec is injectable (`ImageCodec`) so unit tests pin the policy; `browserImageCodec` decodes
+  with EXIF orientation and uses `OffscreenCanvas` with an HTML-canvas fallback.
+
 ## Read aloud
 
 The Read aloud action on assistant messages speaks that reply through the gateway's per-agent TTS
@@ -739,7 +856,11 @@ makes `stop()`, or starting another message, retire in-flight work silently: a l
 never surfaces audio or errors. `describeReadAloudError` maps a `read_aloud_disabled` refusal to
 `Read aloud is turned off for this assistant.`, any other gateway error to
 `Couldn't read aloud: <message>`, and a `decodeAudioData` failure to
-`Couldn't play the audio in this browser.`
+`Couldn't play the audio in this browser.` The manual `start` is now built on the same primitives as
+the streaming queue: `startStream(key, agentId)` opens an empty queue, `pushChunks(key, chunks)`
+feeds it (prefetching the next chunk as soon as one exists), and `endStream(key)` closes it once the
+loop has drained. `unlock()` must run synchronously inside the enabling gesture, the same
+AudioContext-resume contract as `start`.
 
 Markup contract:
 
@@ -749,6 +870,50 @@ Markup contract:
   otherwise.
 - The actions row gets `data-reading="true"` while this message reads or shows an error.
 - An error renders a `role="status"` span with `data-testid="message-read-aloud-error"`.
+
+## Auto-read (Read replies aloud)
+
+The composer's **Read replies aloud** toggle (`data-testid="composer-auto-read"`, speaker icon,
+`aria-pressed` plus `cl-composer-btn--active` while on) turns streamed read-aloud on. Its props are
+optional (`autoRead`, `onToggleAutoRead`, `autoReadUnavailableReason`), so an unwired composer
+renders it off. When the reason is set it renders through `DisabledControl` with the same reason
+strings the message button uses; when live it plays every new reply of the open chat while it
+streams.
+
+- **Preference.** `providers/auto-read-preference.ts` stores the toggle per gateway URL and client id
+  under `openclaw.web.auto-read:<encodedGatewayUrl>:<clientId>` (`"1"`/`"0"`, default off) - the same
+  scoping rule as the navigation preferences. It is browser-local only; there is no operator default
+  (finding #1347).
+- **Chunking.** `providers/read-aloud-stream.ts` is the incremental counterpart of
+  `packSpeechChunks`: `update(markdown)` returns chunks for every newly completed sentence (one per
+  `extractSpeakableUnits` unit, split by the shared `splitSentences`), holding back the last sentence
+  of a still-growing unit; `finish(markdown)` flushes the remainder. It re-parses only when the
+  appended tail can complete a sentence, survives a markdown reflow that reparses to fewer sentences
+  than already emitted, and packs through the same `packSpeechChunks` — so streamed and manual reads
+  of the same text produce the same speech.
+- **Driver.** `app/auto-read-driver.ts` turns the chat store into `pushChunks` calls. One stream per
+  run: the stream key is the run's first tracked assistant id, and the stream stays open across every
+  assistant message the run appends (a message boundary flushes the previous message's pending
+  sentences into the same stream and replaces only the chunker — a second `startStream` would stop
+  playback and drop the queued tail). At the run boundary it flushes and closes. `reset(seed)` marks
+  every assistant id on screen as known, so a reply that was already streaming when auto-read turned
+  on is never spoken from its beginning; the driver abandons a run the moment the player stops
+  serving its stream (toggle off, chat switch, Voice mode, offline, a manual read).
+- **Gates.** `use-read-aloud.ts` subscribes the driver only while `autoRead` is on, the status
+  reports `enabled`, the connection is up and Voice mode is off; the cleanup unsubscribes,
+  resets the driver and calls `player.stop()`, so queued speech never outlives the gates. The
+  streaming chunk limits (first chunk 200, later chunks 600 characters) are clamped to the
+  status's `maxTextLength` and refreshed whenever the status or agent changes, so a low gateway
+  limit never produces a `tts.speak` rejection.
+- **Gesture.** Enabling the toggle, and starting Dictate with auto-read on, unlock the audio
+  context synchronously inside the click (`readAloud.unlock()`), keeping Safari/iOS playback
+  audible.
+
+**Stop semantics.** Toggling auto-read off, a chat switch, Voice mode or a disconnect stop playback
+through `player.stop()`. Pressing **Stop** on the reply itself does not silence the voice: the run
+ending flushes the reply's remaining sentences into the stream and the queue drains to the end of
+the reply. An in-flight `tts.speak` request is not cancelled on stop (pending finding,
+provisionally #1367); the generation counter retires its result instead of surfacing the audio.
 
 ## Busy state, unread badges and reply notifications
 

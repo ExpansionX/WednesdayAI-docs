@@ -7,6 +7,9 @@ read_when:
   - You want to change the theme or know why a button is dimmed
   - You want to pick a model or Think level, reply to a message, or rename a chat
   - You want to hear a reply read aloud, or know why that button is dimmed
+  - You want replies read aloud while they are still being written, or dictation that sends itself when you pause
+  - You want to paste text from Word, Google Docs or a web page into the message box
+  - You want to know why a picture larger than 5 MB attaches anyway
   - You want to send another message while a reply is still being written
   - You open the web client on several devices and want to know when replies and unread replies show up, or how desktop notifications work
   - You want to install the web client to your device's home screen
@@ -37,7 +40,18 @@ sources:
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/app/use-chat-send.ts
+  - apps/web/src/app/use-read-aloud.ts
+  - apps/web/src/app/auto-read-driver.ts
+  - apps/web/src/providers/auto-read-preference.ts
+  - apps/web/src/providers/read-aloud-stream.ts
+  - apps/web/src/providers/image-resize.ts
+  - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/ui/Composer.tsx
+  - apps/web/src/ui/use-composer-paste.ts
+  - apps/web/src/ui/use-dictate-autosend.ts
+  - apps/web/src/ui/clipboard-html.ts
+  - apps/web/src/ui/markdown/html-to-markdown.ts
+  - packages/talk-client/src/silence-endpointer.ts
   - packages/gateway-browser-client/src/runs/runs-model.ts
   - apps/web/src/app/use-busy-sessions.ts
   - apps/web/src/ui/AccountMenu.tsx
@@ -52,7 +66,7 @@ sources:
   - apps/web/src/state/chat.ts
   - apps/web/index.html
   - apps/web/public/manifest.webmanifest
-generated: 2026-10-17
+generated: 2026-10-25
 ---
 
 # Using the web client
@@ -149,6 +163,10 @@ Enter does in the meantime, and
 [Use several browsers or devices at once](#use-several-browsers-or-devices-at-once) for the full
 multi-device behaviour.
 
+Your message is formatted the same way a reply is: markdown such as **bold**, headings, lists,
+`code`, tables and links render in your message bubble. Each line break you typed stays a line
+break.
+
 If you have not opened a chat yet (for example, the first time you use a new browser), you see a
 greeting (**Good morning**, **Good afternoon** or **Good evening**), a line that reads **What can
 [your assistant's name] help with?**, and three suggestion buttons: **Plan my day**, **Help me
@@ -157,10 +175,13 @@ box so you can edit them - it does not send anything until you press Enter. Your
 opens your conversation with the assistant automatically; it uses the same conversation your
 direct messages on other channels use when the gateway links them.
 
-Hover over a reply to reveal its buttons. **Copy** copies the reply to your clipboard, and
-**Reply** quotes it (see [Reply to a message](#reply-to-a-message)). Hover over a message of your
-own to reveal **Reply** too. **Read aloud** reads the reply out loud; see
-[Read a reply aloud](#read-a-reply-aloud). The remaining buttons beside **Copy** are described in
+Hover over a reply to reveal its buttons. **Copy** copies the reply with its structure intact -
+headings, lists, tables and bold - ready to paste into a document or an email, where it takes on
+that document's own styling; if the browser cannot write rich text, the reply's markdown source is
+copied instead. **Reply** quotes it (see
+[Reply to a message](#reply-to-a-message)). Hover over a message of your own to reveal **Reply**
+too. **Read aloud** reads the reply out loud; see [Read a reply aloud](#read-a-reply-aloud). The
+remaining buttons beside **Copy** are described in
 [Controls that are not available yet](#controls-that-are-not-available-yet).
 
 The strip under the message box shows the connection state (**Connected**, **Reconnecting...** or
@@ -188,6 +209,22 @@ it from then on, including when you reopen the chat later.
   yet while a reply is streaming. Wait for it to finish, or remove your reply and send a plain
   message.** Nothing is sent, and your quote and text stay where they are.
 
+### Paste formatted text
+
+Pasting into the message box keeps the structure of what you copied. Text copied from Word, an
+email or a web page is converted to markdown as you paste: headings, lists, bold, links and code
+survive, while scripts, embedded frames, HTML comments and pictures that are not on the web are
+dropped. Pictures from a web page keep their web address; whether the conversation shows them is
+the same rule as any other image (see [Screens with images](#screens-with-images)).
+
+Press Cmd+Z (Ctrl+Z on Windows and Linux) to undo a paste: the text the paste replaced comes back
+exactly as it was.
+
+Pasting a picture (for example a screenshot on your clipboard) attaches it as if you had used the
+attach button, including the automatic shrinking described in
+[Attach files](#attach-files). Ordinary text paste - including paste without formatting, such as
+Shift+Cmd+V - works exactly as it always did.
+
 ### Read a reply aloud
 
 Hover over a reply and select the speaker button (**Read aloud**) to hear that reply spoken. The
@@ -211,6 +248,36 @@ configured a voice for your assistant to speak with. Ask them to enable it; see
 If reading fails, a short message appears beside the button: **Read aloud is turned off for this
 assistant.**, **Couldn't play the audio in this browser.**, or **Couldn't read aloud:** followed by
 the reason. Nothing is sent to your assistant when you use the button.
+
+### Read replies aloud automatically
+
+The speaker button beside the microphone turns on **Read replies aloud**. While it is on, every
+new reply in the chat you have open starts playing on its own as your assistant writes it: the
+first sentence is spoken as
+soon as it exists, and the rest follows sentence by sentence without waiting for the reply to
+finish. The button stays pressed while the setting is on, and this browser remembers it for your
+WednesdayAI connection the same way it remembers the theme.
+
+- Turning the toggle off stops the reading at once. Switching to another chat, starting Voice
+  mode, or losing the connection stops it too. Selecting **Stop** on the reply ends the reply but
+  does not stop the voice: the rest of that reply is still read out. Turning the toggle off is
+  what silences it.
+- Long replies are spoken in consecutive pieces, like **Read aloud**; each piece is capped so the
+  voice never sends too much text at once.
+- If the button is dimmed, hover over it to see why. The reasons are the ones **Read aloud** uses:
+  **unavailable while offline**, **unavailable during Voice mode**, or
+  **unavailable on this gateway**.
+
+While the toggle is on, dictation becomes hands-free as well. The tooltip reads
+**Read replies aloud. Dictation sends when you pause**: when the microphone has heard you speak
+and you then stay quiet for about a second and a half, the dictation ends by itself and the words
+are sent straight away - one tap to start, speak, then just pause. With the toggle off, Dictate
+works as before: you select the microphone button to stop, edit the text, and send it yourself.
+
+The words are sent only when the message box is free. While a reply is being written, or the
+message box cannot send yet, the dictated text waits in the message box for you to send. A
+dictation that heard nothing (for example after denied microphone access) never sends anything,
+including text you had already typed in the message box.
 
 ### Choose a model and Think
 
@@ -401,12 +468,16 @@ drops, or when you leave the page.
 
 Select the **+** button (**Attach files**) in the message box, or drag files onto it. You can
 attach several at once. The web client accepts any file type, up to 32 files, 5 MB each and
-18 MB total per message (images show a thumbnail; other files appear as a card). Images are
-described automatically when the chat's model cannot see images. Each attachment appears as a small
-card above the message box; select its **x** to remove it before sending. A file that is empty,
-larger than 5 MB, or that pushes the message over 18 MB or 32 files is rejected before anything is
-sent, with a message under the message box explaining why. The **+** button is dimmed while a file
-is uploading or a reply is being written.
+18 MB total per message (images show a thumbnail; other files appear as a card). Large pictures
+are shrunk automatically first: an image wider or taller than 2048 pixels is scaled down to fit
+inside that size and re-encoded, so a photo too large for the 5 MB limit attaches instead of being
+refused. Pictures are never enlarged, animated GIFs are left untouched, and an image that still
+cannot be made to fit is rejected like any other oversized file. Images are described
+automatically when the chat's model cannot see images. Each attachment appears as a small
+card above the message box; select its **x** to remove it before sending. A file that is empty, a
+non-image file larger than 5 MB, or an attachment that pushes the message over 18 MB or 32 files
+is rejected before anything is sent, with a message under the message box explaining why. The
+**+** button is dimmed while a file is uploading or a reply is being written.
 
 ### See older messages
 
@@ -469,12 +540,17 @@ the strip's button to bring it back. On a phone or a narrow window the sidebar i
 with the menu button at the left of the top bar, and close it with the **x** at the top of the
 sidebar or by tapping outside it. On a phone the page itself never scrolls: the conversation
 scrolls inside its own area, and the top bar and message box stay where they are - including with
-the on-screen keyboard open - and typing into a box never zooms the page.
+the on-screen keyboard open - and typing into a box never zooms the page. Wide content - a long
+link, a wide table or a large picture - never pushes the page sideways: it scrolls or shrinks
+inside its own box instead.
 
 The **Assistants** section lists assistants with an eligible chat updated within the last
 **4 hours**, by default. Choose **1h**, **2h**, **4h**, **8h**, **16h**, **24h** or **All** with the
 activity-window control. **All** includes assistants with no chats. The assistant you have selected
-stays pinned and visible even when its chats are older than the window. The assistant for the chat
+stays pinned and visible even when its chats are older than the window. An assistant you pick in
+the **Browse assistants** window also stays in the list for the rest of this browser session,
+even once its chats fall outside the window; that memory is kept for the page you have open, so a
+reload returns the list to the ordinary rules. The assistant for the chat
 you currently have open also stays visible when you have not selected a filter.
 
 Use **Sort assistants** to choose **Newest**, **Oldest**, **Name A-Z** or **Name Z-A**. Newest and
@@ -764,7 +840,9 @@ the tooltip then reads **unavailable on this gateway**. Ask them to enable it if
 it.
 
 **Read aloud** is not on this list either: the button works, or is dimmed with the reason beside
-it - see [Read a reply aloud](#read-a-reply-aloud).
+it - see [Read a reply aloud](#read-a-reply-aloud). The composer's **Read replies aloud** toggle
+is live the same way, with the same dimmed reasons - see
+[Read replies aloud automatically](#read-replies-aloud-automatically).
 
 ## Sign out
 
@@ -815,7 +893,16 @@ the button is available but a message appears beside it instead of audio, the me
 went wrong - for example **Read aloud is turned off for this assistant.**, or
 **Couldn't play the audio in this browser.**, which usually means the browser is old or missing
 audio support: try a current desktop browser. See
-[Read a reply aloud](#read-a-reply-aloud).
+[Read a reply aloud](#read-a-reply-aloud). The composer's **Read replies aloud** toggle follows
+the same rules; see [Read replies aloud automatically](#read-replies-aloud-automatically).
+
+### A dictated message sent without me pressing send
+
+If the **Read replies aloud** toggle is on, this is expected: dictation ends itself after about a
+second and a half of quiet and sends the words it heard, as long as the message box was free to
+send. The text your assistant received is the text the microphone heard. If you prefer to edit
+before sending, turn the toggle off; dictation then keeps its old behaviour, stopping when you
+select the microphone button again.
 
 ### Talking does not interrupt the reply
 
@@ -856,7 +943,9 @@ a new setup code.
 
 Check that the file is under 5 MB, is not empty, and that the attachments for the message stay
 within the limits: 32 files in total and no more than 18 MB across all of them. Any file type is
-accepted.
+accepted. A picture is shrunk automatically first - scaled to at most 2048 pixels on its longest
+edge and re-encoded - so a photo over 5 MB usually attaches after all; an image that still cannot
+be made to fit (and any other file type over 5 MB) is rejected.
 
 ### The message box will not send, or shows an error
 
