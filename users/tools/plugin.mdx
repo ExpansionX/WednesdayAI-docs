@@ -738,10 +738,13 @@ Plugins can declare the kernel contract versions they need in `openclaw.plugin.j
   message like `plugin "<id>" is not compatible with this host: <reason>. Upgrade WednesdayAI and
 retry.` Nothing is installed. A malformed `contracts` field is rejected the same way before any
   files are copied.
-- **Load skips**: a plugin that installs anyway (for example installed from a path on an older
-  host) is skipped at load and the Gateway logs an error diagnostic with code
-  `PLUGIN_CONTRACT_INCOMPATIBLE` (or `PLUGIN_MANIFEST_INVALID` when the manifest itself is
-  invalid), naming the plugin and the missing contract version.
+- **Config refuses**: a plugin that is already on disk (for example on `plugins.load.paths`, or
+  installed before a host downgrade) is not loaded, and config validation reports it as an error
+  at `plugins.entries.<id>`, e.g. `plugin <id>: plugin "<id>" requires delivery contract 2.x
+(>= 2.0), but host provides 1.0`. Like the existing minimum-host-version check, this makes
+  `wednesdayai config validate`, `plugins list` and Gateway startup fail until the plugin is
+  removed from disk or the load path, or upgraded — an incompatible plugin is never silently
+  skipped.
 - **Remedy**: upgrade WednesdayAI, or install a build of the plugin made for this host's kernel
   contracts. Contract versions are compiled into the host, so they are reliable even when the
   version string is not.
@@ -2062,7 +2065,7 @@ Plugins can (and should) ship tests:
 **Plugin is not discovered at startup**
 Check that `plugins.enabled` is `true` (default) and that the plugin directory or file is reachable. Run `openclaw plugins list` to see what was discovered. If the plugin is absent, verify the path is listed under `plugins.load.paths` or the plugin file is in `~/.openclaw/extensions/`. Non-bundled plugins without install provenance emit a startup warning — add the id to `plugins.allow` to suppress it and confirm trust.
 
-**Install fails with `version_incompatible` or logs `PLUGIN_CONTRACT_INCOMPATIBLE`**
+**Install fails with `version_incompatible`, or config reports `requires <id> contract …`**
 The plugin declares kernel contract versions newer than this host provides. See
 [Kernel contract compatibility](#kernel-contract-compatibility): upgrade WednesdayAI or install a
 plugin build matching this host's contracts.
