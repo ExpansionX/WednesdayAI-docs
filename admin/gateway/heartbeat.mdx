@@ -56,6 +56,7 @@ Example config:
         lightContext: true, // keep heartbeat context small
         isolatedSession: true, // run in a fresh sibling transcript
         skipWhenBusy: true, // defer while this agent has nested work in flight
+        // toolsAllow: ["session_status"], // bound the isolated heartbeat tool surface
         // activeHours: { start: "08:00", end: "24:00" },
         // includeReasoning: true, // optional: send separate `Reasoning:` message too
       },
@@ -274,12 +275,21 @@ Use `accountId` to target a specific account on multi-account channels like Tele
 - `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only heartbeat-specific bootstrap files such as `HEARTBEAT.md`. Note the interaction with `isolatedSession`: with `isolatedSession: false` (heartbeat shares the main session), the heartbeat keeps the session's normal full bootstrap regardless of `lightContext`, and the HEARTBEAT.md checklist is inlined into the trigger message instead (only when the session's normal bootstrap does not already inject it — the stock bootstrap file list includes HEARTBEAT.md, in which case nothing is duplicated) — this keeps the system prompt byte-identical to user turns so provider prefix caching survives every heartbeat (see [Prompt caching](/reference/prompt-caching#byte-stability-across-trigger-kinds)). `lightContext` only takes effect for isolated `:heartbeat` sessions.
 - `isolatedSession`: when true, each heartbeat enqueues an `agent.turn` (`kind` heartbeat) and runs in a fresh sibling `:heartbeat` session with no prior conversation transcript. A positive `wakeGate` also nudges the named main session (`kind` nudge). Delivery routing and duplicate suppression still use the base session. The isolated run resolves its own session **before** any event peek or consume, so it does not drain the base session's queued non-signal events. `contextKey=signal:*` events may transfer into that isolated turn; remaining non-signal events stay on the base session for its next turn. The `:heartbeat` session key suffix causes the storage layer to tag these entries with `trigger_source = 'heartbeat'`; session recall (`readByKey`) and analytics queries automatically exclude them so heartbeat turns do not appear in conversation history or inflate per-turn metrics. See [Session History Hygiene](/concepts/session-history-hygiene).
 - `skipWhenBusy`: when true, also skips this agent's heartbeat while its session-keyed subagent or nested lanes are busy.
+- `toolsAllow`: exact tool names an isolated heartbeat may use. `[]` = no tools. Matching is case- and alias-insensitive. When set, the heartbeat also omits the skills list **and skips skill-declared environment overrides**, so a tool that depends on a skill-provided environment variable will not see it. Applies only with `isolatedSession: true`; on a shared-session heartbeat it is ignored with a warn. The list can only narrow the tool surface — the session's policy `tools.allow` still applies, so `toolsAllow` never widens what the agent may use. An allow-list entry that matches no tool logs a `toolsAllow names matched no tool` warn. Unset keeps the agent's full tool surface.
 - `activeHours`: restricts heartbeat runs to a time window. Object with `start` (HH:MM, inclusive; use `00:00` for start-of-day), `end` (HH:MM exclusive; `24:00` allowed for end-of-day), and optional `timezone`.
   - Omitted or `"user"`: uses your `agents.defaults.userTimezone` if set, otherwise falls back to the host system timezone.
   - `"local"`: always uses the host system timezone.
   - Any IANA identifier (e.g. `America/New_York`): used directly; if invalid, falls back to the `"user"` behavior above.
   - `start` and `end` must not be equal for an active window; equal values are treated as zero-width (always outside the window).
   - Outside the active window, heartbeats are skipped until the next tick inside the window.
+
+## Measuring heartbeat cost
+
+Every provider-dispatched attempt of every embedded run — not only heartbeats — logs one info line from subsystem `agent/prompt-composition`: `prompt composition`. A run that retries after an overflow or a compaction emits one line per attempt; an attempt that fails before its first provider request emits none. It attributes input size by component — `systemChars`, `bootstrapChars`, `skillsChars`, `toolCount`, `toolChars`, `contextChars` (per plugin source label: identifier-shaped labels stay readable with the session key redacted, anything else is replaced by its hash, and labels past the first 16 pool under `other`), `messagesChars`, and `totalChars` — together with `firstCallInputTokens`, `trigger`, `bounded`, a redacted `sessionKey`, `sessionId`, `runId`, `provider`, and `model`. `messagesChars` measures the message list actually handed to the provider, after `context.project`, `context.prune`, `transform_llm_input` and ledger projection. Per-component tokens can be approximated as `chars × firstCallInputTokens / totalChars`; treat it as an estimate — `toolChars` counts the rendered roster plus name/summary/schema lengths, not serialized wire bytes, and message chars exclude non-text blocks.
+
+Selecting the heartbeat cohort takes more than `trigger`: `trigger: "heartbeat"` also matches shared-session heartbeats and the main-session nudge/announce agent turns that carry `systemTrigger: "heartbeat"`. Filter on `bounded: true` for runs that actually carried a `toolsAllow` list, and on the redacted `sessionKey` to pin one session.
+
+Per epic #1163 decision D-LANE, heartbeats share the agent's `main` command lane on purpose; see ADR 0057 (`dev-docs/adr/0057-agent-turn-producers-peers.md`).
 
 ## Delivery behavior
 
