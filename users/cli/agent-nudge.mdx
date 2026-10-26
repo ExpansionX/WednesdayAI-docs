@@ -3,24 +3,39 @@ summary: "CLI reference for `wednesdayai agent nudge` (cheap-check → wake the 
 read_when:
   - You want a script to wake an agent's main persona with a payload
   - Wiring an external watcher (inbox, CI, calendar) into a nudge
+audience: admin
+component: agent-nudge
+sources:
+  - src/infra/nudge.ts
+  - src/infra/nudge-grants.ts
+  - src/gateway/server-methods/agent-nudge.ts
+  - src/gateway/protocol/schema/agent.ts
+  - src/commands/agent-nudge.ts
+  - src/acp/control-plane/agent-turn-enqueue.ts
+  - src/acp/control-plane/agent-turn-recovery.ts
+generated: "2026-10-25"
 title: "agent nudge"
 ---
 
 # `wednesdayai agent nudge`
 
 `wednesdayai agent nudge` (alias `openclaw agent nudge`) hands a payload to an agent's **main
-persona** and wakes it to decide what to do. It is the script-callable surface of the
-[nudge contract](/gateway/heartbeat#nudge-wake-the-main-persona): a cheap check lives in your
-script; the expensive persona turn runs only when you call this command.
+persona** and wakes it to decide what to do. It enqueues an `agent.turn` with `kind=nudge`.
+It does not publish a heartbeat signal or call `runHeartbeatOnce`. It is the script-callable
+surface of the [nudge contract](/gateway/heartbeat#nudge-wake-the-main-persona): a cheap check
+lives in your script; the expensive persona turn runs only when you call this command.
 
 The persona behaves **silent-unless-it-decides** — it receives the payload as non-user context and
 sends a user-facing message only when warranted, otherwise acknowledges with no delivery (the
-existing heartbeat relay semantics). The nudge honours every existing safety gate (active-hours,
-main/cron/subagent/session lane busy checks, `skipWhenBusy`, duplicate suppression); a busy target
-session defers rather than bypassing the checks.
+existing heartbeat relay semantics). A nudge carries the `delay` busy policy: while a main turn is
+in flight the nudge is accepted only after it is persisted in `bus_work_items`, then delivers once
+that turn completes, instead of being dropped. Parked nudges are bounded per session (cap 32); a
+nudge that overflows the cap is rejected. On Gateway restart, recovery re-arms only those
+producer-accepted pending nudges; it does not execute at boot.
 
 Related:
 
+- Coordination model, grants, and dedupe: [Agent coordination](/concepts/agent-coordination)
 - Nudge contract + wake-gate: [Heartbeat](/gateway/heartbeat#nudge-wake-the-main-persona)
 - Plugin-SDK nudge: [Agent Signals](/plugins/agent-signals#nudge)
 - Heartbeat vs cron guidance: [Cron vs Heartbeat](/automation/cron-vs-heartbeat)
@@ -36,12 +51,36 @@ openclaw agent nudge [text] [flags]
 - `--text <text>`: nudge text (required; also accepted as a positional argument).
 - `--data <json>`: structured payload as a JSON object (parsed; invalid JSON or a non-object errors).
 - `--agent <id>`: target agent id (defaults to the default agent's main session).
-- `--session <key>`: target session key (overrides `--agent`).
-- `--reason <reason>`: nudge reason (defaults to `nudge`).
+- `--session <key>`: a session **within** the agent chosen by `--agent` (operator-only). It does
+  not select the agent: the key must belong to `--agent` (or to the default agent when `--agent`
+  is omitted), otherwise the nudge is refused with `session-agent-mismatch`. Pass both, e.g.
+  `--agent ops --session agent:ops:main`.
+- `--dedupe-key <key>`: idempotency key — the same key never wakes the agent twice. Dedupe is
+  scoped to (requester, target session, key) and holds for the life of the durable row, not a
+  time window. See [Agent coordination](/concepts/agent-coordination#dedupe).
+- `--reason <reason>`: accepted for compatibility and ignored.
 - `--json`: print the raw result (`{ ok, sessionKey, signalId }`) as JSON.
 
-Exit code is `0` when the nudge is queued and non-zero when it is rejected (empty text, invalid
-`--data`, or a busy/full target), so scripts can branch on the outcome.
+Exit code is `0` when the nudge is durably admitted. The command goes through the authorized
+coordination seam (`requestAuthorizedNudge`), and the response confirms durable admission. Human
+output is:
+
+```text
+Nudge accepted for session agent:main:main (work agent-turn:nudge:operator:dedupe:99a9adce02b7215ea34ab00eb9e162c4).
+```
+
+`signalId` is the idempotency key of the persisted `agent.turn` row: repeating the same command
+with the same `--dedupe-key` returns the same work id and does not admit a second row. A refusal
+is now reported back instead of being silently dropped: nudging an agent id that is not
+configured fails with `unknown-agent`, and the other reason-bearing outcomes (`self-target`,
+`session-agent-mismatch` — a `--session` key naming a different agent than `--agent` —
+`depth-exceeded`) surface as `INVALID_REQUEST` gateway errors. Two outcomes surface as
+`UNAVAILABLE`: an enqueue failure, and `rejected-overflow` (the target session already holds
+its cap of 32 parked delayed turns), which is marked `retryable` because it clears once the
+lane drains. Non-zero means the CLI rejected the input (empty text or
+invalid `--data`), the seam refused the nudge, or the gateway call failed. Only the legacy
+internal path (cron and heartbeat producers calling `requestNudge`) remains fire-and-forget, so
+its busy, overflow, and enqueue outcomes are still not reported back.
 
 The Gateway method behind this command (`agent.nudge`) validates the same contract for CLI,
 Web UI, and automation clients:
@@ -51,6 +90,7 @@ Web UI, and automation clients:
 - `agentId`, `sessionKey`, `source`, and `dedupeKey` must be non-empty strings when present.
 - `ttlMs`, when present, must be an integer greater than or equal to 1.
 - `priority`, when present, must be one of `low`, `normal`, `high`, or `urgent`.
+- `reason`, `source`, `ttlMs`, `priority`, and `requiresIdle` are accepted and ignored.
 - Unknown fields are rejected instead of being ignored.
 
 ## Examples

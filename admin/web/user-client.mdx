@@ -24,15 +24,21 @@ sources:
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/providers/navigation-preferences.ts
+  - apps/web/src/providers/auto-read-preference.ts
   - apps/web/src/ui/DisplayMenu.tsx
   - apps/web/src/ui/NavigationMenus.tsx
   - apps/web/src/providers/session-list-runtime.ts
+  - apps/web/src/providers/image-resize.ts
+  - apps/web/src/ui/use-composer-paste.ts
+  - apps/web/src/ui/markdown/html-to-markdown.ts
+  - apps/web/src/ui/clipboard-html.ts
+  - apps/web/src/ui/use-dictate-autosend.ts
   - apps/web/src/state/types.ts
   - apps/web/index.html
   - apps/web/src/ui/ActivityRail.tsx
   - extensions/ui-surfaces/index.ts
   - packages/ui-contract/src/index.ts
-generated: 2026-10-17
+generated: 2026-10-25
 ---
 
 # Web client hosting
@@ -337,7 +343,7 @@ Methods the client calls with `operator.sessions.read`:
 | `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a session                                                                                |
 | `chat.history`                            | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere                                              |
 | `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection                                                                                                           |
-| `tts.readAloud.status`                    | Whether the **Read aloud** button is available, and the text limit it sends with                                                                                           |
+| `tts.readAloud.status`                    | Whether the **Read aloud** button and the **Read replies aloud** auto-read toggle are available, and the text limit the client caps both paths' chunks to                  |
 | `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas)) |
 
 Methods the client calls with `operator.sessions.write`:
@@ -356,7 +362,7 @@ Methods the client calls with `operator.sessions.write`:
 | `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline                                |
 | `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                                                 |
 | `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                                                     |
-| `tts.speak`                | The **Read aloud** button on replies: synthesizes a reply's text into inline audio to play                                                                                                                                                                                                                                    |
+| `tts.speak`                | The **Read aloud** button on replies, and the **Read replies aloud** auto-read toggle: synthesize reply text into inline audio to play. Auto-read speaks a streaming reply sentence by sentence, so one reply can produce several `tts.speak` requests, each under the advertised `maxTextLength`                             |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -372,7 +378,11 @@ Gateway settings that decide what users can do with those methods:
   **Read aloud** button; an assistant's own `agents.list[].tts.readAloud.enabled` overrides it for
   that assistant. With the gate on but no TTS provider configured, the button still shows as
   unavailable. While a Voice conversation is active (listening, thinking or speaking), it is
-  unavailable, and starting Voice mode stops any playback in progress. See
+  unavailable, and starting Voice mode stops any playback in progress. The composer's
+  **Read replies aloud** toggle rides the same gate: with it on, a streaming reply is spoken
+  sentence by sentence while it is written, each chunk capped at the `maxTextLength` the status
+  reports. The toggle is a per-browser preference (default off) with no gateway setting yet - an
+  operator-side per-assistant default is tracked as finding #1347. See
   [Text-to-speech](/tts).
 - **Suggest a title.** Each use sends the chat's first message (up to 1000 characters) to the
   assistant's default model - the agent's configured model, not the model picked for the chat. The
@@ -536,6 +546,21 @@ The defaults and available choices are:
 | Chat sort order           | `desc` (`chatSortOrder: "desc"`)        | `asc`, `desc`                                              |
 | Show reasoning            | `false` (`showReasoning: false`)        | `true`, `false`                                            |
 | Tool details              | `minimum` (`tools: "minimum"`)          | `hide`, `minimum`, `collapsed`, `full`                     |
+| Read replies aloud        | `false` (`autoRead: false`)             | `true`, `false`                                            |
+
+The **Read replies aloud** toggle uses its own storage key,
+`openclaw.web.auto-read:<encodedGatewayUrl>:<clientId>`, holding `1` or `0` per gateway URL and
+client ID like the other preferences. With it on, the client also sends dictated turns
+automatically when the user pauses. There is no gateway-side default yet; an operator-level
+per-assistant default is tracked as finding #1347.
+
+Assistants picked in the **Browse assistants** window stay visible in the sidebar for the current
+page session only: the client keeps the picked assistant ids in memory (`pickedAgentIds`, a
+session-only list that is never written to storage) so they stay listed past the activity
+window until a reload. The selected assistant filter itself still persists as
+`selectedAgentId` under the navigation key. When a filtered page of `sessions.list` returns,
+the client merges that page's `agentActivity` into its existing map instead of replacing it, so
+picking one assistant no longer blanks the activity of the others already on screen.
 
 <Warning>
 Navigation filters are not authorization boundaries. Hiding internal sessions or filtering the UI
@@ -587,8 +612,18 @@ session filter and search, paging past the first page, the model switcher and Th
 while a reply streams, rename and Suggest, and replying to a message are live (client-chat-v3
 P2). Replies appearing on every open device without a reload, the busy and unread indicators,
 the desktop-notification opt-in, Dictate and Voice mode's on/off state, and the automatic
-resend into a chat changed elsewhere are also live; see
-[Using the web client](/web/using-the-web-client) for what users see.
+resend into a chat changed elsewhere are also live. The 2026-10-25 client chat-flow slice added
+more live behaviour, all client-side: assistants picked in the Browse assistants window stay in
+the sidebar for the browser session, the chat area no longer overflows horizontally on narrow
+screens, the composer's **Read replies aloud** toggle reads streaming replies sentence by
+sentence and sends dictation when the user pauses, user messages render markdown, pasted rich
+text (Word, Google Docs, web pages) converts to markdown in the draft, the copy button writes
+structured rich text with a plain-text fallback, and large images are downscaled to at most
+2048 px on attach; see [Using the web client](/web/using-the-web-client) for what users see.
+
+Two known gaps in that slice: an image that cannot be re-encoded under the 5 MB attachment cap
+is still rejected at attach time (#1330), and stopping a read-aloud does not cancel a
+`tts.speak` request already in flight.
 
 **Canvas** in the top bar is no longer on this list: it is live with the `ui-surfaces` plugin
 enabled and explains itself when it is not (see
@@ -609,7 +644,11 @@ phase.
 provider is configured - see [Text-to-speech](/tts) and
 [Web client components](/reference/web-client-components#read-aloud), plus the
 "Gateway settings" list in
-[What the client needs from the gateway](#what-the-client-needs-from-the-gateway).
+[What the client needs from the gateway](#what-the-client-needs-from-the-gateway). The composer's
+**Read replies aloud** auto-read toggle is live under the same gate (see
+[Navigation and transcript preferences](#navigation-and-transcript-preferences)); the dictation
+auto-send it enables is client-side and needs no gateway method beyond the Dictate session
+methods already listed.
 
 ## Rules the host must follow
 

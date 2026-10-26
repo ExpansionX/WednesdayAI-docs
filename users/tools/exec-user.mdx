@@ -4,8 +4,10 @@ component: exec-tools
 sources:
   - src/config/types.tools.ts
   - src/infra/exec-approvals.ts
+  - src/infra/exec-policy-evaluate.ts
+  - src/gateway/node-invoke-system-run-approval.ts
   - src/config/types.approvals.ts
-generated: 2026-06-28
+generated: 2026-07-21
 ---
 
 # Exec Tool — User Guide
@@ -44,9 +46,42 @@ When a prompt fires, you see the command, cwd, agent id, and resolved binary pat
 
 If no UI is available to respond, the request falls back (usually to deny).
 
+## Policy engine (new)
+
+Behind the scenes, the approval gate now runs through a **policy engine** that evaluates
+deny/ask/allow rules before deciding whether to prompt you. The engine is opt-in: if you have not
+authored any v2 policies in `~/.openclaw/exec-approvals.json`, the engine is a no-op and the
+existing security/ask/allowlist behaviour you are used to is unchanged. When your operator adds
+policies (deny rules for dangerous commands, allow rules for trusted executables), the engine
+applies them with deny-first precedence — a single `deny` rule beats any number of `allow` rules.
+
+## Using exec presets
+
+Instead of hand-writing `security` / `ask` / `safeBins` / allowlist entries, set a named preset on the agent:
+
+```json
+{
+  "agents": {
+    "list": [
+      { "id": "main", "tools": { "exec": { "preset": "coding" } } },
+      { "id": "teacher", "tools": { "exec": { "preset": "readonly" } } }
+    ]
+  }
+}
+```
+
+- **readonly** — read-only diagnostics: `ls`, `cat`, `df`, `ps`, `grep`, `sort` and friends, plus stdin filters. Good default for non-technical agents.
+- **minimal** — only the 7 default stdin-safe bins (`jq`, `cut`, `uniq`, `head`, `tail`, `tr`, `wc`).
+- **coding** — readonly plus `git`, `node`, `npm`, `pnpm`, `python3`, `rg`.
+- **full** — no restrictions (`security: "full"`, `ask: "off"`).
+
+When a command falls outside what the preset allows, what happens depends on the policy: with the default `ask: "on-miss"` (and `security: "allowlist"`) you get an approval prompt rather than a silent failure; with `security: "deny"`, `ask: "off"`, or when no approval UI is attached, the command is denied or resolved via the configured ask fallback instead of prompting. Explicit `security` / `ask` / `safeBins` fields you set yourself override the preset. The Agents → Tools panel in the Control UI (v2: **Configure → Agents → Tools**) shows the effective policy and offers the same picker.
+
+See [Exec policy presets](/tools/exec-approvals#exec-policy-presets) for the full pack contents.
+
 ## Giving an agent full exec permission
 
-To skip approval prompts entirely for an agent, set `security: "full"` and `ask: "off"`:
+Prefer a preset (above) over raw `full` where possible. To skip approval prompts entirely for an agent, set `security: "full"` and `ask: "off"`:
 
 ```json
 {
@@ -116,7 +151,7 @@ Add patterns to `~/.openclaw/exec-approvals.json` under your agent's `allowlist`
 }
 ```
 
-Or use the **Control UI → Nodes → Exec approvals** card to add patterns interactively.
+Or use the **Control UI v2 → Fleet → Nodes & devices → Exec approvals** panel to add patterns interactively.
 
 ## Per-session overrides (/exec)
 
@@ -138,13 +173,14 @@ Exec lifecycle appears as system messages in your session:
 
 ## Quick config reference
 
-| Key                          | Default             | What it does                     |
-| ---------------------------- | ------------------- | -------------------------------- |
-| `tools.exec.host`            | `sandbox`           | Where exec runs                  |
-| `tools.exec.security`        | `deny`              | `deny` / `allowlist` / `full`    |
-| `tools.exec.ask`             | `on-miss`           | When to prompt                   |
-| `tools.exec.safeBins`        | (list above)        | Stdin-only auto-trusted binaries |
-| `agents.list[].tools.exec.*` | (inherits defaults) | Per-agent overrides              |
+| Key                          | Default             | What it does                                               |
+| ---------------------------- | ------------------- | ---------------------------------------------------------- |
+| `tools.exec.host`            | `sandbox`           | Where exec runs                                            |
+| `tools.exec.security`        | `deny`              | `deny` / `allowlist` / `full`                              |
+| `tools.exec.ask`             | `on-miss`           | When to prompt                                             |
+| `tools.exec.preset`          | unset               | Named policy baseline (readonly / minimal / coding / full) |
+| `tools.exec.safeBins`        | (list above)        | Stdin-only auto-trusted binaries                           |
+| `agents.list[].tools.exec.*` | (inherits defaults) | Per-agent overrides                                        |
 
 ## Examples
 

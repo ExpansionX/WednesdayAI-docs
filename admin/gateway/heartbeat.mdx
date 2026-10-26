@@ -7,11 +7,12 @@ audience: admin
 component: heartbeat
 sources:
   - src/infra/heartbeat-runner.ts
+  - src/infra/nudge.ts
   - src/infra/system-events.ts
   - src/backbone/passes/heartbeat-tick.ts
   - src/gateway/task-pipeline-boot.ts
   - src/acp/control-plane/agent-turn-execute.ts
-generated: "2026-08-24"
+generated: "2026-10-25"
 title: "Heartbeat"
 ---
 
@@ -458,8 +459,12 @@ The nudge contract is one payload shared by every trigger surface:
 - **`text`** (required): the human-readable context the persona sees.
 - **`data`** (optional): a structured JSON object, rendered into the system-event text and also
   carried raw for programmatic subscribers.
-- **target** (optional): `agentId` or an explicit `sessionKey`; defaults to the default agent's main
-  session.
+- **target** (optional): `agentId`, defaulting to the default agent's main session. On the
+  authorized coordination path (`requestAuthorizedNudge`) only operator surfaces (CLI
+  `--session`, the `agent.nudge` RPC) may pass an explicit `sessionKey`, and it must name the
+  same agent; plugins and agents always reach the target's main session. The legacy internal
+  producers (cron, heartbeat wake-gate) call `requestNudge`, which still accepts an explicit
+  `sessionKey`.
 
 **Silent-unless-it-decides.** The persona receives the payload as non-user context and produces a
 user-facing message **only when warranted**, otherwise acknowledges with `HEARTBEAT_OK` and no
@@ -484,11 +489,13 @@ persona wake:
 ### Plugin / hook example
 
 ```ts
-api.runtime.signals.nudge({
+// Requires plugins.entries.<id>.grants.agentTurn.agents to include "ops"; otherwise this
+// rejects with AuthorizationError. See /concepts/agent-coordination.
+const result = await api.runtime.signals.nudge({
   agentId: "ops",
   text: "Calendar: standup starts in 10 minutes.",
   data: { eventId: "evt_123", startsInMin: 10 },
-  reason: "calendar",
+  dedupeKey: "standup:evt_123",
 });
 ```
 

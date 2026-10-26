@@ -406,7 +406,7 @@ Plugin hooks registered via `api.on(hookName, handler)` intercept the agent pipe
 | `storage.afterAppend`  | After a conversation entry is appended to context storage                                                                       | `ContextLifecycleContext`                            | void                                                                                         |
 | `context.collect`      | During context construction, before prompt assembly                                                                             | `ContextLifecycleContext`                            | `PromptContribution` or void                                                                 |
 | `context.project`      | During context projection, after collection                                                                                     | `ContextLifecycleContext`                            | `{ messages?, projection?, contribution?, failedPluginIds? }` or void                        |
-| `context.prune`        | During context pruning                                                                                                          | `ContextLifecycleContext`                            | `{ messages?, dropped?, contribution?, suppressCompaction? }` or void                        |
+| `context.prune`        | During context pruning                                                                                                          | `ContextLifecycleContext`                            | `{ messages?, dropped?, contribution?, compactionHandled?, freezeToolResults? }` or void     |
 | `session_start`        | A session begins (new or resumed)                                                                                               | `PluginHookSessionContext`                           | void                                                                                         |
 | `session_end`          | A session ends                                                                                                                  | `PluginHookSessionContext`                           | void                                                                                         |
 | `subagent_spawning`    | A sub-agent is about to be spawned                                                                                              | `PluginHookSubagentContext`                          | `{ status: "ok" \| "error", ... }` or void                                                   |
@@ -576,6 +576,31 @@ context includes `sessionId`, `sessionKey`, `runId`, storage cursor data when
 available, sender identity fields, and the same optional `runtimeIdentity` and
 `turn` objects. Use `context.collect` for context contributions and
 `storage.afterAppend` for background capture or extraction queues.
+
+`context.project` and `context.prune` run on every model call of a run,
+including the continuations that follow overflow compaction or an automatic
+retry, and each call gets fresh per-call fields on `ContextLifecycleContext`.
+`context.collect` runs once per attempt, before the first model call; it
+receives `ContextLifecycleContext` without the per-call fields.
+`transform_llm_input` runs on every model call and receives
+`PluginHookAgentContext`, which does not carry the per-call lifecycle fields.
+
+Per-call fields on `ContextLifecycleContext` for `context.project` and
+`context.prune`:
+
+- `usage`: the run's usage totals so far.
+- `lastCallUsage`: the usage of the most recent assistant message in this call's
+  input; undefined on the first call of a session.
+- `tokenWindow.estimatedInputTokens`: an estimate of this call's input after core
+  tool-result projection.
+
+Core changes tool-result bytes it already sent only in batched evictions, overflow
+recovery or a cache-TTL pruning round, so the provider prompt cache keeps hitting
+between those points. A `context.prune` handler that
+substitutes a tool result's text can return its `toolCallId` in
+`freezeToolResults`; core then replays that substitution on every later call and
+run until the result leaves history, even when the handler later returns the
+messages unchanged.
 
 A `context.project` result can carry `failedPluginIds`: the plugins whose
 handlers threw or timed out. A plugin that registered the `message-render`
