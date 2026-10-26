@@ -65,7 +65,7 @@ SLACK_BOT_TOKEN=xoxb-...
         - `message.channels`, `message.groups`, `message.im`, `message.mpim`
         - `reaction_added`, `reaction_removed`
         - `member_joined_channel`, `member_left_channel`
-        - `channel_created`, `channel_rename`, `channel_id_changed`
+        - `channel_rename`
         - `pin_added`, `pin_removed`
 
         Also enable App Home **Messages Tab** for DMs.
@@ -239,25 +239,12 @@ and still route command execution against the target conversation session (`Comm
 - Thread replies can create thread session suffixes (`:thread:<threadTs>`) when applicable.
 - `channels.slack.thread.historyScope` default is `thread`; `thread.inheritParent` default is `false`.
 - `channels.slack.thread.initialHistoryLimit` controls how many existing thread messages are fetched when a new thread session starts (default `20`; set `0` to disable).
-- `channels.slack.historyLimit`: max channel messages fetched as history context (default `50`; set `0` to disable). Falls back to `messages.groupChat.historyLimit` when unset.
-- `channels.slack.dmHistoryLimit`: max DM turns kept as history context; per-user override via `channels.slack.dms["<userId>"].historyLimit`.
 
 Reply threading controls:
 
 - `channels.slack.replyToMode`: `off|first|all` (default `off`)
-- `channels.slack.replyToModeByChatType`: per-chat-type overrides keyed by `direct|group|channel`, each `off|first|all`. When set for a chat type, it takes precedence over `replyToMode` and over the legacy `dm.replyToMode` fallback
+- `channels.slack.replyToModeByChatType`: per `direct|group|channel`
 - legacy fallback for direct chats: `channels.slack.dm.replyToMode`
-
-```json5
-{
-  channels: {
-    slack: {
-      replyToMode: "off",
-      replyToModeByChatType: { direct: "all", group: "first", channel: "off" },
-    },
-  },
-}
-```
 
 Manual reply tags are supported:
 
@@ -279,7 +266,8 @@ Note: `replyToMode="off"` disables **all** reply threading in Slack, including e
   <Accordion title="Outbound text and files">
     - text chunks use `channels.slack.textChunkLimit` (default 4000)
     - `channels.slack.chunkMode="newline"` prefers paragraph/block boundaries and packs as many complete paragraphs as fit into each message up to `textChunkLimit`, falling back to length-based splitting only when a single block exceeds the limit. Fenced code blocks and tables are kept intact.
-    - `channels.slack.chunkNewlinePacking` (default `true`): set to `false` to restore one message per paragraph (the pre-packing behaviour).
+    - `channels.slack.chunkMode="paragraph"` emits one message per paragraph. Oversized blocks still fall back to length splitting.
+    - `channels.slack.chunkNewlinePacking` is **deprecated** (default `true`); with `chunkMode: "newline"`, `false` ≡ `chunkMode: "paragraph"`.
     - file sends use Slack upload APIs and can include thread replies (`thread_ts`)
     - outbound media cap follows `channels.slack.mediaMaxMb` when configured; otherwise channel sends use MIME-kind defaults from media pipeline
   </Accordion>
@@ -417,9 +405,7 @@ Reaction events still respect Slack access controls; unauthorized senders are dr
         "reaction_removed",
         "member_joined_channel",
         "member_left_channel",
-        "channel_created",
         "channel_rename",
-        "channel_id_changed",
         "pin_added",
         "pin_removed"
       ]
