@@ -11,15 +11,17 @@ component: gateway-protocol
 sources:
   - src/gateway/protocol/index.ts
   - src/gateway/protocol/schema.ts
+  - src/gateway/protocol/schema/agent.ts
   - src/gateway/protocol/schema/sessions.ts
   - src/gateway/protocol/schema/chat-surfaces.ts
   - src/gateway/protocol/schema/logs-chat.ts
+  - src/gateway/server-methods/agent-nudge.ts
   - src/gateway/session-utils.ts
   - src/gateway/session-utils.fs.ts
   - src/gateway/session-reply-activity.ts
   - src/gateway/server-methods/chat.ts
   - src/shared/session-visibility.ts
-generated: 2026-10-17
+generated: 2026-10-25
 ---
 
 # Gateway protocol (WebSocket)
@@ -446,7 +448,20 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   `text` is required; optional fields are `data`, `agentId`, `sessionKey`, `reason`, `source`,
   `dedupeKey`, `ttlMs`, `priority`, and `requiresIdle`. Extra fields are rejected. `reason`,
   `source`, `ttlMs`, `priority`, and `requiresIdle` are accepted for compatibility and ignored.
-  A successful response is `AgentNudgeResult` with `{ "ok": true, "sessionKey": "...", "signalId": "..." }`.
+  `sessionKey`, when given, must name the same agent as `agentId` (`session-agent-mismatch`
+  otherwise); a successful response is `AgentNudgeResult` with `{ "ok": true, "sessionKey": "...", "signalId": "..." }`
+  and confirms durable admission: `signalId` is the idempotency key of the persisted row. Dedupe
+  is requester-scoped — the key is `agent-turn:nudge:operator:<runId>`, where `runId` is derived
+  from the requester, the target session, and `dedupeKey` when one is supplied, so the same
+  operator request
+  with the same `dedupeKey` is admitted once and different requesters never collide. Plugin and
+  agent callers use the same seam with their own requester-scoped keys; see
+  [Agent coordination](/concepts/agent-coordination#dedupe). A refusal surfaces as
+  `INVALID_REQUEST` with the reason (`empty-text`, `unknown-agent`, `self-target`,
+  `session-agent-mismatch`, `depth-exceeded`) as the message, except the two backpressure
+  outcomes: `enqueue-failed` answers `UNAVAILABLE`, and `rejected-overflow` — the target session
+  already holds its cap of 32 parked delayed turns — answers `UNAVAILABLE` with
+  `retryable: true` because it clears once the lane drains.
 
 - Operators may call `sessions.describe` (`operator.read`; narrow-admitted) with
   `{key, includeDerivedTitles?, includeLastMessage?}` to fetch a single gateway session row:
@@ -989,6 +1004,15 @@ For example, these are complete RPC `params` objects; they require no imports:
   "limit": 50
 }
 ```
+
+### Session-chat broadcast finals
+
+Heartbeat and system-event agent-turn output delivered to the session chat (an explicit
+`webchat` target or a fallback) is appended to the session transcript and broadcast as a
+`chat` `final` event so live clients see it without re-reading history. These finals
+carry a `runId` prefixed with `session-chat-` (for example `session-chat-<uuid>`) and
+reuse the standard display pipeline, so they look like any other assistant reply.
+`chat.inject` is unchanged.
 
 ### The chat error event
 

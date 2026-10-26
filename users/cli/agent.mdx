@@ -10,6 +10,31 @@ title: "agent"
 Run an agent turn via the Gateway (use `--local` for embedded).
 Use `--agent <id>` to target a configured agent directly.
 
+A `--local` turn takes exclusive ownership of the configured SQL session database and
+releases it when the turn ends. It refuses to run while a Gateway owns that database.
+The Gateway reads the same stored sessions and history when it next starts.
+
+Normal Gateway requests do not open the database in the CLI, including session-ID
+lookups. For a current `--session-id`, the Gateway finds its current SQL owner key
+before applying session policy and `/new` or `/reset` handling. If that stored key
+is unqualified and belongs to a non-default agent, the request is rejected with the
+stored key and an instruction to pass the session key explicitly; the Gateway
+does not guess an alias. If canonical key lookup selects a different session ID,
+the request is also rejected before policy checks, reset, or mutation rather than
+running against that other session. A session with `sendPolicy: "deny"` refuses
+the turn even without `--deliver`. An older or deleted session ID is forwarded
+unchanged without resolving it to the current session's key; it does not reset or
+retarget the current session. A new `--session-id` is stored under the default
+agent's qualified key (`agent:<default-agent>:<id>`), so later turns with the same
+ID resume that session. A new ID that contains `:` or names `main`, the configured
+main key, `global`, or `unknown` is rejected; use `--agent`, or pass `sessionKey` to
+the Gateway `agent` method, to reach those sessions.
+Session IDs map to keys case-insensitively, so `Run-1` and `run-1` share one key and
+only the first one admitted owns it.
+If the Gateway request fails, an embedded fallback is allowed only when the CLI
+can acquire local storage ownership. An unreachable live Gateway or a remote-mode
+configuration never falls back to local database access.
+
 Related:
 
 - Agent send tool: [Agent send](/tools/agent-send)

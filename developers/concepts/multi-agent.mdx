@@ -214,6 +214,17 @@ Common channels supporting this pattern include:
 - `binding`: routes inbound messages to an `agentId` by `(channel, accountId, peer)` and optionally guild/team ids.
 - Direct chats collapse to `agent:<agentId>:<mainKey>` (per-agent “main”; `session.mainKey`).
 
+## Agent-to-agent communication and handoffs
+
+When running multiple agents, agents can interact using two distinct patterns:
+
+- **`agents_nudge` (durable handoffs)**: Fire-and-forget wake signal. Wakes the target agent to run one turn in its direct main session (`agent:<agentId>:main`) with your message. The nudge is enqueued durably as an `agent.turn` work row, surviving gateway restarts and recovering automatically. Use `agents_nudge` for task handoffs, background notifications, and triggers where the caller does not wait for a synchronous reply.
+- **`sessions_send` (session messaging)**: Synchronous message delivered directly into a specific target session (`sessionKey` or `sessionId`). When `timeoutSeconds > 0`, the caller waits for the run to finish and can engage in a multi-turn ping-pong dialogue before returning.
+
+Both tools share the same agent-to-agent authorization gate (`tools.agentToAgent.enabled: true` and the target listed under `tools.agentToAgent.allow`), and cross-agent calls require `tools.sessions.visibility: "all"` (clamped to `tree` in sandboxed sessions).
+
+For detailed grant rules, idempotency keys, and chained hop caps, see [Agent coordination](/concepts/agent-coordination).
+
 ## Platform examples
 
 ### Discord bots per agent

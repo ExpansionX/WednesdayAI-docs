@@ -4,10 +4,25 @@ component: exec-tools
 sources:
   - src/config/types.tools.ts
   - src/infra/exec-approvals.ts
+  - src/infra/exec-policy-presets.ts
+  - src/infra/exec-effective-policy.ts
+  - src/infra/canonical-execution-request.ts
+  - src/infra/exec-policy-types.ts
+  - src/infra/exec-policy-evaluate.ts
+  - src/infra/shell-parse.ts
+  - src/infra/exec-audit.ts
+  - src/infra/approval-replay-binding.ts
+  - src/infra/friendly-rule-compiler.ts
+  - src/infra/approved-script-validation.ts
+  - src/infra/load-policies-for-request.ts
+  - src/infra/saas-capability-profile.ts
+  - src/infra/executable-path.ts
+  - src/gateway/node-invoke-system-run-approval.ts
+  - src/gateway/node-invoke-sanitize.ts
   - src/config/types.approvals.ts
   - src/config/types.agents.ts
   - src/config/types.agent-defaults.ts
-generated: 2026-06-28
+generated: 2026-08-20
 ---
 
 # Exec Tool — Developer Reference
@@ -16,13 +31,28 @@ Type definitions, policy precedence, and implementation details for the exec too
 
 ## Source files
 
-| File                                 | What it defines                                                      |
-| ------------------------------------ | -------------------------------------------------------------------- |
-| `src/config/types.tools.ts`          | `ExecToolConfig`, `AgentToolsConfig`, `FsToolsConfig`, `ToolsConfig` |
-| `src/infra/exec-approvals.ts`        | `ExecSecurity`, `ExecAsk`, `ExecApprovalsFile`, approval runtime     |
-| `src/config/types.approvals.ts`      | `ApprovalsConfig`, `ExecApprovalForwardingConfig`                    |
-| `src/config/types.agents.ts`         | `AgentConfig.tools`                                                  |
-| `src/config/types.agent-defaults.ts` | `elevatedDefault`                                                    |
+| File                                             | What it defines                                                                                                       |
+| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `src/config/types.tools.ts`                      | `ExecToolConfig`, `AgentToolsConfig`, `FsToolsConfig`, `ToolsConfig`                                                  |
+| `src/infra/exec-approvals.ts`                    | `ExecSecurity`, `ExecAsk`, `ExecApprovalsFile` (v1), `ExecApprovalsFileV2`, `ApprovalRecord`, migration runtime       |
+| `src/infra/exec-policy-presets.ts`               | `EXEC_POLICY_PRESETS` (readonly/minimal/coding/full), `ExecPolicyPresetId`, `resolveExecPolicyPreset`                 |
+| `src/infra/exec-effective-policy.ts`             | `resolveEffectiveExecPolicy`, `EffectiveExecPolicy`, `EffectiveExecCanExec` (display/RPC resolver)                    |
+| `src/infra/canonical-execution-request.ts`       | `CanonicalExecutionRequest`, `ExecInvocation`, `ShellInvocation`, `ApprovedScriptInvocation`, `McpInvocation`         |
+| `src/infra/exec-policy-types.ts`                 | `CompiledExecutionPolicy`, `PolicyEffect`, `PolicySource`, `PolicyNamespace`, source + effect precedence              |
+| `src/infra/exec-policy-evaluate.ts`              | `evaluatePolicies`, `reEvaluatePoliciesForPath`, `namespaceMatchesInvocation`, `globMatch`                            |
+| `src/infra/shell-parse.ts`                       | `parseShellSegments`, `parsePowerShellSegments`, `parseCmdSegments`, `detectDangerousWrapper`, `hasUnterminatedQuote` |
+| `src/infra/exec-audit.ts`                        | `ExecAuditRecord`, `emitAuditRecord`, `redactArgvForAudit`, `redactCommandText`                                       |
+| `src/infra/approval-replay-binding.ts`           | `bindApprovalToCanonicalRequest`, `replayApproval` (anti-tamper hash + `timingSafeEqual`)                             |
+| `src/infra/friendly-rule-compiler.ts`            | `compileFriendlyRule` (`Bash(pnpm test:*)` → compiled policy)                                                         |
+| `src/infra/approved-script-validation.ts`        | `validateApprovedScriptArgs`, `validateInputSummary` (JSON Schema type matching)                                      |
+| `src/infra/load-policies-for-request.ts`         | `PolicySourceLoader`, `createUserPolicySource`, `loadPoliciesForRequest`                                              |
+| `src/infra/saas-capability-profile.ts`           | `AgentProfile`, `loadAgentProfile`, `evaluateSaasProfile` (SaaS gate, deferred)                                       |
+| `src/infra/executable-path.ts`                   | `resolveExecutablePath` (PATH lookup + symlink-aware)                                                                 |
+| `src/gateway/node-invoke-system-run-approval.ts` | Gateway wiring: RPC gate, policy load, env sanitize, PATH re-resolve, evaluate, non-interactive ask, audit emit       |
+| `src/gateway/node-invoke-sanitize.ts`            | `sanitizeNodeInvokeParamsForForwarding` (async entry point)                                                           |
+| `src/config/types.approvals.ts`                  | `ApprovalsConfig`, `ExecApprovalForwardingConfig`                                                                     |
+| `src/config/types.agents.ts`                     | `AgentConfig.tools`                                                                                                   |
+| `src/config/types.agent-defaults.ts`             | `elevatedDefault`                                                                                                     |
 
 ## ExecToolConfig
 
@@ -32,6 +62,7 @@ export type ExecToolConfig = {
   host?: "sandbox" | "gateway" | "node"; // default: "sandbox"
   security?: "deny" | "allowlist" | "full"; // default: "deny"
   ask?: "off" | "on-miss" | "always"; // default: "on-miss"
+  preset?: ExecPolicyPresetId; // "readonly" | "minimal" | "coding" | "full"
   node?: string;
   pathPrepend?: string[];
   safeBins?: string[];
@@ -89,6 +120,10 @@ export type FsToolsConfig = {
 
 ## ExecApprovalsFile schema
 
+The exec-approvals store has two coexisting versions. v1 is migrated in-memory to v2 on load;
+the on-disk file is not auto-overwritten (D18 R3) — callers that only need `policies`/`approvals`
+can ignore the v1 fields preserved on the v2 schema.
+
 ```typescript
 // src/infra/exec-approvals.ts
 
@@ -114,8 +149,33 @@ export type ExecApprovalsAgent = ExecApprovalsDefaults & {
   allowlist?: ExecAllowlistEntry[];
 };
 
+// v1 (legacy on-disk format, still accepted)
 export type ExecApprovalsFile = {
   version: 1;
+  socket?: { path?: string; token?: string };
+  defaults?: ExecApprovalsDefaults;
+  agents?: Record<string, ExecApprovalsAgent>;
+};
+
+// v2 (in-memory after migration; the on-disk v1 fields are preserved as a super-set)
+export type ApprovalRecord = {
+  id: string;
+  /** SHA-256 of the authoritative canonical-request fields (display excluded per ADR 0029). */
+  requestHash: string;
+  scope: {
+    agentId: string;
+    sessionKey: string;
+    tenantId?: string;
+    workspaceId?: string;
+  };
+  boundAt: number;
+};
+
+export type ExecApprovalsFileV2 = {
+  version: 2;
+  policies: CompiledExecutionPolicy[];
+  approvals: ApprovalRecord[];
+  // Preserved v1 fields (super-set, not destroyed by migration):
   socket?: { path?: string; token?: string };
   defaults?: ExecApprovalsDefaults;
   agents?: Record<string, ExecApprovalsAgent>;
@@ -172,6 +232,19 @@ Config schema uses two separate shapes:
 - `ToolExecSchema` — global, no `approvalRunningNoticeMs`
 - `AgentToolExecSchema` — extends base with `approvalRunningNoticeMs`
 
+## Exec policy presets (runtime)
+
+`tools.exec.preset` is resolved in `resolveExecConfig` (`src/agents/pi-tools.ts`, exported) before the exec tool is built:
+
+- `presetId` = agent `tools.exec.preset` ?? global `tools.exec.preset`.
+- `security` / `ask` / `safeBins` resolve through a 4-level chain: agent explicit > agent preset > global explicit > global preset.
+- `allowlistPack` follows the **winning preset only** (agent preset if set, else global) — an agent preset `minimal` suppresses a global `readonly` pack rather than mixing.
+- Unknown ids fall back to no-preset with a subsystem warning (`infra/exec-policy-presets`).
+
+At the gateway host seam, `processGatewayAllowlist` (`src/agents/bash-tools.exec-host-gateway.ts`) unions the pack entries with the agent's `exec-approvals.json` allowlist **before** `evaluateShellAllowlist`. Pack entries are `{ pattern }` objects constructed at evaluation time and are never persisted: `recordMatchedAllowlistUse` skips any match whose pattern is in the `packPatterns` set, so `~/.openclaw/exec-approvals.json` is never rewritten by preset usage. `minSecurity` / `maxAsk` flooring against the approvals file still applies on top.
+
+The `tools.catalog` RPC response now carries an additive `execPolicy` block (`ToolsCatalogExecPolicy` typebox schema, compile-time linked to the resolver return) computed by `resolveEffectiveExecPolicy(resolved.cfg, resolved.agentId)`: `{ presetId?, security, ask, canExec: none | safebins-only | full | normal, allowlistEntryCount, safeBinCount, sources, warning? }` — absent keys are omitted, never `null`.
+
 ## Tool policy filtering order
 
 Tool availability is determined in this order (each level can only further restrict):
@@ -193,17 +266,17 @@ If `agents.list[].tools.sandbox.tools` is set, it replaces `tools.sandbox.tools`
 
 Tool policies support `group:*` shorthands:
 
-| Group              | Expands to                                                                               |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `group:runtime`    | `exec`, `bash`, `process`                                                                |
-| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                   |
-| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
-| `group:memory`     | `memory_search`, `memory_get`                                                            |
-| `group:ui`         | `browser`, `canvas`                                                                      |
-| `group:automation` | `cron`, `gateway`                                                                        |
-| `group:messaging`  | `message`                                                                                |
-| `group:nodes`      | `nodes`                                                                                  |
-| `group:openclaw`   | all built-in tools (excludes provider plugins)                                           |
+| Group              | Expands to                                                                                               |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `bash`, `process`                                                                                |
+| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                                   |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
+| `group:memory`     | `memory_search`, `memory_get`                                                                            |
+| `group:ui`         | `browser`, `canvas`                                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                                        |
+| `group:messaging`  | `message`                                                                                                |
+| `group:nodes`      | `nodes`                                                                                                  |
+| `group:openclaw`   | all built-in tools (excludes provider plugins)                                                           |
 
 ## Safe bin implementation
 
@@ -268,3 +341,197 @@ elevatedDefault?: "off" | "on" | "ask" | "full";
 Sets the default elevated level when no `/elevated` directive is present for a session. `"full"` skips exec approvals entirely.
 
 Related: [Exec Tool (user)](/tools/exec-user) · [Exec Tool (admin)](/tools/exec-admin) · [Sandboxing (developer)](/gateway/sandboxing-developer)
+
+## Canonical execution model
+
+The exec tool's host-execution path runs through a **canonical execution model** policy engine
+bolted onto the gateway's `sanitizeNodeInvokeParamsForForwarding` entry point
+(`src/gateway/node-invoke-sanitize.ts`). The engine is **opt-in**: when zero policies are loaded,
+the pipeline is a no-op and the request is allowed (pre-PR behaviour is preserved). Deny-first
+enforcement only activates when at least one `CompiledExecutionPolicy` is present in
+`~/.openclaw/exec-approvals.json` (v2 `policies` array).
+
+### CanonicalExecutionRequest shape
+
+```typescript
+// src/infra/canonical-execution-request.ts
+
+export type CanonicalExecutionRequest = {
+  kind: "exec" | "approved-script" | "mcp-operation";
+  invocation:
+    | ExecInvocation // argv mode
+    | ShellInvocation // shell mode (parsed segments)
+    | ApprovedScriptInvocation
+    | McpInvocation;
+  target: {
+    host: "gateway" | "node" | "sandbox" | "saas-worker";
+    nodeId?: string;
+    nodeName?: string;
+    os?: "linux" | "macos" | "windows" | "unknown";
+  };
+  context: {
+    agentId: string;
+    sessionKey: string;
+    requester?: string;
+    workspaceId?: string;
+    tenantId?: string;
+    pluginId?: string;
+  };
+  cwd?: string;
+  envDelta?: Record<string, string>;
+  timeoutMs?: number;
+  stdin?: "absent" | "present-redacted";
+  display: {
+    commandText: string;
+    source: "derived" | "legacy-raw-command" | "model-generated" | "user-authored";
+  };
+};
+
+export type ExecInvocation = {
+  mode: "argv";
+  executable: string;
+  /** Resolved absolute path of `executable` after PATH lookup; populated by the gateway
+      on PATH mutation. Honoured by `resolvedPathGlob` policy matching. */
+  resolvedExecutablePath?: string;
+  args: string[];
+};
+```
+
+The `display` field is **non-authoritative** — when the model-supplied `rawCommand` disagrees with
+the hardened argv (B8), the gateway logs a warn and proceeds with the argv. The display field is
+excluded from the approval-replay hash (ADR 0029) so cosmetic drift does not invalidate bindings.
+
+### CompiledExecutionPolicy
+
+```typescript
+// src/infra/exec-policy-types.ts
+
+export type PolicyEffect = "deny" | "ask" | "allow";
+export type PolicySource = "managed" | "project" | "user" | "session" | "approval";
+export type PolicyNamespace = "exec.shell" | "exec.argv" | "approved-script" | "mcp";
+
+export type CompiledExecutionPolicy = {
+  id: string;
+  effect: PolicyEffect;
+  source: PolicySource;
+  namespace: PolicyNamespace;
+  match: {
+    shell?: "posix-sh" | "powershell" | "cmd";
+    executableName?: string;
+    resolvedPathGlob?: string; // dependency-free glob: *, ?, **
+    argvPattern?: string; // "*" = any, otherwise prefix match
+    matchAnyTrailingArgs?: boolean; // argvPattern matches a prefix
+    scriptId?: string;
+    mcpServerId?: string;
+    mcpToolName?: string;
+    operationClass?: "read" | "write" | "destructive" | "admin";
+  };
+  scope?: { agentId?; nodeId?; workspaceId?; tenantId?; pluginId? };
+};
+```
+
+### Policy evaluator
+
+`evaluatePolicies(request, policies, defaultEffect)` in `src/infra/exec-policy-evaluate.ts`:
+
+1. **Namespace gate** — `namespaceMatchesInvocation` rejects cross-kind authorization (an
+   `exec.argv` policy with `match:{}` cannot authorize `approved-script` or `mcp-operation`).
+2. **Per-namespace match** — argv mode matches on `executableName` (basename, `/` + `\\` aware),
+   `resolvedPathGlob` (when `resolvedExecutablePath` is populated), `argvPattern` (with optional
+   `matchAnyTrailingArgs`). Shell mode walks `parsedSegments` per-segment (chain-injection guard:
+   a `rm -rf / && git status` request with an `allow git` policy does NOT match).
+3. **Deny-first sort** — `EFFECT_PRECEDENCE` (deny=300, ask=200, allow=100), then `SOURCE_PRECEDENCE`
+   (managed=500, project=400, user=300, session=200, approval=100).
+4. **PATH re-resolution** — `reEvaluatePoliciesForPath` re-runs the pipeline after
+   `resolveExecutablePath` swaps the executable against the sanitized env (B17). The re-resolved
+   request populates `resolvedExecutablePath` for `resolvedPathGlob` matching.
+
+### Friendly-rule compiler
+
+`compileFriendlyRule("Bash(pnpm test:*)", "allow")` in `src/infra/friendly-rule-compiler.ts`:
+
+- Splits on the FIRST space: `Bash(foo bar baz:*)` → `executableName: "foo"`, `argvPattern: "bar baz"`,
+  `matchAnyTrailingArgs: true`. An executable name containing shell metacharacters is rejected.
+- `Bash(*)` → no executableName constraint, `argvPattern: "*"`.
+- `Bash(git status:*)` → `executableName: "git"`, `argvPattern: "status"`, `matchAnyTrailingArgs: true`.
+
+The friendly-rule compiler is library-only today (deferred per D19); production wiring depends on a
+config-UI surface that has not shipped.
+
+### Shell parser (library-only, deferred per D19)
+
+`src/infra/shell-parse.ts` ships three minimum-viable parsers (POSIX, PowerShell, cmd.exe) and a
+`detectDangerousWrapper` that unwraps `sh -c` / `bash -c` / `pwsh -Command` / `cmd /c` / `sudo` /
+`doas` / `runas` / `env` / `command` / `exec` / `xargs`. The wrapper detector skips preceding option
+flags (`sh -e -c "rm -rf /"` is detected; `hasUnterminatedQuote` tracks quote spans instead of
+parity-counting, so `echo "it's working"` does not false-positive.
+
+The parser is **not wired** into the production argv-mode path today —
+`canonicalizeLegacySystemRunParams` always emits `mode: "argv"`. Wiring shell-mode detection
+(`argv[0]` is `sh`/`bash` with `-c`) would activate the per-segment chain-injection guard, the
+dangerous-wrapper detection, and the `shellChainPattern` deny pattern in one stroke.
+
+### Audit record (S8)
+
+`emitAuditRecord` in `src/infra/exec-audit.ts` emits a structured audit record via the
+`infra/exec-audit` subsystem logger. Redaction covers:
+
+- `sk-` prefix (case-insensitive) and `Bearer` token values, in both bare-token and `key=value` forms.
+- `Authorization: Bearer <token>` spans are pre-redacted before whitespace tokenization, so the
+  token cannot leak as separate tokens.
+- Flag-name matching (`/token/i`, `/auth/i`, `/credential/i`, `/secret/i`) catches `--token=...`
+  even when the value is not a known prefix.
+
+Early-deny sites (RPC gate, replay binding, PATH re-eval) return early without emitting audit
+today — see the plan-fidelity review's SC8 known-open note.
+
+### Approval-replay binding (anti-tamper)
+
+`bindApprovalToCanonicalRequest` in `src/infra/approval-replay-binding.ts` records a SHA-256 of the
+authoritative canonical-request fields (display excluded per ADR 0029). `replayApproval` compares
+the presented hash against the stored hash using `crypto.timingSafeEqual` to avoid a timing
+side-channel. The binding is **not** one-shot consumed (spec L394 ambiguity) — one-shot consumption
+happens at the approval-manager layer (`manager.consumeAllowOnce`), which correctly distinguishes
+`allow-once` (consumed) from `allow-always` (reusable). Consuming the binding here would break
+allow-always approvals.
+
+### SaaS capability profile (library-only, deferred per D18-update / D19)
+
+`evaluateSaasProfile` in `src/infra/saas-capability-profile.ts` enforces the SC6 boundary:
+
+- shell-mode: hard-denied for SaaS agents
+- argv-mode: hard-denied unless `profile.allowedExecutables` enumerates the executable
+- approved-script: matched on scriptId; args validated via `validateApprovedScriptArgs`
+- mcp-operation: matched on (serverId, toolName, operationClass)
+
+The SaaS gate is library-only today; production wiring depends on a SaaS-mode provider config that
+has not shipped. The `tenantId`-stamping gap (spec L75 says the gateway stamps it from the
+authenticated identity, not from the request payload) is a known-open deviation flagged in the
+plan-fidelity review — currently `tenantId` flows from the client RPC payload verbatim.
+
+### Non-interactive ask resolution
+
+`resolveNonInteractiveAsk` in `src/infra/non-interactive-ask.ts` is a standalone module (no gateway
+imports) that resolves an `ask` effect when no interactive UI is reachable: defaults to `deny` for
+SaaS mode, `askFallback` for local/operator mode. Consumed by the gateway wiring at the policy
+evaluation site.
+
+### Loaders
+
+`loadPoliciesForRequest` in `src/infra/load-policies-for-request.ts` composes multiple
+`PolicySourceLoader` instances and flattens their policies. `createUserPolicySource` reads
+`~/.openclaw/exec-approvals.json` via `loadExecApprovalsV2`; a corrupt or missing store logs a
+warning and returns `[]` (the engine stays opt-in — no policies means no enforcement, pre-PR allow).
+
+## Wiring status (production argv path)
+
+The argv-mode production path is wired at `src/gateway/server-methods/nodes.ts:750`
+(`await sanitizeNodeInvokeParamsForForwarding({... gatewayNodes: cfg.gateway?.nodes})`) →
+`src/gateway/node-invoke-sanitize.ts` → `src/gateway/node-invoke-system-run-approval.ts`. Trusted
+policy inputs (`interactive`, `gatewayNodes` RPC command-id gate config) are derived from gateway
+state, never client payload.
+
+Library-only surfaces (deferred per D19): friendly-rule compiler, SaaS capability gate, shell parser
+(POSIX/PowerShell/cmd), `shellChainPattern` deny pattern, SC4 `denialLayer` audit field. These
+activate when their respective config surfaces (friendly-rule UI, SaaS provider config, shell-mode
+dispatch) are wired in a future release.

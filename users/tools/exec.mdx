@@ -57,6 +57,7 @@ Notes:
 - `tools.exec.ask` (default: `on-miss`)
 - `tools.exec.node` (default: unset)
 - `tools.exec.pathPrepend`: list of directories to prepend to `PATH` for exec runs (gateway + sandbox only).
+- `tools.exec.preset`: named baseline exec policy (readonly / minimal / coding / full). See [Presets](/tools/exec-approvals#exec-policy-presets).
 - `tools.exec.safeBins`: stdin-only safe binaries that can run without explicit allowlist entries. For behavior details, see [Safe bins](/tools/exec-approvals#safe-bins-stdin-only).
 - `tools.exec.safeBinTrustedDirs`: additional explicit directories trusted for `safeBins` path checks. `PATH` entries are never auto-trusted. Built-in defaults are `/bin` and `/usr/bin`.
 - `tools.exec.safeBinProfiles`: optional custom argv policy per safe bin (`minPositional`, `maxPositional`, `allowedValueFlags`, `deniedFlags`).
@@ -97,7 +98,7 @@ openclaw config get agents.list
 openclaw config set agents.list[0].tools.exec.node "node-id-or-name"
 ```
 
-Control UI: the Nodes tab includes a small “Exec node binding” panel for the same settings.
+Classic console (`/classic`): the Nodes tab includes a small “Exec node binding” panel for the same settings. The default [Control UI v2](/web/control-ui-v2) console has no such panel - set the keys above in its **Settings** screen instead.
 
 ## Session overrides (`/exec`)
 
@@ -126,6 +127,29 @@ When approvals are required, the exec tool returns immediately with
 `status: "approval-pending"` and an approval id. Once approved (or denied / timed out),
 the Gateway emits system events (`Exec finished` / `Exec denied`). If the command is still
 running after `tools.exec.approvalRunningNoticeMs`, a single `Exec running` notice is emitted.
+
+## Canonical execution model (policy engine)
+
+Behind the approval gate, exec host execution runs through a **canonical execution model** policy
+engine. The engine evaluates `deny`/`ask`/`allow` rules against a canonical request shape
+(`kind: exec | approved-script | mcp-operation`, invocation mode, target host, agent context)
+and applies deny-first + source-precedence sorting. The engine is **opt-in**: when zero policies
+are loaded, the pipeline is a no-op and the pre-policy-engine behaviour is preserved.
+
+Key behaviours operators should know:
+
+- **Deny-first** — a single `deny` policy beats any number of `allow` policies, regardless of source.
+- **PATH re-resolution** — when a request mutates `PATH`, the gateway re-resolves the executable
+  against the sanitized env and re-runs the policy pipeline (closes a path-hijack vector).
+- **Approval-replay binding** — approvals are bound to a SHA-256 of the canonical request's
+  authoritative fields; a tampered request (e.g. swapped executable) is rejected on replay.
+- **Audit trail** — every policy outcome emits a structured audit record; secret-looking values
+  (`sk-*`, `Bearer *`, `Authorization: Bearer *`) are redacted.
+
+Policies live in `~/.openclaw/exec-approvals.json` under the v2 `policies` array. See
+[Exec Tool (developer)](/tools/exec-developer#canonical-execution-model) for the full type
+definitions and wiring status. The v1 schema (allowlist + defaults + per-agent overrides) is
+preserved as a super-set — migration is in-memory and non-destructive.
 
 ## Allowlist + safe bins
 

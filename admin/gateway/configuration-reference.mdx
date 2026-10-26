@@ -8,10 +8,11 @@ read_when:
 audience: admin
 sources:
   - src/config/types.base.ts
+  - src/config/types.plugins.ts
   - src/config/zod-schema.ts
   - src/config/schema.help.ts
   - src/logging/file-log-writer.ts
-generated: 2026-06-16
+generated: 2026-10-25
 ---
 
 # Configuration Reference
@@ -1091,7 +1092,7 @@ Periodic heartbeat runs.
         session: "main",
         to: "+15555550123",
         directPolicy: "allow", // allow (default) | block
-        target: "none", // default: none | options: last | whatsapp | telegram | discord | ...
+        target: "none", // default: none | options: last | webchat | whatsapp | telegram | discord | ...
         prompt: "Read HEARTBEAT.md if it exists...",
         ackMaxChars: 300,
         suppressToolErrorWarnings: false,
@@ -1998,27 +1999,27 @@ sessions keep the configuration resolved when they started.
 
 Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved).
 
-| Profile     | Includes                                                                                  |
-| ----------- | ----------------------------------------------------------------------------------------- |
-| `minimal`   | `session_status` only                                                                     |
-| `coding`    | `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`                    |
-| `messaging` | `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `session_status` |
-| `full`      | No restriction (same as unset)                                                            |
+| Profile     | Includes                                                                                                  |
+| ----------- | --------------------------------------------------------------------------------------------------------- |
+| `minimal`   | `session_status` only                                                                                     |
+| `coding`    | `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`                                    |
+| `messaging` | `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `session_status` |
+| `full`      | No restriction (same as unset)                                                                            |
 
 ### Tool groups
 
-| Group              | Tools                                                                                    |
-| ------------------ | ---------------------------------------------------------------------------------------- |
-| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                            |
-| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                   |
-| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`, `session_status` |
-| `group:memory`     | `memory_search`, `memory_get`                                                            |
-| `group:web`        | `web_search`, `web_fetch`                                                                |
-| `group:ui`         | `browser`, `canvas`                                                                      |
-| `group:automation` | `cron`, `gateway`                                                                        |
-| `group:messaging`  | `message`                                                                                |
-| `group:nodes`      | `nodes`                                                                                  |
-| `group:openclaw`   | All built-in tools (excludes provider plugins)                                           |
+| Group              | Tools                                                                                                    |
+| ------------------ | -------------------------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                            |
+| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                                   |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
+| `group:memory`     | `memory_search`, `memory_get`                                                                            |
+| `group:web`        | `web_search`, `web_fetch`                                                                                |
+| `group:ui`         | `browser`, `canvas`                                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                                        |
+| `group:messaging`  | `message`                                                                                                |
+| `group:nodes`      | `nodes`                                                                                                  |
+| `group:openclaw`   | All built-in tools (excludes provider plugins)                                                           |
 
 ### `tools.allow` / `tools.deny`
 
@@ -2299,7 +2300,7 @@ Tool-policy defaults for spawned sub-agents. Controls which **tools** sub-agents
 - `tools.allow`: if set, becomes allow-only (deny still wins).
 - `tools.alsoAllow`: additional allowlist entries merged into allow and/or default sub-agent denylist.
 - `tools.deny`: denied tools (deny wins over allow).
-- Sub-agents always start with all tools except session tools (`sessions_list`, `sessions_history`, `sessions_send`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
+- Sub-agents always start with all tools except session tools (`sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
 
 For runtime tuning (depth, concurrency, timeouts, archive), see `agents.defaults.subagents.*` above.
 
@@ -2661,6 +2662,9 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
 - `plugins.entries.<id>.apiKey`: plugin-level API key convenience field (when supported by the plugin).
 - `plugins.entries.<id>.env`: plugin-scoped env var map.
 - `plugins.entries.<id>.config`: plugin-defined config object (validated by plugin schema).
+- `plugins.entries.<id>.grants.agentTurn.agents`: agent ids (or `"*"`) this plugin may wake
+  through `api.runtime.signals.nudge`; default deny. Each wake is a durable `agent.turn` nudge.
+  See [Agent coordination](/concepts/agent-coordination).
 - `plugins.slots.memory`: pick the active memory plugin id, or `"none"` to disable memory plugins.
 - `plugins.hookTimeouts`: per-hook timeout in milliseconds. Keys are hook names or `default`.
   Unset hooks use 30000 ms. Registration `api.on(..., { timeoutMs })` still wins. Restart required.
