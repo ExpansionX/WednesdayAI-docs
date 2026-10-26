@@ -29,7 +29,9 @@ generated: 2026-10-15
 Control UI v2 is the WednesdayAI operator console and the **default console**: the gateway serves
 it at the root (`/`). It covers the full operator surface, grouped in the sidebar as **Monitor**,
 **Configure**, **Fleet** and **Learning** (see [What the pages show](#what-the-pages-show)), plus
-a command palette (⌘K or Ctrl+K) and light and dark themes. The [classic Control
+a command palette (⌘K or Ctrl+K) and light and dark themes. When an allowlisted plugin
+contributes console UI, a **Plugins** group appears with its pages (see
+[Plugin pages and panels](#plugin-pages-and-panels)). The [classic Control
 UI](/web/control-ui) is deprecated: it serves at `/classic` for one more release and is removed in
 the next release.
 
@@ -235,7 +237,9 @@ gateway" instead.
   today, 7 days or 30 days, upcoming automations, nodes and pending approvals. Refreshes every 30
   seconds and on reconnect.
 - **Sessions**: every session with its channel, model, context use (flagged at 80%) and last
-  activity. Select one to see its runs.
+  activity. Select one to open the Session inspector next to the list: it shows the session facts
+  (channel, model, tokens, last activity), a **View runs** link to the runs filtered by that
+  session, and plugin panels contributed by allowlisted plugins.
 - **Runs**: agent turns and task runs, filtered by Queued, Running, Needs attention, Failed or
   Done. Select a run for its details and timeline, abort a running turn, decide an interrupted
   run, or answer an approval that belongs to it. Queued and task runs need SQLite or Postgres
@@ -286,6 +290,28 @@ removed with it; the web client's Dictate and Voice mode buttons are a separate 
 
 Approvals requested before the console connected are not listed; the bell counts the ones that
 arrived since.
+
+## Plugin pages and panels
+
+Trusted plugins can extend the console with their own browser code (ADR 0111). The operator opts
+in per plugin with `gateway.controlUiV2.pluginUi.allow` (default none); an allowlisted plugin
+whose manifest declares `controlUi.entry` can then add:
+
+- **Pages** in a **Plugins** sidebar group and the command palette. Each page is its own route
+  (`?plugin=<id>&page=<pageId>`), titled with the page label the plugin registered.
+- **Session panels** in the Session inspector, receiving the inspected session key.
+- **Run panels** at the end of the Run inspector, receiving the session and run ids.
+
+Plugin UI loads only when the console is served by the gateway origin; on a standalone or
+cross-origin deployment the console reports the gateway origin it would need instead of loading
+plugin modules. Plugin code runs with the signed-in operator's gateway authority, so allow only
+plugins you trust. Each plugin loads in isolation: a plugin that fails to load or activate is
+reported per plugin in **Debug** (with its failure message) and never breaks the rest of the
+console.
+
+Developers build these modules against the SDK subpath `wednesdayai/plugin-sdk/control-ui`; see
+[Control UI plugins](/plugins/control-ui). After updating a plugin, reload the tab: loaded plugin
+modules stay cached for the life of the page.
 
 ## Troubleshooting
 

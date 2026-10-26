@@ -1,0 +1,156 @@
+---
+summary: "Kokoro local text-to-speech for read aloud, voice notes and Voice conversation"
+read_when:
+  - You want local TTS without an API key
+  - Configuring the Kokoro plugin for TTS or Voice conversation
+  - talk.catalog reports the kokoro row unavailable
+title: "Kokoro (Local TTS)"
+---
+
+# Kokoro (local TTS)
+
+Kokoro is the bundled local text-to-speech provider, powered by
+[Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI). It runs on your own hardware, speaks the
+OpenAI-compatible `/audio/speech` endpoint, and needs no API key. Because the URL is operator
+config, a custom or local TTS server never has to borrow the built-in `openai` provider, and real
+OpenAI TTS keeps working alongside it.
+
+The plugin registers both speech seams under the single id `kokoro`:
+
+- **Batch TTS** (`registerSpeechProvider`) — read aloud, voice notes, auto-TTS and the `tts` tool,
+  served through `messages.tts.provider` (see [Text-to-speech](/tts#custom-and-local-providers)).
+- **Streaming TTS** (`registerStreamingSpeechProvider`) — spoken replies in Voice conversation,
+  served through `talk.provider` (see
+  [Voice conversation sessions](/talk/realtime-voice-conversation)).
+
+Kokoro is speech output only. Voice conversation still needs a streaming speech-to-text provider,
+for example ElevenLabs (see [ElevenLabs streaming voice](/providers/elevenlabs)).
+
+Website: [https://github.com/remsky/Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI)
+
+## Quick start
+
+1. Run the server:
+
+```text
+docker run -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
+A GPU image is available as `ghcr.io/remsky/kokoro-fastapi-gpu`. Confirm the server is up:
+`curl localhost:8880/v1/models` should list the `kokoro` model.
+
+2. Enable the plugin and select the provider:
+
+```json5
+{
+  plugins: { entries: { kokoro: { enabled: true, config: { voice: "af_heart" } } } },
+  messages: { tts: { provider: "kokoro" } },
+  talk: { provider: "kokoro" },
+}
+```
+
+3. Restart the gateway, then confirm with `talk.catalog`: its `speech` section should list a
+   `kokoro` row with `configured: true`. For the batch path, `tts.providers` lists the same row.
+
+The plugin is bundled but disabled by default. Enabling it is the only "configured" check the
+batch provider makes — there is no API key and no reachability probe.
+
+## Configuration
+
+Plugin settings live under `plugins.entries.kokoro.config`:
+
+| Key       | Default                    | Effect                                                  |
+| --------- | -------------------------- | ------------------------------------------------------- |
+| `baseUrl` | `http://127.0.0.1:8880/v1` | Kokoro-FastAPI endpoint (trailing slashes are stripped) |
+| `model`   | `kokoro`                   | Model id sent in the request body                       |
+| `voice`   | `af_heart`                 | Default voice                                           |
+
+Batch-side overrides live under `messages.tts.providers.kokoro` and the per-agent
+`agents.list[].tts.providers.kokoro`:
+
+| Key     | Default                     | Effect                    |
+| ------- | --------------------------- | ------------------------- |
+| `voice` | the plugin's `config.voice` | Voice for batch synthesis |
+| `model` | the plugin's `config.model` | Model for batch synthesis |
+
+```json5
+{
+  plugins: { entries: { kokoro: { enabled: true, config: { voice: "af_heart" } } } },
+  messages: { tts: { provider: "kokoro" } },
+  agents: {
+    list: [{ id: "ops", tts: { providers: { kokoro: { voice: "am_adam" } } } }],
+  },
+}
+```
+
+Voices can be mixed by joining names with `+`, for example `af_bella+af_sky`; the string is passed
+through verbatim.
+
+For Voice conversation only, `talk.providers.kokoro.baseUrl` overrides the plugin's `config.baseUrl`
+for the streaming seam. Batch synthesis (read aloud, voice notes) always uses the plugin
+`config.baseUrl` — a single Kokoro server serves every agent.
+
+## Per-agent voices
+
+`agents.list[].tts` gives each agent its own voice, and it applies everywhere that agent speaks:
+read aloud, voice notes, auto-TTS, the `/tts` commands and the `tts` tool. In the example above the
+`ops` agent speaks with `am_adam` while every other agent uses `af_heart`.
+
+When Voice conversation speaks, the voice resolves in this order:
+
+1. The active agent's `agents.list[].tts` voice for the talk provider.
+2. `talk.providers.kokoro.voiceId` (the global Talk setting).
+3. `messages.tts.providers.kokoro.voice`.
+4. The plugin's default voice (`config.voice`, `af_heart`).
+
+Selecting an agent in the web client selects its voice; there is no separate voice picker.
+
+## Fallback behaviour
+
+A plugin provider can also serve as a fallback: when the primary provider fails, the gateway tries
+the built-ins (`openai`, `elevenlabs`, `edge`) and then the remaining plugin providers. Set
+`messages.tts.provider` (or the per-agent block) to make Kokoro the primary; it is never
+auto-selected.
+
+## Troubleshooting
+
+### Synthesis fails with `Kokoro TTS request failed (HTTP ...)`
+
+The gateway could not synthesize with the configured endpoint. Check that the server is running
+(`curl localhost:8880/v1/models` lists `kokoro`), that `plugins.entries.kokoro.config.baseUrl`
+points at the right port, and that the request model (`config.model`) is one the server offers.
+Error messages never echo the URL, because it can carry credentials.
+
+### Synthesis fails with `Kokoro TTS request failed (network error)` or `Kokoro TTS request aborted`
+
+`network error` means the request could not reach the server at all — the server is down, the port
+is wrong, or a firewall blocks it. `aborted` means the request was cancelled before it finished:
+the per-request `messages.tts.timeoutMs` (default 30 seconds) expired, or the read-aloud request
+was dropped. Kokoro on CPU can be slower than real time for long text; raise `timeoutMs` or shorten
+the text.
+
+### Synthesis fails with `Kokoro TTS response too large`
+
+The server returned more than 16 MiB for one synthesis request. This usually means the request hit
+a non-Kokoro endpoint (for example a proxy or file server at the configured `baseUrl`). Check
+`plugins.entries.kokoro.config.baseUrl` points at the Kokoro-FastAPI server itself.
+
+### The `kokoro` row in `talk.catalog` or `tts.providers` reports `configured: false`
+
+For `tts.providers`, the batch provider is always configured while the plugin is enabled — check
+`plugins.entries.kokoro.enabled`. In `talk.catalog`'s `speech` section, a keyless provider like
+Kokoro is configured as soon as the plugin is enabled and a voice resolves; if the row is
+unconfigured, enable the plugin and restart the gateway.
+
+### Voice conversation reports no configured TTS provider
+
+Kokoro registers only speech (TTS). Voice conversation needs a streaming speech-to-text provider as
+well — see [Voice conversation sessions](/talk/realtime-voice-conversation) and
+[ElevenLabs streaming voice](/providers/elevenlabs).
+
+## Related
+
+- [Text-to-speech](/tts) — batch TTS config, per-agent voices, fallback order
+- [Voice conversation sessions](/talk/realtime-voice-conversation)
+- [ElevenLabs streaming voice](/providers/elevenlabs)
+- [Register a speech provider](/tools/plugin#speechproviderplugin-batch-tts)

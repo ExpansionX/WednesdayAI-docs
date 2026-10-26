@@ -18,6 +18,8 @@ It works anywhere OpenClaw can send audio; Telegram gets a round voice-note bubb
 - **ElevenLabs** (primary or fallback provider)
 - **OpenAI** (primary or fallback provider; also used for summaries)
 - **Edge TTS** (primary or fallback provider; uses `node-edge-tts`, default when no API keys)
+- **Plugin providers** (primary or fallback provider; registered by plugins such as the bundled
+  Kokoro plugin — see [Custom and local providers](#custom-and-local-providers))
 
 ### Edge TTS notes
 
@@ -226,9 +228,10 @@ Then run:
   - `tagged` only sends audio when the reply includes `[[tts]]` tags.
 - `enabled`: legacy toggle (doctor migrates this to `auto`).
 - `mode`: `"final"` (default) or `"all"` (includes tool/block replies).
-- `provider`: `"elevenlabs"`, `"openai"`, or `"edge"` (fallback is automatic).
+- `provider`: `"elevenlabs"`, `"openai"`, `"edge"`, or a plugin-registered provider id such as
+  `kokoro` (fallback is automatic).
 - If `provider` is **unset**, OpenClaw prefers `openai` (if key), then `elevenlabs` (if key),
-  otherwise `edge`.
+  otherwise `edge`. Plugin providers are never auto-selected; set `provider` to use one.
 - `summaryModel`: optional cheap model for auto-summary; defaults to `agents.defaults.model.primary`.
   - Accepts `provider/model` or a configured model alias.
 - `modelOverrides`: allow the model to emit TTS directives (on by default).
@@ -238,6 +241,20 @@ Then run:
 - `prefsPath`: override the local prefs JSON path (provider/limit/summary).
 - `apiKey` values fall back to env vars (`ELEVENLABS_API_KEY`/`XI_API_KEY`, `OPENAI_API_KEY`).
 - `elevenlabs.baseUrl`: override ElevenLabs API base URL.
+- `elevenlabs.modelId`: ElevenLabs model id (default `eleven_multilingual_v2`). For interactive
+  Read aloud, `eleven_flash_v2_5` sounds nearly the same and responds noticeably faster, which
+  matters when the client plays chunks back to back; the batch default stays
+  `eleven_multilingual_v2` for the best quality on one-shot voice notes.
+- `openai.baseUrl`: OpenAI-compatible endpoint for OpenAI TTS (default `https://api.openai.com/v1`).
+  Overridable per agent with `agents.list[].tts.openai.baseUrl`. Replaces the deprecated
+  `OPENAI_TTS_BASE_URL` env var, which is now only used when no config value is set (the gateway
+  logs a one-time deprecation warning when it is the source). A non-default endpoint also relaxes
+  the OpenAI model and voice validators, so a local server can accept model and voice names
+  api.openai.com does not know.
+- `providers`: per-provider settings for plugin-registered speech providers, keyed by provider id
+  (`voice`, `model`, plus provider-specific keys). Built-in ids are rejected here; per-agent
+  override under `agents.list[].tts.providers`. See
+  [Custom and local providers](#custom-and-local-providers).
 - `elevenlabs.voiceSettings`:
   - `stability`, `similarityBoost`, `style`: `0..1`
   - `useSpeakerBoost`: `true|false`
@@ -278,6 +295,92 @@ the prefs file) still wins over any configured provider.
 For Discord voice playback there is one more layer: the resolution order is
 `messages.tts` → the route agent's `agents.list[].tts` → `channels.discord.voice.tts`,
 so `voice.tts` still wins for voice channels.
+
+## Custom and local providers
+
+Plugins can register additional batch TTS providers, so you are not limited to the built-in
+`elevenlabs`, `openai` and `edge`. WednesdayAI ships one bundled plugin provider: **Kokoro**, a
+local text-to-speech server from [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI). It
+speaks OpenAI-compatible TTS against your own hardware, with no API key.
+
+### Run a Kokoro server
+
+```text
+docker run -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
+A GPU image is available as `ghcr.io/remsky/kokoro-fastapi-gpu`. Confirm the server is up:
+`curl localhost:8880/v1/models` should list the `kokoro` model.
+
+### Enable the plugin and select the provider
+
+```json5
+{
+  plugins: { entries: { kokoro: { enabled: true, config: { voice: "af_heart" } } } },
+  messages: { tts: { provider: "kokoro" } },
+  talk: { provider: "kokoro" },
+  agents: { list: [{ id: "ops", tts: { providers: { kokoro: { voice: "am_adam" } } } }] },
+}
+```
+
+- `plugins.entries.kokoro.enabled`: the plugin is bundled but disabled by default.
+- `plugins.entries.kokoro.config.baseUrl`: Kokoro-FastAPI endpoint (default
+  `http://127.0.0.1:8880/v1`).
+- `plugins.entries.kokoro.config.model`: model id (default `kokoro`).
+- `plugins.entries.kokoro.config.voice`: default voice (default `af_heart`).
+- `messages.tts.provider` / `agents.list[].tts.provider`: set to `kokoro` to make it the primary
+  provider for that scope. Plugin providers never win automatic selection; you must set `provider`.
+- `talk.provider`: makes Kokoro the spoken reply provider for Voice conversation (see below).
+
+Config changes need a gateway restart.
+
+Other plugin providers work the same way: their per-provider settings live under
+`messages.tts.providers.<id>` (and the per-agent override `agents.list[].tts.providers.<id>`),
+with `voice` and `model` as the common keys. Built-in ids are rejected under `providers` — the
+built-ins keep their own blocks (`messages.tts.openai`, `messages.tts.elevenlabs`,
+`messages.tts.edge`).
+
+### Fallback order
+
+When the primary provider fails, the fallback order is: the configured primary, then the built-ins
+(`openai`, `elevenlabs`, `edge`), then the remaining plugin-registered providers. A plugin provider
+can therefore serve as a fallback for OpenAI or ElevenLabs without extra configuration.
+
+### Per-agent voices
+
+The `agents.list[].tts` block gives each agent its own voice, and it applies everywhere the agent
+speaks: Read aloud, voice notes, auto-TTS, the `/tts` commands and the `tts` tool. In the example
+above, the `ops` agent speaks with `am_adam` while every other agent uses the plugin default
+`af_heart`.
+
+Voices can be mixed, passing several through at once — for example `af_bella+af_sky`:
+
+```json5
+{
+  agents: {
+    list: [{ id: "narrator", tts: { providers: { kokoro: { voice: "af_bella+af_sky" } } } }],
+  },
+}
+```
+
+### Voice conversation voice precedence
+
+When Voice conversation (`talk.provider: "kokoro"` in `stt-tts` mode) speaks, the voice resolves in
+this order:
+
+1. The active agent's `agents.list[].tts` voice for the talk provider (`agents.list[].tts.providers.kokoro.voice`).
+2. `talk.providers.kokoro.voiceId` (the global Talk setting, unchanged).
+3. `messages.tts.providers.kokoro.voice` (plugin providers only).
+4. The provider's default voice (the plugin's `config.voice`, `af_heart`).
+
+Selecting an agent in the web client therefore selects its voice; there is no separate voice picker.
+
+<Note>
+Kokoro is speech output only. Voice conversation still needs a streaming speech-to-text provider
+(for example ElevenLabs) — see
+[Voice conversation sessions](/talk/realtime-voice-conversation) and
+[ElevenLabs streaming voice](/providers/elevenlabs).
+</Note>
 
 ## Read aloud for chat clients
 
@@ -335,13 +438,22 @@ Here you go.
 
 Available directive keys (when enabled):
 
-- `provider` (`openai` | `elevenlabs` | `edge`, requires `allowProvider: true`)
+- `provider` (`openai` | `elevenlabs` | `edge`, or a registered plugin provider id; requires
+  `allowProvider: true`; ids are matched case-insensitively)
 - `voice` (OpenAI voice) or `voiceId` (ElevenLabs)
-- `model` (OpenAI TTS model or ElevenLabs model id)
+- `model` — routing depends on the key and value: `openai_model=` goes to OpenAI and
+  `elevenlabs_model=` to ElevenLabs. A bare `model=` routes by value: a known OpenAI model id
+  goes to OpenAI, an `eleven_*` model id goes to ElevenLabs; with a custom `openai.baseUrl`, any
+  other id goes to OpenAI (the endpoint decides what it accepts), otherwise to ElevenLabs.
 - `stability`, `similarityBoost`, `style`, `speed`, `useSpeakerBoost`
 - `applyTextNormalization` (`auto|on|off`)
 - `languageCode` (ISO 639-1)
 - `seed`
+
+Directives cannot set plugin-provider voices or models: `voice=` and `voiceId=` only affect the
+OpenAI and ElevenLabs built-ins, and a plugin provider takes its voice and model from
+`messages.tts.providers.<id>` (or the per-agent `agents.list[].tts.providers.<id>`) config. A
+`provider=` directive may still name a plugin provider when `allowProvider` is on.
 
 Disable all model overrides:
 
@@ -458,6 +570,9 @@ Notes:
 - `commands.text` or native command registration must be enabled.
 - `off|always|inbound|tagged` are per‑session toggles (`/tts on` is an alias for `/tts always`).
 - `limit` and `summary` are stored in local prefs, not the main config.
+- `/tts provider` accepts a built-in id or a plugin-registered provider id (for example
+  `/tts provider kokoro`); `/tts provider` with no argument lists every provider with its
+  configured state.
 - `/tts audio` generates a one-off audio reply (does not toggle TTS on).
 
 ## Agent tool
@@ -512,6 +627,8 @@ Edge TTS connects to Microsoft's online endpoints and has no published SLA. Tran
 
 ## Related
 
+- [Kokoro (local TTS)](/providers/kokoro)
+- [ElevenLabs streaming voice](/providers/elevenlabs)
 - [Slash commands](/tools/slash-commands)
 - [Gateway configuration](/gateway/configuration)
 - [Agent loop](/concepts/agent-loop)
@@ -525,5 +642,7 @@ reply. It is a separate system from the live voice conversation behind the
 [ElevenLabs streaming voice](/providers/elevenlabs). The two keep separate ElevenLabs config even
 when both point at the same vendor: cascaded Voice mode reads `talk.providers.<id>`, not
 `messages.tts.elevenlabs`, and an unset cascaded Voice model falls back to `eleven_flash_v2_5`
-rather than this page's `eleven_multilingual_v2`. The `realtime` Voice engine uses neither.
+rather than this page's `eleven_multilingual_v2`. The `realtime` Voice engine likewise reads its
+own Talk provider credentials — for example `talk.providers["openai-realtime"].apiKey` (falling
+back to plugin defaults and `OPENAI_API_KEY`) — but it does not read `messages.tts` either.
 </Note>
