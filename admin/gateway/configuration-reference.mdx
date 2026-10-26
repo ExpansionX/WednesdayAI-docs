@@ -685,7 +685,9 @@ Group messages default to **require mention** (metadata mention or regex pattern
 }
 ```
 
-Resolution: per-DM override → provider default → no limit (all retained).
+Resolution: per-DM override → provider default → no limit (all retained). The DM's channel and
+peer id come from the session's stored identity, not the session key text: a session with no
+stored identity gets no limit (all retained), and a per-DM override never matches it.
 
 Supported: `telegram`, `whatsapp`, `discord`, `slack`, `signal`, `imessage`, `msteams`.
 
@@ -1110,6 +1112,7 @@ Periodic heartbeat runs.
 - `wakeGate`: optional command/model gate checked before the heartbeat turn; on a positive gate the isolated heartbeat turn is enqueued and the main session is additionally nudged (`kind` nudge). Default `timeoutMs` is 30000. Gates the heartbeat producer only.
 - `activeHours`: optional window (`start`/`end`/`timezone`) — heartbeat ticks outside the window are skipped.
 - `lightContext`: when true, runs the heartbeat turn with a reduced context payload.
+- `toolsAllow`: exact tool names an isolated heartbeat may use (`[]` = no tools; matching is case- and alias-insensitive; when set the skills list is also omitted and skill-declared environment overrides are not applied; only with `isolatedSession: true` — ignored with a warn on a shared-session heartbeat; can only narrow the tool surface, policy `tools.allow` still applies; an entry matching no tool logs a `toolsAllow names matched no tool` warn; unset keeps the full tool surface).
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
 - `identity`: optional `session.identityLinks` key (matched case-insensitively). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`); unmatched values leave runs unattributed. Honoured per-agent via `agents.list[].heartbeat.identity`.
@@ -1735,14 +1738,14 @@ See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for preceden
   - `per-peer`: isolate by sender id across channels.
   - `per-channel-peer`: isolate per channel + sender (recommended for multi-user inboxes).
   - `per-account-channel-peer`: isolate per account + channel + sender (recommended for multi-account).
-- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity). Keys starting with `raw~` are rejected at config validation — that prefix is reserved for contained unlinked-sender session buckets (see [Sessions](/concepts/session)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; add that value to the person's links. Get ids from `openclaw devices list --json` (`deviceId` on each `paired` entry). Agents with [workspace lanes](/concepts/workspace-lanes) deny unlinked devices.
+- **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity). Keys starting with `raw~` are rejected at config validation — that prefix is reserved for contained unlinked-sender session buckets (see [Sessions](/concepts/session)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each device to a person with `wednesdayai devices link <deviceId> --identity <key>`, or pair it already linked with `wednesdayai identity link <key> --qr` (see [Identities](/gateway/identity)). Get ids from `openclaw devices list --json` (`deviceId` on each `paired` entry). Agents with [workspace lanes](/concepts/workspace-lanes) deny unlinked devices.
 - **`reset`**: primary reset policy. `daily` resets at `atHour` local time; `idle` resets after `idleMinutes`. When both configured, whichever expires first wins.
 - **`resetByType`**: per-type overrides (`direct`, `group`, `thread`). Legacy `dm` accepted as alias for `direct`.
 - **`parentForkMaxTokens`**: max parent-session `totalTokens` allowed when creating a forked thread session (default `100000`).
   - If parent `totalTokens` is above this value, OpenClaw starts a fresh thread session instead of inheriting parent transcript history.
   - Set `0` to disable this guard and always allow parent forking.
 - **`mainKey`**: legacy field. Runtime now always uses `"main"` for the main direct-chat bucket.
-- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. Rules match the session key, and a contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
+- **`sendPolicy`**: match by `channel`, `chatType` (`direct|group|channel`, with legacy `dm` alias), `keyPrefix`, or `rawKeyPrefix`. First deny wins. `channel` and `chatType` compare against the session's stored identity (the channel and peer kind recorded when the conversation arrived, or the session's recorded channel), never the session key text; `keyPrefix` and `rawKeyPrefix` match the key itself. A contained `raw~` bucket is a distinct key: a `keyPrefix` written for a linked person's canonical key does not match their unlinked `raw~<peer>` bucket — add a rule for each bucket (see [Sessions](/concepts/session)).
 - **`store`**: per-agent session store identity (supports the `{agentId}` template); also where
   legacy JSON session files are found for the one-time import. See
   [Sessions](/concepts/session#upgrading-from-json-session-files).
@@ -1865,8 +1868,12 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
       },
       openai: {
         apiKey: "openai_api_key",
+        baseUrl: "https://api.openai.com/v1", // OpenAI-compatible endpoint; replaces the deprecated OPENAI_TTS_BASE_URL env var
         model: "gpt-4o-mini-tts",
         voice: "alloy",
+      },
+      providers: {
+        kokoro: { voice: "af_heart", model: "kokoro" }, // plugin-registered speech providers only
       },
     },
   },
@@ -1876,6 +1883,14 @@ Batches rapid text-only messages from the same sender into a single agent turn. 
 - `auto` controls auto-TTS. `/tts off|always|inbound|tagged` overrides per session.
 - `summaryModel` overrides `agents.defaults.model.primary` for auto-summary.
 - `modelOverrides` is enabled by default; `modelOverrides.allowProvider` defaults to `false` (opt-in).
+- `openai.baseUrl`: OpenAI-compatible endpoint for OpenAI TTS (default `https://api.openai.com/v1`),
+  overridable per agent with `agents.list[].tts.openai.baseUrl`. The `OPENAI_TTS_BASE_URL` env var
+  is deprecated and is only used when no config value is set. A non-default endpoint relaxes the
+  OpenAI model and voice validators. See [Text-to-speech](/tts).
+- `providers`: per-provider settings for plugin-registered speech providers (such as the bundled
+  Kokoro plugin), keyed by provider id. Built-in ids (`openai`, `elevenlabs`, `edge`) are rejected
+  here. Plugin providers join the fallback order after the built-ins and are never auto-selected as
+  primary. See [Custom and local providers](/tts#custom-and-local-providers).
 - `readAloud.enabled`: gate for chat clients reading replies aloud on demand through the
   `tts.speak` gateway RPC (default `true`). Turn it off to stop on-demand synthesis spend; auto-TTS
   and `/tts` are unaffected. Overridden per agent by `agents.list[].tts.readAloud.enabled`. See
@@ -2814,6 +2829,7 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
       // enabled: false, // serve the web client bundle from this gateway (default off)
       // basePath: "/v2/client", // default; override to remount, must not collide with another SPA mount
       // root: "/srv/wednesdayai-web", // optional; defaults to the packaged dist/web-client
+      // accountLinking: true, // default; set false to keep all linking operator-only (no /link codes)
     },
     controlUiV2: {
       // enabled: true, // default; the v2 console owns the gateway root
@@ -2865,6 +2881,7 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - `webClient.basePath`: public path the gateway-served client is mounted under. Default `/v2/client`. It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`gateway.controlUi.basePath`, `gateway.controlUiV2.basePath` when the v2 console is enabled); a collision is rejected when the config loads, naming both keys. Earlier builds defaulted to `/client`; on a deployment that never set `basePath`, an old `/client/` bookmark no longer reaches the client (there is no redirect), and with the Control UI at the gateway root that path is answered by the Control UI. Set `basePath: "/client"` to keep the old address. `gateway.*` changes need a gateway restart. See [Web client hosting](/web/user-client#gateway-route).
 - `webClient.root`: directory holding the built bundle (`index.html` plus `assets/`). Optional: with `webClient.enabled` true and no `root`, the gateway serves the bundle packaged with this install (`dist/web-client`), and answers `503` naming the build command only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason rather than silently falling back.
 - `webClient.imageOrigins`: exact `https://host[:port]` origins that remote markdown images may load from in the gateway-served web client, extended into its CSP `img-src`. Default empty: remote images render as links and never auto-load, so agent output cannot turn them into a tracking or exfiltration channel. Each entry must be an exact https origin with no path, query or fragment. See [Web client hosting](/web/user-client).
+- `webClient.accountLinking`: lets a linked web-client user link their own chat accounts with `/link` codes (web client Account menu → Linked accounts → `identity.link.claim`). Default `true`. Set `false` to keep all linking operator-only: `/link` and the claim RPC both answer `Account linking is turned off on this gateway.` Operator commands (`identity add/link/unlink`, `devices link`, `pairing approve`) are unaffected. See [Identities](/gateway/identity).
 - `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `true`: the v2 console is the daily console and owns the gateway root, while the classic console (deprecated) serves at `/classic`. Set it to `false` only to run the classic console alone. The console connects as the classic console's `openclaw-control-ui` client, so admission, scopes and auth modes are the classic console's: browser origins are governed by `controlUi.allowedOrigins`, and there is no separate allowlist. A non-loopback bind with a console enabled still requires `controlUi.allowedOrigins` at startup. See [Control UI v2](/web/control-ui-v2).
 - `controlUiV2.basePath`: public path the console is mounted under. Default: the gateway root; the v2 console mounts at `/v2/control` instead when the root is already claimed (an explicit `basePath: "/"` on the classic console or an enabled web client, or the classic console keeping the root because another mount explicitly uses `/classic`), so configs valid before v2 became the default keep serving the same SPA at the root. Must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`, `controlUi.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
 - `controlUiV2.root`: directory holding the built console (`index.html` plus `assets/`). Optional: unset, the gateway serves the bundle packaged with this install (`dist/control-ui-v2`) and answers `503` naming `pnpm control:build:packaged` only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason.
