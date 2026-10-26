@@ -3,12 +3,21 @@ summary: "Heartbeat polling messages and notification rules"
 read_when:
   - Adjusting heartbeat cadence or messaging
   - Deciding between heartbeat and cron for scheduled tasks
+audience: admin
+component: heartbeat
+sources:
+  - src/infra/heartbeat-runner.ts
+  - src/infra/system-events.ts
+  - src/backbone/passes/heartbeat-tick.ts
+  - src/gateway/task-pipeline-boot.ts
+  - src/acp/control-plane/agent-turn-execute.ts
+generated: "2026-08-24"
 title: "Heartbeat"
 ---
 
 # Heartbeat (Gateway)
 
-> **Heartbeat vs Cron?** See [Cron vs heartbeat](/users/cron#cron-vs-heartbeat) for guidance on when to use each.
+> **Heartbeat vs Cron?** See [Cron vs Heartbeat](/automation/cron-vs-heartbeat) for guidance on when to use each.
 
 Heartbeat runs **periodic agent turns** on a configured session so the model can
 surface anything that needs attention without spamming you. By default that is
@@ -17,6 +26,13 @@ so each heartbeat runs in a fresh sibling transcript while delivery still uses
 the base session.
 
 Troubleshooting: [/automation/troubleshooting](/automation/troubleshooting)
+
+When the task pipeline is available, each heartbeat that actually runs is
+enqueued as a `heartbeat-tick` task pass. Skip reasons are unchanged
+(`requests-in-flight`, `quiet-hours`, `disabled`, and the rest). Inspect those
+runs with `wednesdayai task status --task heartbeat-tick`. If the task pipeline
+is disabled or otherwise unavailable, heartbeats keep using the previous
+interval `runOnce` path.
 
 ## Quick start (beginner)
 
@@ -57,28 +73,6 @@ Example config:
   prompt includes a “Heartbeat” section and the run is flagged internally.
 - Active hours (`heartbeat.activeHours`) are checked in the configured timezone.
   Outside the window, heartbeats are skipped until the next tick inside the window.
-
-## Configuration
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `every` | duration string | `"30m"` | Heartbeat interval. `0m` disables. Default is `1h` when Anthropic OAuth/setup-token is detected. |
-| `model` | string | — | Model override for heartbeat runs (`provider/model`). |
-| `target` | string | `"none"` | Delivery target: `none`, `last`, or an explicit channel id (`whatsapp`, `telegram`, `discord`, `slack`, etc.). |
-| `to` | string | — | Channel-specific recipient override (e.g. E.164 for WhatsApp, Telegram chat id). For Telegram topics: `<chatId>:topic:<threadId>`. |
-| `accountId` | string | — | Account id for multi-account channels (e.g. Telegram with multiple bots). |
-| `identity` | string | — | Attribute heartbeat runs to a registered identity. See [Identity attribution](#identity-attribution). |
-| `directPolicy` | `allow` \| `block` | `allow` | Controls direct/DM delivery. `block` suppresses DM delivery while still running the turn. |
-| `prompt` | string | _(see below)_ | Overrides the default prompt body (sent verbatim; not merged). |
-| `ackMaxChars` | number | `300` | Max chars allowed after `HEARTBEAT_OK` before the reply is delivered. |
-| `lightContext` | boolean | — | Use lightweight bootstrap context; keeps only heartbeat-specific files like `HEARTBEAT.md`. |
-| `isolatedSession` | boolean | — | Each tick runs in a fresh sibling `:heartbeat` session. Delivery and duplicate suppression still use the base session. |
-| `skipWhenBusy` | boolean | — | Skip this agent's heartbeat while its session-keyed subagent or nested lanes are busy. |
-| `activeHours` | object | — | Restrict heartbeats to a time window. See [Active hours](#active-hours). |
-| `includeReasoning` | boolean | `false` | Also deliver a separate `Reasoning:` message when extended thinking is available. |
-| `session` | string | `"main"` | Session key for the heartbeat run. When `isolatedSession: true`, set the base key here — the runtime appends `:heartbeat`. |
-| `suppressToolErrorWarnings` | boolean | — | Suppress tool-error warning payloads during heartbeat runs. |
-| `wakeGate` | object | — | Cheap declarative check that decides whether the persona turn runs. See [Wake-gate](#wake-gate). |
 
 ## What the heartbeat prompt is for
 
@@ -131,6 +125,17 @@ and logged; a message that is only `HEARTBEAT_OK` is dropped.
 }
 ```
 
+Whether a heartbeat config change needs a gateway restart depends on the config path:
+
+- `agents.defaults.heartbeat.*` (and `agents.defaults.model`, `models`, legacy `agent.heartbeat`)
+  are classified as hot-reloadable with a `restart-heartbeat` action, so a dynamic config reload
+  hands the new config to the running heartbeat runner. It rebuilds its interval and its per-agent
+  state in place — no gateway restart needed.
+- `agents.list[].heartbeat.*` is **not** picked up by a reload today. A change anywhere in the
+  `agents.list` array diffs to the single path `agents.list`, which matches a no-op reload rule, so
+  the change is neither hot-applied nor flagged as needing a restart. Restart the gateway after
+  editing a per-agent heartbeat block.
+
 ### Scope and precedence
 
 - `agents.defaults.heartbeat` sets global heartbeat behavior.
@@ -164,6 +169,7 @@ Example: two agents, only the second agent runs heartbeats.
           every: "1h",
           target: "whatsapp",
           to: "+15551234567",
+          identity: "alice", // attribute heartbeat runs to the identityLinks key "alice"
           prompt: "Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK.",
         },
       },
@@ -172,7 +178,11 @@ Example: two agents, only the second agent runs heartbeats.
 }
 ```
 
-### Active hours
+The `identity` value must match an existing `session.identityLinks` key (see
+[Session](/gateway/configuration-reference#session)) — unmatched values leave heartbeat runs
+unattributed.
+
+### Active hours example
 
 Restrict heartbeats to business hours in a specific timezone:
 
@@ -248,20 +258,21 @@ Use `accountId` to target a specific account on multi-account channels like Tele
     pre-append `:heartbeat`; the runtime creates and refreshes the sibling
     `:heartbeat` session itself.
 - `target`:
-  - `last`: deliver to the last used external channel.
+  - `last`: deliver to the last used external channel. A stored route whose account is no longer configured counts as no route.
   - explicit channel: `whatsapp` / `telegram` / `discord` / `googlechat` / `slack` / `msteams` / `signal` / `imessage`.
+  - `webchat`: append the output to the session chat (the transcript shown in the web client and Control UI) and push it live to connected clients. Use this for agents whose users only chat through the web client.
   - `none` (default): run the heartbeat but **do not deliver** externally.
 - `directPolicy`: controls direct/DM delivery behavior:
   - `allow` (default): allow direct/DM heartbeat delivery.
   - `block`: suppress direct/DM delivery (`reason=dm-blocked`).
 - `to`: optional recipient override (channel-specific id, e.g. E.164 for WhatsApp or a Telegram chat id). For Telegram topics/threads, use `<chatId>:topic:<messageThreadId>`.
-- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. If the account id does not match a configured account for the resolved channel, delivery is skipped.
+- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. If the account id does not match a configured account for the resolved channel, the output goes to the session chat instead (see the fallback note below).
+- `identity`: optional `session.identityLinks` key (matched case-insensitively against the keys). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`). Unmatched or absent values leave runs as unattributed system runs — there is never a default or fallback identity. Attribution is operator-configured only; agents cannot set it.
 - `prompt`: overrides the default prompt body (not merged).
 - `ackMaxChars`: max chars allowed after `HEARTBEAT_OK` before delivery.
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
-- `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only heartbeat-specific bootstrap files such as `HEARTBEAT.md`.
-- `isolatedSession`: when true, each heartbeat runs in a fresh sibling `:heartbeat` session with no prior conversation transcript. Delivery routing and duplicate suppression still use the base session. The `:heartbeat` session key suffix causes the storage layer to tag these entries with `trigger_source = 'heartbeat'`; session recall (`readByKey`) and analytics queries automatically exclude them so heartbeat turns do not appear in conversation history or inflate per-turn metrics. See [Session History Hygiene](/concepts/session-history-hygiene).
-  - Event ownership: the run session key is resolved **before** the preflight queue peek, so an isolated run only ever peeks its own `:heartbeat` queue — never the base session's. `signal:*` prompt events are the exception that can transfer: when the run session holds signal events, the turn is served as a signal-event turn and may relay to the user through the base lane.
+- `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only heartbeat-specific bootstrap files such as `HEARTBEAT.md`. Note the interaction with `isolatedSession`: with `isolatedSession: false` (heartbeat shares the main session), the heartbeat keeps the session's normal full bootstrap regardless of `lightContext`, and the HEARTBEAT.md checklist is inlined into the trigger message instead (only when the session's normal bootstrap does not already inject it — the stock bootstrap file list includes HEARTBEAT.md, in which case nothing is duplicated) — this keeps the system prompt byte-identical to user turns so provider prefix caching survives every heartbeat (see [Prompt caching](/reference/prompt-caching#byte-stability-across-trigger-kinds)). `lightContext` only takes effect for isolated `:heartbeat` sessions.
+- `isolatedSession`: when true, each heartbeat enqueues an `agent.turn` (`kind` heartbeat) and runs in a fresh sibling `:heartbeat` session with no prior conversation transcript. A positive `wakeGate` also nudges the named main session (`kind` nudge). Delivery routing and duplicate suppression still use the base session. The isolated run resolves its own session **before** any event peek or consume, so it does not drain the base session's queued non-signal events. `contextKey=signal:*` events may transfer into that isolated turn; remaining non-signal events stay on the base session for its next turn. The `:heartbeat` session key suffix causes the storage layer to tag these entries with `trigger_source = 'heartbeat'`; session recall (`readByKey`) and analytics queries automatically exclude them so heartbeat turns do not appear in conversation history or inflate per-turn metrics. See [Session History Hygiene](/concepts/session-history-hygiene).
 - `skipWhenBusy`: when true, also skips this agent's heartbeat while its session-keyed subagent or nested lanes are busy.
 - `activeHours`: restricts heartbeat runs to a time window. Object with `start` (HH:MM, inclusive; use `00:00` for start-of-day), `end` (HH:MM exclusive; `24:00` allowed for end-of-day), and optional `timezone`.
   - Omitted or `"user"`: uses your `agents.defaults.userTimezone` if set, otherwise falls back to the host system timezone.
@@ -272,27 +283,39 @@ Use `accountId` to target a specific account on multi-account channels like Tele
 
 ## Delivery behavior
 
+Heartbeat and agent-turn modes share the post-model finalizer. Heartbeat-only
+request/history filtering, dedupe, sent-state, and events stay heartbeat-gated.
+Agent turns (`kind` cron or nudge) use the same merged per-agent heartbeat configuration
+(`resolveHeartbeatConfig`) for model, identity, context, and delivery target.
+Non-sentinel text creates one outbound delivery; `NO_REPLY` and `HEARTBEAT_OK`
+stay silent.
+
 - Heartbeats run in the agent’s main session by default (`agent:<id>:<mainKey>`),
   or `global` when `session.scope = "global"`. Set `session` to override to a
   specific channel session (Discord/WhatsApp/etc.).
 - `session` only affects the run context; delivery is controlled by `target` and `to`.
 - To deliver to a specific channel/recipient, set `target` + `to`. With
-  `target: "last"`, delivery uses the last external channel for that session.
+  `target: "last"`, delivery uses the last live external channel for that session.
 - Heartbeat deliveries allow direct/DM targets by default. Set `directPolicy: "block"` to suppress direct-target sends while still running the heartbeat turn.
 - If the main queue, cron queue, or target session lane is busy, the heartbeat is skipped and retried later.
 - With `skipWhenBusy: true`, this agent's own session-keyed subagent/nested lanes also defer heartbeat runs. Other agents' busy lanes do not defer this agent.
-- If `target` resolves to no external destination, the run still happens but no
-  outbound message is sent.
+- Output always lands somewhere. If `last` or an explicit channel target can't be
+  resolved, the channel isn't ready (`checkReady`), or the send fails, the output is
+  appended to the session chat instead. The operator gets a gateway log `warn`
+  (`heartbeat: delivery target unavailable; delivered to session chat`, repeated
+  occurrences at `info` until the gateway restarts), a heartbeat `sent` event on
+  channel `webchat` with reason `fallback:<reason>`, and the same reason in
+  `openclaw status --deep`. Reasons: `no-external-route`, `target-unavailable`,
+  `unknown-account`, `channel-not-ready`, `send-failed`. Only `target: "none"`,
+  `directPolicy: "block"`, and `showAlerts: false` keep output undelivered.
 - Heartbeat-only replies do **not** keep the session alive; the last `updatedAt`
   is restored so idle expiry behaves normally.
-
-## Identity attribution
-
-Key: `heartbeat.identity` — default unset (the heartbeat runs as a pure system turn with no identity).
-
-Set it to a registered identity key (a `session.identityLinks` entry, matched case-insensitively) to run the heartbeat under that user's identity lane — the turn is attributed to them the same way their chat-initiated turns are, instead of running identity-less. An unmatched value is never fabricated into an identity: the run simply stays unattributed.
-
-This attribute governs the **run**, not the destination: `target` / `to` / `accountId` still decide where check-ins are delivered. The companion behaviour on the cron side is identity-linked delivery, where a `delivery.to` holding an identity key resolves to the channel-native chat id linked to that identity — see [Cron jobs: Identity attribution](/admin/automation/cron-jobs#identity-attribution).
+- Zero-information heartbeats (empty replies, `NO_REPLY`, acknowledgement-only
+  `HEARTBEAT_OK`, and duplicate alerts) append a run-specific hiding marker. Their
+  trigger, acknowledgement, and tool exchange are omitted from later model requests
+  and `chat.history`, matching the previous visible behavior. SQL retains every
+  original row unchanged, including these exchanges; raw history exports retain them.
+  Heartbeats with new content, and concurrent human turns, remain visible.
 
 ## Visibility controls
 
@@ -417,9 +440,8 @@ Use `--mode next-heartbeat` to wait for the next scheduled tick.
 
 A **nudge** hands a payload to an agent's **main session** as non-user context and wakes the main
 persona to decide what to do. Detection is cheap and lives in the caller; action is expensive and
-lives in the persona. A nudge is **not** a new signal mode — it is a named operation over the
-existing heartbeat bridge (`enqueueSystemEvent` + a targeted heartbeat wake), so it inherits every
-heartbeat gate.
+lives in the persona. A nudge enqueues an `agent.turn` with `kind=nudge`. It does not call
+`runHeartbeatOnce` and does not publish a heartbeat-mode agent signal.
 
 The nudge contract is one payload shared by every trigger surface:
 
@@ -433,17 +455,21 @@ The nudge contract is one payload shared by every trigger surface:
 user-facing message **only when warranted**, otherwise acknowledges with `HEARTBEAT_OK` and no
 delivery. A nudge whose check found nothing actionable sends no message.
 
-**Gates are honoured.** A nudge routes through the heartbeat dispatch, so active-hours, the
-main/cron/subagent/session lane busy checks, `skipWhenBusy`, and duplicate suppression all apply. A
-nudge against a busy target session defers; it does not bypass any check.
+**Busy policy.** `requestNudge` enqueues with `busy: "delay"`: a nudge against a busy main
+session parks in the per-session delayed queue and delivers once the main lane goes idle (the
+same semantics as `wakeMode: "next-heartbeat"`). Isolated heartbeat ticks still honour
+`heartbeat.wakeGate` for the heartbeat producer only. Legacy fields `reason`, `source`, `ttlMs`,
+`priority`, and `requiresIdle` are still accepted and ignored.
 
 The nudge is reachable from four trigger surfaces, all producing the same main-session injection and
 persona wake:
 
-- **Cron** — a job with a `wakeGate` payload (see [Cron jobs](/admin/automation/cron-jobs))
-- **Heartbeat** — a heartbeat configured with a `wakeGate` (see [Wake-gate](#wake-gate) below)
-- **Plugin / hook** — `api.runtime.signals.nudge(...)` (see [Agent Signals](/developers/agent-signals#nudge))
-- **CLI** — `openclaw agent nudge`
+- **Cron** — a job with a `wakeGate` payload (see
+  [Cron vs Heartbeat](/automation/cron-vs-heartbeat#nudge-and-wake-gate-jobs)).
+- **Heartbeat** — a heartbeat configured with a `wakeGate` (next section).
+- **Plugin / hook** — `api.runtime.signals.nudge(...)` (see
+  [Agent Signals](/plugins/agent-signals#nudge)).
+- **CLI** — [`openclaw agent nudge`](/cli/agent-nudge).
 
 ### Plugin / hook example
 

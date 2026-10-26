@@ -39,7 +39,7 @@ Nothing changes on the gateway until `wednesdayai validation activate` is run lo
 }
 ```
 
-That agent's heartbeat delivery must also _resolve_ to `none`. The probe judges the delivery resolver's output, not the raw config value, and refuses three separate ways: a resolved channel other than `none`, a degrade to `none` through fallback routing, and a raw `target` that is not literally `"none"` (an unrecognised target is normalised to `none`, so it is refused by name). One guard implements that rule, and the cron and resolved-config probes reuse it, so all three refuse the ambient `last` target, fallback routing, wildcard destinations and any explicit destination alike.
+That agent's heartbeat delivery must also _resolve_ to `none`. The probe judges the delivery resolver's output, not the raw config value, and refuses three separate ways: a resolved channel other than `none` (including the session-chat fallback, `webchat`), a degrade to `none` for any reason other than `target-none`, and a raw `target` that is not literally `"none"` (an unrecognised target is normalised to `none`, so it is refused by name). One guard implements that rule, and the cron and resolved-config probes reuse it, so all three refuse the ambient `last` target, fallback routing, wildcard destinations and any explicit destination alike.
 
 **The allowlisted test destination.** The only destination a probe run may reach is the verification sink, and it is provisioned by the storage backend above rather than by you. The sink is local and workstream-owned: a delivery is one row written to the `verification_receipts` table, and the validator reads that row back. There is no URL, no egress and no caller-supplied target of any kind, and idempotency is the table's `UNIQUE(work_id)` constraint rather than a process-local memo. The run's preflight only reads the sink to confirm it exists; it never provisions one. No claim is made about deduplication on ordinary channels.
 
@@ -84,16 +84,16 @@ This opens the soak window. The commit, version and timestamp all come from the 
 
 ### 3. Wait out the soak window
 
-The window is 168 uninterrupted hours at that one build. Until it completes, `validation run` is refused at the soak gate:
+The window is 24 uninterrupted hours at that one build. Until it completes, `validation run` is refused at the soak gate:
 
 | Refusal                                | Meaning                                                                          |
 | -------------------------------------- | -------------------------------------------------------------------------------- |
 | `SOAK_NO_ATTESTATION`                  | Step 2 has not been run against this gateway                                     |
 | `SOAK_BUILD_MISMATCH`                  | The running build is not the attested one, so the window was reset to this build |
-| `SOAK_WINDOW_INCOMPLETE`               | The 168 hours have not elapsed yet                                               |
+| `SOAK_WINDOW_INCOMPLETE`               | The 24 hours have not elapsed yet                                                |
 | `SOAK_NO_NON_VERIFICATION_OBSERVATION` | The window recorded no ordinary, non-verification work                           |
 
-Redeploying, rebuilding or reinstalling during the window resets it.
+The clock resets only on a build change (a different commit or version) or on re-running `validation record-deployment`. A gateway restart alone, at the same build, does not reset it — the deployment timestamp is durable.
 
 ### 4. First run
 
@@ -202,7 +202,7 @@ Deactivating does not remove the soak attestation, so reactivating later does no
 - **`VALIDATION_STORE_UNAVAILABLE` or `VALIDATION_RUNTIME_UNAVAILABLE`:** the session storage backend is not `sqlite` or `postgres`, or the runtime has not finished coming up. The validator reports these at the `control.unavailable` gate.
 - **`ACTIVE_SESSION_EXISTS`:** an earlier run is still held. End it with `validation abort`, or wait for the deadline the refusal names.
 - **The heartbeat probe refuses with `HEARTBEAT_PROBE_ISOLATION_UNAVAILABLE`:** the agent lacks `heartbeat.isolatedSession: true`, or `session.scope` is `global`.
-- **A probe refuses the delivery target:** the agent's heartbeat resolves to a real channel, or reaches `none` only through fallback routing. Set `heartbeat.target: "none"` on the probed agent and re-check the resolved value.
+- **A probe refuses the delivery target:** the agent's heartbeat resolves to a real channel or to the session chat (`webchat`, also used as the fallback when a target can't be resolved), or reaches `none` for a reason other than `target-none`. Set `heartbeat.target: "none"` on the probed agent and re-check the resolved value.
 
 ## Related
 
