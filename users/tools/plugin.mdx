@@ -11,6 +11,9 @@ sources:
   - src/plugins/hooks.ts
   - src/plugins/provider-runtime-identity.ts
   - src/plugins/runtime/runtime-time.ts
+  - src/plugins/runtime/types-channel.ts
+  - src/plugins/runtime/types-core.ts
+  - src/channels/plugins/types.plugin.ts
   - src/sessions/message-ingress.ts
   - src/shared/text/message-stamp.ts
   - src/gateway/assistant-display.ts
@@ -173,7 +176,8 @@ Keep these identity boundaries clear:
 - `sessionId` and `sessionKey` are optional on early hooks. Do not synthesize
   fake session values when they are absent.
 - Core may use `session.identityLinks` internally, but plugins should consume
-  only the resolved identity fields or `api.runtime.identity.resolveCanonicalIdentity(...)`.
+  only the resolved identity fields or the `api.runtime.identity` helpers
+  (see [Identity helpers](#identity-helpers)).
 - `identitySource: "job-config"` provenance is operator-attributed (CLI, gateway
   RPC, Web UI); agents can never set it on their own runs.
 
@@ -300,6 +304,29 @@ Notes:
 - Uses the media-understanding audio configuration (`tools.media.audio`) and provider fallback order; providers are plugin extensions and must be enabled (`plugins.entries.<vendor>.enabled: true`) or a local CLI (Whisper) must be installed.
 - Returns `{ text: undefined }` when no transcription output is produced (for example skipped/unsupported input, or no provider/CLI available).
 
+### Identity helpers
+
+Bundled extensions reach the identity core through `api.runtime.identity` — the same link
+operation the gateway's `identity.*` RPCs expose (flows in [Identities](/gateway/identity)).
+Reads are resolved against the live config on every call:
+
+- `api.runtime.identity.resolveCanonicalIdentity({ channel?, senderId? })` returns the
+  `session.identityLinks` key a channel sender is linked to, using the same resolution the gateway
+  applies to inbound messages. See [Runtime and turn identity](#runtime-and-turn-identity) for the
+  provenance-aware `ctx.runtimeIdentity` fields; use those on hooks that carry them.
+- `api.runtime.identity.resolvePerson(name)` returns the stored-case key for a configured
+  identity name (matched case-insensitively), or `undefined` when no such person exists. It never
+  creates a person: resolve first, and fail on a typo instead of minting one.
+- `await api.runtime.identity.link({ person, value })` links a `<namespace>:<id>` value to a
+  person and returns `{ person, value, changed }`. It refuses `device:` values
+  (`identity_link_invalid`; devices have their own operator path, and plugins issue an enrollment
+  instead), and a value another person already holds throws `identity_link_conflict`.
+- `await api.runtime.identity.issueUserClientEnrollment({ person })` mints a web-client device
+  bootstrap for an existing person and returns `{ bootstrapToken, expiresAtMs }`; an unknown person
+  throws `identity_unknown`. Deliver the token to the browser as a `#setup=` fragment exactly the
+  way the identity-oidc sign-in flow does: the browser redeems it on first connect and is paired
+  and linked in one step (see [Identities](/gateway/identity#proofs-of-control)).
+
 ### Task pipeline and learning workspace
 
 - `api.runtime.tasks.pipelineStatus()` returns
@@ -342,6 +369,25 @@ const { body } = api.runtime.time.parseLeadingStamps(text);
 
 `parseLeadingStamps` and `stripLeadingStamps` are also top-level SDK exports, for code that has no
 plugin `api` handle.
+
+### Channel plugin helpers
+
+Bundled channel extensions reach these core helpers through `api.runtime` instead of importing
+core modules (the packaged plugin-sdk is a separate bundle; see the process-scoped state rules in
+[Coding style](https://docs.wednesdayai.dev/developers/contributing/coding-style)):
+
+- `api.runtime.config.readConfigFileSnapshotForWrite()` reads the on-disk config file snapshot
+  plus the matching `writeOptions` (`envSnapshotForRestore` and `expectedConfigPath`) for a
+  read-modify-write flow. Pass the returned `writeOptions` when you write the config back so
+  `${VAR}` restoration is validated against the env snapshot that produced it, and only for the
+  same config path.
+- `api.runtime.channel.session.loadSessionStore(storePath)` returns a structured clone of the
+  live session store record for a store path.
+- `api.runtime.channel.session.recordInboundSessionMetaSafe({ cfg, agentId, sessionKey, ctx, onError? })`
+  records inbound session meta; failures are swallowed and reported through the optional
+  `onError` callback instead of throwing into the channel's inbound path.
+- `api.runtime.channel.outbound.loadAdapter(channelId)` loads the registered channel plugin's
+  outbound adapter (channel docking), so a host or plugin can deliver through another channel.
 
 ### Read the message ingress carrier
 
@@ -1476,6 +1522,38 @@ Notes:
 - `meta.preferSessionLookupForAnnounceTarget` is a deprecated no-op: the announce target
   resolves entry-first from the session row. It is kept for plugin-SDK compatibility and
   removed in the next minor release.
+
+#### Optional adapter members for channel integrations
+
+Bundled channel integrations (Telegram, WhatsApp) dock into core through optional adapter
+members on the `ChannelPlugin` object. All are optional; core falls back to shared behavior when
+they are absent (`src/channels/plugins/types*.ts` is the contract):
+
+- `actions.supportsButtons({ cfg, accountId? })` — whether the channel supports inline buttons
+  for that account.
+- `agentPrompt.reactionGuidance({ cfg, accountId? })` — returns `{ level, channel? }` guidance
+  included in agent prompts.
+- `threading.buildToolContext({ cfg, accountId?, context, hasRepliedRef? })` and
+  `threading.resolveAutoThreadId({ to, toolContext? })` — build the message-tool thread context
+  and resolve the auto thread id for a target.
+- `messaging.resolveOutboundSession(params)` — resolve a custom outbound session route (returns
+  `OutboundSessionRoute | null`); `messaging.parseTargetTopic(target)` splits a `to` target into
+  `{ to, threadId? }`; `messaging.inferTargetChatType(to)` infers the chat type for a target.
+- `status.collectStartupDiagnostics({ cfg })` — startup diagnostic entries
+  (`{ level, code, message, remediation? }`).
+- `doctor.collectWarnings({ cfg })`, `doctor.repairConfig({ cfg })`,
+  `doctor.collectStatusWarnings({ accounts })` — doctor checks and repairs. The gateway doctor
+  loads channel plugins best-effort from its candidate config, so plugin doctor notes and
+  repairs run even when the config is schema-invalid.
+- `setup.afterApplyAccountConfig({ prevCfg, nextCfg, accountId })` — runs after the wizard
+  applies account config.
+- `config.afterDeleteAccount({ cfg, accountId })` — cleanup after an account is deleted.
+- `security.collectAuditFindings(ctx)` — returns `SecurityAuditFinding[]` for the security audit.
+
+When Telegram was extracted from core into the bundled `@wednesdayai/telegram` extension, its
+Telegram-specific plugin-sdk exports were removed; the SDK keeps only the Telegram config
+surface for validation (`TelegramConfigSchema` and its supporting config types). The extension
+package is private and exports nothing; third-party plugins must not depend on Telegram helpers.
 
 ### Channel onboarding hooks
 

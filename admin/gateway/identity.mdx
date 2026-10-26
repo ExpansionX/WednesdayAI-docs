@@ -1,0 +1,234 @@
+---
+summary: "Identities: people and their linked accounts, bound by command instead of hand-edited config"
+read_when:
+  - You want one person to span Telegram, Slack, Discord and the web client
+  - You need to link or unlink an account from a person
+  - You are onboarding a browser or a chat account to a person
+title: "Identities"
+---
+
+# Identities
+
+An identity is a person your gateway knows by name, for example `Alice`. The person and their
+linked accounts live in one place in the gateway config:
+
+```json5
+{
+  session: {
+    identityLinks: {
+      Alice: ["telegram:123456789", "slack:U061CR7GN", "device:6abfaeda…"],
+    },
+  },
+}
+```
+
+The key is the canonical identity used everywhere a person matters: sender attribution, workspace
+lanes, cron and heartbeat `identity` fields, and cross-channel DM session merging. The values are
+provider-prefixed link values: `telegram:<id>`, `discord:<id>`, `device:<deviceId>`,
+`oauth:<provider>:<subject>` and so on.
+
+You never edit that map by hand. Every proof of control ends in one core link operation, exposed as
+the `identity` CLI commands and the gateway `identity.*` RPCs, that writes the config for you.
+
+## Creating an identity
+
+```bash
+wednesdayai identity add Alice
+```
+
+Prints `Added identity Alice.`, or `Alice already exists.` if the name is taken. Names allow
+letters, digits, `.`, `_` and `-`, up to 64 characters. The names `prototype`, `constructor` and
+`__proto__` are reserved and refused, as is the `raw~` prefix (it marks contained unlinked-sender
+session buckets).
+
+Identities are never created implicitly. Every linking flow below, `wednesdayai qr --identity`,
+`pairing approve --identity` and `oidc invite`, resolves an existing name first and fails on a
+typo, so a misspelling cannot mint a person.
+
+## Proofs of control
+
+A link value joins a person only after someone proves control of it. There are four proofs:
+
+### 1. Operator QR (web client)
+
+```bash
+wednesdayai identity link Alice --qr
+# or, equivalently:
+wednesdayai qr --client openclaw-user-client --identity Alice
+```
+
+The command prints the setup code / QR for the web client. When the browser redeems it on first
+connect, its device credential is paired and linked to `Alice` in one step; no `devices link`
+follow-up is needed. With `--qr` you can also pass `--setup-code-only`, `--no-ascii` and `--json`
+to `identity link`.
+
+Once at least one identity exists, `wednesdayai qr --client openclaw-user-client` refuses to issue
+a bootstrap without `--identity`:
+
+```
+--identity <name> is required with --client openclaw-user-client once identities exist. Run "wednesdayai identity list" to see them.
+```
+
+An unknown identity fails before anything is issued:
+
+```
+Unknown identity "Alic". Known identities: Alice. Add it with: wednesdayai identity add Alic
+```
+
+On an install with no identities at all the copy is:
+
+```
+No identities are set up yet. Add one with: wednesdayai identity add <name>
+```
+
+### 2. Operator channel-pairing approval
+
+```bash
+wednesdayai pairing approve telegram <code> --identity Alice
+```
+
+The identity is resolved **before** the one-time pairing code is consumed, so a typo never burns
+the code. After approval the sender is linked as `telegram:<id>` to `Alice`. If the link write
+fails, the approval stands and the command prints the exact follow-up:
+
+```
+Approved, but linking failed: <reason>. Link it with: wednesdayai identity link Alice telegram:<id>
+```
+
+### 3. Self-service link code
+
+A person links their own chat account without operator involvement:
+
+1. In a **direct message** to the bot, the person sends `/link`.
+2. The bot replies with an 8-character code, valid for one hour, single use (at most 3 pending per
+   channel):
+
+   ```
+   Your link code: ABCD2345
+   In the WednesdayAI app open your account menu → Linked accounts and enter it within 1 hour.
+   ```
+
+3. A person who is already linked opens the web client, chooses **Account menu → Linked accounts**
+   and enters the code.
+
+Redeeming the code links the sender's `<channel>:<id>` to the linked person's identity **and**
+approves the pairing code, so a linked person can vouch for their own chat account when the channel
+runs `dmPolicy: "pairing"`. The code grants nothing on its own: sending `/link` only queues a
+request, and the claimant must already be a linked person on a paired browser.
+
+The web client shows these errors:
+
+- Unknown or expired code: `That code isn't valid or has expired.`
+- Too many attempts: `Too many link-code attempts. Try again later.` (5 attempts per device and 15
+  per person per minute, then a 5-minute lockout)
+- Conflict: `<value> is already linked to another person; ask them to unlink it first.`
+
+### 4. OIDC sign-in
+
+With the bundled `identity-oidc` plugin enabled, a person signs in with Google, Microsoft Entra or
+GitHub; a provider-verified invite links the sign-in to the person and enrolls the browser. See
+[Identity OIDC](/plugins/identity-oidc).
+
+## Listing and unlinking
+
+```bash
+wednesdayai identity list           # table of Identity | Links
+wednesdayai identity list --json
+
+wednesdayai identity unlink telegram:123456789
+```
+
+`identity unlink <value>` removes the value from every identity and prints
+`Unlinked telegram:123456789 from Alice.`, or `telegram:123456789 is not linked.`
+
+## Conflicts and devices
+
+A chat or OAuth value belongs to exactly one person. Linking a value another person already owns is
+refused with `identity_link_conflict`:
+
+```
+telegram:123456789 is already linked to Bob. Unlink it first: wednesdayai identity unlink telegram:123456789
+```
+
+Ownership is resolved canonically: a legacy config entry that holds a bare `"123"` still owns
+`telegram:123`. Link-code claims are serialized per claimed value, so two people redeeming codes
+for the same sender cannot interleave their ownership check, link and approval.
+
+Devices are different: a device is a credential and may be re-bound. `identity link` refuses
+`device:` values and points you at the device command:
+
+```
+Use "wednesdayai devices link <deviceId> --identity <name>" for devices.
+```
+
+`wednesdayai devices link <deviceId> --identity <name>` moves the `device:<deviceId>` value to the
+target person (linking implicitly unlinks it from the previous person). `devices unlink` and
+`devices remove` drop the value. These device commands are unchanged by the identity command set.
+See [devices](/cli/devices).
+
+## Gateway RPCs
+
+The CLI talks to the same gateway methods every client uses:
+
+| Method                | Scope                     | Notes                                       |
+| --------------------- | ------------------------- | ------------------------------------------- |
+| `identity.list`       | `operator.read`           | list identities and links                   |
+| `identity.self`       | `operator.read` (narrow)  | reads the calling device's person and links |
+| `identity.add`        | `operator.admin`          | create a person                             |
+| `identity.link`       | `operator.admin`          | link a value to a person                    |
+| `identity.unlink`     | `operator.admin`          | remove a value everywhere                   |
+| `identity.link.claim` | `operator.write` (narrow) | redeem a `/link` code                       |
+| `identity.logout`     | `operator.write` (narrow) | log the calling browser out                 |
+
+The narrow methods read the verified device id from the connection, never from the request body, so
+a caller can only act on its own device and person. See [Protocol](/gateway/protocol) for the scope
+model.
+
+## What logout does
+
+**Log out** in the web client calls `identity.logout`, which:
+
+- removes the paired device server side,
+- unlinks its `device:<deviceId>` value from every identity,
+- clears the stored credential **and** the browser keypair.
+
+The unlink always runs, even when the pairing removal failed: a device whose credential is gone
+must not keep its link. The next sign-in pairs a fresh device. The keypair is rotated because a
+paired browser belongs to one person: keeping it would let the next person inherit the previous
+person's link.
+
+A `#setup=<token>` link (an enrollment bootstrap) that arrives at a browser which is already paired
+is never redeemed automatically. The web client shows a confirmation naming the consequence, and
+only after you confirm does it log the current device out and re-pair under the new identity. On a
+browser with no stored credential, redemption is automatic; if an earlier auth failure left the
+browser's keypair orphaned (its token was cleared but the keypair remained), that redemption
+rotates the keypair instead of re-presenting the orphaned device id.
+
+## The account-linking switch
+
+`gateway.webClient.accountLinking` (default `true`) gates the self-service path. Set it to `false`
+to keep all linking operator-only: `/link` replies
+`Account linking is turned off on this gateway.` and `identity.link.claim` refuses with the same
+copy. Operator commands (`identity add/link/unlink`, `devices link`, `pairing approve`) are
+unaffected.
+
+```json5
+{
+  gateway: {
+    webClient: {
+      accountLinking: false,
+    },
+  },
+}
+```
+
+## Reserved-name errors
+
+A legacy config that still holds a reserved key blocks identity mutations until it is renamed:
+
+```
+Identity "constructor" is a reserved name; rename it in session.identityLinks.
+```
+
+Renaming that key in `openclaw.json` is a one-time migration fix, not part of enrollment: normal
+enrollment never needs a hand edit.

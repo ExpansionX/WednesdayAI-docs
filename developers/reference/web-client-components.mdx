@@ -43,6 +43,7 @@ sources:
   - apps/web/src/ui/TypingIndicator.tsx
   - apps/web/src/ui/Thread.tsx
   - apps/web/src/ui/Sidebar.tsx
+  - apps/web/src/ui/assistant-avatar.ts
   - apps/web/src/ui/AccountMenu.tsx
   - apps/web/src/ui/AssistantMessage.tsx
   - apps/web/src/ui/EmptyState.tsx
@@ -377,6 +378,7 @@ provider module per concern, each testable without a gateway connection.
 | History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                                                                    | `chat.history {before}`                                                                                    |
 | Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                 | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                    | `agents.list` `identity.color`                                                                             |
+| Assistant names and avatars      | `app/AppShell.tsx`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                   | `agents.list` `identity.name`, `identity.emoji`                                                            |
 | Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                 | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
 | Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                           | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
 | Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                       | `tts.readAloud.status`, `tts.speak`                                                                        |
@@ -631,6 +633,18 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   32-bit of the agent id modulo 8 picks one, so an unconfigured assistant keeps its colour across
   reloads and devices. The `--wai-assistant-<name>` and `-fg` tokens are in
   `packages/brand-tokens/tokens.css`; ADR 0084 section 6 records the contrast guarantee.
+- **Names and avatars follow the open chat.** `AppShell` derives the active chat's assistant once
+  (`activeAssistantName`/`activeAssistantAvatar`): the top bar, the thread's bubbles and typing
+  indicator, the empty state, both composers and the reply-chip sender all take it, and an agent
+  with no configured name shows its id. While the chat's assistant cannot be resolved
+  (`agents.list` still loading, or a session key with no agent id) those surfaces fall back to the
+  brand name, and the turn avatar falls back to the brand logo image. The avatar glyph comes from
+  `ui/assistant-avatar.ts` (`assistantAvatarText`: the configured `emoji`, else the name's first
+  two graphemes uppercased) — the one source the `Sidebar` and `AssistantPicker` render too. It
+  reaches a turn through the optional `assistantAvatar` prop on `Thread` and `AssistantMessage`:
+  a coloured, aria-hidden `cl-msg-avatar cl-agent-av` span (`data-testid="assistant-avatar"`)
+  when set, the logo `img` when undefined. Do not inline `slice(0, 2)` initials or read the brand
+  constant in a chat-scoped component; take the props.
 - **Menus.** `useDismissibleMenu` closes a menu on an outside mousedown and on Escape, returning
   focus to its trigger. `ModelMenu`, `ThinkMenu` and the Composer send menu all use it; do not copy
   its body into a new menu.
