@@ -28,7 +28,9 @@ sources:
   - apps/web/src/app/auto-read-driver.ts
   - packages/talk-client/src/silence-endpointer.ts
   - apps/web/src/state/chat.ts
+  - apps/web/src/state/tool-step-rows.ts
   - apps/web/src/gateway/message-text.ts
+  - apps/web/src/gateway/chat-activity-frame.ts
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/providers/navigation-preferences.ts
   - apps/web/src/providers/events.tsx
@@ -46,10 +48,11 @@ sources:
   - apps/web/src/ui/assistant-avatar.ts
   - apps/web/src/ui/AccountMenu.tsx
   - apps/web/src/ui/AssistantMessage.tsx
+  - apps/web/src/ui/assistant-turns.ts
   - apps/web/src/ui/EmptyState.tsx
   - apps/web/src/ui/AttentionMenu.tsx
   - src/gateway/session-utils.ts
-generated: 2026-10-25
+generated: 2026-10-27
 ---
 
 # Web client components
@@ -269,9 +272,17 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `onSessionChanged`, `onSessionsList`, `onConnectionStatus`). It also has WednesdayAI-native
   members the vendored seams have no room for, which the `app/` hooks call directly: `listAgents`,
   `listModels`, `patchSession`, `prepareSessionTitle`, `resolveDirectSession`, `sendChatMessage`
-  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`, the `sessionList`
-  runtime, and the `onSidebarSessionsChange`, `onActiveSessionRowChange`, `onQueuedRunStarted`,
-  `onAssistantReply` and `onActiveLeafConflict` subscriptions.
+  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`,
+  `adoptRestoredRun`, the `sessionList` runtime, and the `onSidebarSessionsChange`,
+  `onActiveSessionRowChange`, `onQueuedRunStarted`, `onRunResumed`, `onToolStep`,
+  `onOwnTurnStarted`, `onOwnTurnQueued`, `onSteerTurnSettled`, `onAssistantReply` and
+  `onActiveLeafConflict` subscriptions. `onToolStep` turns each `chat.activity` frame of a run
+  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); `onRunResumed`
+  restores the typing indicator on the first live frame of a run adopted after a reload;
+  `ui/assistant-turns.ts` groups a run's rows into one reply block for `ui/Thread.tsx`.
+  `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
+  (`data-testid="tool-step-announcer"`): the tool name only, no status cues, and nothing while
+  the display hides tools.
 - `app/AppShell.tsx` subscribes to the events seam once per runtime, writes into the store
   (`state/chat.ts`, `useChatStore`) and composes the hooks described under
   [Chat controls and hooks](#chat-controls-and-hooks). Components read the store or receive props;
@@ -528,9 +539,13 @@ Contracts worth keeping when you change them:
   click); the gateway returns the caller's dmScope-correct direct session key (ADR 0109). There is
   no model select and no create step.
 - **History and the chat leaf.** `useChatHistory` loads the newest page (`HISTORY_PAGE_SIZE`, 50)
-  and pages older with the returned `cursor`. `WebClientRuntime` records the chat's leaf from its
-  newest-page `chat.history` reads (the thinking reconcile opts out with `noteLeaf: false`); a
-  `before` page never updates it. `LeafTracker` tells "never learned" (`undefined`: the send omits
+  and pages older with the returned `cursor`. When that page starts inside a reply (its oldest row
+  carries a run id and the page holds no user row of that run), the load keeps paging older until
+  it reaches the reply's user row, a row of another run, or the start of the history, and publishes
+  the combined rows at once, so a reload never shows a reply without its question.
+  `WebClientRuntime` records the chat's leaf from its newest-page `chat.history` reads (the
+  thinking reconcile opts out with `noteLeaf: false`); a `before` page never updates it.
+  `LeafTracker` tells "never learned" (`undefined`: the send omits
   `expectedLeafEntryId`) from "known empty" (`null`: the send asserts an empty chat). After a
   final, aborted or error event for a run this client owns, `readLeafUntilStable` re-reads with
   `limit: 1` until two reads agree (every 25 ms, at most 40 attempts) and a send waits for it. A
@@ -605,7 +620,8 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   are scoped by gateway URL and client ID in browser storage; malformed remembered entries are discarded.
 - **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimum"`
   by default, separately from `reasoningLevel`. `extractTranscriptBlocks` preserves ordered text,
-  thinking, tool calls, results and media; `Thread` pairs tools by call ID across loaded pages.
+  thinking, tool calls, results and media; `Thread` pairs calls and results by their run-scoped
+  identity (run key plus call id) across loaded pages.
   Legacy `tool` roles and snake_case result metadata remain tools, not assistant prose.
   Hidden tool details retain errors, and wholly hidden execution turns leave no empty assistant
   row. Local final/aborted turns trigger a `completed-turn` reconciliation after the leaf settles,
@@ -841,8 +857,10 @@ config (`messages.tts` merged with `agents.list[].tts`; ADR 0102, wire shapes in
 [TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
 owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
 `ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, phase, error, toggle}`
-value. `AssistantMessage` takes it as `readAloud` plus `readAloudKey` (a stable key per message,
-`String(message.id ?? message.entryId ?? idx:<index>)` from `Thread`).
+value. `AssistantMessage` takes it as `readAloud` plus `readAloudKeys` from `Thread`: the reply
+block's turn key first, then each of its rows' ids. The button toggles the first key unless
+playback is active under another member (auto-read streams under a row id), and an error or the
+playing state shows on the reply when any of its keys matches.
 
 `unavailableReason` is first match wins: `unavailable while offline` when disconnected,
 `unavailable during Voice mode`, `unavailable on this gateway` when the status reports

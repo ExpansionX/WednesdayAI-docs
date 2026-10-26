@@ -20,8 +20,10 @@ sources:
   - src/gateway/session-utils.fs.ts
   - src/gateway/session-reply-activity.ts
   - src/gateway/server-methods/chat.ts
+  - src/gateway/session-history-read.ts
+  - src/gateway/server-methods/chat-history-placeholder.ts
   - src/shared/session-visibility.ts
-generated: 2026-10-25
+generated: 2026-10-27
 ---
 
 # Gateway protocol (WebSocket)
@@ -241,19 +243,6 @@ read or write groups later are refused until they are allowlisted.
   `talk.realtime.*`, `talk.config`
   and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
-**Internal agents.** The allowlist admits a method, not every target. On a narrow connection an
-agent configured with `userFacing: false` (ADR 0119) is refused on every admitted method and
-hidden from every admitted listing, so internal ids look the same as unconfigured ones:
-`handleGatewayRequest` refuses any request whose params name an internal agent (`agentId`,
-`sessionKey`, `key`, `parentSessionKey`, ...) with the same `unknown agent "<id>"` error an
-unconfigured id gets; `sessions.create` enforces the same inside `createSession` and answers
-`unknown agent: <id>`; `agents.list` and `sessions.direct` omit internal agents' rows, `sessions.list`
-hides their agent activity, `sessions.resolve` searches a store without their sessions, and
-`sessions.runs.list` drops their runs; a run id that resolves to an internal agent's session is
-refused where it resolves (`sessions.runs.get`/`events`/`continue`/`cancel`); and session-bearing
-events for their sessions are withheld from the connection. Operators and other agents keep full
-access.
-
 `sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
 scope it needs.
 
@@ -341,7 +330,7 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
   before the user message, so it is stored, replayed and audited like any other turn. The turn is
   command-inert - a submitted value of `/new` never resets the session, and the turn never
   resolves a pending exec approval.
-- `chat.activity` (`operator.sessions.read`) streams a bounded tool-activity rail per turn. The
+- `chat.activity` (`operator.sessions.read`) streams bounded per-step tool activity for a turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
 "durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
@@ -814,6 +803,18 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   `__openclaw.ingress` provenance carrier is stripped from every message before it reaches the
   client and never appears in `chat.history` output; sibling `__openclaw` keys (`id`,
   `replyToId`, …) are untouched.
+- `chat.history` messages also carry `__openclaw.runId` when the stored entry recorded the run that
+  wrote it. For a run a client started, it equals the `idempotencyKey` of that client's `chat.send`
+  or `sessions.steer` (mode `queue`), so a client can pair its own turn with the stored row even
+  when the stored text differs, and group every row of one reply. Entries without a stored run id
+  (written before the field existed) omit the key. An oversized message's placeholder keeps it,
+  and is marked `__openclaw.truncated: true` with `reason: "oversized"`. When an oversized tool
+  message's bare call identities exceed the per-message cap, one stored entry returns as several
+  consecutive placeholder rows that share its run id; only the last carries `__openclaw.id`.
+  Every returned row additionally carries `__openclaw.rowId`, an opaque identity of the returned
+  ROW (the entry's storage position; placeholder chunks suffix a chunk ordinal) that is unique
+  within the session and stable across pages, reloads and window shifts — a client can key rows
+  with it instead of a positional fallback id, which moves when the head window slides.
 - A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
   plus the same reference under upstream's field names, `__openclaw.replyToId` and
   `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
@@ -901,12 +902,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   `lime`, `teal` or `sky` (see
   [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor)). The key is
   absent when no colour is configured, and the web client then derives a stable colour from the
-  agent id. `agent.identity.get` does not carry it. Rows also carry the ADR 0119 fields:
-  `description` (the trimmed `agents.list[].description`, absent when unset), `userFacing`
-  (present only as `false`, marking an internal agent), and `team`
-  (`{ id, name?, role: "lead" | "member" }`, from `agents.teams[]`, absent when the agent is in no
-  team). For user clients the row list itself is filtered to user-facing agents, so an internal
-  agent's row never reaches a narrow connection.
+  agent id. `agent.identity.get` does not carry it.
 
 #### sessions.list sorting, agent activity, and visibility
 
