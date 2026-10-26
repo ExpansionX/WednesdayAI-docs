@@ -9,7 +9,7 @@ title: "Release channels"
 
 # Release channels
 
-Last updated: 2026-06-16
+Last updated: 2026-10-26
 
 WednesdayAI uses release channels so users can choose how much change they
 accept and maintainers can promote builds only after the right checks have run.
@@ -71,18 +71,24 @@ Tip: if you want stable + dev in parallel, keep two clones and point your gatewa
 
 ## Promotion checks
 
-Release-channel promotion is tied to deterministic gates in CI:
+GitHub Actions does not run checks on pull requests or `main` pushes. It only
+builds and publishes releases (release-please, and npm-publish using npm trusted
+publishing) and runs a weekly gitleaks and Semgrep security scan. Promotion
+evidence therefore comes from the local gates listed under "Deterministic gate
+evidence" in the PR template, and named in the
+[Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing):
 
-| Promotion                         | Required evidence                                                                                                                             |
-| --------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `main` to `dev`                   | Fast CI, workflow sanity, package checks where relevant, and focused runtime-risk tests for changed paths.                                    |
-| `dev` or prerelease tag to `beta` | Full CI, deterministic security checks, install smoke, runtime-risk gates, and docs-surface source checks.                                    |
-| `beta` to `stable`                | Full CI, release package check, install smoke, docs freshness, runtime-risk gates, and beta soak evidence or an explicit maintainer override. |
-| `stable` to `LTS`                 | Future policy. Do not promise LTS coverage until the LTS ADR is accepted.                                                                     |
+| Promotion                         | Required evidence                                                                                                                                                                                                                                     |
+| --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `main` to `dev`                   | Focused local gates for the changed paths: `pnpm check`, workflow sanity (`actionlint`), package checks where relevant, and runtime-risk tests selected for the changed paths.                                                                        |
+| `dev` or prerelease tag to `beta` | Full local gate set: `pnpm check`, `pnpm build`, `pnpm build:strict-smoke`, `pnpm test`, `pnpm test:docker:session-storage`, `pnpm check:docs`, protocol check, docs-surface source check, runtime-risk selector, `actionlint`, and Dockerfile smoke. |
+| `beta` to `stable`                | The full local gate set above, plus release package check (`pnpm release:check`), docs freshness, and beta soak evidence or an explicit maintainer override.                                                                                          |
+| `stable` to `LTS`                 | Future policy. Do not promise LTS coverage until the LTS ADR is accepted.                                                                                                                                                                             |
 
-The deterministic gates are described in the CI pipeline runbook (repo-only,
-under `dev-docs/build/`). Some security and docs checks are advisory while the
-repository is private, but real findings must be tracked before promotion.
+The weekly security scan is the backstop for anything that slips past local
+hooks. Some security and docs checks are advisory while the repository is
+private, but real findings must be tracked before promotion. The gate runbook
+is repo-only, under `dev-docs/build/`.
 
 ## Plugins and channels
 
