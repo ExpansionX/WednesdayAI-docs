@@ -24,15 +24,21 @@ sources:
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/providers/navigation-preferences.ts
+  - apps/web/src/providers/auto-read-preference.ts
   - apps/web/src/ui/DisplayMenu.tsx
   - apps/web/src/ui/NavigationMenus.tsx
   - apps/web/src/providers/session-list-runtime.ts
+  - apps/web/src/providers/image-resize.ts
+  - apps/web/src/ui/use-composer-paste.ts
+  - apps/web/src/ui/markdown/html-to-markdown.ts
+  - apps/web/src/ui/clipboard-html.ts
+  - apps/web/src/ui/use-dictate-autosend.ts
   - apps/web/src/state/types.ts
   - apps/web/index.html
   - apps/web/src/ui/ActivityRail.tsx
   - extensions/ui-surfaces/index.ts
   - packages/ui-contract/src/index.ts
-generated: 2026-10-17
+generated: 2026-10-25
 ---
 
 # Web client hosting
@@ -326,19 +332,20 @@ which its setup code mints and its device token is bound to (see
 
 Methods the client calls with `operator.sessions.read`:
 
-| Method                                    | What it powers                                                                                                                                                             |
-| ----------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`, `models.authStatus`             | Start-up checks: the connection is alive, and the gateway has a model provider credential                                                                                  |
-| `agents.list`                             | The assistant picker, the sidebar's assistants and their colours                                                                                                           |
-| `models.list`                             | The model menu, and whether Think is available for the chat's model                                                                                                        |
-| `sessions.list`                           | The sessions list, with the assistant filter, search and paging                                                                                                            |
-| `sessions.describe`                       | The open session's own row: title, model and Think level                                                                                                                   |
-| `sessions.direct`                         | The device's direct session for an assistant, computed by the gateway (ADR 0109) so assistant picks land in the dmScope-correct session                                    |
-| `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a session                                                                                |
-| `chat.history`                            | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere                                              |
-| `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection                                                                                                           |
-| `tts.readAloud.status`                    | Whether the **Read aloud** button is available, and the text limit it sends with                                                                                           |
-| `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas)) |
+| Method                                    | What it powers                                                                                                                                                                  |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`, `models.authStatus`             | Start-up checks: the connection is alive, and the gateway has a model provider credential                                                                                       |
+| `agents.list`                             | The assistant picker, the sidebar's assistants and their colours                                                                                                                |
+| `models.list`                             | The model menu, and whether Think is available for the chat's model                                                                                                             |
+| `sessions.list`                           | The sessions list, with the assistant filter, search and paging                                                                                                                 |
+| `sessions.describe`                       | The open session's own row: title, model and Think level                                                                                                                        |
+| `sessions.direct`                         | The device's direct session for an assistant, computed by the gateway (ADR 0109) so assistant picks land in the dmScope-correct session                                         |
+| `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a session                                                                                     |
+| `chat.history`                            | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere                                                   |
+| `identity.self`                           | The **Linked accounts** dialog: who this browser is (`Signed in as …`) and the person's linked accounts, read from the verified device id (see [Identities](/gateway/identity)) |
+| `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection                                                                                                                |
+| `tts.readAloud.status`                    | Whether the **Read aloud** button and the **Read replies aloud** auto-read toggle are available, and the text limit the client caps both paths' chunks to                       |
+| `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas))      |
 
 Methods the client calls with `operator.sessions.write`:
 
@@ -356,7 +363,9 @@ Methods the client calls with `operator.sessions.write`:
 | `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline                                |
 | `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                                                 |
 | `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                                                     |
-| `tts.speak`                | The **Read aloud** button on replies: synthesizes a reply's text into inline audio to play                                                                                                                                                                                                                                    |
+| `tts.speak`                | The **Read aloud** button on replies, and the **Read replies aloud** auto-read toggle: synthesize reply text into inline audio to play. Auto-read speaks a streaming reply sentence by sentence, so one reply can produce several `tts.speak` requests, each under the advertised `maxTextLength`                             |
+| `identity.link.claim`      | Redeeming a `/link` code in the **Linked accounts** dialog: links `<channel>:<id>` to this person and approves the pairing code. Rate limited per device and per person (see [Identities](/gateway/identity#proofs-of-control))                                                                                               |
+| `identity.logout`          | **Log out**: removes the paired device server side, unlinks its `device:<deviceId>` value and clears the browser credential and keypair                                                                                                                                                                                       |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -372,7 +381,11 @@ Gateway settings that decide what users can do with those methods:
   **Read aloud** button; an assistant's own `agents.list[].tts.readAloud.enabled` overrides it for
   that assistant. With the gate on but no TTS provider configured, the button still shows as
   unavailable. While a Voice conversation is active (listening, thinking or speaking), it is
-  unavailable, and starting Voice mode stops any playback in progress. See
+  unavailable, and starting Voice mode stops any playback in progress. The composer's
+  **Read replies aloud** toggle rides the same gate: with it on, a streaming reply is spoken
+  sentence by sentence while it is written, each chunk capped at the `maxTextLength` the status
+  reports. The toggle is a per-browser preference (default off) with no gateway setting yet - an
+  operator-side per-assistant default is tracked as finding #1347. See
   [Text-to-speech](/tts).
 - **Suggest a title.** Each use sends the chat's first message (up to 1000 characters) to the
   assistant's default model - the agent's configured model, not the model picked for the chat. The
@@ -388,26 +401,51 @@ need no gateway setting.
 
 Each paired browser mints its own device credential, and the gateway identifies that browser's
 turns by `device:<deviceId>`. Assistants with workspace lanes keep a private workspace per person,
-so a device must be linked to a person in `session.identityLinks`; an unlinked device gets a
-denial message in the chat telling you which id to add:
-
-```json5
-{
-  session: {
-    identityLinks: {
-      Alice: ["telegram:111", "device:6abfaeda…"],
-    },
-  },
-}
-```
+so a device must be linked to a person; an unlinked device gets a denial message in the chat
+naming the `device:<deviceId>` value it needs linked.
 
 List device ids with `openclaw devices list --json` (the `deviceId` field of each entry under
-`paired`). Link a device with `wednesdayai devices link <deviceId> --identity <key>` instead of
-editing this file by hand, or pair with `wednesdayai qr --client openclaw-user-client --identity <key>`
-so the first connect links it (`devices remove` also unlinks). After ADR 0104 the person is the
-sender name: turns from a linked device show `Alice (device:…)` to the model, with the browser's
-display name as a separate provenance field. See
+`paired`). Link a device with `wednesdayai devices link <deviceId> --identity <key>`, or pair with
+`wednesdayai identity link <key> --qr` so the first connect links it (`devices remove` also
+unlinks). After ADR 0104 the person is the sender name: turns from a linked device show
+`Alice (device:…)` to the model, with the browser's display name as a separate provenance field.
+See [Identities](/gateway/identity),
 [Workspace Lanes](/concepts/workspace-lanes#linking-gateway-devices) and [devices](/cli/devices).
+
+## Linked accounts, sign-in and logout
+
+The sidebar **account menu** has a **Linked accounts** entry. It opens a dialog that shows who this
+browser belongs to (`Signed in as <person>`) and the person's linked accounts. If the browser is
+paired but not linked to a person yet, the dialog instead shows:
+
+```
+This browser isn't linked to a person yet. Ask your administrator to run:
+wednesdayai devices link <deviceId> --identity <name>
+```
+
+**Linking a chat account.** In the dialog's form, a linked person can claim their own chat
+account: send `/link` to the bot in a direct message, then enter the one-hour code it replies
+with. A successful claim links `<channel>:<id>` to this person and approves the pairing request,
+so the chat account can pass `dmPolicy: "pairing"` gates. The gateway refuses the whole flow when
+`gateway.webClient.accountLinking` is `false`. See
+[Identities](/gateway/identity#proofs-of-control).
+
+**Signing in.** When the `identity-oidc` plugin is enabled, the pairing screen shows
+**Continue with ...** buttons (Google, Microsoft Entra, GitHub) above the setup-code form.
+Signing in links the browser to your person and pairs the device in one step; no setup code is
+needed. See [Identity OIDC](/plugins/identity-oidc).
+
+**Enrollment links.** A `#setup=<token>` link (from OIDC sign-in or a setup code) is redeemed
+automatically only on an unpaired browser; if an earlier auth failure left a half-signed-in
+keypair behind, that redemption rotates it so the old device id is never reused. If the browser is
+already paired, the client asks for
+confirmation first, because re-pairing logs this device out and moves its link to the new person:
+_Pair this browser again_ proceeds, _Keep the current session_ leaves everything unchanged.
+Sign-in failures land back on the client with `#oauthError=<reason>` and a plain-language message.
+
+**Log out.** The account menu's **Log out** removes the paired device server side, unlinks its
+`device:<deviceId>` value, and clears the stored credential and the browser keypair. The next
+sign-in pairs a fresh device, because a paired browser belongs to exactly one person.
 
 ## Assistant UI and Canvas
 
@@ -536,6 +574,21 @@ The defaults and available choices are:
 | Chat sort order           | `desc` (`chatSortOrder: "desc"`)        | `asc`, `desc`                                              |
 | Show reasoning            | `false` (`showReasoning: false`)        | `true`, `false`                                            |
 | Tool details              | `minimum` (`tools: "minimum"`)          | `hide`, `minimum`, `collapsed`, `full`                     |
+| Read replies aloud        | `false` (`autoRead: false`)             | `true`, `false`                                            |
+
+The **Read replies aloud** toggle uses its own storage key,
+`openclaw.web.auto-read:<encodedGatewayUrl>:<clientId>`, holding `1` or `0` per gateway URL and
+client ID like the other preferences. With it on, the client also sends dictated turns
+automatically when the user pauses. There is no gateway-side default yet; an operator-level
+per-assistant default is tracked as finding #1347.
+
+Assistants picked in the **Browse assistants** window stay visible in the sidebar for the current
+page session only: the client keeps the picked assistant ids in memory (`pickedAgentIds`, a
+session-only list that is never written to storage) so they stay listed past the activity
+window until a reload. The selected assistant filter itself still persists as
+`selectedAgentId` under the navigation key. When a filtered page of `sessions.list` returns,
+the client merges that page's `agentActivity` into its existing map instead of replacing it, so
+picking one assistant no longer blanks the activity of the others already on screen.
 
 <Warning>
 Navigation filters are not authorization boundaries. Hiding internal sessions or filtering the UI
@@ -587,8 +640,18 @@ session filter and search, paging past the first page, the model switcher and Th
 while a reply streams, rename and Suggest, and replying to a message are live (client-chat-v3
 P2). Replies appearing on every open device without a reload, the busy and unread indicators,
 the desktop-notification opt-in, Dictate and Voice mode's on/off state, and the automatic
-resend into a chat changed elsewhere are also live; see
-[Using the web client](/web/using-the-web-client) for what users see.
+resend into a chat changed elsewhere are also live. The 2026-10-25 client chat-flow slice added
+more live behaviour, all client-side: assistants picked in the Browse assistants window stay in
+the sidebar for the browser session, the chat area no longer overflows horizontally on narrow
+screens, the composer's **Read replies aloud** toggle reads streaming replies sentence by
+sentence and sends dictation when the user pauses, user messages render markdown, pasted rich
+text (Word, Google Docs, web pages) converts to markdown in the draft, the copy button writes
+structured rich text with a plain-text fallback, and large images are downscaled to at most
+2048 px on attach; see [Using the web client](/web/using-the-web-client) for what users see.
+
+Two known gaps in that slice: an image that cannot be re-encoded under the 5 MB attachment cap
+is still rejected at attach time (#1330), and stopping a read-aloud does not cancel a
+`tts.speak` request already in flight.
 
 **Canvas** in the top bar is no longer on this list: it is live with the `ui-surfaces` plugin
 enabled and explains itself when it is not (see
@@ -609,7 +672,11 @@ phase.
 provider is configured - see [Text-to-speech](/tts) and
 [Web client components](/reference/web-client-components#read-aloud), plus the
 "Gateway settings" list in
-[What the client needs from the gateway](#what-the-client-needs-from-the-gateway).
+[What the client needs from the gateway](#what-the-client-needs-from-the-gateway). The composer's
+**Read replies aloud** auto-read toggle is live under the same gate (see
+[Navigation and transcript preferences](#navigation-and-transcript-preferences)); the dictation
+auto-send it enables is client-side and needs no gateway method beyond the Dictate session
+methods already listed.
 
 ## Rules the host must follow
 
@@ -654,3 +721,5 @@ client at the previous gateway.
 - [Gateway protocol](/gateway/protocol) - client identity, scopes and the connect handshake
 - [Configuration reference](/gateway/configuration-reference) - every `gateway.webClient` key
 - [Pairing QR and setup codes](/cli/qr) - onboarding a browser with `--client openclaw-user-client`
+- [Identities](/gateway/identity) - people, linked accounts and the four proofs of control
+- [Identity OIDC](/plugins/identity-oidc) - sign-in with Google, Microsoft Entra or GitHub
