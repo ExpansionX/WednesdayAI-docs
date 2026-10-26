@@ -753,6 +753,29 @@ Dependency-free bundled plugins may run directly from the global package copy wh
 healthy global bundled plugin should not produce `PLUGIN_DEPS_MISSING` diagnostics just because it
 does not have a managed install record.
 
+## Kernel contract compatibility
+
+Plugins can declare the kernel contract versions they need in `openclaw.plugin.json`
+(`contracts`). When a plugin needs newer kernel contracts than this host provides:
+
+- **Install refuses**: `wednesdayai plugins install` fails with code `version_incompatible` and a
+  message like `plugin "<id>" is not compatible with this host: <reason>. Upgrade WednesdayAI and
+retry.` Nothing is installed. A malformed `contracts` field is rejected the same way before any
+  files are copied.
+- **Config refuses**: a plugin that is already on disk (for example on `plugins.load.paths`, or
+  installed before a host downgrade) is not loaded, and config validation reports it as an error
+  at `plugins.entries.<id>`, e.g. `plugin <id>: plugin "<id>" requires delivery contract 2.x
+(>= 2.0), but host provides 1.0`. Like the existing minimum-host-version check, this makes
+  `wednesdayai config validate`, `plugins list` and Gateway startup fail until the plugin is
+  removed from disk or the load path, or upgraded — an incompatible plugin is never silently
+  skipped.
+- **Remedy**: upgrade WednesdayAI, or install a build of the plugin made for this host's kernel
+  contracts. Contract versions are compiled into the host, so they are reliable even when the
+  version string is not.
+
+Details, the full contract table and the versioning rules: [Versioned kernel
+contracts](/plugins/contracts).
+
 ## Plugin API (overview)
 
 Plugins export either:
@@ -2065,6 +2088,11 @@ Plugins can (and should) ship tests:
 
 **Plugin is not discovered at startup**
 Check that `plugins.enabled` is `true` (default) and that the plugin directory or file is reachable. Run `openclaw plugins list` to see what was discovered. If the plugin is absent, verify the path is listed under `plugins.load.paths` or the plugin file is in `~/.openclaw/extensions/`. Non-bundled plugins without install provenance emit a startup warning — add the id to `plugins.allow` to suppress it and confirm trust.
+
+**Install fails with `version_incompatible`, or config reports `requires <id> contract …`**
+The plugin declares kernel contract versions newer than this host provides. See
+[Kernel contract compatibility](#kernel-contract-compatibility): upgrade WednesdayAI or install a
+plugin build matching this host's contracts.
 
 **Plugin loads but its config is rejected with an unknown-key error**
 Unknown fields inside `plugins.entries.<id>.config` are rejected by that

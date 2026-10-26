@@ -1,0 +1,291 @@
+---
+summary: "Versioned kernel contracts, the manifest contracts field, plugin conformance checks, private import rules and the contract surface snapshot"
+read_when:
+  - You are building a plugin and want to know which contracts the host provides
+  - You need to declare contract requirements in openclaw.plugin.json
+  - You are changing a public plugin-sdk or gateway type and need the versioning rules
+  - You hit a contract compatibility, conformance or private import error
+title: "Versioned Kernel Contracts"
+audience: developer
+---
+
+# Versioned kernel contracts
+
+The kernel exposes six versioned contracts. Each contract id names one public surface an
+extension builds against, versioned as `major.minor` by a constant in
+`src/plugins/contract-versions.ts`. Versions are compiled into the host, so they are reliable
+even when the host version string is not. All ids, constants and the compat checker are
+re-exported from `openclaw/plugin-sdk`.
+
+## Versioned contracts
+
+| Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
+| ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `1.0`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `1.0`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.0`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
+| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.0`           | `MsgContext` (`src/auto-reply/templating.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                                                                                              | `MsgContext`, `ChannelGatewayAdapter`                                                               |
+| `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.0`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+
+Each root type carries a direction, and the snapshot records it per entry:
+
+- `provided` — core hands the type to you, so core may add members to it freely without
+  breaking you.
+- `implemented` — you implement or construct the type, so a new required member or a changed
+  signature in core would break your implementation.
+
+The exact per-type split lives in `scripts/contract-surface/roots.ts`.
+
+The `gateway` contract is special: its major equals `PROTOCOL_VERSION` in
+`src/gateway/protocol/schema/protocol-schemas.ts`, because the wire protocol between clients and
+the gateway is observable outside the plugin boundary.
+
+## Version semantics
+
+Contract versions are `major.minor` strings. The policy is:
+
+- **Breaking** (requires a major bump): removing an entry, adding a required member to an
+  `implemented` type, changing a signature or type shape, or flipping a direction.
+- **Additive** (requires only a minor bump): new optional members, new members on a `provided`
+  type, and new deprecation markers.
+
+A breaking change without a major bump fails CI (see [Changing a contract](#changing-a-contract)).
+
+## Declaring what your plugin needs
+
+The optional `contracts` field in `openclaw.plugin.json` maps contract ids to the minimum
+`major.minor` version your plugin requires:
+
+```json
+{
+  "id": "voice-call",
+  "configSchema": {},
+  "contracts": {
+    "plugin": "1.0",
+    "hooks": "1.0",
+    "ingress": "1.0",
+    "delivery": "1.0"
+  }
+}
+```
+
+The field is parsed in `src/plugins/manifest.ts` and checked in
+`src/plugins/contract-versions.ts` (`checkPluginContractCompat`). The compat rule is: same
+major, and the host minor must be greater than or equal to the required minor. A plugin that
+declares nothing is always compatible; a plugin can require a subset of the contracts.
+
+When the check fails, the host refuses the plugin with one of these reasons, taken verbatim
+from `checkPluginContractCompat`:
+
+- `requires kernel contract "<id>", which this host does not provide`
+- `contracts.<id> "<v>" is not a valid "major.minor" version`
+- `requires <id> contract <M>.x (>= <v>), but host provides <host>`
+- `requires <id> contract >= <v>, but host provides <host>`
+
+Where the check runs:
+
+- **At install**: `src/plugins/install.ts` refuses the install with the error code
+  `VERSION_INCOMPATIBLE` and the message `plugin "<id>" is not compatible with this host:
+<reason>. Upgrade WednesdayAI and retry.` An invalid version string is prefixed with
+  `invalid contract version in openclaw.plugin.json:`. A malformed `contracts` field (not a map
+  of contract ids to strings) is rejected the same way — and before any files are copied — with
+  the message `invalid contracts field in openclaw.plugin.json: <error>`.
+- **At load**: `src/plugins/manifest-registry.ts` drops the plugin and records an error
+  diagnostic with the internal code `PLUGIN_CONTRACT_INCOMPATIBLE` (or `PLUGIN_MANIFEST_INVALID`
+  when the manifest fails to parse — including a malformed `contracts` field — or the declared
+  version is not a valid `major.minor` string) and the message `plugin "<id>" <reason>`.
+  Config validation (`src/config/validation.ts`) turns every error-level manifest diagnostic into
+  a config error at `plugins.entries.<id>`, so `config validate`, `plugins list` and Gateway
+  startup fail until the plugin is removed or upgraded — the same behaviour as the existing
+  minimum-host-version check. The check runs in dev builds too, because contract versions are
+  compiled into the host.
+
+See [Plugin manifest](/plugins/manifest) for the rest of the manifest shape.
+
+## Conformance suite
+
+`src/plugin-sdk/conformance.ts`, `conformance-delivery.ts` and `conformance-ingress.ts` ship
+framework-free checkers through `openclaw/plugin-sdk/testing` (same surface as
+`wednesdayai/plugin-sdk/testing`). Each checker returns a report of rule violations;
+`assertConformance` throws a typed `ConformanceError` when any report has violations, so
+extension tests never need to import a test framework to run the checks.
+
+```ts
+import {
+  assertConformance,
+  checkDeliveryConformance,
+  checkExtensionConformance,
+  checkIngressConformance,
+} from "openclaw/plugin-sdk/testing";
+
+const reports = [
+  ...(await checkExtensionConformance({
+    dir: "test/fixtures/plugins/conformance-reference",
+    pluginId: "conformance-reference",
+  })),
+  await checkDeliveryConformance(channelPlugin.outbound, { subject: "my outbound" }),
+  checkIngressConformance(buildInboundContext("hello"), { subject: "my inbound" }),
+];
+assertConformance(reports);
+```
+
+`checkExtensionConformance` loads the plugin through the real plugin loader and runs the plugin,
+hooks and delivery checks; `checkDeliveryConformance` and `checkIngressConformance` can also be
+called directly on an adapter or a `MsgContext`. Two properties of `checkExtensionConformance`
+matter for test suites: calls are serialised through a module-level promise chain (the inspecting
+load activates process-global plugin state, so overlapping loads would restore over each
+other), and after the load the checker restores the pre-call state — registry, hook runner,
+plugin APIs, speech and voice providers, internal-hook handlers, plugin commands and the
+task-pass buffer — so other plugins' commands and registrations survive the check.
+
+Rule ids, grouped by checker:
+
+Plugin and hooks (`checkExtensionConformance`, which includes `checkHooksConformance`):
+
+- `plugin.load.loaded` — the plugin module actually loaded into the registry. When the plugin
+  fails to load, this is the only check reported.
+- `plugin.register.no-diagnostics` — no warn or error diagnostic is attributed to the plugin.
+  Discovery, manifest parsing, config validation and registration all count, not only
+  registration.
+- `hooks.handler.function` — every registered hook handler is a function.
+- `hooks.priority.finite` — hook priority, when set, is a finite number.
+- `hooks.timeout.positive` — hook `timeoutMs`, when set, is greater than 0.
+
+Delivery (`checkDeliveryConformance`):
+
+- `delivery.mode.known` — `deliveryMode` is `direct`, `gateway` or `hybrid`.
+- `delivery.direct.handlers` — non-gateway delivery provides both `sendText` and `sendMedia`
+  (otherwise `createPluginHandler` returns null and delivery throws at send time).
+- `delivery.text-chunk-limit.positive` — `textChunkLimit`, when set, is a positive integer.
+- `delivery.chunker.bounded` — a chunker returns a non-empty chunk array at the adapter's own
+  limit (default 4000) without throwing. The probe text is capped independently of the declared
+  limit (~8000 chars), so a huge valid `textChunkLimit` does not scale the probe allocation.
+- `delivery.send-text.result` — the optional sendText probe resolves to a result object with a
+  non-empty `messageId` and the adapter's own `channel`.
+
+Ingress (`checkIngressConformance`):
+
+- `ingress.sender.identity` — sender identity fields pass `validateSenderIdentity`.
+- `ingress.body.strings` — `Body`, `BodyForAgent` and `BodyForCommands` are strings.
+- `ingress.group.conversation-label` — group/channel context carries a conversation label
+  (`ConversationLabel` or fields that derive one).
+
+These checks are not sandboxed: the checkers execute the adapter's own code in-process, with
+neither a sandbox nor a timeout. `delivery.chunker.bounded` calls the adapter's chunker twice,
+and the optional `deliveryProbe` makes the `delivery.send-text.result` check call the adapter's
+real send path — with a credential-bearing config, that sends a real message. Run the send-text
+probe only against an in-memory or sandbox adapter.
+
+`test/fixtures/plugins/conformance-reference/` is the reference implementation: a minimal
+in-memory channel plugin that imports only from `openclaw/plugin-sdk` and passes every check.
+For an extension-side example, see `extensions/telegram/src/outbound.conformance.test.ts`.
+
+## Private imports
+
+An extension may import core only through the plugin-sdk surface:
+
+- `openclaw/plugin-sdk` (alias `wednesdayai/plugin-sdk`), and
+- its exported `./plugin-sdk/*` subpaths, for example `openclaw/plugin-sdk/account-id`,
+  `openclaw/plugin-sdk/keyed-async-queue`, `openclaw/plugin-sdk/process-scoped-map`,
+  `openclaw/plugin-sdk/escape-regexp`, `openclaw/plugin-sdk/control-ui`,
+  `openclaw/plugin-sdk/provider-web-search` and
+  `openclaw/plugin-sdk/provider-media-understanding`, and
+- `openclaw/plugin-sdk/testing` from test files only. Importing it from production code is
+  forbidden because the jiti manifest entrypoint never loads it in production.
+
+The bare package root `openclaw` and `openclaw/cli-entry` appear in the root `package.json`
+`exports` map, but they are not part of the allowed plugin surface; importing either one from an
+extension is a violation. A "test file" here means a file whose name ends in `.test.ts`,
+`.test.tsx`, `.test-harness.ts`, `.shared-test.ts`, `.test-utils.ts` or `.e2e-harness.ts`, or any
+file inside a `__tests__` directory.
+
+Deep relative imports into `src/` resolve inside the monorepo but crash in the installed
+package, which ships `dist/` only. The gate is
+`pnpm lint:extensions:no-private-imports` (`scripts/check-extension-imports.ts`), part of
+`pnpm check`. Violations print one line each:
+
+```text
+<file>:<line>: <rule>: "<specifier>" -> <target>
+```
+
+Rule ids:
+
+- `relative-outside-package` — a relative import leaves the extension package (test files may
+  still deep-import `src/` when their file is in the documented allowlist).
+- `core-internal-package-path` — a `openclaw/...` or `wednesdayai/...` import that is not one of
+  the allowed plugin-sdk subpaths above.
+- `testing-subpath-in-production` — `openclaw/plugin-sdk/testing` imported from a production
+  file instead of a test file.
+- `stale-allowlist-entry` — an allowlist entry whose file no longer deep-imports `src/`, so the
+  exception can be deleted.
+
+## Changing a contract
+
+To change a public contract surface:
+
+1. Edit the type.
+2. Run `pnpm contracts:update` to regenerate `src/plugin-sdk/contract-surface.json`.
+3. Bump the version constant in `src/plugins/contract-versions.ts`: minor bump for additive-only
+   changes, major bump for breaking changes.
+4. Commit the updated `src/plugin-sdk/contract-surface.json` with your change.
+
+`pnpm lint:contracts:surface` (`scripts/check-contract-surface.ts`) inside `pnpm check` diffs the
+committed snapshot against the merge base with the PR base branch (the first parent on a push
+build) and the latest release tag — true only because the CI `check` job checks out full history
+(`fetch-depth: 0`); do not reduce that checkout depth, or the gate silently degrades to a
+base-tip comparison. The script accepts only `--update` and `--base-ref <ref>`: a missing
+`--base-ref` value, or a value that is itself a flag, and any unknown argument are a usage
+error, never a silent fallback to the default base. It fails CI with:
+
+- `snapshot.stale` — `src/plugin-sdk/contract-surface.json` does not match the generated
+  snapshot. Fix: run `pnpm contracts:update` and commit the result.
+- `base.unresolved` — the base snapshot cannot be read at all. The check fails rather than
+  passing silently; a base branch that simply does not carry the snapshot yet is only a notice.
+- `version.bump-required` — the surface changed but the contract version constant did not.
+  Fix: bump the constant (minor for additive changes).
+- `version.major-bump-required` — the change is breaking but the constant kept its major.
+  Fix: bump the major.
+- `version.decreased` — the constant went down relative to the base branch's snapshot. Fix:
+  restore or correctly bump the version.
+- `contract.removed` — a contract id disappeared from the snapshot. Fix: reinstate it or record
+  the removal with a major bump and a released `@deprecated` alias
+  (see [Renaming and removing](#renaming-and-removing)).
+
+### What the snapshot tracks
+
+The snapshot is deliberately shallow: per entry it records only its presence, whether it is
+optional, its direction, its deprecation marker, and the entry's printed type text, with two
+exceptions: an anonymous object property that gets flattened into dotted child entries records a
+marker instead of its own text (its children carry the shape), and type texts longer than 240
+characters are stored as a `sha256:` digest. For generic interfaces, classes and type aliases
+the declaration's type-parameter list — constraints and defaults included — is appended to the
+recorded text (`Box<T> { value: T; } <T>`), because the printed type alone drops them; this
+closes the generic-type-alias known limit in ADR 0115. A member whose type is a named type is tracked by that
+type's printed name only, so a change inside that named type surfaces only if the type is exported
+from `openclaw/plugin-sdk` (where the `sdk` contract catches it) or is itself listed as a root in
+`scripts/contract-surface/roots.ts`; a consequence is that such a change can demand an `sdk` bump
+rather than a bump of the contract whose member actually changed. The test-only
+`openclaw/plugin-sdk/testing` subpath is deliberately excluded from the `sdk` contract.
+
+## Renaming and removing
+
+Config keys, CLI flags and SDK exports are never removed immediately; the same discipline
+applies to kernel contract entries. The flow:
+
+1. Add the new name.
+2. Keep the old name with a `/** @deprecated Use <new> */` marker and ship the whole change as a
+   minor bump.
+3. Wait one release cycle so a released snapshot carries the deprecated alias.
+4. Remove the old name with a major bump.
+
+CI enforces the alias requirement through `deprecation.alias-release-required`: a removed entry
+must have shipped `@deprecated` in the latest release tag's snapshot, otherwise the removal is
+rejected. Two key shapes are exempt because nobody authors them and so nobody can deprecate
+them: hook-name literal entries (`PluginHookName|"message_received"`, including dotted literals
+like `PluginHookName|"context.collect"`) and generated union-constituent keys
+(`<Root>|kind="a".member`, `<Root>|m:<digest>.member`, `<Root>|v:<digest>`, `<Root>|<n>.member`),
+whose prefix changes whenever that constituent's shape changes. Both still require the major bump
+when an entry disappears, and ordinary payload properties are never exempt.
+
+See the general policy in [Release](/contributing/release#deprecation-policy).
