@@ -197,7 +197,7 @@ read or write groups later are refused until they are allowlisted.
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
   `sessions.resolve`, `sessions.subscribe`, `sessions.direct`, `chat.history`,
-  `identity.self`, `chat.surfaces.list`,
+  `chat.surfaces.list`,
   `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
@@ -208,14 +208,12 @@ read or write groups later are refused until they are allowlisted.
   surfaces): they read the session's assistant-composed surfaces for the web client's Canvas
   panel. The `ui-surfaces` plugin seam answers `enabled: false` when the plugin is off, so
   admission is unconditional; the methods report the plugin's state rather than the absence of the
-  capability. See [Assistant UI surfaces](#assistant-ui-surfaces). `identity.self` joined with
-  ADR 0116 (identity binding at enrollment): it reads the calling browser's own person and links;
-  the device id comes from the verified connection, never the request body.
+  capability. See [Assistant UI surfaces](#assistant-ui-surfaces).
 - `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
-  `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
-  `talk.session.bargeIn`, `identity.link.claim` and `identity.logout`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
+  `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark` and
+  `talk.session.bargeIn`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
   the one surfaces write, flipping the pinned boolean on a surface the session already owns.
   Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
   and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
@@ -232,11 +230,7 @@ read or write groups later are refused until they are allowlisted.
   `mode: "transcription"` too. An operator-scope `transcription` create is not gated. Request
   and event shapes are under [Talk sessions](#talk-sessions). `tts.speak` joined with ADR 0102
   (read aloud) so a narrow client can read replies aloud on demand; shapes and errors are under
-  [TTS read aloud](#tts-read-aloud). `identity.link.claim` and `identity.logout` joined with
-  ADR 0116 (identity binding at enrollment): redeeming a self-service `/link` code and the
-  server-side logout of the calling device. Both take the device id from the verified
-  connection, never the request body; behaviour is under [Identity RPCs](#identity-rpcs).
-  `talk.realtime.*`, `talk.config`
+  [TTS read aloud](#tts-read-aloud). `talk.realtime.*`, `talk.config`
   and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
 `sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
@@ -1462,35 +1456,6 @@ Migration target:
   in addition to device/client/role/scopes/token/nonce fields.
 - Legacy `v2` signatures remain accepted for compatibility, but paired-device
   metadata pinning still controls command policy on reconnect.
-
-## Identity RPCs
-
-ADR 0116 binds people to their linked accounts at enrollment. The CLI, the web client and every
-other client talk to the same seven `identity.*` methods; the flows they serve are in
-[Identities](/gateway/identity). Linking grants a person's identity, so only `operator.admin` binds
-or unbinds a value.
-
-| Method                | Scope            | Narrow admission          | Serves                                                                                      |
-| --------------------- | ---------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
-| `identity.list`       | `operator.read`  | never                     | the operator's directory view (`identity list`)                                             |
-| `identity.self`       | `operator.read`  | `operator.sessions.read`  | the calling browser's own person and links (the **Linked accounts** dialog)                 |
-| `identity.add`        | `operator.admin` | never                     | create a person (`identity add`)                                                            |
-| `identity.link`       | `operator.admin` | never                     | link a `<namespace>:<id>` value to a person (`identity link`, `pairing approve --identity`) |
-| `identity.unlink`     | `operator.admin` | never                     | remove a value from every person (`identity unlink`)                                        |
-| `identity.link.claim` | `operator.write` | `operator.sessions.write` | redeem a `/link` code (`identity.link.claim` links, then approves the pairing code)         |
-| `identity.logout`     | `operator.write` | `operator.sessions.write` | server-side logout of the calling device (**Log out**)                                      |
-
-- The three narrow methods (`identity.self`, `identity.link.claim`, `identity.logout`) read the
-  verified device id from the connection, never from the request body. A connection without one is
-  refused fail-closed with `identity_device_required` ("This connection has no verified device."),
-  so a caller can only act on its own device and person.
-- `identity.link` refuses `device:` values (`identity_link_invalid`) and points at
-  `wednesdayai devices link <deviceId> --identity <name>`: devices have their own operator path
-  (see [Device identity + pairing](#device-identity--pairing)).
-- `identity.link.claim` answers `identity_link_conflict` with
-  `<value> is already linked to another person; ask them to unlink it first.` — it never names the
-  other person to a narrow caller. Claims are serialized per claimed value and rate limited per
-  device (5/min) and per person (15/min), with a 5-minute lockout.
 
 ## TLS + pinning
 
