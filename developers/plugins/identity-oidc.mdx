@@ -1,0 +1,177 @@
+---
+summary: "identity-oidc plugin: Google, Microsoft Entra and GitHub sign-in that links a person and enrolls the web client"
+read_when:
+  - You want people to sign in to the web client with Google, Microsoft Entra or GitHub
+  - You are configuring OIDC providers or inviting people to sign in
+title: "Identity OIDC"
+---
+
+# Identity OIDC plugin
+
+`identity-oidc` is a bundled, disabled-by-default extension that turns browser sign-in into an
+identity proof. A person signs in with Google, Microsoft Entra (single tenant) or GitHub; if the
+sign-in matches an invite or is already linked, the extension links the sign-in to that person,
+mints a web-client device bootstrap and lands the browser in the web client, paired as its own
+device.
+
+Identity values minted by sign-in look like `oauth:<providerId>:<32 hex>`, where the hex is the
+first 32 characters of `sha256("<issuer>|<subject>")`. The pair `(iss, sub)` is the only stable
+subject a provider gives you: email addresses and usernames can change and are never used as the
+key.
+
+## Enable the plugin
+
+```bash
+wednesdayai plugins enable identity-oidc
+```
+
+Restart the gateway afterwards. Once enabled, the sign-in routes live under
+`<publicBaseUrl>/plugins/identity-oidc/...`.
+
+## Configuration
+
+```json5
+{
+  plugins: {
+    entries: {
+      "identity-oidc": {
+        enabled: true,
+        config: {
+          publicBaseUrl: "https://assistant.example.com",
+          // webClientUrl: "https://assistant.example.com/v2/client/", // default
+          // cookieSecret: "${IDENTITY_OIDC_COOKIE_SECRET}", // required for multi-replica
+          // inviteTtlDays: 7, // default
+          providers: [
+            {
+              id: "google",
+              type: "oidc",
+              issuer: "https://accounts.google.com",
+              clientId: "${GOOGLE_CLIENT_ID}",
+              clientSecret: "${GOOGLE_CLIENT_SECRET}",
+            },
+            {
+              id: "entra",
+              label: "Microsoft",
+              type: "oidc",
+              issuer: "https://login.microsoftonline.com/<tenantId>/v2.0",
+              clientId: "${ENTRA_CLIENT_ID}",
+              clientSecret: "${ENTRA_CLIENT_SECRET}",
+              trustEmailClaim: true, // Entra emits no email_verified; single-tenant issuers only
+            },
+            {
+              id: "github",
+              type: "github",
+              clientId: "${GITHUB_CLIENT_ID}",
+              clientSecret: "${GITHUB_CLIENT_SECRET}",
+            },
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+- `publicBaseUrl` (required): the external origin people use to reach the gateway. It must use
+  `https` (plain `http` is only trusted on loopback hosts — `127.0.0.1`, `::1`, `localhost` — for
+  local development) and be a bare origin with no path, query or fragment. Sign-in callbacks run at
+  `<publicBaseUrl>/plugins/identity-oidc/<providerId>/callback`, so register exactly that redirect
+  URI with each provider.
+- `webClientUrl`: where sign-in lands. Defaults to `<publicBaseUrl>/v2/client/`. Must be an
+  absolute `https` URL (loopback plain `http` is allowed) without a fragment and without control
+  characters: the sign-in handler appends its own `#setup=`/`#oauthError=` fragments.
+- `cookieSecret`: at least 32 characters (checked after trimming). The flow state (provider,
+  state, PKCE verifier, nonce) lives in a sealed cookie, never in server memory, so any replica
+  can serve the callback. Set one shared value when more than one gateway replica serves the
+  routes; otherwise a secret is generated under `<state dir>/identity-oidc/`. Supports
+  `${ENV_VAR}` secret references.
+- `inviteTtlDays`: how long invites stay valid. Default `7`.
+- `providers` (at least one): see below. `id` is `[a-z0-9][a-z0-9-]{0,31}`; duplicate ids log an
+  error and the later duplicates are skipped. `label` overrides the displayed name.
+  `clientSecret` accepts `${ENV_VAR}` secret references. `type: "oidc"` requires an `issuer` and,
+  when `scopes` are set, they must include `openid` (otherwise no id token and no email claim
+  arrives). `type: "github"` accepts no `issuer` — its endpoints are pinned; GitHub Enterprise is
+  out of scope.
+
+## Provider presets
+
+| Provider                       | `type`   | `issuer`                                            | Notes                                 |
+| ------------------------------ | -------- | --------------------------------------------------- | ------------------------------------- |
+| Google                         | `oidc`   | `https://accounts.google.com`                       | default scopes `openid email profile` |
+| Microsoft Entra, single tenant | `oidc`   | `https://login.microsoftonline.com/<tenantId>/v2.0` | set `trustEmailClaim: true`           |
+| GitHub                         | `github` | none                                                | default scopes `read:user user:email` |
+
+- **Entra** emits no `email_verified` claim, so invites would never match without
+  `trustEmailClaim: true`. That flag trusts the `email` claim as verified and is only safe for a
+  **single-tenant** issuer, where your tenant already decides who holds an address.
+- **GitHub** is plain OAuth2 with pinned endpoints (no discovery document, no id token). The
+  subject is the numeric user id and verified emails come from `/user/emails`, which needs the
+  `user:email` scope (or the GitHub App Email permission): without it, already-linked sign-ins
+  still work, only the invite match is skipped, and the gateway logs a warning naming the missing
+  `user:email` scope.
+- Custom OIDC providers work with any standards-compliant issuer: set `type: "oidc"`, the `issuer`
+  URL, `clientId` and `clientSecret`, and optionally `scopes` (which must include `openid`).
+
+## Issuer security
+
+Issuers must use `https`. A plain-`http:` issuer is accepted only on loopback hosts (`127.0.0.1`,
+`::1`, `localhost`) for local development and test issuers; anything else is refused when the
+config loads:
+
+```
+identity-oidc: provider <id> issuer must use https (plain http is only trusted for loopback hosts 127.0.0.1, ::1, localhost): <issuer>
+```
+
+Over cleartext, an attacker on the network path could serve a forged JWKS and mint id tokens for
+any linked subject.
+
+Discovery is per provider and lazy: a failed discovery is remembered for 30 seconds and the next
+sign-in start after that window retries (so a transient issuer outage does not turn every start
+into a full discovery round trip), and each discovery attempt is cut off after 10 seconds so a
+hanging discovery endpoint cannot stall sign-in.
+
+## Invites
+
+Sign-in only binds a person when the operator invited that person first, or the sign-in is already
+linked. An invite matches a **provider-verified** email (the id token's `email_verified: true`, or
+GitHub's verified email list) against the invited address, exactly once:
+
+```bash
+wednesdayai oidc invite Alice --provider google --email alice@example.com
+wednesdayai oidc uninvite Alice --provider google
+wednesdayai oidc invites           # or --json
+```
+
+- The person must already exist: `Unknown identity "Alic". Add it first: wednesdayai identity add Alic`.
+- The provider must be configured: `Unknown provider "<id>". Configured providers: google, github.`
+- The email must contain exactly one `@`.
+- Inviting again for the same person+provider, or for an address that another person already holds
+  at that provider (correcting a typo), replaces the pending invite; the CLI prints what it
+  replaced.
+- Invites expire after `inviteTtlDays` (default 7 days) because mailboxes get reassigned. From the
+  first sign-in on, the immutable `(iss, sub)` subject is the key, and the email no longer matters.
+- The invite is claimed and removed under one store lock, so two concurrent callbacks carrying the
+  same verified email cannot both bind. If linking then fails with a transient error, the original
+  invite is put back so the claim does not burn or renew it; when the invited person no longer
+  exists, the claim stands and the sign-in is refused (`link_failed`).
+
+An uninvited, unlinked sign-in is refused and the browser lands on
+`#oauthError=not_invited` in the web client: `Your account isn't registered with this assistant.
+Ask the administrator to invite you.` The other failure reasons the web client renders are
+`oauth_state_invalid` (`Sign-in expired or was started in another browser. Try again.`),
+`link_failed` (`Your sign-in is already linked to someone else. Ask the administrator.`) and the
+generic `oauth_failed` (`Sign-in failed. Try again.`). Callback state is single use: a replayed
+callback (back button, duplicate tab) is refused as `oauth_state_invalid` before the token
+exchange, so the provider's single-use code is never presented twice.
+
+## What sign-in does afterwards
+
+On success the extension links the sign-in to the person and calls the identity runtime to mint a
+user-client device bootstrap, then redirects to `<webClientUrl>#setup=<token>`. The browser pairs
+as its own device exactly as it does with a scanned setup code.
+
+That token is a bearer code: it pairs whichever browser redeems it, and re-pairing moves the
+device link to the token's person. A `#setup=` link that arrives at a browser which is already
+paired is therefore never redeemed silently; the web client asks for explicit confirmation first
+and only on confirm logs the current device out and re-pairs. See
+[Identities](/gateway/identity#what-logout-does).
