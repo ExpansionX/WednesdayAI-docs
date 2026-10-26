@@ -136,7 +136,7 @@ Tool params:
 - `task` (required)
 - `label?` (optional)
 - `agentId?` (optional; spawn under another agent id if allowed)
-- `model?` (optional; overrides the sub-agent model; invalid values are skipped and the sub-agent runs on the default model with a warning in the tool result)
+- `model?` (optional; overrides the sub-agent model; an invalid or disallowed value fails the spawn with an error instead of starting the run)
 - `thinking?` (optional; overrides thinking level for the sub-agent run)
 - `runTimeoutSeconds?` (defaults to `agents.defaults.subagents.runTimeoutSeconds` when set, otherwise `0`; when set, the sub-agent run is aborted after N seconds)
 - `thread?` (default `false`; when `true`, requests channel thread binding for this sub-agent session)
@@ -268,7 +268,10 @@ Note: the merge is additive, so main profiles are always available as fallbacks.
 
 Spawned sub-agents inherit the requester identity of the spawning session (the child carries
 `identitySource: "parent-session"`), so tools with identity-based access checks resolve the same
-user in the child run. System-triggered parents that run without a resolved identity spawn
+user in the child run. The target agent's `agents.list[].inheritRequesterIdentity: false` switches
+this off at the gateway: delegated turns on that agent run without a person identity (see
+[`inheritRequesterIdentity`](/gateway/configuration-reference#agentslist-per-agent-overrides)).
+System-triggered parents that run without a resolved identity spawn
 unattributed children — there is no fallback identity. Sub-agent runs and announces resolve the
 target agent's workspace lane from that identity, so an unattributed run or announce into a
 lane-enabled agent is denied (see [Workspace Lanes](/concepts/workspace-lanes)).
@@ -280,7 +283,7 @@ Sub-agents report back via an announce step:
 - The announce step runs inside the sub-agent session (not the requester session).
 - If the sub-agent replies exactly `ANNOUNCE_SKIP`, nothing is posted.
 - Otherwise the announce reply is posted to the requester chat channel via a follow-up `agent` call (`deliver=true`).
-- If the requester session's stored route names an account that the channel no longer lists, the announce has no external target: the completion is delivered as the announce turn inside the requester session instead, with no default-account fallback (see [Sessions](/concepts/session#delivery-routes-go-stale)).
+- If the requester session's stored route names a non-default account that the channel's configured account list no longer includes, the announce has no external target: the completion is delivered as the announce turn inside the requester session instead, with no default-account fallback (see [Sessions](/concepts/session#delivery-routes-go-stale)).
 - Announce replies preserve thread/topic routing when available on channel adapters.
 - Announce context is normalized to a stable internal event block:
   - source (`subagent` or `cron`)
@@ -355,6 +358,8 @@ Sub-agent configuration lives across three independent surfaces. They answer dif
 - This is **allowlist-only**; there is no deny-list for target agent IDs. To restrict, omit IDs from `allowAgents`.
 - Sandbox inheritance guard still applies: a sandboxed requester cannot spawn into an unsandboxed target, even if the ID is allowlisted.
 - Discovery: call `agents_list` to see which IDs are currently allowed for `sessions_spawn`.
+- Teams: an agent that leads an [`agents.teams`](/gateway/configuration-reference#agentsteams) entry can also spawn every member of that team, in addition to `allowAgents`. Members get no extra rights from the team.
+- Internal agents (`userFacing: false`) can be spawned like any other agent, but not with `thread: true`, because that binds them to a user-visible thread.
 
 ### 2. Global sub-agent tuning (timing, depth, concurrency)
 
