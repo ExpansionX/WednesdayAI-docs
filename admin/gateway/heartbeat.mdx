@@ -260,14 +260,15 @@ Use `accountId` to target a specific account on multi-account channels like Tele
     pre-append `:heartbeat`; the runtime creates and refreshes the sibling
     `:heartbeat` session itself.
 - `target`:
-  - `last`: deliver to the last used external channel.
+  - `last`: deliver to the last used external channel. A stored route whose account is no longer configured counts as no route.
   - explicit channel: `whatsapp` / `telegram` / `discord` / `googlechat` / `slack` / `msteams` / `signal` / `imessage`.
+  - `webchat`: append the output to the session chat (the transcript shown in the web client and Control UI) and push it live to connected clients. Use this for agents whose users only chat through the web client.
   - `none` (default): run the heartbeat but **do not deliver** externally.
 - `directPolicy`: controls direct/DM delivery behavior:
   - `allow` (default): allow direct/DM heartbeat delivery.
   - `block`: suppress direct/DM delivery (`reason=dm-blocked`).
 - `to`: optional recipient override (channel-specific id, e.g. E.164 for WhatsApp or a Telegram chat id). For Telegram topics/threads, use `<chatId>:topic:<messageThreadId>`.
-- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. If the account id does not match a configured account for the resolved channel, delivery is skipped.
+- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. If the account id does not match a configured account for the resolved channel, the output goes to the session chat instead (see the fallback note below).
 - `identity`: optional `session.identityLinks` key (matched case-insensitively against the keys). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`). Unmatched or absent values leave runs as unattributed system runs — there is never a default or fallback identity. Attribution is operator-configured only; agents cannot set it.
 - `prompt`: overrides the default prompt body (not merged).
 - `ackMaxChars`: max chars allowed after `HEARTBEAT_OK` before delivery.
@@ -305,12 +306,19 @@ stay silent.
   specific channel session (Discord/WhatsApp/etc.).
 - `session` only affects the run context; delivery is controlled by `target` and `to`.
 - To deliver to a specific channel/recipient, set `target` + `to`. With
-  `target: "last"`, delivery uses the last external channel for that session.
+  `target: "last"`, delivery uses the last live external channel for that session.
 - Heartbeat deliveries allow direct/DM targets by default. Set `directPolicy: "block"` to suppress direct-target sends while still running the heartbeat turn.
 - If the main queue, cron queue, or target session lane is busy, the heartbeat is skipped and retried later.
 - With `skipWhenBusy: true`, this agent's own session-keyed subagent/nested lanes also defer heartbeat runs. Other agents' busy lanes do not defer this agent.
-- If `target` resolves to no external destination, the run still happens but no
-  outbound message is sent.
+- Output always lands somewhere. If `last` or an explicit channel target can't be
+  resolved, the channel isn't ready (`checkReady`), or the send fails, the output is
+  appended to the session chat instead. The operator gets a gateway log `warn`
+  (`heartbeat: delivery target unavailable; delivered to session chat`, repeated
+  occurrences at `info` until the gateway restarts), a heartbeat `sent` event on
+  channel `webchat` with reason `fallback:<reason>`, and the same reason in
+  `openclaw status --deep`. Reasons: `no-external-route`, `target-unavailable`,
+  `unknown-account`, `channel-not-ready`, `send-failed`. Only `target: "none"`,
+  `directPolicy: "block"`, and `showAlerts: false` keep output undelivered.
 - Heartbeat-only replies do **not** keep the session alive; the last `updatedAt`
   is restored so idle expiry behaves normally.
 - Zero-information heartbeats (empty replies, `NO_REPLY`, acknowledgement-only
