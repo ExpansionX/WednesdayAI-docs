@@ -117,8 +117,9 @@ that still set them are migrated automatically on load (see
 ### How it works
 
 Maintenance only ever touches the session index, and never at startup: gateway activation runs
-only the startup backfill chains (user ids, token counts, usage columns) — no index retirement,
-even in `enforce` mode. Index upkeep happens when the index is written:
+only the startup backfill chains (user ids, session identity / actor columns, token counts, usage
+columns) — no index retirement, even in `enforce` mode. Index upkeep happens when the index is
+written:
 
 - **Index upkeep on writes.** Ordinary session-index writes (and `openclaw sessions cleanup`)
   maintain the index record itself: in `enforce` mode they drop index rows whose `updatedAt` is
@@ -474,9 +475,38 @@ the workspace is writable. See [Memory](/concepts/memory) and
   (a `kind=nudge` turn) instead. They do not create a `cron:<job.id>` chat session and do not run
   through the heartbeat tick.
 
+## Delivery routes go stale
+
+A session entry stores the last external delivery route (`lastChannel`,
+`lastAccountId`, and the peer id) so follow-up replies can be sent back without
+re-resolving the target. That route is not validated when it is stored, so it can
+outlive the account it points at: a bot account removed from
+`channels.<channel>.accounts` leaves the session entry behind as a dead route.
+
+Every stored-route consumer treats a dead route as **no route** rather than
+falling back to the channel's default account:
+
+- Heartbeat and system-event output (cron `--system-event`, ACP nudges) is
+  appended to the session chat instead (see
+  [Heartbeat](/gateway/heartbeat#delivery-behavior) for the fallback reason shown
+  in `openclaw status --deep`).
+- Sub-agent completion announces run inside the requester session with no
+  external send, and session notices are queued as a system event (see
+  [Sub-agents](/tools/subagents#announce)).
+- `chat.send` replies from the web clients stay in the session chat and are not
+  mirrored to the dead route.
+
+The route row stays in the session store and becomes inert; no migration is
+needed. Re-adding the account to the channel config makes stored routes live
+again on the next delivery.
+
 ## Send policy (optional)
 
 Block delivery for specific session types without listing individual ids.
+
+`channel` and `chatType` match the session's stored identity (the channel and peer kind recorded
+when the conversation arrived, or the session's recorded channel), never the session key text.
+`keyPrefix` and `rawKeyPrefix` match the key itself.
 
 ```json5
 {
@@ -587,3 +617,7 @@ Each session entry records where it came from (best-effort) in `origin`:
   `GroupSubject`, `GroupChannel`, `GroupSpace`, and `SenderName` in the inbound
   context and calling `recordSessionMetaFromInbound` (or passing the same context
   to `updateLastRoute`).
+
+A stored origin route can outlive the account it points at. Delivery consumers
+treat a route whose account the channel no longer lists as no route instead of
+falling back to a default account; see [Delivery routes go stale](#delivery-routes-go-stale).
