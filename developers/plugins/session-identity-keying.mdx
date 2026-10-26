@@ -56,11 +56,10 @@ type ExtensionRecordKey = {
   It is `undefined` for an unlinked sender.
 - `sessionKey` is valid only as an opaque bucket id — pass it back to core APIs that expect a
   bucket id (`readByKey`, hook dispatch), never parse it to recover channel/account/peer.
-- Within the ADR 0081 implementation, the one newly introduced legacy `sessionKey` parser
-  (`src/config/sessions/ctx-identity-backfill.ts`) exists solely to backfill pre-ADR-0081 rows.
-  The new identity read and runtime paths do not parse keys. Existing consumers that still parse
-  keys remain outside this workstream and retain their current behavior until the follow-up
-  `context-schema-consumers` workstream.
+- The only code that parses a legacy `sessionKey` for identity is the backfill
+  (`src/config/sessions/ctx-identity-backfill.ts`), which fills identity onto pre-ADR-0081 rows.
+  No live consumer parses keys: since ADR 0081 mission 2, every live read and runtime path
+  takes identity from the persisted session actor.
 
 ### Gateway senders are devices
 
@@ -313,8 +312,12 @@ is `direct` and the existing channel provenance applies. A known `group`, `chann
 kind never treats that human entry as the chat peer. Do not guess scope from a known kind or
 from a metadata account. Use the matching turn's `runtimeIdentity` or the persisted tuple.
 
-A local working-tree gate now keeps that contract for all three markers. It is not a shipped
-review or a deploy. Still do not parse the key.
+A local working-tree gate now keeps that contract for all three markers:
+`scripts/check-no-sessionkey-identity-parse.mjs`, which runs as
+`pnpm lint:sessions:no-sessionkey-identity-parse` inside `pnpm check` and fails on code that
+recovers channel, account, peer kind/id, group, or user identity from `sessionKey` text. The
+gate scans this repository's source tree only. It does not check third-party plugins, so
+never parse the key in yours.
 
 ## Async safety
 
