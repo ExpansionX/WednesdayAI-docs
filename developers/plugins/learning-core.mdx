@@ -11,14 +11,17 @@ sources:
   - extensions/learning-core/index.ts
   - extensions/learning-core/openclaw.plugin.json
   - extensions/learning-core/src/config.ts
+  - extensions/learning-core/src/capture-window.ts
   - extensions/learning-core/src/learning-runner.ts
+  - extensions/learning-core/src/consolidation-judge.ts
+  - extensions/learning-core/src/gateway-lesson-review.ts
   - extensions/learning-core/src/promote-pass.ts
   - extensions/learning-core/src/assist-collect.ts
   - extensions/learning-core/src/tool.ts
   - extensions/learning-core/src/markdown-export.ts
   - extensions/learning-core/src/lesson-record.ts
-  - ui/src/ui/views/learning.ts
-generated: 2026-08-16
+  - apps/control/src/views/learning/LessonDetail.tsx
+generated: 2026-10-27
 ---
 
 # Learning Core (plugin)
@@ -73,22 +76,30 @@ next reply so the agent can use them.
 ## What it does
 
 - **Notes a candidate when a chat ends.** The plugin claims that finished chat and stores a
-  redacted excerpt plus tags (for example `correction` or `untagged`). It does not write a lesson
-  at that moment.
+  redacted window of up to 12 messages (4,000 characters) around the message it anchors on -
+  usually your last correction. Heartbeat, cron and subagent turns are dropped before capture,
+  so a chat with nothing you said produces no candidate. It does not write a lesson at that
+  moment.
 - **Promotes candidates into lessons.** A background `produce` task turns pending candidates into
   lessons shortly after the chat ends, using LLM consolidation when it is configured and able to
   run, and the deterministic promote step otherwise. Promote runs right when the chat is claimed
   instead when background tasks are off or `schedule.enabled` is `false`, so you still see a
   lesson without waiting for a night-time job. Dream Cycle being on or off makes no difference.
 - **Consolidates with a judge model (optional).** With consolidation turned on and a model set,
-  a judge model reads each new candidate next to up to five similar lessons and decides to add a
-  lesson, update or replace one, retire one, or do nothing. It runs within a daily call cap per
-  agent and needs a SQLite or Postgres store. Promote, by contrast, makes no model call: it
+  a judge model reads each new candidate - the stored message window plus up to five similar
+  lessons and up to six examples you endorsed or retired - and decides to add a lesson, update or
+  replace one, retire one, or do nothing. Every lesson it adds must cite the messages that taught
+  it and name its kind: a correction, a preference, a procedure, or a failure. Lessons that
+  state facts about you or other people are rejected; facts belong to the agent's memory, not
+  lessons. It runs within a daily call cap per agent and needs a SQLite or Postgres store. Promote,
+  by contrast, makes no model call: it
   merges repeats of the same lesson text using the thresholds below.
 - **Counts recurrence.** A lesson seen once is recorded but not acted on. Repeats increment an
   occurrence count and record which chats they came from.
 - **Queues skill proposals.** Once a lesson passes the promotion thresholds, or a distill pass
-  runs on a successful chat, a proposal sits in a queue waiting for you.
+  picks an eligible lesson, a proposal sits in a queue waiting for you. Distill is selective: it
+  only considers `procedure` and `failure` lessons that have recurred at least twice, or that you
+  endorsed or edited.
 - **Exports a readable trail.** Lessons are written as Markdown into your workspace so you can read
   what the agent thinks it learned without touching a database.
 
@@ -105,8 +116,27 @@ authoritative copy - see [Learning Core (admin)](/plugins/learning-core-admin) f
 
 ## Reviewing what was learned
 
-Open the **Learning** tab in the control panel. You can search lessons, jump to the chat a lesson
-came from, preview a proposal before you decide, and approve or reject several proposals at once.
+Open the **Learning** tab in the control panel. You can search lessons, preview a proposal before
+you decide, and approve or reject several proposals at once. Clicking a lesson row opens the
+lesson drawer, which shows:
+
+- **What the lesson says**, its kind and whether it is active or retired.
+- **Why it was written**: the judge's one-sentence rationale, or a note saying none was recorded
+  for lessons created before this tracking existed.
+- **Where it came from**: who produced it (the judge, a promotion, or you), the model and the
+  judge prompt version, and when.
+- **The evidence it learned from**: the quoted messages with the speaker, each with an
+  **Open session** button that jumps back to that chat.
+- **Its history**: earlier versions of the lesson and when each was valid.
+- **The skill proposals** built from it.
+
+While a lesson is active you can act on it in the drawer. **Edit** writes a corrected version (up to 400
+characters, plus an optional note) and retires the old one. **Endorse** marks it as a
+good example. **Retire** stops it being used; add a note so the record shows why. Retired lessons
+are not editable, and the drawer shows the reason they were retired.
+
+Your review feeds back into learning: lessons you endorse, retire, or edit become examples the
+judge sees. Endorsed ones show it what a good lesson looks like, retired ones what to avoid.
 
 After this update the tab shows three data changes in every state:
 
@@ -180,9 +210,10 @@ in every future session.
 
 ## Correcting a lesson
 
-Lessons are never deleted. `supersede_lesson` writes a replacement and links it to the lesson it
-replaces, so the chain of what the agent believed and when stays intact and auditable. The
-superseded lesson stops being active but remains readable.
+Lessons are never deleted. In the lesson drawer, **Edit** writes a corrected version and links it
+to the lesson it replaces; the same supersede is available through the `learning` tool
+(`supersede_lesson`) if you prefer to ask the agent. The chain of what the agent believed and
+when stays intact and auditable. The superseded lesson stops being active but remains readable.
 
 ## Tuning when a lesson gets promoted
 
@@ -198,6 +229,7 @@ These live under `plugins.entries.learning-core.config`:
 | `requireDistinctSessions`      | `true`    | Repeats must come from at least two different sessions.               |
 | `maxLessonsForPrompt`          | `5`       | How many active lessons `assist` mode feeds into the next reply.      |
 | `consolidation.enabled`        | `false`   | When true, a budgeted LLM pass may add, update, or drop lessons.      |
+| `consolidation.exploreEpsilon` | `1`       | Share of untagged candidates judged per run; `0` disables.            |
 | `consolidation.model`          | unset     | Judge model for that pass (with `consolidation.provider`).            |
 | `schedule.enabled`             | `true`    | Set `false` to stop consolidation; promote then writes lessons.       |
 | `distill.enabled`              | `false`   | When true, successful chats can become owner-gated skill proposals.   |
@@ -220,7 +252,8 @@ chats never become lessons.
 What you should see after a healthy restart: the Gateway comes back. The next finished
 chat produces a new candidate (and later a lesson) only when learning is turned on
 and that chat includes something you said. If learning is off, or the chat has no
-user excerpt, no candidate is expected.
+human turn (heartbeat, cron and subagent turns are dropped before capture), no candidate is
+expected.
 
 If that does not happen, ask whoever runs the Gateway to restart it and confirm Learning
 Core loaded without a register error. Right after an update, Learning Core also finishes a
@@ -234,9 +267,9 @@ update are a separate cron-store issue; see [Cron or heartbeat did not fire](/he
 
 Lesson text passes through a redaction layer before it is stored, covering credentials and
 API-key-shaped secrets, email addresses and phone numbers, plus any patterns you have configured in
-`logging.redactPatterns`. So a key pasted into a correction does not reach the stored lesson text or
-its evidence summary. Exported Markdown files and the state directory are created private to your
-user.
+`logging.redactPatterns`. So a key pasted into a correction does not reach the stored lesson text,
+its evidence quotes, or the exported Markdown. Exported Markdown files and the state directory
+are created private to your user.
 
 ## Related
 

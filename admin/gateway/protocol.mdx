@@ -199,7 +199,7 @@ read or write groups later are refused until they are allowlisted.
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
   `sessions.resolve`, `sessions.subscribe`, `sessions.direct`, `chat.history`,
-  `chat.surfaces.list`,
+  `identity.self`, `chat.surfaces.list`,
   `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
@@ -210,12 +210,14 @@ read or write groups later are refused until they are allowlisted.
   surfaces): they read the session's assistant-composed surfaces for the web client's Canvas
   panel. The `ui-surfaces` plugin seam answers `enabled: false` when the plugin is off, so
   admission is unconditional; the methods report the plugin's state rather than the absence of the
-  capability. See [Assistant UI surfaces](#assistant-ui-surfaces).
+  capability. See [Assistant UI surfaces](#assistant-ui-surfaces). `identity.self` joined with
+  ADR 0116 (identity binding at enrollment): it reads the calling browser's own person and links;
+  the device id comes from the verified connection, never the request body.
 - `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
-  `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark` and
-  `talk.session.bargeIn`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
+  `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
+  `talk.session.bargeIn`, `identity.link.claim` and `identity.logout`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
   the one surfaces write, flipping the pinned boolean on a surface the session already owns.
   Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
   and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
@@ -232,7 +234,11 @@ read or write groups later are refused until they are allowlisted.
   `mode: "transcription"` too. An operator-scope `transcription` create is not gated. Request
   and event shapes are under [Talk sessions](#talk-sessions). `tts.speak` joined with ADR 0102
   (read aloud) so a narrow client can read replies aloud on demand; shapes and errors are under
-  [TTS read aloud](#tts-read-aloud). `talk.realtime.*`, `talk.config`
+  [TTS read aloud](#tts-read-aloud). `identity.link.claim` and `identity.logout` joined with
+  ADR 0116 (identity binding at enrollment): redeeming a self-service `/link` code and the
+  server-side logout of the calling device. Both take the device id from the verified
+  connection, never the request body; behaviour is under [Identity RPCs](#identity-rpcs).
+  `talk.realtime.*`, `talk.config`
   and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
 `sessions.patch` is admitted per call, not per method name: the fields the call carries decide the
@@ -556,7 +562,7 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
   `UNAVAILABLE`. A run the gateway expires on its own timer is announced at once (`stopReason`
   `timeout`) and saves nothing.
 - Operators may call `sessions.steer` (`operator.write`) with
-  `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?, dictated?}` to deliver
+  `{key, message, mode?, fallback?, idempotencyKey, thinking?, timeoutMs?, attachments?, dictated?, location?}` to deliver
   a message to a session that may already be running a turn. `mode` is `inject` (default),
   `interrupt` or `queue`; legacy queue names such as `steer`, `steer-backlog`, `followup` and
   `collect` are rejected. When `mode` is omitted the gateway default
@@ -596,6 +602,11 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
     dictated. The turn gets a user-role "Speech input (untrusted metadata)" note so the model can
     tolerate mis-transcribed names (for example a homophone of a person it knows); the note is
     never persisted into the message text.
+  - `location` (optional object) carries the device position the user chose to share with the
+    steered message: `{latitude, longitude, accuracyMeters?, capturedAtMs}` with the same bounds
+    as `chat.send`'s `location` (described below). The turn gets the same user-role
+    "Device location (untrusted metadata)" block on that turn only, never persisted into the
+    message text (ADR 0119).
   - `runId` and `targetRunId` always name a real run, never an id the gateway minted for a call
     that started no run. For `injected`, `started` and `interrupted` the id is a live gateway run:
     it can be passed to `sessions.abort` and is reported by `sessions.runs.list`. For `queued` it is
@@ -802,7 +813,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   reference is stored as a custom transcript entry written just before the user turn, so it never
   enters the model context.
 - `chat.send` (`operator.write`; narrow-admitted) takes
-  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?, dictated?}`
+  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?, dictated?, location?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
   running). When an embedded run is already active in the session and the queue policy enqueues the
   turn behind it, the answer is `{ runId, status: "queued" }`, sent once the policy decides (at
@@ -846,6 +857,14 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     dictated. The turn gets a user-role "Speech input (untrusted metadata)" note so the model can
     tolerate mis-transcribed names; the note is never persisted into the message text. It is
     ignored for `uiAction` submits, and a turn with the flag stays command-capable.
+  - `location` (optional object) carries the device position the user chose to share with the
+    message (ADR 0119): `{latitude, longitude, accuracyMeters?, capturedAtMs}` with latitude in
+    [-90, 90], longitude in [-180, 180], an optional non-negative `accuracyMeters` in meters, and
+    a `capturedAtMs` epoch-millisecond fix time (bounded by the largest valid `Date`). The turn
+    gets a user-role "Device location (untrusted metadata)" block beside the Speech-input note so
+    the model can use the position on this request only; like that note it is never persisted
+    into the message text, stays out of `chat.history` and replay, and is kept only in the stored
+    row's `__openclaw.ingress.untrusted` carrier. It is ignored for `uiAction` submits.
 - A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
   starts, from run start to run end (never from the moment it was merely enqueued). From then it
   is exactly as abortable and listable as a run started any other way - see the `queued` outcome
@@ -1480,6 +1499,35 @@ Migration target:
   in addition to device/client/role/scopes/token/nonce fields.
 - Legacy `v2` signatures remain accepted for compatibility, but paired-device
   metadata pinning still controls command policy on reconnect.
+
+## Identity RPCs
+
+ADR 0116 binds people to their linked accounts at enrollment. The CLI, the web client and every
+other client talk to the same seven `identity.*` methods; the flows they serve are in
+[Identities](/gateway/identity). Linking grants a person's identity, so only `operator.admin` binds
+or unbinds a value.
+
+| Method                | Scope            | Narrow admission          | Serves                                                                                      |
+| --------------------- | ---------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `identity.list`       | `operator.read`  | never                     | the operator's directory view (`identity list`)                                             |
+| `identity.self`       | `operator.read`  | `operator.sessions.read`  | the calling browser's own person and links (the **Linked accounts** dialog)                 |
+| `identity.add`        | `operator.admin` | never                     | create a person (`identity add`)                                                            |
+| `identity.link`       | `operator.admin` | never                     | link a `<namespace>:<id>` value to a person (`identity link`, `pairing approve --identity`) |
+| `identity.unlink`     | `operator.admin` | never                     | remove a value from every person (`identity unlink`)                                        |
+| `identity.link.claim` | `operator.write` | `operator.sessions.write` | redeem a `/link` code (`identity.link.claim` links, then approves the pairing code)         |
+| `identity.logout`     | `operator.write` | `operator.sessions.write` | server-side logout of the calling device (**Log out**)                                      |
+
+- The three narrow methods (`identity.self`, `identity.link.claim`, `identity.logout`) read the
+  verified device id from the connection, never from the request body. A connection without one is
+  refused fail-closed with `identity_device_required` ("This connection has no verified device."),
+  so a caller can only act on its own device and person.
+- `identity.link` refuses `device:` values (`identity_link_invalid`) and points at
+  `wednesdayai devices link <deviceId> --identity <name>`: devices have their own operator path
+  (see [Device identity + pairing](#device-identity--pairing)).
+- `identity.link.claim` answers `identity_link_conflict` with
+  `<value> is already linked to another person; ask them to unlink it first.` — it never names the
+  other person to a narrow caller. Claims are serialized per claimed value and rate limited per
+  device (5/min) and per person (15/min), with a 5-minute lockout.
 
 ## TLS + pinning
 

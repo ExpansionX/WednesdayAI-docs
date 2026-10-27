@@ -1,0 +1,297 @@
+---
+summary: "What the WednesdayAI system prompt contains and how it is assembled"
+read_when:
+  - Editing system prompt text, tools list, or time/heartbeat sections
+  - Changing workspace bootstrap or skills injection behavior
+title: "System Prompt"
+---
+
+# System Prompt
+
+WednesdayAI builds a custom system prompt for every agent run. The prompt is **WednesdayAI-owned** and does not use the pi-coding-agent default prompt. Model-visible copy uses the WednesdayAI product name; operator paths and env vars still use the stable `openclaw` identifiers — see [Product naming](/concepts/product-naming).
+
+The prompt is assembled by WednesdayAI and injected into each agent run. The default identity line is:
+
+```text
+You are a personal assistant running inside WednesdayAI.
+```
+
+## Structure
+
+The prompt is intentionally compact and uses fixed sections:
+
+- **Tooling**: current tool list + short descriptions.
+- **Safety**: short guardrail reminder to avoid power-seeking behavior or bypassing oversight.
+- **Skills** (when available): tells the model how to load skill instructions on demand.
+- **WednesdayAI Self-Update**: use `config.patch` for targeted edits; first call `config.get` and pass `payload.hash` as `baseHash`. `config.apply` is default-denied for non-sandbox agents. `update.run` stays available. See [Config writes](/gateway/config-writes).
+- **WednesdayAI CLI Quick Reference**: primary CLI spelling taught to the model (`wednesdayai …`).
+- **Workspace**: working directory (`agents.defaults.workspace`).
+- **Documentation**: local path to WednesdayAI docs (repo or npm package), public mirror `https://docs.wednesdayai.dev`, and when to read them.
+- **Workspace Files (injected)**: indicates bootstrap files are included below.
+- **Sandbox** (when enabled): indicates sandboxed runtime, sandbox paths, and whether elevated exec is available.
+- **Current Date & Time**: user-local time, timezone, and time format.
+- **Reply Tags**: optional reply tag syntax for supported providers.
+- **Heartbeats**: heartbeat prompt and ack behavior.
+- **Runtime**: host, OS, node, model, repo root (when detected), thinking level (one line).
+- **Reasoning**: current visibility level + /reasoning toggle hint.
+
+Safety guardrails in the system prompt are advisory. They guide model behavior but do not enforce policy. Use tool policy, exec approvals, sandboxing, and channel allowlists for hard enforcement; operators can disable these by design.
+
+## Prompt structure markers
+
+When `agents.defaults.systemPrompt.cache.boundary` is `auto` (default), the assembled prompt inserts HTML-comment markers between stable and volatile sections:
+
+- `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` — cache-stable prefix ends; per-turn suffix begins.
+- `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->` — ends the Project Context / workspace-file block when that block is present.
+
+Constants are exported once from `src/agents/system-prompt.ts` and imported by the system-prompt report parser so assembler and parser cannot drift (ADR 0051). Set `cache.boundary: "off"` to render one continuous prompt with no cache-boundary marker. Changing marker text invalidates provider prompt-cache prefixes once at upgrade time — see [Prompt Caching](/reference/prompt-caching).
+
+## Prompt modes
+
+WednesdayAI can render smaller system prompts for sub-agents. The runtime sets a
+`promptMode` for each run (not a user-facing config):
+
+- `full` (default): includes all sections above.
+- `minimal`: used for sub-agents; omits **Skills**, **Memory Recall**, **WednesdayAI
+  Self-Update**, **Model Aliases**, **Team**, **User Identity**, **Reply Tags**,
+  **Messaging**, **Silent Replies**, and **Heartbeats**. Tooling, **Safety**,
+  Workspace, Sandbox, Current Date & Time (when known), Runtime, and injected
+  context stay available.
+- `none`: returns only the base identity line.
+
+When `promptMode=minimal`, extra injected prompts are labeled **Subagent
+Context** instead of **Group Chat Context**.
+
+## Configurable Sections
+
+`agents.defaults.systemPrompt` controls the shared prompt baseline. `agents.list[].systemPrompt` overrides that baseline for one agent. Per-agent section objects merge over the defaults by section key, except `projectContext.files`: when an override supplies `files`, that list is authoritative and ordered.
+
+### Precedence
+
+The effective system prompt is assembled in three tiers, lowest to highest, each merged over the previous one by section key (`resolveSystemPromptConfigForAgent`):
+
+1. **Preset** - the built-in shape selected by `preset` (`default`, `lean`, or `minimal`).
+2. **`agents.defaults.systemPrompt`** - the shared baseline, merged over the preset.
+3. **`agents.list[].systemPrompt`** - a single agent's overrides, merged over the defaults.
+
+`AGENTS.md` and the other workspace persona files are injected through the `projectContext` section rather than as standalone config. The file list comes from `projectContext.files`, and when an override supplies `files` that list is authoritative and ordered (it replaces the lower tier rather than merging). Because `AGENTS.md` rides inside the same merged precedence, config `systemPrompt` and workspace `AGENTS.md` cannot silently diverge - both resolve through the tiers above.
+
+The `preset` field chooses a starting shape:
+
+- `default`: keeps all built-in sections at full detail. This is the standard prompt.
+- `lean`: removes repeated guidance and uses a compact Project Context file list.
+- `minimal`: keeps only essential guidance for constrained agents.
+
+The preset selects which sections render and how verbose they are. It does not control the
+cache-friendly layout: regardless of preset, WednesdayAI splits the prompt into a stable prefix and a
+volatile suffix at a cache boundary whenever `cache.boundary` is `auto` (the default). Set
+`cache.boundary: "off"` to render one continuous prompt with no boundary marker. See
+[Prompt Caching](/reference/prompt-caching) for the section ordering and tuning guidance.
+
+Regular section modes are:
+
+- `default`: use the built-in section.
+- `off`: omit the section.
+- `prepend`: add configured text before the built-in section.
+- `append`: add configured text after the built-in section.
+- `replace`: use configured text instead of the built-in section.
+
+Generated sections use a smaller mode set. `tooling`, `skills`, and `modelAliases` support `default`, `compact`, `names`, and `off`. `runtime` supports `default`, `minimal`, and `off`. `projectContext` supports `default`, `lean`, and `off`.
+
+Generated sections accept a `progressive` boolean, but it currently changes rendering only for `skills`. With `skills` set to `mode: "compact"` and `progressive: true`, WednesdayAI renders only skill names and SKILL.md paths so the model can load one relevant skill on demand without carrying every description in the stable prompt. Setting `progressive` on `tooling` or `modelAliases` is accepted but has no effect today.
+
+Section `content` entries can come from inline `text` or a `file`. Regular sections require `prepend`, `append`, or `replace` to render configured content; generated and runtime sections append configured content whenever the section is enabled. `projectContext` also accepts a `content` array (same `text`/`file` sources) that is appended to the section when the section is enabled, regardless of mode.
+
+### Section key reference
+
+All configurable section keys, their types, and available modes:
+
+| Section key            | Type            | Modes                                                    |
+| ---------------------- | --------------- | -------------------------------------------------------- |
+| `identity`             | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `tooling`              | Generated       | `default` / `compact` / `names` / `off` + `progressive?` |
+| `team`                 | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `toolCallStyle`        | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `safety`               | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `cliQuickReference`    | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `skills`               | Generated       | `default` / `compact` / `names` / `off` + `progressive?` |
+| `memory`               | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `selfUpdate`           | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `modelAliases`         | Generated       | `default` / `compact` / `names` / `off` + `progressive?` |
+| `workspace`            | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `documentation`        | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `sandbox`              | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `authorizedSenders`    | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `time`                 | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `workspaceFilesNotice` | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `replyTags`            | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `messaging`            | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `voice`                | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `groupContext`         | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `reactions`            | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `silentReplies`        | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `heartbeats`           | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `reasoningFormat`      | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
+| `projectContext`       | Project Context | `default` / `lean` / `off` + `content[]` + `files[]`     |
+| `runtime`              | Runtime         | `default` / `minimal` / `off`                            |
+
+Sections omitted by the `minimal` preset: `documentation`, `modelAliases`, `team`, `replyTags`, `messaging`, `voice`, `reactions`, `silentReplies`, `heartbeats`, and `runtime`. The `minimal` preset also sets `tooling: names` instead of the full tool listing.
+
+```jsonc
+{
+  "agents": {
+    "defaults": {
+      "systemPrompt": {
+        "sections": {
+          "safety": {
+            "mode": "append",
+            "content": [
+              { "text": "Prefer reversible actions during experiments." },
+              { "file": "prompt/safety.md", "optional": true, "maxChars": 4000 },
+            ],
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+File sources are resolved relative to the effective agent workspace unless the path is absolute or starts with `~`. WednesdayAI expands absolute and home-relative paths first, then rejects paths outside the effective workspace boundary before rendering the prompt. It applies character limits and caches file reads by file identity; the prompt renderer itself does not perform file I/O.
+
+## Workspace bootstrap injection
+
+Bootstrap files are trimmed and appended under **Project Context** so the model sees identity and profile context without needing explicit reads:
+
+- `AGENTS.md`
+- `SOUL.md`
+- `TOOLS.md`
+- `IDENTITY.md`
+- `USER.md`
+- `HEARTBEAT.md`
+- `BOOTSTRAP.md` (only on brand-new workspaces)
+- `MEMORY.md` and/or `memory.md` (when present in the workspace; either or both may be injected)
+
+Without `systemPrompt.sections.projectContext.files`, this legacy bootstrap list remains the default. All loaded bootstrap files are **injected into the context window** on every turn, which
+means they consume tokens. Keep them concise — especially `MEMORY.md`, which can
+grow over time and lead to unexpectedly high context usage and more frequent
+compaction.
+
+> **Note:** `memory/*.md` daily files are **not** injected automatically. They
+> are accessed on demand via the `memory_search` and `memory_get` tools, so they
+> do not count against the context window unless the model explicitly reads them.
+
+Large files are truncated with a marker. The max per-file size is controlled by
+`agents.defaults.bootstrapMaxChars` (default: 20000). Total injected bootstrap
+content across files is capped by `agents.defaults.bootstrapTotalMaxChars`
+(default: 150000). Missing files inject a short missing-file marker.
+
+Sub-agent sessions with the legacy default list only inject `AGENTS.md` and `TOOLS.md` (other bootstrap files
+are filtered out to keep the sub-agent context small). Configured Project Context file lists are already explicit, so they are not filtered by the legacy sub-agent allowlist.
+
+### Project Context Files
+
+`systemPrompt.sections.projectContext.files` replaces the inherited Project Context file list for the effective agent. Ordering is authoritative: WednesdayAI loads files in the configured order and renders them in that order.
+
+Each entry supports:
+
+- `path`: workspace-relative, absolute, or `~`-prefixed path.
+- `mode`: `inline`, `manifest`, `off`, or `runKind`.
+- `optional`: skip the file instead of injecting a missing-file marker. Optional files are skipped for any reason they cannot be used, including a missing path or one rejected by the workspace boundary check.
+- `maxChars`: per-file character cap before the global bootstrap caps apply (applies to `inline` content; `manifest` files are not read, so this does not affect them).
+
+Modes:
+
+- `inline`: inject file content into Project Context. Subject to the per-file and global bootstrap size caps.
+- `manifest`: inject an on-disk pointer with size, so the model can read the file only when needed. Manifest files are stat-only and are not read into the prompt, so they are not subject to the inline size cap; large files are still advertised by path and size rather than reported as missing.
+- `off`: omit the file entry.
+- `runKind`: include the file only for matching run kinds such as heartbeat runs.
+
+The `lean` and `minimal` presets use this ordered Project Context list:
+
+```jsonc
+[
+  { "path": "AGENTS.md", "mode": "inline" },
+  { "path": "SOUL.md", "mode": "inline" },
+  { "path": "IDENTITY.md", "mode": "inline", "maxChars": 4000 },
+  { "path": "USER.md", "mode": "manifest" },
+  { "path": "TOOLS.md", "mode": "manifest" },
+  { "path": "HEARTBEAT.md", "mode": "runKind" },
+]
+```
+
+Internal hooks can intercept this step via `agent:bootstrap` to mutate or replace
+the injected bootstrap files (for example swapping `SOUL.md` for an alternate persona).
+
+To inspect the effective preset, cache boundary, Project Context file modes, raw versus injected file sizes, truncation, and tool schema overhead, use `/context list` or `/context detail`. See [Context](/concepts/context).
+
+## Time handling
+
+The system prompt includes a dedicated **Current Date & Time** section when the
+user timezone is known or message stamps are on. To keep the prompt cache-stable, it only
+includes the **time zone** (no dynamic clock or time format).
+
+Use `session_status` when the agent needs the current time; the status card
+includes a timestamp line.
+
+When message stamps are on (the default), the section also carries one
+prevention line: user messages may begin with a system-added timestamp such as
+`[Wed 2026-10-07 21:47 GMT+10]`, and replies must not begin with one.
+
+Configure with:
+
+- `agents.defaults.userTimezone`
+- `agents.defaults.timeFormat` (`auto` | `12` | `24`)
+- `agents.defaults.envelopeTimestamp` (`"off"` also disables the stamps and the prevention line)
+
+See [Date & Time](/date-time) for full behavior details.
+
+## Skills
+
+When eligible skills exist, WednesdayAI injects an **available skills list**. In
+default mode this uses `formatSkillsForPrompt`, including the skill name,
+description, and SKILL.md path. The prompt instructs the model to use `read` to
+load the SKILL.md at the listed location (workspace, managed, or bundled). If no
+skills are eligible, the Skills section is omitted.
+
+```text
+<available_skills>
+  <skill>
+    <name>...</name>
+    <description>...</description>
+    <location>...</location>
+  </skill>
+</available_skills>
+```
+
+With `skills: { mode: "compact", progressive: true }`, WednesdayAI renders a
+smaller loadable manifest instead:
+
+```text
+Available skills:
+- example-skill (/path/to/example-skill/SKILL.md)
+```
+
+This keeps the base prompt smaller while still enabling targeted skill usage.
+
+## Documentation
+
+When available, the system prompt includes a **Documentation** section that points to
+local WednesdayAI docs. Resolution order:
+
+1. A workspace `docs/` directory, if one exists.
+2. The repo `docs/` directory, in a source checkout (detected by `docs/docs.json`
+   being present next to the package root).
+3. Otherwise (a plain npm install, which ships no local docs beyond
+   `docs/reference/templates/`), the section points directly at
+   `https://docs.wednesdayai.dev` with no local path and no Mirror line.
+
+When the section points at a local directory (cases 1 and 2), it also adds a
+`Mirror: https://docs.wednesdayai.dev` line.
+
+The section also lists the source repo `https://github.com/ExpansionX/WednesdayAI-core`,
+community Discord, and ClawHub ([https://clawhub.com](https://clawhub.com)) for skills
+discovery. The prompt instructs the model to consult docs first for WednesdayAI behavior,
+commands, configuration, or architecture, and to run `wednesdayai status` itself when
+possible (asking the user only when it lacks access). The `openclaw` binary remains a
+permanent process-level alias.

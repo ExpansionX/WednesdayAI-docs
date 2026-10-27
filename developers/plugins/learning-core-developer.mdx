@@ -18,7 +18,11 @@ sources:
   - extensions/learning-core/src/legacy-jsonl-readthrough.ts
   - extensions/learning-core/src/message-text.ts
   - extensions/learning-core/src/extractor.ts
+  - extensions/learning-core/src/capture-window.ts
   - extensions/learning-core/src/extraction-candidate.ts
+  - extensions/learning-core/src/consolidation-judge.ts
+  - extensions/learning-core/src/consolidation-effects.ts
+  - extensions/learning-core/src/gateway-lesson-review.ts
   - extensions/learning-core/src/promote-pass.ts
   - extensions/learning-core/src/consolidation-pass.ts
   - extensions/learning-core/src/distill-pass.ts
@@ -28,7 +32,7 @@ sources:
   - src/config/storage/domain-storage.ts
   - src/plugin-sdk/index.ts
   - src/backbone/plugin-task-passes.ts
-generated: 2026-08-18
+generated: 2026-10-27
 ---
 
 # Learning Core (developer)
@@ -59,17 +63,21 @@ resolve to the Postgres backend.
 | `learning-gate.ts`            | The one fence-and-scope gate every learning writer and reader resolves its scope through.          |
 | `legacy-jsonl-readthrough.ts` | Read-only, bounded view of a pre-C0 log over a SQL store; SQL only after `repaired_at`.            |
 | `message-text.ts`             | Pulling text out of stored transcript entries.                                                     |
-| `extractor.ts`                | Turning transcript text into lesson-shaped excerpts (promote consumes them).                       |
+| `extractor.ts`                | `isCorrection` and `stripEnvelopeHeader`: anchor correction patterns and the envelope rule.        |
+| `capture-window.ts`           | `buildCaptureWindow`: the cited, bounded message window the judge sees.                            |
 | `extraction-candidate.ts`     | `ExtractionCandidate` envelope (`record_type='candidate'`).                                        |
 | `learning-runner.ts`          | Claim-path admission: write a candidate, not a lesson.                                             |
 | `promote-pass.ts`             | `runPromotePass` — sole deterministic lesson writer.                                               |
 | `consolidation-pass.ts`       | Budgeted LLM add/update/delete under the daily call ceiling.                                       |
+| `consolidation-judge.ts`      | Judge v2: prompt version pin, verdict schema, input builder, and validation.                       |
 | `learning-budget*.ts`         | Candidate-claim fencing and the `learning_budget` ledger (SQLite, Postgres).                       |
 | `distill-pass.ts`             | LLM-authored pending SkillProposal per eligible lesson (HC10 name claim). Never writes `SKILL.md`. |
 | `reconcile-skills-pass.ts`    | Restores deleted or mutated applied files from `desiredState`.                                     |
 | `assist-collect.ts`           | `context.collect` injection when `mode` is `assist`.                                               |
 | `gateway-methods.ts`          | Read RPCs including `learning.searchLessons`.                                                      |
 | `gateway-decide.ts`           | `learning.decideProposal` and bulk `learning.decideProposals`.                                     |
+| `gateway-lesson-review.ts`    | `learning.inspectLesson`, `learning.reviseLesson`, and `learning.rateLesson` (operator review).    |
+| `gateway-actor.ts`            | The operator actor string for review audits: client name plus the paired device id.                |
 | `tool.ts`                     | The owner-gated `learning` agent tool.                                                             |
 
 A schema name is validated at **both** SQL interpolation boundaries, not only in the DDL:
@@ -110,6 +118,7 @@ Lessons     listLessons  getLesson  upsertLesson  insertLessonIfAbsent  mergeLes
             supersedeLesson  invalidateLesson  listActiveLessons  listActiveLessonsPage
             getLessonsByIds  getLessonChain  searchLessons  countOverview
             legacyWindowTruncated? (optional)
+Review      rateLesson  reviseLesson  listLessonExemplars
 Proposals   listProposals  getProposal  findProposalWithScope  listProposalsWithScope
             insertProposalIfAbsent  upsertProposal  recordProposalDecision
 Audit       appendAudit  listAudit
@@ -131,6 +140,27 @@ returned unchanged. Inside a claim, a consolidation `delete` verdict without tex
 same invalidation through `applyVerdict` (effect `invalidate`), in the transaction that
 finalizes the candidate. Claim, budget, and distill operations are available on both SQL
 backends; an unopened store reports `store_unavailable` rather than serving a file store.
+
+The operator-review writers share the same locking discipline:
+
+- `rateLesson({ id, rating, now })` holds the same effect lock as `invalidateLesson` and, in one
+  transaction, writes the rating and the audit row (`lesson.endorsed` for `score: 1`,
+  `lesson.retired` for `-1`). A -1 on an active lesson also retires it with
+  `invalidationReason: "operator: <note|retired>"`. Endorsing a retired lesson is a domain
+  error.
+- `reviseLesson({ predecessorId, successor, actor, now })` supersedes in one transaction (the
+  supersede effect locks held) and appends the `lesson.revised` audit row carrying the successor
+  id.
+- `listLessonExemplars({ limit })` projects rated or operator-authored lessons to compact
+  `{ verdict: "good" | "bad", text, note? }` exemplars, newest update first. The consolidation
+  pass injects them into the judge prompt as feedback; see [Judge v2](#judge-v2).
+
+The provenance types behind these live in `types.ts`: `LessonOrigin` (producer
+`consolidation | promote | operator`, time, rationale, model, prompt version, analysis job id,
+actor), `LessonRating`, `EvidenceQuote` (a redacted cited message with `entryId`, `seq`,
+`sender`), and `LessonExemplar`. `ExtractionCandidate` carries the capture `window`
+(`CaptureMessage[]`) and the `anchor` index; `excerpt` remains the anchor text sliced to 500
+characters for ranking, promote, and UI compatibility.
 
 Candidates live in `learning_records` with `record_type='candidate'`. `listLessons` must not
 return them. `searchLessons` returns lessons only.
@@ -328,6 +358,46 @@ synchronously inside SQLite's `BEGIN IMMEDIATE` and asynchronously on one pinned
 - **Owner fence.** Each finalization goes through `applyVerdict` with producer `promote`; a
   `producer_conflict` stands the run down with its claims released and nothing applied.
 
+### Judge v2
+
+The consolidation judge's system prompt is pinned by `JUDGE_PROMPT_VERSION`
+(`judge-v2:<first 12 hex chars of its SHA-256>`), so a lesson's `origin.promptVersion` names the
+exact prompt that produced it. `buildJudgeInput` emits
+`{ window, anchor, tags, similarLessons, examples }`: the candidate's capture window (or, for a
+pre-v2 candidate without one, a single-message window built from `excerpt`), up to
+`JUDGE_SIMILAR_K` (5) similar active lessons, and up to `JUDGE_EXEMPLARS_MAX` (6) operator
+exemplars from `listLessonExemplars`. The consolidation pass loads the exemplars once per run.
+
+`validateJudgeVerdict(value, allowedLessonIds, window)` keeps the base checks (`action` enum,
+`confidence` in [0, 1], `reason` string, `lessonId` in `allowedLessonIds`) and adds the v2 rules:
+
+- `add`/`update`: non-empty `text` of at most `JUDGE_TEXT_MAX_CHARS` (400) characters, `kind` in
+  `JUDGE_KINDS` (`correction`, `preference`, `procedure`, `failure`), and `sourceIndexes` — a
+  non-empty integer array with every index inside the window and at least one pointing at a
+  `user` message.
+- `delete`: the same `sourceIndexes` rule; `kind` is required whenever `text` is given.
+- `noop`: `rejectCategory` in `JUDGE_REJECT_CATEGORIES` (`fact`, `one_off`, `automated`,
+  `transient_failure`, `already_known`, `no_signal`).
+
+Any violation returns `{ ok: false, error }`, which classifies as `invalid` and is struck against
+the candidate by the existing failure mechanism. Judge calls are capped at `JUDGE_MAX_OUTPUT_TOKENS`
+(8,192).
+
+On an applied verdict the effect layer (`consolidation-effects.ts`) writes `origin`
+(`producer: "consolidation"`, the redacted judge `reason` as `rationale`, the
+`${provider}/${model}` from the analysis result, the prompt version, and the analysis job id),
+sets the lesson `kind` from the verdict instead of the candidate tags, and stores the cited
+messages as `evidence[].quotes` — the first three cited window messages as `EvidenceQuote`
+entries (text sliced to 500), the primary quote being the first user-role one. The invalidate
+path stores the redacted judge reason as `invalidationReason`. `promote` marks its lessons
+`origin.producer: "promote"`.
+
+### Distill eligibility
+
+`listDistillCandidates` decides eligibility in SQL: only `procedure` or `failure` lessons with at
+least 2 occurrences, or a `+1` rating, or `origin.producer: "operator"`, are selected.
+Single-occurrence, unrated lessons of any other kind are never distilled.
+
 ### Candidate claims and the budget ledger
 
 `consolidation` and `promote` never apply a candidate without a claim. The order is:
@@ -370,11 +440,25 @@ tokenized because hyphen is FTS `NOT`.
 
 ## Gateway and tool seams
 
-Seven gateway methods are registered in `index.ts`: `learning.overview`, `learning.listLessons`,
-`learning.searchLessons`, `learning.listProposals`, `learning.inspectProposal`,
-`learning.decideProposal`, and `learning.decideProposals`. The read path goes **through the
+Ten gateway methods are registered in `index.ts`: `learning.overview`, `learning.listLessons`,
+`learning.searchLessons`, `learning.inspectLesson`, `learning.listProposals`,
+`learning.inspectProposal`, `learning.decideProposal`, `learning.decideProposals`,
+`learning.reviseLesson`, and `learning.rateLesson`. The read path goes **through the
 store**, not the raw log. This matters: leaving the read path on the JSONL log while capture moved
 to SQL would show an empty list while capture silently succeeded.
+
+The three review RPCs (`gateway-lesson-review.ts`) resolve one lesson the same way
+`inspectProposal` does: `params.agentId` narrows to that agent's verified scope, a cross-agent
+read hides mismatched agents' rows, and an id that resolves to more than one visible scope is
+refused as ambiguous. `learning.inspectLesson` needs the read scope and returns the lesson detail
+(origin, rating, invalidation reason, evidence with quotes), the revision chain, and the
+proposals built from the lesson. `learning.reviseLesson` (text ≤400, optional `kind`, optional
+`note` ≤500) and `learning.rateLesson` (`score: 1 | -1`, optional `note`) need the approvals
+scope; the write gates the lesson's own scope exactly like decide, then calls
+`store.reviseLesson` / `store.rateLesson`. The audit actor comes from `operatorActor`
+(`gateway-actor.ts`): the client display name plus the paired device id when one is present.
+`learning.listLessons` rows carry `producer` and `rating` so the UI can badge operator edits and
+endorsements.
 
 `learning.decideProposal` looks a proposal up with an empty scope deliberately, so the lookup spans
 every workspace and the proposal's own scope comes back in the result. It then gates that scope
@@ -403,10 +487,21 @@ lines — `pending` proposals, total `lessons`, `applied` proposals — pulled b
 
 Learning Core is a session consumer. `onSessionWorkAvailable` filters to `session.end`, then loops
 `claimSessionWork` until the queue drains. When `mode` is `off`, the handler acknowledges without
-persisting. Otherwise it writes an `ExtractionCandidate` (only when an excerpt exists) and acks
-`processed`. It must not call `upsertLesson` / `mergeLesson`. On a processing failure the catch
-block logs `api.logger.warn` (message, error code, claim and session IDs) **before** acking the
-claim as failed/retryable — a throwing `ackSessionWork` must never mask the real error.
+persisting. Otherwise it builds the capture window (`buildCaptureWindow`,
+`capture-window.ts`) from the claimed entries: user and assistant entries only -
+`isAutomated: true` drops heartbeat, cron and subagent turns, and a legacy `undefined` counts as
+human - each text envelope-stripped (user messages), redacted, and sliced to
+`CAPTURE_MESSAGE_MAX_CHARS` (800). The anchor is the last user message matching `isCorrection`,
+else the last user message; the window holds at most `CAPTURE_WINDOW_MAX_MESSAGES` (12) messages
+ending one message past the anchor and is trimmed to `CAPTURE_WINDOW_MAX_CHARS` (4,000) by
+dropping the oldest non-anchor messages. When no user message remains the runner returns `none`,
+the claim is acked without a candidate, and no `produce` pass is enqueued - automation-only
+sessions capture nothing. When a window exists the runner writes an `ExtractionCandidate`
+carrying it (`window`, `anchor`, `excerpt` = the anchor text sliced to 500 characters, tags)
+and acks `processed`. It must not call `upsertLesson` / `mergeLesson`. On a processing failure
+the catch block logs `api.logger.warn` (message, error code, claim and session IDs) **before**
+acking the claim as failed/retryable — a throwing `ackSessionWork` must never mask the real
+error.
 
 Core namespaces consumer ids as `<agentId>:<pluginId>:<effectKind>`, with an unscoped
 `<pluginId>:<effectKind>` fallback and an optional `/<subCursor>` suffix. Anything that **counts
@@ -459,6 +554,7 @@ export default function register(api: OpenClawPluginApi): void {
 | ------------------------------------------------ | -------------------------------------------------------------------------------------- |
 | `lesson-store-conformance.test.ts`               | Both SQL backends satisfy the same contract.                                           |
 | `claim-to-store.reachability.test.ts`            | A `session.end` claim lands exactly one candidate (not a lesson) and acks `processed`. |
+| `capture-window.test.ts`                         | The window drops automated turns, anchors the correction, and honours the budgets.     |
 | `lesson-store-factory.test.ts`                   | SQL selection, memoisation, unavailable-store errors, and legacy read-through.         |
 | `workspace-scope.reachability.test.ts`           | Two gateways on one DB: the mismatched one fails closed on every entry point.          |
 | `session-end-unconfigured.reachability.test.ts`  | An unconfigured agent's claim is deferred daily; the drain still captures the others.  |
@@ -473,6 +569,22 @@ The conformance suites' live-Postgres legs, `lesson-store-conformance.pg.integra
 collect them, and without that lane's database they report as skipped (`describe.skipIf`) rather
 than passing. The conformance suite carries a mutation self-check so a suite that cannot fail is
 itself a failure.
+
+**Live golden set.** `consolidation-judge.live.test.ts` judges ten synthetic windows against the
+real configured tier and asserts each fixture's expected action, kind, or reject category. It is
+collected only by the live config and skipped unless `OPENCLAW_LIVE_TEST=1` and
+`OPENCLAW_LIVE_LEARNING_BASE_URL` are set; `pnpm test:live` already sets `OPENCLAW_LIVE_TEST=1`:
+
+```bash
+OPENCLAW_LIVE_LEARNING_BASE_URL=http://<judge-host>:<port>/v1 \
+OPENCLAW_LIVE_LEARNING_MODEL=low \
+OPENCLAW_LIVE_LEARNING_API_KEY="$KEY" \
+pnpm test:live extensions/learning-core/src/consolidation-judge.live.test.ts
+```
+
+`OPENCLAW_LIVE_LEARNING_MODEL` defaults to `low`; `OPENCLAW_LIVE_LEARNING_API_KEY`, when set, is
+sent as a bearer token. The fixtures are synthetic; never point the test at a real transcript
+store.
 
 ### Running the Postgres store without a Postgres server
 

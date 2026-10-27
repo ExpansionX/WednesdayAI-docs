@@ -225,6 +225,52 @@ Both tools share the same agent-to-agent authorization gate (`tools.agentToAgent
 
 For detailed grant rules, idempotency keys, and chained hop caps, see [Agent coordination](/concepts/agent-coordination).
 
+## Agent teams
+
+`agents.teams[]` declares a named group of agents with one **lead**. The lead may spawn every
+member with `sessions_spawn` (in addition to its own `subagents.allowAgents`), and when it has the
+`sessions_spawn` tool its system prompt gets a `## Team` section listing each member's id, name,
+and `description`, so it can pick the right delegate. Members get no new rights from the team.
+Teams do not change `tools.agentToAgent` (`sessions_send`, `agents_nudge`) or ACP targets.
+
+Teams pair well with **internal specialists**: set `agents.list[].userFacing: false` on a member
+and people cannot reach it directly — config validation refuses it as the default agent, a
+`bindings[]` target, or a `broadcast` target (and rejects any internal agent when `session.scope`
+is `"global"`), and user clients such as the web client do not see it at all. Other agents, cron,
+hooks, and operator clients keep full access.
+
+```json5
+{
+  agents: {
+    list: [
+      { id: "main", default: true },
+      {
+        id: "researcher",
+        userFacing: false,
+        description: "Finds and summarises sources.", // shown to the lead and in the Control UI
+      },
+    ],
+    teams: [{ id: "research", name: "Research", lead: "main", members: ["researcher"] }],
+  },
+}
+```
+
+Rules (enforced by config validation):
+
+- Each agent belongs to **at most one team**, as lead or member; teams do not nest.
+- `lead` and every `members` entry must be an id in `agents.list`; the lead is not also a member.
+- Team ids are unique, lowercase letters/digits/`-`/`_`.
+
+Defaults: `userFacing: true` and `inheritRequesterIdentity: true`. With
+`inheritRequesterIdentity: false` on an agent, turns delegated to it (`sessions_spawn`,
+`sessions_send`) run without the requesting person's identity.
+
+Agent config is **not hot-reloaded**: restart the gateway after changing `agents.list` or
+`agents.teams`.
+
+See [`agents.teams`](/gateway/configuration-reference#agentsteams) in the Configuration Reference
+and [Sub-agents](/tools/subagents) for spawn semantics.
+
 ## Platform examples
 
 ### Discord bots per agent
