@@ -37,10 +37,10 @@ sources:
   - apps/web/src/ui/use-dictate-autosend.ts
   - apps/web/src/state/types.ts
   - apps/web/index.html
-  - apps/web/src/ui/ActivityRail.tsx
+  - apps/web/src/ui/assistant-turns.ts
   - extensions/ui-surfaces/index.ts
   - packages/ui-contract/src/index.ts
-generated: 2026-10-25
+generated: 2026-10-26
 ---
 
 # Web client hosting
@@ -191,7 +191,7 @@ the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
   `gateway.webClient.allowedOrigins`, or the websocket connect is refused.
 - Every response of the route - index, assets, redirects, `config.json` - sends
   `Permissions-Policy` granting `geolocation=(self)` and `Cross-Origin-Opener-Policy: same-origin`.
-  This is what makes the client's **Share location** toggle work on the gateway route (ADR 0119):
+  This is what makes the client's **Share location** toggle work on the gateway route (ADR 0121):
   browsers only honour geolocation where the policy allows it, and geolocation additionally needs
   a secure context. Every other gateway response keeps the default policy with `geolocation=()`,
   so agent-authored same-origin pages - the canvas host, A2UI and plugin UIs - cannot reach the
@@ -226,7 +226,7 @@ default stays `/`.
 - **Do not mix schemes.** An HTTPS page cannot open a `ws://` socket. Serve the client over HTTPS
   and point `gatewayUrl` at `wss://`.
 - **Location sharing and the screen wake lock need a secure context too.** The client's
-  **Share location** toggle and its screen-stays-awake behaviour (ADR 0119) use
+  **Share location** toggle and its screen-stays-awake behaviour (ADR 0121) use
   `navigator.geolocation` and `navigator.wakeLock`, which browsers expose only in a secure
   context: on a plain-`http://` page the location button renders dimmed and the wake lock is a
   no-op. HTTPS hosting covers both.
@@ -400,7 +400,11 @@ Gateway settings that decide what users can do with those methods:
 - **Assistants.** The picker lists the agents the gateway's `agents.list` method returns: every
   `agents.list` entry in config plus the default agent, or, with none configured, the default agent
   plus each agent directory under the gateway state directory. `identity.name` and `identity.color`
-  set how each one looks; an assistant with no colour gets a stable one derived from its id.
+  set how each one looks; an assistant with no colour gets a stable one derived from its id. An
+  agent with `agents.list[].userFacing: false` is internal: the gateway omits it (and its sessions
+  and runs) from every user-client answer, so web-client users never see it in the picker, the
+  sidebar or their chat lists — only operators do. See
+  [`userFacing`](/gateway/configuration-reference#agentslist-per-agent-overrides).
 - **Read aloud.** `messages.tts.readAloud.enabled` (default on) decides whether users see the
   **Read aloud** button; an assistant's own `agents.list[].tts.readAloud.enabled` overrides it for
   that assistant. With the gate on but no TTS provider configured, the button still shows as
@@ -478,11 +482,11 @@ sign-in pairs a fresh device, because a paired browser belongs to exactly one pe
 The assistant can compose interactive UI for the web chat: forms, choice pickers, tables, simple
 charts and progress, rendered inline under the reply that produced them. Each chat also gets a
 **Canvas** panel (the top-bar toggle) listing every surface the assistant published in that chat
-at its latest revision; pins survive a reload and a gateway restart. Under the reply, an activity
-rail shows each tool step live with its name, status and duration, and collapses to a
-"Worked for `<duration>` · `<n>` step(s)" summary once the turn ends (the singular
-"`<n>` step" when there is exactly one; "`<n>` steps" when timing is unavailable) - also after a
-reload, because it is derived from the stored transcript, not from the live connection.
+at its latest revision; pins survive a reload and a gateway restart. Each tool step appears live
+as a tool line inside the reply that ran it (from the `chat.activity` event, which carries the
+step's display name only, never its arguments or results), in order with the reply's text. When
+the turn is stored, the same line fills in its details in place; it never moves or disappears,
+also after a reload. Every assistant row of one run renders as a single reply block.
 
 This is the bundled `ui-surfaces` plugin, and it is **off by default** (ADR 0034). Enable it
 explicitly, then restart the gateway:
@@ -611,7 +615,7 @@ of `1500`, `2500` or `4000` (default `2500`; anything else loads the default). I
 while auto-read is on. The **Share location** toggle stores `1` or `0` under
 `openclaw.web.share-location:<encodedGatewayUrl>:<clientId>` (default `0`). There is no
 gateway-side default for either; an operator-level per-assistant auto-read default is tracked as
-finding #1347. See ADR 0119 for what the location toggle sends.
+finding #1347. See ADR 0121 for what the location toggle sends.
 
 Assistants picked in the **Browse assistants** window stay visible in the sidebar for the current
 page session only: the client keeps the picked assistant ids in memory (`pickedAgentIds`, a
