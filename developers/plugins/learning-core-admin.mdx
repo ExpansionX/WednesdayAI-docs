@@ -1,0 +1,632 @@
+---
+summary: "Operating Learning Core: storage backend placement, migration, verification, and troubleshooting"
+read_when:
+  - You are deciding where learning state should live on a deployment
+  - You are moving learning state from JSONL onto SQLite or Postgres
+  - You need to verify that a deployed gateway is actually capturing lessons
+title: "Learning Core (admin)"
+audience: admin
+component: learning-core
+sources:
+  - src/config/storage/domain-storage.ts
+  - extensions/learning-core/src/lesson-store-factory.ts
+  - extensions/learning-core/src/learning-schema.ts
+  - extensions/learning-core/src/legacy-jsonl-readthrough.ts
+  - extensions/learning-core/src/gateway-methods.ts
+  - extensions/learning-core/src/gateway-decide.ts
+  - extensions/learning-core/src/config.ts
+  - extensions/learning-core/openclaw.plugin.json
+  - extensions/learning-core/index.ts
+  - src/backbone/plugin-task-passes.ts
+  - scripts/verify-learning-core-c0.sh
+  - scripts/verify-learning-core-full.sh
+  - scripts/verify-learning-core-placement.sh
+generated: 2026-08-16
+---
+
+# Learning Core (admin)
+
+Operational reference for Learning Core: where lesson state is placed, how to move it, and how to
+prove a deployed gateway is capturing lessons. For what the plugin does and how to review
+proposals, see [Learning Core](/plugins/learning-core).
+
+## Storage placement
+
+Learning Core stores lessons in SQL, separately from the conversation tables. The shared
+domain-storage resolver follows the **system session store backend by default**: SQLite on an
+unconfigured host, Postgres when sessions use Postgres. No configuration is needed for the
+common case. File-backed serving and failure fallback have been removed.
+
+Resolved defaults, with `<state>` being the state directory (`~/.openclaw` unless
+`OPENCLAW_STATE_DIR` says otherwise):
+
+| Resolved backend | Location                                                |
+| ---------------- | ------------------------------------------------------- |
+| `postgres`       | schema `plugin_learning_core`, table `learning_records` |
+| `sqlite`         | `<state>/learning/learning-core/learning.db`            |
+
+This placement follows the plugin table rule (ADR 0099,
+`dev-docs/adr/0099-plugins-own-their-tables.md`): a plugin owns its tables in its own
+namespace (Postgres schema `plugin_<id>`, SQLite prefix `plugin_<id>_`) and never reads,
+writes, or alters core session tables. Conversation data reaches plugins through the
+plugin-sdk, and `pnpm lint:extensions:no-core-tables` (part of `pnpm check`) fails on any
+core table reference under `extensions/`.
+
+### Overriding placement
+
+Set `plugins.entries.learning-core.config.storage` to pin a backend independently of the system
+store:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "learning-core": {
+        config: {
+          storage: {
+            backend: "sqlite", // "sqlite" | "postgres"
+            sqlitePath: "/var/lib/wednesdayai/learning.db",
+            databaseUrl: "postgres://user:password@db.internal:5432/wednesdayai",
+            schema: "plugin_learning_core",
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Only the keys you need. Resolution order:
+
+1. An explicit `backend` wins outright.
+2. With no `backend`, a `databaseUrl` implies `postgres` and a `sqlitePath` implies `sqlite`.
+3. With neither, the system session store backend is used.
+
+`schema` applies to Postgres only and must match `^[a-z_][a-z0-9_]{0,62}$`. It is validated before
+it reaches the database, because Postgres cannot parameterise an identifier. An unsafe value is
+rejected at resolution, not interpolated.
+
+### Guards you should know about
+
+- **Backend name.** An unrecognised `backend` throws at resolution rather than silently degrading.
+- **Postgres without a URL.** Resolving to `postgres` with no `databaseUrl` on either the override
+  or the system store throws, naming the domain.
+- **Collision with the session database.** A `sqlitePath` that resolves to the same file as core's
+  own session database is refused. Learning state gets its own file so that a learning schema
+  change can never affect session storage.
+
+## The table
+
+Both SQL dialects use one table, `learning_records`, keyed
+`(workspace_id, agent_id, record_type, record_id)`. Payloads are `JSONB` on Postgres and `TEXT` on
+SQLite. Two indexes are created: one on `(workspace_id, agent_id, record_kind)` for scope-filtered
+reads, one on `invalid_at` for active-lesson filtering.
+
+The DDL is `CREATE TABLE IF NOT EXISTS` / `CREATE INDEX IF NOT EXISTS` and runs on first use, so
+there is no separate migration step to schedule. On Postgres the schema is created if absent.
+
+`record_type` is the discriminator. Lessons stay `record_type='lesson'`. Finished-chat excerpts
+land as `record_type='candidate'` in the **same** table. Do not add a `record_kind='candidate'`
+column value or a second `extraction_candidates` table.
+
+Optional search DDL (`ALTER TABLE` for a Postgres `search_tsv` generated column + GIN, or SQLite
+FTS5) is skipped when the backend rejects it. `searchLessons` then scans `listLessons()`. A
+capability downgrade is not implied by that skip.
+
+## Capture, promote, and apply
+
+A `session.end` claim admits one redacted candidate when the transcript has a human user turn
+(heartbeat, cron and subagent turns are dropped before capture). The
+capture is insert-if-absent: a redelivered claim never resets a candidate a producer already
+finalized. No human user turn means no candidate row. What happens next depends on the route:
+
+| State                                                | Session end                                                                                                     | `agent_idle`                                                         |
+| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------- |
+| SQL lesson store, task pipeline running, schedule on | Enqueues one `learning-core.produce` item keyed by the session                                                  | Enqueues one `produce` item per (agent, workspace) with pending work |
+| SQL lesson store, pipeline or schedule inactive      | Runs promote inline, unless consolidation already owns today's bucket (then the claim waits until UTC midnight) | Nothing                                                              |
+| SQL configured but unreachable                       | Takes no claim: claims stay `pending`; no file fallback is used                                                 | Nothing                                                              |
+
+The claim is acknowledged only after the enqueue or the inline promote finished. A claim that
+cannot proceed yet (a store outage after the claim, an enqueue that recovery admission refuses,
+a bucket consolidation owns) is deferred without spending an attempt, so it never drifts toward
+`dlq`. With `mode: "off"` nothing is captured or enqueued.
+
+The passes are `learning-core.produce`, `learning-core.promote`, `learning-core.consolidation`,
+`learning-core.distill`, `learning-core.reconcile-skills`, and `learning-core.maintenance`. Those
+are the **effective** (namespaced) ids in `task_runs` and logs; `registerTaskPass` takes the bare
+id and the backbone prefixes `learning-core.`.
+
+### The produce pass
+
+`learning-core.produce` chooses the lesson producer each run: consolidation (budgeted LLM) or
+promote (deterministic). Consolidation is chosen only while it is **runnable**:
+`consolidation.enabled` is true, `consolidation.provider` and `consolidation.model` are both set,
+`schedule.enabled` is not false, the task pipeline is running, both
+`consolidation.maxCallsPerAgentPerDay` and `consolidation.maxCallsPerRun` are above zero, the
+lesson store is SQLite or Postgres, and the upgrade fence is active (below). Otherwise promote
+runs. Dream Cycle's state plays no part.
+
+Each agent's UTC day is one **bucket** with one producer. The first finalization or budget
+reservation of the day records the owner, and every later finalization in that bucket must come
+from the same producer (`producer_conflict` otherwise, which changes nothing). A bucket that
+consolidation owns stays consolidation's for the day, even if consolidation stops being runnable:
+`produce` then records `notRunnable` and the candidates wait for the next day. Only a bucket with
+no applied effect and no unrefunded consolidation spend can switch producer.
+
+Every `produce` run records a `pass.metrics` row whose `items.producer` is `consolidation`,
+`promote`, or `null` when the run took no ownership (nothing finalized and nothing spent), and
+`items.producerReason` says why (`disabled`, `unconfigured`, `notScheduled`, `upgrade_day`,
+`notRunnable`, `frozen_conflict`, `no_effect`, and so on). Standalone `learning-core.promote`
+runs record the same fields.
+
+When a `produce` run applied a lesson effect (in this attempt or an earlier one of the same work
+item), it queues `learning-core.reconcile-skills`, and with `distill.enabled`, the reconcile run
+queues `learning-core.distill`. These follow-ups are written in the same transaction that
+completes the run. A consolidation run stopped by `maxCallsPerRun` or its time budget, with
+candidates and daily capacity left, queues an immediate continuation; any other run that leaves
+claimable candidates behind (including a spent daily cap) queues a next-day carry, available at
+the next UTC midnight. Pending candidates are therefore processed without a new session.
+
+While consolidation is runnable, a standalone promote changes nothing: it neither writes lessons
+nor skips untagged candidates. Promote also leaves alone any agent whose current UTC day's bucket
+consolidation already owns. A consolidation run that is not runnable records why in its
+`pass.metrics` row: `skipped` is `disabled`, `unconfigured`, `notScheduled`, `budget_disabled`,
+or `store_unsupported`, and `items.scheduleActive` shows the schedule state. `tasks.runDryRun`
+reports the same reason with no model call.
+
+| Key                                    | Default   | Effect                                                                                                                                                                         |
+| -------------------------------------- | --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `consolidation.enabled`                | `false`   | Register the LLM consolidation pass. Restart the gateway after changing this.                                                                                                  |
+| `consolidation.maxCallsPerAgentPerDay` | `8`       | Per-agent daily (UTC) call ceiling for consolidation, enforced in the `learning_budget` table.                                                                                 |
+| `consolidation.exploreEpsilon`         | `1`       | Share ε of untagged candidates judged each run: `ceil(ε × N)`, so at least one. `0` disables it. Capture drops automated turns, so `maxCallsPerAgentPerDay` is the real bound. |
+| `consolidation.provider`               | unset     | Provider of the judge model. Consolidation makes no calls until `provider` and `model` are both set.                                                                           |
+| `consolidation.model`                  | unset     | Judge model id, for example a small, fast model.                                                                                                                               |
+| `consolidation.timeoutMs`              | `30000`   | Per-call judge timeout. Bounded 1000-120000.                                                                                                                                   |
+| `consolidation.maxCallsPerRun`         | `8`       | Judge calls one run may make. The pass timeout is derived from this and `timeoutMs` (at most 5 min).                                                                           |
+| `distill.enabled`                      | `false`   | Queue owner-gated, model-authored SkillProposals. Distill never writes `SKILL.md`.                                                                                             |
+| `distill.provider`                     | unset     | Provider of the authoring model. Distill writes no proposal until `provider` and `model` are set.                                                                              |
+| `distill.model`                        | unset     | Authoring model id.                                                                                                                                                            |
+| `distill.timeoutMs`                    | `30000`   | Per-call authoring timeout. Bounded 1000-120000.                                                                                                                               |
+| `distill.maxCallsPerRun`               | `4`       | Authoring calls one run may make. The pass timeout is derived from this and `timeoutMs`.                                                                                       |
+| `distill.maxCallsPerAgentPerDay`       | `4`       | Per-agent daily (UTC) authoring call ceiling, in the `learning_budget` table.                                                                                                  |
+| `schedule.enabled`                     | `true`    | `false` makes consolidation not runnable, so promote writes lessons inline at session end.                                                                                     |
+| `mode`                                 | `observe` | `assist` also injects up to `maxLessonsForPrompt` (default `5`) active lessons via `context.collect`.                                                                          |
+
+This change takes effect after a gateway restart (Linux: `systemctl --user restart openclaw-gateway`;
+macOS: `wednesdayai gateway restart --deep`).
+
+Consolidation needs a SQLite or Postgres lesson store. Each candidate is claimed before any
+budget use or model call, so two overlapping runs never judge or apply the same candidate twice.
+A run that finds a candidate claimed by another live run finishes the rest, then fails with the
+retryable `learning-core: candidates busy` error. The daily budget lives in a `learning_budget`
+table in the lesson store's own database, so gateways that share the database share one cap.
+
+Untagged candidates that the explore sample passes over stay `pending`. Once one is older than
+7 days and has no recorded judge or no-output failure, a consolidation run finalizes it as
+`skipped` with `skipReason: "not_sampled_expired"` (at most 200 per run). A candidate with
+failures follows the quarantine rules instead.
+
+The consolidation pass timeout is `effectiveCalls x timeoutMs + 30 s` (at most 5 minutes). A run
+starts a judge call only if that call's full `timeoutMs` still ends at least 10 seconds before the
+pass timeout. All waiting counts toward this check, including waiting for another learning-core
+run's analysis call. When the next call no longer fits, the run stops with
+`stoppedEarly: "time_budget"` and is not charged for that call. With `maxCallsPerRun: 1`, the one
+call still fits unless the run has already waited more than about 20 seconds. Every call that
+starts can therefore finish, and a verdict that returns within its call timeout is always
+applied. A run that is aborted, for example at shutdown, never starts another paid call. The
+distill pass follows the same rules.
+
+The task cost class is fixed when the plugin registers. Consolidation registers as `llm` only
+when it is enabled with a model, both caps are above zero, `schedule.enabled` is not false, and
+the store is SQL. Otherwise it registers as `deterministic`. Distill uses its own test, with no
+schedule or consolidation term. Only `llm` passes are held back by the restart-loop guard.
+
+The previous `consolidation-budget.jsonl` ledger is imported once for the current UTC day, then
+it is no longer written. You can delete it after the upgrade.
+
+### How the consolidation judge decides
+
+For each selected candidate the pass sends its capture window to the configured judge model
+through the analysis runtime. The window holds up to 12 redacted user and assistant messages
+(4,000 characters at most). Heartbeat, cron and subagent turns are dropped at capture, and a
+session with no human turn yields no candidate. The pass also sends the anchor message, the tags,
+up to five similar active lessons, and up to six operator-reviewed examples. The judge answers
+with one JSON verdict (`action`, `lessonId`, `text`, `kind`, `sourceIndexes`, `rejectCategory`,
+`reason`, `confidence` from 0 to 1), and the plugin validates it.
+
+A lesson is a reusable rule for how the agent behaves. Facts about the user, other people,
+events, health, money or legal matters belong to memory, and the judge rejects them. `add` and
+`update` need `text` (at most 400 characters), a `kind` (`correction`, `preference`,
+`procedure`, `failure`), and `sourceIndexes` that cite at least one user message in the window. A
+`noop` needs a `rejectCategory` (`fact`, `one_off`, `automated`, `transient_failure`,
+`already_known`, `no_signal`). The written lesson records its `origin`: the model, the judge
+prompt version (`judge-v2:<sha>`), the rationale, and the analysis job id. It also keeps the cited
+messages as evidence quotes with the speaker and the message timestamp.
+
+| Verdict                 | Effect                                                                                                                      |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `add`                   | Writes a new lesson with the verdict's text and confidence.                                                                 |
+| `update` (text needed)  | Supersedes the named lesson. The successor has the verdict's text and confidence, merged evidence, and one more occurrence. |
+| `delete` with `text`    | Supersedes the named lesson with that text.                                                                                 |
+| `delete` without `text` | Invalidates the named lesson. No replacement lesson is written.                                                             |
+| `noop`                  | Finishes the candidate without writing a lesson.                                                                            |
+
+`update` and `delete` must name one of the lessons shown to the judge; any other id is invalid
+output. Every supersede uses a successor id derived from the old lesson and the candidate's
+session, so a retried run never writes a second successor.
+
+The pass treats the model as having answered only when reply text came back. Token counts do not
+count as an answer.
+
+- **Bad answer** (not JSON, fails validation, or the store refuses it): the candidate records a
+  failure and stays pending.
+- **No answer** (timeout, empty reply, refusal, provider error): if another call in the run
+  answered, the candidate records a failure. Otherwise the run fails with the retryable
+  `learning-core: analysis unavailable` error and records no failures. Two no-answer calls in a
+  row also end the run that way.
+- **Quarantine**: after three recorded failures, or three UTC days of no-answer runs, the
+  candidate is skipped for 7 days. It stays pending and is never deleted.
+
+Every call that reached the provider counts against `maxCallsPerAgentPerDay`, whatever happened.
+Only calls that never left the gateway are refunded: `analysis concurrency limit exceeded`
+rejections and failures before dispatch, such as a missing API key. A long outage can therefore
+use up the day's calls; pending candidates then wait for the next UTC day. The pass retries up to
+14 times with backoff from 1 minute to 1 hour, about 8 hours in total.
+
+Each run records a `pass.metrics` row whose `items` hold the run summary (`judged`, `added`,
+`updated`, `superseded`, `invalidated`, `noop`, the failure counters, and `meanConfidence`).
+`qualityScore` is the mean verdict confidence, omitted when no verdict succeeded; the
+[Dreams view](/web/dreams) plots it as the consolidation quality trend. `costSource` follows the
+Gateway [pricing rule](/gateway/tasks#run-measurement): a judge model declared under
+`models.providers` reports `priced`, with `costUsd: 0` when its entry has no `cost` block; a
+model with no config entry reports `unpriced` with `costUsd: null`; and a run with a call that
+returned no usage reports `usage_unavailable`.
+
+### How skill distillation works
+
+Distillation turns a lesson into a skill proposal using the SQL lesson store. With
+`distill.enabled` but no `provider`/`model`, a run records `unconfigured` and writes no proposal.
+There is no template fallback.
+
+A lesson is eligible when it is active, has no proposal yet, is not deferred, and at least one
+session merged into it ended `completed` (its `successEvidence`). Sessions with an unknown or
+aborted outcome never count. Selection runs as one SQL query, oldest eligible lessons first,
+with lessons that failed before sorted after untried ones.
+
+- **Name**: the skill name is derived from the lesson text and id. The model never picks it,
+  and the name is the dedup key: a lesson that already has a proposal (from distill or from the
+  `learning` tool, under any name) is never authored again.
+- **Skill-name claim**: before any budget use the pass takes a global claim on the name, so two
+  workspaces that learn the same lesson make one model call and get one proposal. The claim is a
+  hidden record. It never shows in proposal lists, counts, or decisions.
+- **Authoring**: the model returns a `description` and a Markdown `body`. The description must
+  contain `Use when:` and `NOT for:`, be at most 1024 characters, and contain no `<` or `>`.
+  The pass redacts both fields, writes the proposal body as a `SKILL.md` with YAML frontmatter
+  (`name`, `description`), and rejects any result over 16 KiB.
+- **Failures** follow the consolidation rules: a bad answer counts a failure against the lesson,
+  and so does a no-answer call when another call in the run answered. Two no-answer calls in a row,
+  or a run where no call answered, fail with `learning-core: analysis unavailable` and count no
+  failure. After three counted failures (or three UTC days of no-answer runs) the lesson is
+  deferred for 7 days. Calls that reached the provider count against
+  `distill.maxCallsPerAgentPerDay`.
+- **Continuation**: when eligible lessons remain after a run, the pass enqueues one follow-up
+  `distill` run for that agent and workspace. It is available at once while the day's cap has room,
+  otherwise at the next UTC midnight. Repeated runs reuse the same follow-up, so each scope has at
+  most one pending follow-up.
+
+Each run records a `pass.metrics` row with `authoring: "llm"` and `items` such as `considered`,
+`proposed`, `alreadyProposed`, `budgetSkipped`, the failure counters, and `continuation`.
+
+Approved proposals write atomically to the managed skills root:
+
+```text
+$OPENCLAW_STATE_DIR/skills/<name>/SKILL.md
+```
+
+If `OPENCLAW_STATE_DIR` is unset, that is `~/.openclaw/skills/<name>/SKILL.md`. The write is
+tmp-file + `fsync` + rename. `learning-core.reconcile-skills` restores a deleted or mutated file
+from the proposal's stored `desiredState` hash.
+
+## Capability levels
+
+`learning.overview` reports a `capability` alongside the resolved backend:
+
+| Backend    | Capability | Meaning                                             |
+| ---------- | ---------- | --------------------------------------------------- |
+| `postgres` | `full`     | Indexed queries, scope filtering, supersede chains. |
+| `sqlite`   | `full`     | Same, single-file.                                  |
+
+### Upgrade fence
+
+On its first start, the new version installs a one-time **upgrade fence** in the lesson database
+(a `learning_budget` row with key `meta:upgrade-fence`) and repairs the database in bounded
+batches before any learning writer runs:
+
+1. It finalizes candidates that an older promote had already merged but never marked (a crash
+   residue), so no lesson is applied twice.
+2. It copies lessons that exist only in the legacy fs-jsonl log into SQL.
+3. It copies legacy-only proposals into their scopes and records their skill names, so distill
+   never re-authors them. Lessons named by any proposal are flagged as proposed.
+4. It moves every agent's older learning rows onto the agent's canonical workspace (below).
+
+Until the repair finishes, every learning writer waits (`repair_pending`): no session claim is
+taken, `produce`, promote, consolidation, distill, and reconcile runs fail and retry, and the
+owner's `learning` tool and `learning.decideProposal` return `UNAVAILABLE`. The repair runs from a
+background service at gateway start, even with the task pipeline disabled, and resumes after a
+crash or a SQL outage. Several gateways sharing one database run one repair between them.
+
+Steps 2 and 3 read one legacy log: the one of the gateway that installed the fence. At install
+the fence records that log's files by their path relative to the plugin log directory, with each
+file's size and content hash (`meta:legacy-source`). Another gateway continues those steps only
+when its own legacy log is the same (same relative files, same content). A gateway with a
+different legacy log leaves them to the installing gateway: it logs `fence_source_mismatch`, its
+writers stay `repair_pending`, and `learning.overview` reports
+`fence: { state: "repair_pending", reason: "fence_source_mismatch" }`. Its own legacy-only lessons
+and proposals are not copied. `repaired_at` is set only after every lesson and proposal in the
+recorded log has been copied, and the repair position only moves forward.
+
+The fence also fixes an **activation time**: the next UTC midnight after install. Until then
+(`upgrade_day`) promote is the producer; from then on consolidation can own a bucket.
+
+Stop every older gateway that shares the learning database before the first new-version gateway
+starts, because older versions ignore candidate claims. A downgrade after the upgrade is not
+supported.
+
+### Learning workspace
+
+Every learning record is scoped to one canonical workspace per agent: the agent's configured
+workspace (`agents.list[].workspace`, else `agents.defaults.workspace` for the default agent),
+as an absolute path. A sandbox directory is never used. The id is recorded in the database
+(`canonical:<agentId>`) and never rewritten. It is recorded only by a gateway that configures the
+agent (in `agents.list`, or the default agent), in one of two ways:
+
+- when that gateway installs or repairs the upgrade fence;
+- on that gateway's first learning write for the agent.
+
+Reads never record it, and neither does a call that fails closed. A gateway that does not
+configure an agent that has no recorded id refuses that agent's learning reads and writes with
+`agent_unconfigured`.
+
+Gateways that share a learning database must resolve identical absolute workspaces for each
+agent (the same `HOME`, `OPENCLAW_HOME`, `OPENCLAW_PROFILE`, and state directory). A gateway
+that resolves a different workspace logs `scope_mismatch for agent <id>` and fails closed for
+that agent: it captures nothing, moves nothing, and its session claims wait. Changing an agent's
+workspace after the upgrade is not supported either; to recover, restore the recorded workspace
+path.
+
+The same rule covers every learning entry point on that gateway, not only capture:
+
+- The standalone `promote`, `consolidation`, `distill`, and `reconcile-skills` passes fail with
+  `scope_mismatch`, whether their payload names the agent and workspace, only the agent, or
+  nothing (then the default agent). They make no model call and write nothing.
+- `produce` also fails closed when its payload workspace is not the agent's recorded one.
+- The `learning` tool, `learning.decideProposal`, and the workspace-resolution sidecar refuse.
+- The maintenance pass and the startup sweep never queue work for a mismatched scope, and the
+  maintenance retention never deletes a `learning_budget` row of a mismatched agent (the gateway
+  whose workspace matches trims them).
+- Operator reads: a read with `agentId` for a mismatched agent fails with
+  `learning unavailable: scope_mismatch`. For an agent that this gateway does not configure and
+  that has no recorded workspace, it fails with `learning unavailable: agent_unconfigured`. A read without `agentId` excludes the rows of every
+  mismatched agent and names them in `mismatchedAgents`.
+
+The upgrade repair re-keys the pre-upgrade rows of every agent that has a recorded workspace.
+An agent that the repairing gateway does not configure has no recorded workspace, so its rows
+stay under their old key. The first learning write from a gateway that configures that agent
+records its workspace. It then re-keys those rows in bounded batches. Until then, no gateway
+reads or writes them. A gateway that configures the agent can also record its workspace while
+another gateway is still repairing; when the repair finishes, the repairing gateway re-keys the
+rows of every recorded agent, and the configuring gateway's next write finishes any re-key that
+is still outstanding, so no restart is needed.
+
+A session claim from before the upgrade has no recorded workspace. It is resolved from the live
+config; if no workspace resolves, the claim waits (`scope_unavailable`, retried daily) and is
+never captured into a guessed workspace. A session claim for an agent that this gateway does not
+configure and that has no recorded workspace (for example, an agent removed from `agents.list`
+with claims still pending) waits too (`agent_unconfigured`, retried daily). It never holds up the
+session claims of the configured agents.
+
+### Recovery and retention
+
+A `produce`, `distill`, or `reconcile-skills` item that exhausts its 14 attempts goes to the
+dead-letter queue, and there is no operator replay for task work. Its candidates stay pending
+and are picked up again by:
+
+- the agent's next session end or idle event;
+- the next-day carry;
+- the startup sweep: once the task pipeline runs, each gateway start queues one recovery
+  `produce` item per (agent, workspace) with pending candidates;
+- the daily `learning-core.maintenance` pass, which queues one recovery item per scope per day
+  for pending candidates, eligible distill lessons, and applied proposals.
+
+`learning-core.maintenance` runs at startup and then daily through its own next-day follow-up,
+even when the lesson store is unreachable. It also trims the `learning_budget` table by row kind:
+denied, refunded, and imported reservations after 35 days; spent reservations and per-item effect
+rows only once their work item is finished (and effect rows after the 30-day task-run
+retention); a bucket's owner row once nothing retained supports it. Rows of a work item that can
+still be retried are kept however old they are, and the fence rows are never deleted.
+
+## Migrating from a JSONL deployment
+
+No migration command is required. Retired file-backend configuration is removed on config load.
+The [upgrade fence](#upgrade-fence) copies legacy lessons and proposals into SQL in
+bounded batches. Until it sets `repaired_at`, reads also show the newest part of the old log, so
+lessons captured before the move stay visible.
+
+The read-through is deliberately conservative and worth understanding before you plan a cutover:
+
+- It **only reads**. It never locks the log, never creates the directory or a lock file beside it,
+  and never rewrites, compacts, or deletes it.
+- It is **bounded**. Before `repaired_at` it reads at most the newest 8 MiB or 2,000 lessons of the
+  log, never the whole file. When that window does not reach the start of the log,
+  `learning.overview` counts are lower bounds and `truncated` is `true`, `learning.listLessons`
+  reports `truncated: true` (older legacy-only lessons are missing), and similar-lesson ranking
+  records `selectionTruncated: true` in its `pass.metrics` row.
+- After `repaired_at`, every read is **SQL only** and the old log is never opened again. Lessons of
+  an agent this gateway does not configure stay under their legacy scope key in SQL until that
+  agent is configured and re-keyed; SQL reads include them.
+- Where a lesson id exists in both places, the **SQL row wins** - it is the newer state.
+- It covers **lessons only**. A proposal that exists solely in a legacy log is not folded in and
+  will not appear in the queue until the fence copies it.
+
+Your old log therefore remains a complete, untouched backup. Once `learning.overview` reports the
+lesson counts you expect from the SQL backend and its `fence.state` is no longer
+`repair_pending`, you can archive the JSONL directory at your leisure.
+
+## Backend failure behaviour
+
+A SQL outage never switches reads or writes to files.
+
+- **SQLite** that cannot be opened (unwritable path, corrupt file) logs a warning. Every data
+  operation reports retryable `store_unavailable`. A missing parent directory is created
+  automatically; an invalid or unwritable path still needs repair.
+- **Postgres** connects lazily. Connection failures surface on the operation; the store remains
+  Postgres and subsequent operations can retry against SQL when service is restored.
+
+Candidate capture, candidate claims, bucket ownership, and the budget ledger never fall back
+either: while a configured SQL store is unreachable, session claims stay pending (their attempt
+counts unchanged) and the learning passes fail with the retryable `store_unavailable`.
+
+Check the gateway log and database connectivity rather than looking for a reduced-capability
+backend. The retained legacy read-through is for upgrade data, not outage recovery.
+
+## Verifying a deployment
+
+Do not infer capture from a green test suite. Observe the live system. None of these scripts call
+`wednesdayai gateway start` (that would restart the live unit).
+
+**Candidate / pass / apply (current loop):**
+
+```bash
+OPENCLAW_VERIFY_SESSION_ID=<a session that ended on this gateway> \
+  bash scripts/verify-learning-core-full.sh
+```
+
+Missing `OPENCLAW_VERIFY_SESSION_ID` is fail-closed (exit 2). A skipped consolidation or reconcile
+leg is not a pass. The script also runs the isolated placement check.
+
+| Variable                           | Purpose                                         |
+| ---------------------------------- | ----------------------------------------------- |
+| `OPENCLAW_VERIFY_SESSION_ID`       | Required session id.                            |
+| `OPENCLAW_CONFIG_PATH`             | Config to resolve the backend from (read-only). |
+| `OPENCLAW_STATE_DIR`               | State directory for file-backed placement.      |
+| `OPENCLAW_VERIFY_SKIP_SC3=1`       | Still non-zero; prints that SC3 was skipped.    |
+| `OPENCLAW_VERIFY_ALLOW_SKIP_SC7=1` | Permit skipping the reconcile assertion.        |
+| `OPENCLAW_VERIFY_ASSIST=1`         | Demand `mode=assist` on this host.              |
+
+**Placement only (never touches live config):**
+
+```bash
+bash scripts/verify-learning-core-placement.sh
+```
+
+This writes a candidate into a temp default store and a temp override store. It never reads or
+writes `~/.openclaw/openclaw.json`.
+
+**C0 tracer-bullet (lesson-on-claim):** `scripts/verify-learning-core-c0.sh` still exists and
+expects a `record_type='lesson'` row for the claimed session. After the candidate swap that is
+only true when promote ran inline (consolidation not runnable). Prefer the full script
+on current builds.
+
+## Observability
+
+Ten gateway methods (reads first; decide, revise and rate methods mutate):
+
+| Method                     | Returns                                                                       |
+| -------------------------- | ----------------------------------------------------------------------------- |
+| `learning.overview`        | Backend, capability, counts, `truncated`, `fence`, and `mismatchedAgents`.    |
+| `learning.listLessons`     | Active lessons from the store (plus the legacy log window before repair).     |
+| `learning.searchLessons`   | Up to `k` ranked lesson hits for `query` (optional `k`, default 5).           |
+| `learning.inspectLesson`   | One lesson with evidence quotes, origin, revision chain and proposals.        |
+| `learning.listProposals`   | The proposal queue.                                                           |
+| `learning.inspectProposal` | One proposal with its scanner findings.                                       |
+| `learning.decideProposal`  | Apply, reject, or quarantine one proposal.                                    |
+| `learning.decideProposals` | Same actions for `ids[]`, in order; stops at the first failure.               |
+| `learning.reviseLesson`    | Supersede a lesson with operator text (`text` ≤400, optional `kind`, `note`). |
+| `learning.rateLesson`      | Endorse (`score: 1`) or retire (`score: -1`, optional `note`) a lesson.       |
+
+`inspectLesson` needs the read scope. `reviseLesson` and `rateLesson` need the approvals scope and
+write a `lesson.revised`, `lesson.endorsed` or `lesson.retired` audit row. The actor is the
+client name plus the paired device id. Endorsed, retired and operator-edited lessons become the
+judge's good and bad examples. SKILL.md proposals are distilled only from `procedure` and
+`failure` lessons that have at least two occurrences, an endorsement, or an operator edit.
+
+`learning.decideProposals` decides the ids in order. When every id succeeds it returns
+`{ proposals }`. At the first failure it stops and fails with `UNAVAILABLE` `failed to decide`;
+the ids before it stay decided and the ids after it are not attempted. The error `details` are
+`{ proposalId, reason, message, decided, notAttempted }`: the failing id, its cause (`reason` is
+`scope_mismatch`, `repair_pending`, `agent_unconfigured`, and so on, when the item failed at a
+gate), the item's own error message, the ids already decided, and the ids not attempted.
+
+`learning.listLessons` adds `truncated: true` when, before `repaired_at` on SQLite or Postgres,
+the legacy log window it read did not reach the start of the log (older legacy-only lessons are
+then missing). `learning.searchLessons` returns up to `k` hits after it drops the rows of
+mismatched agents: it widens the store query until `k` visible hits are found or the store runs
+out, up to 1,000 candidates, and adds `truncated: true` if that ceiling stopped it first.
+
+The four list and overview reads take an optional `agentId`, which narrows them to that agent's
+recorded workspace. Without it they span every agent except the mismatched ones (see
+[Learning workspace](#learning-workspace)), which the response lists in `mismatchedAgents`.
+
+On SQLite and Postgres, `learning.overview` counts are database aggregates and `truncated` is
+`false`. Before the upgrade fence sets `repaired_at`, the legacy read-through can add lessons
+from the newest 8 MiB of the old log. When that window is incomplete, the counts are lower bounds
+and `truncated` is `true`.
+
+On SQLite and Postgres, `learning.overview` also reports `fence: { state, reason? }`, where
+`state` is `repair_pending`, `upgrade_day`, or `active` and `reason` is `fence_source_mismatch`
+when this gateway stands by for another gateway's repair. The field is left out when the SQL
+store is unreachable.
+
+These status codes show up in the gateway log, in pass errors, in `learning.overview`, and in
+`learning.decideProposals` error `details.reason`:
+
+| Status                  | Meaning                                                                                   | What to do                                                                           |
+| ----------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------ |
+| `repair_pending`        | The [upgrade fence](#upgrade-fence) has not finished; SQL writers and decides wait.       | Wait for the repair; check the log if it does not finish.                            |
+| `fence_source_mismatch` | This gateway's legacy log differs from the one the fence recorded; it stands by.          | Let the installing gateway finish the repair.                                        |
+| `upgrade_day`           | Repair finished; until the next UTC midnight promote, not consolidation, is the producer. | Nothing; consolidation can own buckets from the activation time.                     |
+| `scope_mismatch`        | This gateway resolves a different workspace for the agent than the recorded one.          | Restore the recorded workspace path (see [Learning workspace](#learning-workspace)). |
+| `agent_unconfigured`    | The agent is not configured here and has no recorded workspace.                           | Configure the agent on a gateway that shares the database.                           |
+| `scope_unavailable`     | No workspace resolves for the agent; its session claims wait and retry daily.             | Configure a workspace for the agent.                                                 |
+| `store_unavailable`     | SQL is unreachable; no reads or writes fall back to files.                                | Restore the database connection or repair the SQLite path.                           |
+
+Learning Core is a session consumer with `effectKind: session.end` over all lanes. Its claims are
+in `session_consumer_claims` under a namespaced consumer id of the form
+`<agentId>:learning-core:session.end` - not the bare plugin id. Query with a prefix match, or you
+will find nothing while the claim is sitting there processed. See
+[Session consumer claims](/plugins/session-consumer-claims).
+
+The active JSONL log has its own rotation profile, `extensions.learningCore`. It is path-indexed,
+so `maxFileBytes`, `maxBackups`, `compress`, and `maxQueuedBytes` apply and `file` is ignored. See
+the [configuration reference](/gateway/configuration-reference).
+
+## Troubleshooting
+
+**Claims are processed but no lessons appear.** That is expected on the claim path. Confirm a
+`record_type='candidate'` row exists for the session (`verify-learning-core-full.sh`). A lesson
+appears only after promote (inline whenever consolidation is not runnable) or after a
+consolidation pass. If even the candidate is missing, the transcript had no human user turn.
+
+**`learning.overview` reports a backend you did not configure.** Either the system session store
+resolved differently than you expected, or a fallback fired. Check the gateway log for
+`lesson store backend failed`.
+
+**Lessons from before a backend change are missing.** Check that the legacy directory is still at
+`<state>/learning/learning-core/`. The read-through resolves it relative to the state directory, so
+a changed `OPENCLAW_STATE_DIR` hides the old log without deleting it.
+
+**Postgres permission errors on first use.** The role needs `CREATE` on the database to create the
+schema, or you can pre-create `plugin_learning_core` and grant table-creation rights inside it.
+
+**`PLUGIN_REGISTER_ERROR`: Plugin task pass id must not contain "."** The plugin failed to load
+because a pass was registered with a dotted id such as `learning-core.promote`. Pass ids must be
+bare; the backbone namespaces them. After upgrade you should see `22 loaded` (or your usual count)
+and 0 register errors. Restart the Gateway after deploying the fix (Linux:
+`systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+
+## Related
+
+- [Learning Core](/plugins/learning-core) - what it does and how to review proposals
+- [Learning Core (developer)](/plugins/learning-core-developer) - store contract and extension seams
+- [Session consumer claims](/plugins/session-consumer-claims)
+- [Configuration reference](/gateway/configuration-reference)
