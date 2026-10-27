@@ -21,12 +21,12 @@ re-exported from `openclaw/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `1.0`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `1.1`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
 | `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `1.0`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.0`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
-| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.0`           | `MsgContext` (`src/auto-reply/templating.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                                                                                              | `MsgContext`, `ChannelGatewayAdapter`                                                               |
+| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.1`           | `MsgContext` (`src/auto-reply/templating.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                                                                                              | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.0`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.1`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -36,6 +36,16 @@ Each root type carries a direction, and the snapshot records it per entry:
   signature in core would break your implementation.
 
 The exact per-type split lives in `scripts/contract-surface/roots.ts`.
+
+Object-shaped entries also record their members as child entries (`X.Y` plus `X.Y.member`, with
+member names escaped into stable dotted keys): anonymous object types flatten this way up to a
+fixed depth, and a root can opt in explicitly — the sdk barrel and the gateway's
+`ProtocolSchemas` registry do, because their printed texts embed the members. A parent entry's
+type text is the structural expansion of those members, so its whole-text change defers to the
+member diffs: the parent is breaking only when a strict descendant is breaking (a member type
+change, a removal, a new required `implemented` member), and a lone parent-text diff with no
+member change stays breaking. Without the member entries, adding an optional member to a tracked
+type would surface as a breaking whole-type change.
 
 The `gateway` contract is special: its major equals `PROTOCOL_VERSION` in
 `src/gateway/protocol/schema/protocol-schemas.ts`, because the wire protocol between clients and
@@ -48,7 +58,8 @@ Contract versions are `major.minor` strings. The policy is:
 - **Breaking** (requires a major bump): removing an entry, adding a required member to an
   `implemented` type, changing a signature or type shape, or flipping a direction.
 - **Additive** (requires only a minor bump): new optional members, new members on a `provided`
-  type, and new deprecation markers.
+  type, new required members under a newly added optional parent (omitting the parent omits its
+  whole subtree, so the member can never be forced), and new deprecation markers.
 
 A breaking change without a major bump fails CI (see [Changing a contract](#changing-a-contract)).
 
@@ -261,7 +272,7 @@ marker instead of its own text (its children carry the shape), and type texts lo
 characters are stored as a `sha256:` digest. For generic interfaces, classes and type aliases
 the declaration's type-parameter list — constraints and defaults included — is appended to the
 recorded text (`Box<T> { value: T; } <T>`), because the printed type alone drops them; this
-closes the generic-type-alias known limit in ADR 0115. A member whose type is a named type is tracked by that
+closes the generic-type-alias known limit in ADR 0117. A member whose type is a named type is tracked by that
 type's printed name only, so a change inside that named type surfaces only if the type is exported
 from `openclaw/plugin-sdk` (where the `sdk` contract catches it) or is itself listed as a root in
 `scripts/contract-surface/roots.ts`; a consequence is that such a change can demand an `sdk` bump
