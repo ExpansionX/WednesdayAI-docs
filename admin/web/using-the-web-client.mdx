@@ -8,6 +8,10 @@ read_when:
   - You want to pick a model or Think level, reply to a message, or rename a chat
   - You want to hear a reply read aloud, or know why that button is dimmed
   - You want replies read aloud while they are still being written, or dictation that sends itself when you pause
+  - You want to pause a reply that is being read aloud, resume it, or stop it
+  - You want dictation to wait longer before it sends itself
+  - You want to share your location with your messages, or know why the location button is dimmed
+  - You wonder why the screen stays awake while you are using your voice
   - You want to paste text from Word, Google Docs or a web page into the message box
   - You want to know why a picture larger than 5 MB attaches anyway
   - You want to send another message while a reply is still being written
@@ -32,7 +36,7 @@ sources:
   - apps/web/src/ui/surface/InlineSurface.tsx
   - apps/web/src/ui/surface/SurfaceSubmitError.tsx
   - apps/web/src/ui/canvas/CanvasPanel.tsx
-  - apps/web/src/ui/assistant-turns.ts
+  - apps/web/src/ui/ActivityRail.tsx
   - apps/web/src/ui/TopBar.tsx
   - apps/web/src/ui/RightPanel.tsx
   - apps/web/src/ui/UserMessage.tsx
@@ -44,6 +48,10 @@ sources:
   - apps/web/src/app/auto-read-driver.ts
   - apps/web/src/providers/auto-read-preference.ts
   - apps/web/src/providers/read-aloud-stream.ts
+  - apps/web/src/ui/AutoSendDelayMenu.tsx
+  - apps/web/src/providers/auto-send-delay-preference.ts
+  - apps/web/src/providers/device-location.ts
+  - apps/web/src/app/use-screen-wake-lock.ts
   - apps/web/src/providers/image-resize.ts
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/ui/Composer.tsx
@@ -66,7 +74,7 @@ sources:
   - apps/web/src/state/chat.ts
   - apps/web/index.html
   - apps/web/public/manifest.webmanifest
-generated: 2026-10-27
+generated: 2026-10-25
 ---
 
 # Using the web client
@@ -146,7 +154,9 @@ The installed app then remembers the pairing, the way a browser does.
 </Steps>
 
 Two things the installed app does not do: there is no offline mode - it still needs a connection
-to your assistant - and it does not show notifications while it is closed.
+to your assistant - and it does not show notifications while it is closed. On iPhone or iPad, the
+installed app also needs iOS 18.4 or newer to keep the screen awake while you dictate or listen to
+a reply being read aloud; see [Dictate and voice](#dictate-and-voice).
 
 ## Send a message
 
@@ -238,9 +248,12 @@ Shift+Cmd+V - works exactly as it always did.
 
 Hover over a reply and select the speaker button (**Read aloud**) to hear that reply spoken. The
 button plays the whole reply, however long it is: long replies are spoken in consecutive pieces
-with no action needed from you. While it plays, the button becomes **Stop reading**; select it
-again to stop. Starting another reply, starting Voice mode, switching to another chat, or losing
-the connection stops playback too.
+with no action needed from you. While it plays, the button becomes **Pause reading**; select it to
+pause, and it becomes **Resume reading**, which continues from the same point. A separate
+**Stop reading** button beside it stops the read. Pressing the microphone (**Dictate**) also pauses
+a playing read instead of talking over it: the read stays paused when you stop the take, and only
+**Resume reading** (or starting another read) continues it. Starting another reply, starting Voice
+mode, switching to another chat, or losing the connection stops playback too.
 
 Your assistant reads the text of the reply: paragraphs, headings and list items, spoken in order.
 Code blocks, tables and embedded HTML are skipped, so a reply that contains only code or a table
@@ -279,9 +292,16 @@ WednesdayAI connection the same way it remembers the theme.
 
 While the toggle is on, dictation becomes hands-free as well. The tooltip reads
 **Read replies aloud. Dictation sends when you pause**: when the microphone has heard you speak
-and you then stay quiet for about a second and a half, the dictation ends by itself and the words
-are sent straight away - one tap to start, speak, then just pause. With the toggle off, Dictate
-works as before: you select the microphone button to stop, edit the text, and send it yourself.
+and you then stay quiet for the chosen pause, the dictation ends by itself and the words are sent
+straight away - one tap to start, speak, then just pause. A chip beside the speaker shows the
+current pause - **1.5 s**, **2.5 s** or **4 s**, with **2.5 s** as the default. Select the chip to
+choose a different pause; this browser remembers your choice the way it remembers the toggle, and
+a change applies to the next dictation, not to one that is already listening. With the toggle off,
+the chip is not shown and Dictate works as before: you select the microphone button to stop, edit
+the text, and send it yourself.
+
+While a reply is being read aloud, pressing the microphone pauses the reading instead of talking
+over it; see [Read a reply aloud](#read-a-reply-aloud).
 
 The words are sent only when the message box is free. While a reply is being written, or the
 message box cannot send yet, the dictated text waits in the message box for you to send. A
@@ -333,7 +353,7 @@ Replies that contain reasoning show a collapsed **Reasoning** section that you c
 Choose how tool activity appears.
 
 The conversation updates immediately: **Minimum** shows a one-line summary per tool call,
-**Collapsed** shows compact expandable rows, **Full** shows each call with its result, and
+**Collapsed** shows compact expandable rows, **Full** shows calls and results separately, and
 **Hide** removes normal tool details while leaving errors and failures visible.
 </Step>
 
@@ -348,8 +368,7 @@ The display choices work as follows:
 - **Tools → Collapsed** shows each tool invocation as a compact expandable row, with its result
   paired when available. Expand it to inspect arguments and the result. (This was called
   **Minimal** in older versions; an older saved **Minimal** choice loads as **Collapsed**.)
-- **Tools → Full** shows each call with its result inside the same card, including their
-  structured details.
+- **Tools → Full** shows calls and results separately, including their structured details.
 - **Tools → Hide** removes normal tool call and result details, but keeps tool errors and failures
   visible so you still know when something went wrong.
 
@@ -429,6 +448,10 @@ When you send a dictated message, your assistant is told the text came from spee
 allow for mis-heard names and similar-sounding words. This note is not shown in the chat bubble;
 you only see the text as dictated.
 
+Pressing the microphone while a reply is being read aloud pauses the reading instead of stopping it
+(see [Read a reply aloud](#read-a-reply-aloud)). Stopping the take does not restart the read: it
+stays paused until you select **Resume reading** on that reply.
+
 **Voice mode** has a live, spoken conversation with your assistant instead:
 
 <Steps>
@@ -473,6 +496,52 @@ If either button shows an error (for example after you deny microphone access, o
 cannot use a microphone), the button gets a red outline and its tooltip shows the reason. Select
 it again to retry. Both release the microphone fully when you stop them, when the connection
 drops, or when you leave the page.
+
+While Dictate, Voice mode, or a read-aloud is playing, the web client asks your browser to keep
+the screen awake, so a phone or tablet does not lock in the middle of a sentence. This is best
+effort: the browser may refuse it (for example while Low Power Mode is on), and home-screen apps
+on iPhone or iPad need iOS 18.4 or newer; nothing on the page changes when the browser cannot or
+will not hold the lock.
+
+### Share your location with messages
+
+The map-pin button beside the microphone turns on **Share location**. While it is on, every
+message you send - typed or dictated - carries your device's position at the moment it is sent,
+freshly read for each message. The button is off by default, and this browser remembers your
+choice for your WednesdayAI connection the way it remembers the theme.
+
+<Steps>
+
+1. Select the map-pin button and allow location access when your browser asks.
+
+   The button stays highlighted while sharing is on.
+
+2. Send a message as usual.
+
+   Your assistant receives the position with that message and that message only: it is not kept
+   in the chat history, and it does not appear on later turns. A new position travels with each
+   message only while sharing stays on.
+
+</Steps>
+
+Your assistant is told where you were when the message was sent, including how accurate the
+position is, together with a note to use it only when your request depends on where you are -
+directions, travel times, nearby places, local time or weather.
+
+Notes and limits:
+
+- **The button is dimmed** when this page is not on HTTPS (or `localhost`), with a tooltip
+  explaining that HTTPS and browser location access are needed - browsers only offer location to
+  secure pages. Ask the person who manages WednesdayAI for the HTTPS address.
+- **If you denied location access**, sharing turns itself off and a message under the message box
+  says so. Allow location for this site in your browser's site settings, then select the map pin
+  again.
+- **If a position cannot be read when you send** (for example a weak signal indoors), the message
+  is still sent, without a position, and a short message explains that. Location never blocks or
+  delays a message by more than a few seconds.
+- **Voice mode** conversations do not attach your location yet.
+- Turning the map pin off stops the position from travelling with your next messages; the
+  assistant is not told anything about the change.
 
 ### Attach files
 
@@ -780,19 +849,14 @@ You should see the same **Queued** and **Submitted** labels and the same message
 
 ## Watch your assistant work
 
-While your assistant works on a reply, each tool it uses appears in the reply as it happens, as a
-tool line in your **Tools** display form, between the parts of the reply text it came between.
-While the reply is still being written, the line shows only the tool's name; when the reply
-finishes, the same line fills in its details (for example the file it read) without moving.
-Nothing you have seen disappears or jumps when the reply finishes, and a reload shows the reply
-the same way. A reply that used no tools shows no tool lines. With **Tools → Hide**, tool lines
-stay hidden, except errors and failures. A hidden announcement area tells your screen reader the
-name of each tool step as it starts; when tool lines are hidden, nothing is announced there.
+While your assistant works on a reply, the steps it takes appear in the chat as they happen: the
+name of each tool, its state (**Running**, **Waiting for approval**, **Done** or **Failed**) and
+how long it took. You do not see the details of the work - only the step names and timings.
 
-Each reply is one block: one name, one time and one set of actions. **Copy** and **Read aloud**
-cover the whole reply, and **Reply** quotes its last message. Replies saved before this version
-of WednesdayAI can still show as several blocks, one per saved message, because they were stored
-without a record of which reply each message belongs to.
+When the reply is finished, the steps collapse into one summary line, for example
+**Worked for 20s · 3 steps** (or **Worked for 1m 30s · 1 step** when there was only one). The
+summary stays in the conversation, so reloading the page still shows how long the work took. A
+turn that used no tools shows no steps and no summary.
 
 ## Screens with images
 
@@ -853,6 +917,11 @@ this list — see [Dictate and voice](#dictate-and-voice). Either can still be d
 person who manages WednesdayAI has not turned on and configured that control's voice service yet;
 the tooltip then reads **unavailable on this gateway**. Ask them to enable it if you want to use
 it.
+
+The **Share location** map pin beside the microphone is not on this list either: it works when the
+page is on HTTPS (or `localhost`) and the browser offers location, and is dimmed with a tooltip
+naming what is missing otherwise - see
+[Share your location with messages](#share-your-location-with-messages).
 
 **Read aloud** is not on this list either: the button works, or is dimmed with the reason beside
 it - see [Read a reply aloud](#read-a-reply-aloud). The composer's **Read replies aloud** toggle
@@ -918,13 +987,38 @@ audio support: try a current desktop browser. See
 [Read a reply aloud](#read-a-reply-aloud). The composer's **Read replies aloud** toggle follows
 the same rules; see [Read replies aloud automatically](#read-replies-aloud-automatically).
 
+### The location button will not turn on, or location is not shared
+
+The dimmed map-pin button means this page cannot offer location at all: browsers only give
+location to secure pages, so the address must be HTTPS (or `localhost`) - ask the person who
+manages WednesdayAI for the HTTPS address. If the button is available but turning it on fails:
+
+- **A message says location permission was denied**: allow location for this site in the
+  browser's site settings, then select the map pin again. Sharing turns itself off when a send
+  meets a denied permission, so it needs re-allowing once.
+- **A message says your location could not be read**: the device could not get a fix in time
+  (common indoors or with location services off). Turn location on in your device's settings or
+  move somewhere with a clearer signal, then send again. The message itself was still sent.
+- **The reply ignores your position**: your assistant only receives coordinates on the message
+  that carries them, and is told to use them when the request depends on where you are - ask for
+  directions, travel time or nearby places to see it used.
+
+### The screen goes dark while I am using my voice
+
+While Dictate, Voice mode, or a read-aloud is playing, the client asks the browser to keep the
+screen awake. This is best effort: browsers can refuse it, for example while Low Power Mode or a
+power-saving setting is on, and iPhone or iPad home-screen apps need iOS 18.4 or newer. Nothing
+indicates a refused lock, because there is nothing the page can do about it; opening the page
+fresh in the browser (rather than the home-screen app) or charging the device often helps.
+
 ### A dictated message sent without me pressing send
 
-If the **Read replies aloud** toggle is on, this is expected: dictation ends itself after about a
-second and a half of quiet and sends the words it heard, as long as the message box was free to
-send. The text your assistant received is the text the microphone heard. If you prefer to edit
-before sending, turn the toggle off; dictation then keeps its old behaviour, stopping when you
-select the microphone button again.
+If the **Read replies aloud** toggle is on, this is expected: dictation ends itself after a quiet
+moment and sends the words it heard, as long as the message box was free to send. How long that
+quiet moment is - by default two and a half seconds - is set by the pause chip beside the speaker,
+which offers **1.5 s**, **2.5 s** and **4 s**. Pick a longer pause there if messages kept going out
+before you finished. If you prefer to edit before sending, turn the toggle off; dictation then
+keeps its old behaviour, stopping when you select the microphone button again.
 
 ### Talking does not interrupt the reply
 

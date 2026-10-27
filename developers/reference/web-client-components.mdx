@@ -24,13 +24,16 @@ sources:
   - apps/web/src/ui/markdown/html-to-markdown.ts
   - apps/web/src/providers/image-resize.ts
   - apps/web/src/providers/auto-read-preference.ts
+  - apps/web/src/providers/auto-send-delay-preference.ts
+  - apps/web/src/ui/AutoSendDelayMenu.tsx
   - apps/web/src/providers/read-aloud-stream.ts
   - apps/web/src/app/auto-read-driver.ts
+  - apps/web/src/app/use-screen-wake-lock.ts
+  - apps/web/src/providers/device-location.ts
+  - apps/web/src/app/use-device-location.ts
   - packages/talk-client/src/silence-endpointer.ts
   - apps/web/src/state/chat.ts
-  - apps/web/src/state/tool-step-rows.ts
   - apps/web/src/gateway/message-text.ts
-  - apps/web/src/gateway/chat-activity-frame.ts
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/providers/navigation-preferences.ts
   - apps/web/src/providers/events.tsx
@@ -48,11 +51,10 @@ sources:
   - apps/web/src/ui/assistant-avatar.ts
   - apps/web/src/ui/AccountMenu.tsx
   - apps/web/src/ui/AssistantMessage.tsx
-  - apps/web/src/ui/assistant-turns.ts
   - apps/web/src/ui/EmptyState.tsx
   - apps/web/src/ui/AttentionMenu.tsx
   - src/gateway/session-utils.ts
-generated: 2026-10-27
+generated: 2026-10-25
 ---
 
 # Web client components
@@ -272,17 +274,9 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `onSessionChanged`, `onSessionsList`, `onConnectionStatus`). It also has WednesdayAI-native
   members the vendored seams have no room for, which the `app/` hooks call directly: `listAgents`,
   `listModels`, `patchSession`, `prepareSessionTitle`, `resolveDirectSession`, `sendChatMessage`
-  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`,
-  `adoptRestoredRun`, the `sessionList` runtime, and the `onSidebarSessionsChange`,
-  `onActiveSessionRowChange`, `onQueuedRunStarted`, `onRunResumed`, `onToolStep`,
-  `onOwnTurnStarted`, `onOwnTurnQueued`, `onSteerTurnSettled`, `onAssistantReply` and
-  `onActiveLeafConflict` subscriptions. `onToolStep` turns each `chat.activity` frame of a run
-  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); `onRunResumed`
-  restores the typing indicator on the first live frame of a run adopted after a reload;
-  `ui/assistant-turns.ts` groups a run's rows into one reply block for `ui/Thread.tsx`.
-  `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
-  (`data-testid="tool-step-announcer"`): the tool name only, no status cues, and nothing while
-  the display hides tools.
+  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`, the `sessionList`
+  runtime, and the `onSidebarSessionsChange`, `onActiveSessionRowChange`, `onQueuedRunStarted`,
+  `onAssistantReply` and `onActiveLeafConflict` subscriptions.
 - `app/AppShell.tsx` subscribes to the events seam once per runtime, writes into the store
   (`state/chat.ts`, `useChatStore`) and composes the hooks described under
   [Chat controls and hooks](#chat-controls-and-hooks). Components read the store or receive props;
@@ -384,8 +378,8 @@ provider module per concern, each testable without a gateway connection.
 | Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                                                             | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
 | Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                                                                | none; browser-local preferences                                                                            |
 | Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                                                                | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
-| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                 | `chat.send {replyToId, expectedLeafEntryId}`, `chat.abort`                                                 |
-| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                            | `sessions.steer`, `sessions.runs.list`                                                                     |
+| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                 | `chat.send {replyToId, expectedLeafEntryId, location?}`, `chat.abort`                                      |
+| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                            | `sessions.steer {location?}`, `sessions.runs.list`                                                         |
 | History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                                                                    | `chat.history {before}`                                                                                    |
 | Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                 | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                    | `agents.list` `identity.color`                                                                             |
@@ -394,6 +388,9 @@ provider module per concern, each testable without a gateway connection.
 | Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                           | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
 | Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                       | `tts.readAloud.status`, `tts.speak`                                                                        |
 | Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts` | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Dictation auto-send pause        | `ui/AutoSendDelayMenu.tsx`, `providers/auto-send-delay-preference.ts`, `app/use-dictate.ts`                                                | none; browser-local preference                                                                             |
+| Screen wake lock                 | `app/use-screen-wake-lock.ts`                                                                                                              | none; browser Screen Wake Lock API                                                                         |
+| Share location                   | `providers/device-location.ts`, `app/use-device-location.ts`, `ui/Composer.tsx` (`composer-share-location`)                                | none; location rides `chat.send` / `sessions.steer`                                                        |
 | Paste, rich copy, image prep     | `ui/use-composer-paste.ts`, `ui/markdown/html-to-markdown.ts`, `ui/clipboard-html.ts`, `providers/image-resize.ts`                         | none (browser clipboard and canvas APIs)                                                                   |
 | Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                                                               | none                                                                                                       |
 
@@ -539,13 +536,9 @@ Contracts worth keeping when you change them:
   click); the gateway returns the caller's dmScope-correct direct session key (ADR 0109). There is
   no model select and no create step.
 - **History and the chat leaf.** `useChatHistory` loads the newest page (`HISTORY_PAGE_SIZE`, 50)
-  and pages older with the returned `cursor`. When that page starts inside a reply (its oldest row
-  carries a run id and the page holds no user row of that run), the load keeps paging older until
-  it reaches the reply's user row, a row of another run, or the start of the history, and publishes
-  the combined rows at once, so a reload never shows a reply without its question.
-  `WebClientRuntime` records the chat's leaf from its newest-page `chat.history` reads (the
-  thinking reconcile opts out with `noteLeaf: false`); a `before` page never updates it.
-  `LeafTracker` tells "never learned" (`undefined`: the send omits
+  and pages older with the returned `cursor`. `WebClientRuntime` records the chat's leaf from its
+  newest-page `chat.history` reads (the thinking reconcile opts out with `noteLeaf: false`); a
+  `before` page never updates it. `LeafTracker` tells "never learned" (`undefined`: the send omits
   `expectedLeafEntryId`) from "known empty" (`null`: the send asserts an empty chat). After a
   final, aborted or error event for a run this client owns, `readLeafUntilStable` re-reads with
   `limit: 1` until two reads agree (every 25 ms, at most 40 attempts) and a send waits for it. A
@@ -620,8 +613,7 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   are scoped by gateway URL and client ID in browser storage; malformed remembered entries are discarded.
 - **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimum"`
   by default, separately from `reasoningLevel`. `extractTranscriptBlocks` preserves ordered text,
-  thinking, tool calls, results and media; `Thread` pairs calls and results by their run-scoped
-  identity (run key plus call id) across loaded pages.
+  thinking, tool calls, results and media; `Thread` pairs tools by call ID across loaded pages.
   Legacy `tool` roles and snake_case result metadata remain tools, not assistant prose.
   Hidden tool details retain errors, and wholly hidden execution turns leave no empty assistant
   row. Local final/aborted turns trigger a `completed-turn` reconciliation after the leaf settles,
@@ -695,17 +687,27 @@ textarea height cap. When dictation stops or encounters a capture error, `commit
 last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
 calls `onDictateCommitConsumed` to clear the commit.
 
-**One-tap dictation (`useDictate(runtime, { autoSend })`).** The option is the take-start snapshot of
-the auto-read preference (`AppShell` passes `readAloud.autoRead`); `DictateCommit.autoSend` records that
-value, so toggling the preference mid-take cannot change what happens to text the take already produced.
+**One-tap dictation (`useDictate(runtime, { autoSend, autoSendDelayMs })`).** Both options are
+take-start snapshots: `autoSend` is the auto-read preference (`AppShell` passes
+`readAloud.autoRead`) and `autoSendDelayMs` is the persisted auto-send pause
+(`providers/auto-send-delay-preference.ts`). `DictateCommit.autoSend` records that value, so
+toggling either option mid-take cannot change what happens to text the take already produced.
 While `autoSend` is true at take start:
 
 - `packages/talk-client`'s `createSilenceEndpointer` (exported from the package index) ends the take
-  without a second tap. `providers/voice.ts` creates it per recording and feeds every PCM16 capture
-  frame; it fires `onEndpoint` once, after at least 250 ms of above-threshold speech (`pcm16RmsDbfs` at
-  the same −45 dBFS threshold the barge-in detector uses) is followed by 1500 ms of silence. A burst
-  shorter than the minimum never endpoints, and `reset()` re-arms for a fresh utterance. The endpointer
-  is advisory capture-side timing only - the transcription stream and the gateway session are untouched.
+  without a second tap. `providers/voice.ts` creates it per recording with the take's `silenceMs`
+  and feeds every PCM16 capture frame; it fires `onEndpoint` once, after at least 250 ms of
+  above-threshold speech (`pcm16RmsDbfs` at the same −45 dBFS threshold the barge-in detector
+  uses) is followed by the configured silence window. A burst shorter than the minimum never
+  endpoints, and `reset()` re-arms for a fresh utterance. The endpointer is advisory capture-side
+  timing only - the transcription stream and the gateway session are untouched.
+- The silence window is the composer's **auto-send pause** choice
+  (`ui/AutoSendDelayMenu.tsx`, chip `data-testid="composer-auto-send-delay"`, menu
+  `composer-auto-send-delay-menu`, options `composer-auto-send-delay-option-1500|2500|4000`),
+  rendered right after the **Read replies aloud** toggle and only while that toggle is on. The
+  choice is 1.5 s, 2.5 s (default) or 4 s, stored per gateway URL and client id under
+  `openclaw.web.auto-send-delay:<encodedGatewayUrl>:<clientId>`; anything else in storage loads
+  the default. It is browser-local only; there is no operator default.
 - `ui/use-dictate-autosend.ts` submits the committed text exactly once per commit, and only when three
   things hold: the commit's text is non-empty and not whitespace (a denied mic or an empty take never
   sends, and never sends the user's pre-existing draft), the dictated text is observable in the draft
@@ -714,6 +716,20 @@ While `autoSend` is true at take start:
   the draft instead of queueing it.
 - The composer marks the draft dictated before the auto-send runs, so the send carries
   `{ dictated: true }` provenance like a manual send after dictation.
+
+**Barge-in pauses read aloud.** Pressing **Dictate** while a reply is being read aloud pauses the
+read instead of stopping it: `AppShell`'s dictate toggle runs `readAloud.unlock()` inside the
+click (the AudioContext gesture unlock, which auto-read also needs) and then, when a take is
+starting and a read is active, `readAloud.pause()`. Stopping the take never touches playback, so
+the read stays paused; only the message control's **Resume reading**, or starting another read,
+continues it.
+
+**Screen wake lock.** While any voice path is live — a dictate take that is `recording` or
+`transcribing`, active Voice mode, or read-aloud playback that is not paused —
+`app/use-screen-wake-lock.ts` holds a best-effort `navigator.wakeLock` request. A missing
+`wakeLock` (unsupported browsers, iOS home-screen apps before 18.4, insecure contexts) is a plain
+no-op, request rejections (for example Low Power Mode) are swallowed, and the lock re-acquires on
+`visibilitychange` when the page becomes visible again.
 
 `useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error` and
 `captions: { user, assistant }`. Voice does not fill the composer. Toggle starts or stops the
@@ -856,11 +872,9 @@ The Read aloud action on assistant messages speaks that reply through the gatewa
 config (`messages.tts` merged with `agents.list[].tts`; ADR 0102, wire shapes in
 [TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
 owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
-`ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, phase, error, toggle}`
-value. `AssistantMessage` takes it as `readAloud` plus `readAloudKeys` from `Thread`: the reply
-block's turn key first, then each of its rows' ids. The button toggles the first key unless
-playback is active under another member (auto-read streams under a row id), and an error or the
-playing state shows on the reply when any of its keys matches.
+`ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, paused, phase, error, toggle, pause, resume, stop}`
+value. `AssistantMessage` takes it as `readAloud` plus `readAloudKey` (a stable key per message,
+`String(message.id ?? message.entryId ?? idx:<index>)` from `Thread`).
 
 `unavailableReason` is first match wins: `unavailable while offline` when disconnected,
 `unavailable during Voice mode`, `unavailable on this gateway` when the status reports
@@ -885,9 +899,16 @@ drops.
 `providers/read-aloud-player.ts` is the framework-free playback engine. `start` runs synchronously
 inside the click handler — it creates and resumes the shared `AudioContext` there, which unlocks
 Safari/iOS playback from the user gesture — then fetches chunk 0 and prefetches the next chunk
-while the current one plays, with at most one `tts.speak` request in flight. A generation counter
-makes `stop()`, or starting another message, retire in-flight work silently: a late synth promise
-never surfaces audio or errors. `describeReadAloudError` maps a `read_aloud_disabled` refusal to
+while the current one plays, with at most one `tts.speak` request in flight. `pause()` suspends
+the shared `AudioContext`, freezing the sounding buffer mid-playback so the play loop parks
+instead of ending; `resume()` resumes the context and runs inside a click, satisfying Safari's
+gesture rule. `paused` is a flag separate from the play loop's `phase`, so the loop's own state
+writes can never clear it. `unlock()` is a no-op while paused, so the enabling gestures (turning
+auto-read on, the dictate gesture's unlock) cannot silently un-suspend a paused read. A
+generation counter makes `stop()`, or starting another message, retire in-flight work silently: a
+late synth promise never surfaces audio or errors. `stop()` clears `paused` without resuming the
+context — the next read's `unlock()` does that. `describeReadAloudError` maps a
+`read_aloud_disabled` refusal to
 `Read aloud is turned off for this assistant.`, any other gateway error to
 `Couldn't read aloud: <message>`, and a `decodeAudioData` failure to
 `Couldn't play the audio in this browser.` The manual `start` is now built on the same primitives as
@@ -898,10 +919,14 @@ AudioContext-resume contract as `start`.
 
 Markup contract:
 
-- The live button carries `data-testid="message-read-aloud"`, `aria-label` and `title`
-  `Read aloud` / `Stop reading` while active, `aria-pressed`, `aria-busy` while loading, and
-  `data-read-aloud-phase` set to `loading` or `playing` while this message reads, `idle`
-  otherwise.
+- The main button carries `data-testid="message-read-aloud"`, `aria-label` and `title` `Read
+aloud` when idle, `Pause reading` while this message reads, and `Resume reading` while the read
+  is paused; `aria-pressed` while active, `aria-busy` while loading, `data-read-aloud-phase` set
+  to `loading` or `playing` while this message reads (`idle` otherwise), and
+  `data-read-aloud-paused="true"` while the read is paused.
+- While this message reads or is paused, a second button `data-testid="message-read-aloud-stop"`
+  labelled and titled `Stop reading` stops the read outright: it clears `paused` without
+  resuming the context, and the next read's `unlock()` resumes it.
 - The actions row gets `data-reading="true"` while this message reads or shows an error.
 - An error renders a `role="status"` span with `data-testid="message-read-aloud-error"`.
 
@@ -944,10 +969,13 @@ streams.
   audible.
 
 **Stop semantics.** Toggling auto-read off, a chat switch, Voice mode or a disconnect stop playback
-through `player.stop()`. Pressing **Stop** on the reply itself does not silence the voice: the run
-ending flushes the reply's remaining sentences into the stream and the queue drains to the end of
-the reply. An in-flight `tts.speak` request is not cancelled on stop; the generation counter retires its
-result instead of surfacing the audio.
+through `player.stop()`, and so does the message's **Stop reading** button: the driver abandons the
+run the moment the player stops serving its stream, so its queued and remaining sentences are never
+spoken. Pressing the message's main button during a streaming read only pauses it; **Resume
+reading** continues from the same point. A normal run ending (no stop) flushes the reply's
+remaining sentences into the stream and the queue drains to the end of the reply. An in-flight
+`tts.speak` request is not cancelled on stop; the generation counter retires its result instead of
+surfacing the audio.
 
 ## Busy state, unread badges and reply notifications
 
