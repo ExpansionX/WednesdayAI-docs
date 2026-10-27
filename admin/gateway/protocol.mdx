@@ -20,8 +20,10 @@ sources:
   - src/gateway/session-utils.fs.ts
   - src/gateway/session-reply-activity.ts
   - src/gateway/server-methods/chat.ts
+  - src/gateway/session-history-read.ts
+  - src/gateway/server-methods/chat-history-placeholder.ts
   - src/shared/session-visibility.ts
-generated: 2026-10-25
+generated: 2026-10-27
 ---
 
 # Gateway protocol (WebSocket)
@@ -328,7 +330,7 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
   before the user message, so it is stored, replayed and audited like any other turn. The turn is
   command-inert - a submitted value of `/new` never resets the session, and the turn never
   resolves a pending exec approval.
-- `chat.activity` (`operator.sessions.read`) streams a bounded tool-activity rail per turn. The
+- `chat.activity` (`operator.sessions.read`) streams bounded per-step tool activity for a turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
 "durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
@@ -606,7 +608,7 @@ The Gateway treats these as **claims** and enforces server-side allowlists.
     steered message: `{latitude, longitude, accuracyMeters?, capturedAtMs}` with the same bounds
     as `chat.send`'s `location` (described below). The turn gets the same user-role
     "Device location (untrusted metadata)" block on that turn only, never persisted into the
-    message text (ADR 0119).
+    message text (ADR 0120).
   - `runId` and `targetRunId` always name a real run, never an id the gateway minted for a call
     that started no run. For `injected`, `started` and `interrupted` the id is a live gateway run:
     it can be passed to `sessions.abort` and is reported by `sessions.runs.list`. For `queued` it is
@@ -806,6 +808,18 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   `__openclaw.ingress` provenance carrier is stripped from every message before it reaches the
   client and never appears in `chat.history` output; sibling `__openclaw` keys (`id`,
   `replyToId`, …) are untouched.
+- `chat.history` messages also carry `__openclaw.runId` when the stored entry recorded the run that
+  wrote it. For a run a client started, it equals the `idempotencyKey` of that client's `chat.send`
+  or `sessions.steer` (mode `queue`), so a client can pair its own turn with the stored row even
+  when the stored text differs, and group every row of one reply. Entries without a stored run id
+  (written before the field existed) omit the key. An oversized message's placeholder keeps it,
+  and is marked `__openclaw.truncated: true` with `reason: "oversized"`. When an oversized tool
+  message's bare call identities exceed the per-message cap, one stored entry returns as several
+  consecutive placeholder rows that share its run id; only the last carries `__openclaw.id`.
+  Every returned row additionally carries `__openclaw.rowId`, an opaque identity of the returned
+  ROW (the entry's storage position; placeholder chunks suffix a chunk ordinal) that is unique
+  within the session and stable across pages, reloads and window shifts — a client can key rows
+  with it instead of a positional fallback id, which moves when the head window slides.
 - A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
   plus the same reference under upstream's field names, `__openclaw.replyToId` and
   `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
@@ -858,7 +872,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     tolerate mis-transcribed names; the note is never persisted into the message text. It is
     ignored for `uiAction` submits, and a turn with the flag stays command-capable.
   - `location` (optional object) carries the device position the user chose to share with the
-    message (ADR 0119): `{latitude, longitude, accuracyMeters?, capturedAtMs}` with latitude in
+    message (ADR 0120): `{latitude, longitude, accuracyMeters?, capturedAtMs}` with latitude in
     [-90, 90], longitude in [-180, 180], an optional non-negative `accuracyMeters` in meters, and
     a `capturedAtMs` epoch-millisecond fix time (bounded by the largest valid `Date`). The turn
     gets a user-role "Device location (untrusted metadata)" block beside the Speech-input note so
