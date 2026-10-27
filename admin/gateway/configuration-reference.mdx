@@ -869,6 +869,7 @@ Controls the system prompt shape for all agents. Per-agent overrides go in `agen
 | ---------------------- | --------------- | -------------------------------------------------------- |
 | `identity`             | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
 | `tooling`              | Generated       | `default` / `compact` / `names` / `off` + `progressive?` |
+| `team`                 | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
 | `toolCallStyle`        | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
 | `safety`               | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
 | `cliQuickReference`    | Regular         | `default` / `off` / `prepend` / `append` / `replace`     |
@@ -1460,8 +1461,11 @@ scripts/sandbox-browser-setup.sh   # optional browser image
 }
 ```
 
-- `id`: stable agent id (required).
+- `id`: stable agent id (required). Ids are compared after normalization (lowercased, invalid characters collapsed to `-`); two entries that normalize to the same id fail config validation.
 - `default`: when multiple are set, first wins (warning logged). If none set, first list entry is default.
+- `description`: one-line summary of what the agent is for (max 500 characters). Team leads see it in their `## Team` prompt section, `agents_list` returns it, and the Control UI shows it.
+- `userFacing`: whether people can reach the agent directly (default `true`). Set `false` for internal specialists. Config validation rejects an internal agent as the default agent, a `bindings[]` target, or a `broadcast` target, and rejects any internal agent when `session.scope` is `"global"` (all agents share one session there). User clients (web client) do not see it or its sessions and runs in `agents.list`, `sessions.direct`, `sessions.list`, or `sessions.runs.list`, do not receive events for its sessions, get it omitted from `health` and `status` agent summaries, and any user-client request that names it, one of its sessions, or one of its runs (`chat.send`, `chat.history`, `sessions.create`, `sessions.steer`, `sessions.runs.get`, `sessions.resolve`, ...) fails with the same error as an unknown agent. `sessions_spawn` with `thread: true`, `/subagents spawn`, `/tell`, `/steer`, `/focus`, and `/acp` cannot target it, `/acp sessions` hides it, and an existing channel thread binding to one of its sessions stops routing once the flag is set. Other agents, cron, hooks, and operator clients keep full access.
+- `inheritRequesterIdentity`: when another agent invokes this agent (`sessions_spawn`, `sessions_send`), accept the requesting person's canonical identity, validated against `session.identityLinks`, so identity-scoped workspace lanes, memory, and plugins resolve for that person (default `true`). Set `false` to run delegated turns on this agent without a person identity. This also applies to sub-agent completion announces delivered to this agent, so do not turn it off on a lead that relies on identity-scoped workspace lanes.
 - `workspaceLanes`: optional per-agent workspace lanes for personas that may serve multiple users. See [Workspace Lanes](/concepts/workspace-lanes).
 - `model`: string form overrides `primary` only; object form `{ primary, fallbacks }` overrides both (`[]` disables global fallbacks). Cron jobs that only override `primary` still inherit default fallbacks unless you set `fallbacks: []`.
 - `params`: per-agent stream params merged over the selected model entry in `agents.defaults.models`. Use this for agent-specific overrides like `cacheRetention`, `temperature`, or `maxTokens` without duplicating the whole model catalog.
@@ -1550,6 +1554,33 @@ Defaults for enabled agents:
 - `laneFiles: ["USER.md", "BOOTSTRAP.md", "MEMORY.md", "memory.md"]`
 - `skills: "shared"` (`"lane"` is implemented for lane-local skill roots; `"both"` is reserved and currently behaves like `"shared"`)
 - `create: "on-first-message"`
+
+### `agents.teams`
+
+Named groups of agents with one lead. Set `userFacing: false` on members that people should only
+reach through the lead.
+
+```json5
+{
+  agents: {
+    list: [
+      { id: "main", default: true },
+      { id: "researcher", userFacing: false, description: "Finds and summarises sources." },
+      { id: "writer", userFacing: false, description: "Drafts long-form text." },
+    ],
+    teams: [{ id: "research", name: "Research", lead: "main", members: ["researcher", "writer"] }],
+  },
+}
+```
+
+- `id`: stable, unique team id: 1–64 characters, starting with a lowercase letter or digit, then lowercase letters, digits, `-` or `_`.
+- `name`: optional display name for the Control UI and the lead's prompt.
+- `lead`: agent id of the team lead; must be in `agents.list`.
+- `members`: agent ids of the members (at least one); must be in `agents.list` and must not include the lead.
+- Each agent belongs to at most one team, as lead or member; teams do not nest. Config validation rejects unknown ids and repeated agents.
+- The lead can `sessions_spawn` every member in addition to its own `subagents.allowAgents`, and `agents_list` includes them. Members get no new rights.
+- When the lead has the `sessions_spawn` tool, its system prompt gets a `## Team` section listing each member's id, name, and description. Control it with the `team` key in [`systemPrompt.sections`](#agentsdefaultssystemprompt).
+- Teams do not change `tools.agentToAgent` (`sessions_send`) or ACP targets.
 
 ---
 
@@ -2608,6 +2639,14 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
       peekaboo: { enabled: true },
       sag: { enabled: false },
     },
+    installs: {
+      "nano-banana-pro": {
+        source: "archive",
+        spec: "nano-banana-pro",
+        installPath: "~/.openclaw/skills/nano-banana-pro",
+        version: "1.2.0",
+      },
+    },
   },
 }
 ```
@@ -2615,6 +2654,17 @@ See [Local Models](/gateway/local-models). TL;DR: run MiniMax M2.5 via LM Studio
 - `allowBundled`: optional allowlist for bundled skills only (managed/workspace skills unaffected).
 - `entries.<skillKey>.enabled: false` disables a skill even if bundled/installed.
 - `entries.<skillKey>.apiKey`: convenience for skills declaring a primary env var (plaintext string or SecretRef object).
+- `skills.installs`: CLI-managed install metadata for skills installed from the verified
+  skills catalog (`wednesdayai skills install <id>`), used by `openclaw skills` commands to
+  locate install sources. Mirrors `plugins.installs`:
+  - `source` is one of `npm`, `archive`, `path`, or `bundled`; catalog installs use `archive`.
+  - `spec` is the catalog id (or the original spec for non-catalog installs).
+  - `installPath` is the resolved install directory (usually `~/.openclaw/skills/<id>`).
+  - Includes `source`, `spec`, `sourcePath`, `installPath`, `version`, `resolvedName`,
+    `resolvedVersion`, `resolvedSpec` (the verified download URL), `integrity`
+    (`sha256:<hex>` from the catalog), `shasum`, `resolvedAt`, `installedAt`.
+  - Treat `skills.installs.*` as managed state; prefer CLI commands (`skills install`,
+    `skills uninstall`) over manual edits. See [skills CLI](/cli/skills).
 
 ---
 
@@ -3157,6 +3207,22 @@ Reference env vars in any config string with `${VAR_NAME}`:
 - Missing/empty vars throw an error at config load.
 - Escape with `$${VAR}` for a literal `${VAR}`.
 - Works with `$include`.
+
+### Plugin and skill catalog variables
+
+These environment variables control the remote catalog feeds behind
+`wednesdayai plugins install <id>` and `wednesdayai skills install <id>`. Full list and
+precedence: [Environment](/help/environment#plugin-and-skill-catalogs).
+
+| Variable                      | Default                                                                              | Purpose                                                                          |
+| ----------------------------- | ------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------- |
+| `OPENCLAW_CATALOG_URL`        | `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-plugins/main/catalog.json` | Override the remote plugin catalog URL (operator mirror / airgap pinning)        |
+| `OPENCLAW_CATALOG_TTL_MS`     | `3600000` (1 hour)                                                                   | Remote catalog cache TTL in milliseconds (0 is rejected — falls back to default) |
+| `OPENCLAW_CATALOG_REMOTE`     | unset (enabled)                                                                      | Set to `"0"` to disable all remote catalog fetching (airgap / mirror mode)       |
+| `OPENCLAW_SKILLS_CATALOG_URL` | `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-skills/main/catalog.json`  | Override the remote skills catalog URL                                           |
+
+With `OPENCLAW_CATALOG_REMOTE=0`, every feed fails open to the bundled offline snapshot and
+bare catalog ids still install, verified against the snapshot pins.
 
 ---
 

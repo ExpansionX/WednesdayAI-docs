@@ -1,14 +1,18 @@
 ---
-summary: "CLI reference for `openclaw skills` (list/info/check) and skill eligibility"
+summary: "CLI reference for `wednesdayai skills` / `openclaw skills` (list, info, check, install) and skill eligibility"
 read_when:
   - You want to see which skills are available and ready to run
   - You want to debug missing binaries/env/config for skills
+  - You want to install a skill from the verified skills catalog
 title: "skills"
 ---
 
-# `openclaw skills`
+# `wednesdayai skills`
 
-Inspect skills (bundled + workspace + managed overrides) and see what’s eligible vs missing requirements.
+Inspect skills (bundled + workspace + managed overrides), see what is eligible vs missing
+requirements, and install skills from the catalog.
+
+The legacy `openclaw skills` alias remains supported. New examples use `wednesdayai skills`.
 
 Related:
 
@@ -19,8 +23,56 @@ Related:
 ## Commands
 
 ```bash
-openclaw skills list
-openclaw skills list --eligible
-openclaw skills info <name>
-openclaw skills check
+wednesdayai skills list
+wednesdayai skills list --eligible
+wednesdayai skills info <name>
+wednesdayai skills check
+wednesdayai skills install <id>
+wednesdayai skills install <id> --force
 ```
+
+## Install
+
+```bash
+wednesdayai skills install <id> [--force]
+```
+
+Installs a skill from the skills catalog feed
+(`https://raw.githubusercontent.com/ExpansionX/WednesdayAI-skills/main/catalog.json`,
+overridable with `OPENCLAW_SKILLS_CATALOG_URL`). The install is verified, not trusted:
+
+1. The catalog entry is resolved. Unknown ids are refused with
+   `skill "<id>" is not in the skills catalog (<catalog-url>)`.
+2. Compatibility is checked first, with no network. A pinned skill that needs a newer host is
+   refused with
+   ``skill "<id>" <version> is not compatible with this host: <reason>. Run `wednesdayai update` to upgrade WednesdayAI, then retry.``.
+   See [Compatibility](/plugins/compatibility).
+3. The Sigstore provenance bundle named by the entry is fetched and verified against the signer
+   identity `https://github.com/ExpansionX/WednesdayAI-skills/.github/workflows/release.yml@refs/heads/main`
+   and the catalog-pinned sha256, before a single tarball byte is downloaded.
+4. The tarball is downloaded into a stage directory, bounded at 32 MiB, stream-hashed and
+   compared to the catalog digest, then verified by loading it. Only then is it promoted into
+   the managed skills directory.
+
+On success the command logs:
+
+```text
+Skill '<id>' <version> installed to <targetDir>. Verified: sha256 pinned by catalog, provenance signed by <signer identity>.
+```
+
+The install is recorded in `openclaw.json` under `skills.installs.<id>` with the pinned digest
+(`integrity: "sha256:<hex>"`).
+
+- **Managed directory**: installs land under `~/.openclaw/skills/<id>` (the active state dir,
+  `$OPENCLAW_STATE_DIR/skills`). Managed installs take precedence over bundled copies on name
+  conflicts; workspace skills still win. See [Skills](/tools/skills#locations-and-precedence).
+- **Already installed**: without `--force`, an existing install is refused with
+  `skill "<id>" is already installed at <dir>; re-run with --force to replace it`. With
+  `--force` the existing copy is replaced only after the new one verifies.
+- **Refusals**: provenance, digest, size and stage failures are refused with nothing written to
+  the managed directory. Full message reference:
+  [Compatibility](/plugins/compatibility#refusal-messages).
+
+Treat installed skills like code you run: the catalog and provenance prove where an artifact
+was built, not that its instructions are safe. See the security notes in
+[Skills](/tools/skills#security-notes).

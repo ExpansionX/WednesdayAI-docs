@@ -125,6 +125,47 @@ Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
 
+## Plugin or skill install refuses
+
+Use this when `wednesdayai plugins install <id>` or `wednesdayai skills install <id>`
+exits with a refusal and nothing was installed. Catalog installs are verified, not
+trusted: compatibility first (no network), then Sigstore provenance, then digest. The
+full message reference is [Compatibility](/plugins/compatibility).
+
+```bash
+wednesdayai --version
+wednesdayai update
+wednesdayai plugins install <id>
+wednesdayai skills install <id>
+```
+
+Look for:
+
+- `plugin "<id>" <version> is not compatible with this host: <reason>. Run
+\`wednesdayai update\` to upgrade WednesdayAI, then retry.`(or the same shape with`skill`) — the catalog entry needs a newer host than you run.
+- `refusing to install "<id>" <version>: provenance verification failed: <detail>` —
+  the npm artifact has no SLSA attestation, was signed by a different workflow or ref,
+  or its digest differs from the catalog pin.
+- `could not load the Sigstore trusted root (needs https://tuf-repo-cdn.sigstore.dev): ...` —
+  the Sigstore trusted-root refresh could not reach the TUF mirror. Check network egress
+  to `https://tuf-repo-cdn.sigstore.dev` (corporate proxies and airgapped hosts are the
+  usual cause), then retry. Nothing was installed.
+- A leftover `.openclaw-install-stage-*` directory next to the install target
+  (`~/.openclaw/extensions/` or `~/.openclaw/skills/`) — the install failed and the stage
+  cleanup also failed. Stage directories are dot-prefixed and skipped by plugin and skill
+  discovery, so they are inert; it is safe to delete the leftover directory manually, and
+  the refusal error includes a `cleanup also failed: ...` note naming it.
+
+Fix options:
+
+1. For a compatibility refusal: run `wednesdayai update`, then retry the install.
+2. For a provenance refusal: do not retry from the bare npm spec. The artifact must be
+   re-published through the release workflow so a correct attestation exists.
+3. For a trusted-root or network failure: restore egress to
+   `https://tuf-repo-cdn.sigstore.dev` and npmjs, then retry.
+4. For a leftover stage directory: confirm no install is running, then remove
+   `.openclaw-install-stage-*` under the state extensions/skills roots.
+
 ## ACP startup identity reconcile fails at startup
 
 Use this when gateway logs include `startup identity reconcile failed for
@@ -388,7 +429,7 @@ Common signatures:
 - `main job requires payload.kind="systemEvent"` → stored job type and payload are incompatible. Recreate or edit it as a Timeline message, Check first, then nudge, or isolated Assistant task job.
 - `wake-gate-empty` → a wake-gate cron check found no work, so the skipped run is expected.
 - `heartbeat skipped` with `reason=quiet-hours` → outside active hours window.
-- `heartbeat: delivery target unavailable; delivered to session chat` → the configured or `last` target couldn't be resolved, wasn't ready, or failed to send, so the output went to the session chat. `fallbackReason` names the cause (`no-external-route`, `target-unavailable`, `unknown-account`, `channel-not-ready`, `send-failed`); `staleChannel`/`staleAccountId` name the route that was lost. A `no-external-route` with a `staleAccountId` usually means the session's last route names a channel account that was removed from config.
+- `heartbeat: delivery target unavailable; delivered to session chat` → the configured or `last` target couldn't be resolved, wasn't ready, or failed to send, so the output went to the session chat. `fallbackReason` names the cause (`no-external-route`, `target-unavailable`, `unknown-account`, `channel-not-ready`, `send-failed`); `staleChannel`/`staleAccountId` name the lost route only when it survived resolution. A route whose account was removed from config is cleared before the fallback, so a `no-external-route` without those fields, on a session that used to deliver externally, usually means its account was removed; check the session's stored route against `channels.<channel>.accounts`.
 - `heartbeat skipped` with `reason=dm-blocked` → heartbeat target resolved to a DM-style destination while `agents.defaults.heartbeat.directPolicy` (or per-agent override) is set to `block`.
 
 Related:

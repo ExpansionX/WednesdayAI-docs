@@ -1,0 +1,179 @@
+---
+summary: "The plugin and skill compatibility matrix: minWednesdayVersion, minHostVersion and contracts, the exact refusal messages and their remediation, and the catalog feeds that publish the matrix"
+read_when:
+  - You publish a plugin or skill and need to declare compatibility
+  - You hit a compatibility, provenance or catalog refusal during install
+  - You want to know which host version a check compares against
+title: "Compatibility"
+audience: developer
+---
+
+# Plugin and skill compatibility
+
+Every catalog-pinned plugin and skill declares what host it runs on. WednesdayAI checks those
+declarations three times on the install path and once more at load, and refuses the install with
+a specific message when a check fails. This page is the matrix and the message reference.
+
+## Host versions
+
+Two version strings exist per host:
+
+- **Host version**: the WednesdayAI semver printed by `wednesdayai --version`. This is the
+  version plugins and skills are normally pinned against.
+- **forkBase**: the openclaw tag WednesdayAI forked from, currently `openclaw@2026.3.2`. It only
+  matters for the legacy `minHostVersion` field.
+
+The fields live in `openclaw.plugin.json`, in catalog entries, and in skill catalog entries.
+They are implemented in `src/plugins/manifest-version-compat.ts`
+(`checkPluginVersionCompat`) and `src/plugins/contract-versions.ts`
+(`checkPluginContractCompat`).
+
+## The matrix
+
+| Field                 | Compared against                             | Format                        | Where checked                    |
+| --------------------- | -------------------------------------------- | ----------------------------- | -------------------------------- |
+| `minWednesdayVersion` | Host version (WednesdayAI semver)            | `>=x.y.z`                     | Catalog preflight, install, load |
+| `minHostVersion`      | forkBase (`openclaw@2026.3.2`)               | `>=x.y.z`                     | Catalog preflight, install, load |
+| `contracts`           | Compiled kernel contract versions (ADR 0117) | `major.minor` per contract id | Catalog preflight, install, load |
+
+Rules:
+
+- When both `minWednesdayVersion` and `minHostVersion` are present, `minWednesdayVersion` wins
+  and `minHostVersion` is ignored. Declare one of the two, not both.
+- A version field passes when the host compares greater than or equal to the specifier. Build
+  suffixes on the host version are ignored; the leading `x.y.z` decides.
+- A `contracts` entry passes when the contract major is the same and the host minor is greater
+  than or equal to the required minor. A plugin that declares no `contracts` field is always
+  contract-compatible. See [Versioned kernel contracts](/plugins/contracts) for the contract ids
+  and their current versions.
+- Malformed input is a refusal, never a pass: a version field that is not `>=x.y.z` and a
+  contract value that is not `major.minor` both fail with the invalid-field message below.
+
+## Where the checks run
+
+1. **Catalog preflight** (`src/plugins/catalog-install.ts` for plugins,
+   `src/agents/skills/catalog-install.ts` for skills). Runs first, with no network: a
+   compatibility failure never triggers a fetch.
+2. **Install** (`src/plugins/install.ts`, error code `VERSION_INCOMPATIBLE`). The manifest
+   inside the artifact is re-checked before any file is copied.
+3. **Load** (`src/plugins/manifest-registry.ts`). The loader re-checks on every load and
+   records an error diagnostic (`PLUGIN_VERSION_INCOMPATIBLE` or
+   `PLUGIN_CONTRACT_INCOMPATIBLE`), which fails gateway startup and config validation until the
+   plugin is removed or upgraded. The load-time check runs in dev builds too, because contract
+   versions are compiled into the host.
+
+**Dev builds** (`isDev`, running WednesdayAI from `src/` rather than a built package) skip the
+version checks entirely. They do not skip provenance: catalog installs verify the Sigstore
+bundle in dev builds exactly as in release builds.
+
+## Refusal messages
+
+### Compatibility refusal
+
+```text
+plugin "<id>" <version> is not compatible with this host: <reason>. Run `wednesdayai update` to upgrade WednesdayAI, then retry.
+```
+
+`<reason>` is one of:
+
+- `requires WednesdayAI >=<x.y.z>, but host is <host>` (a `minWednesdayVersion` miss)
+- `requires openclaw >=<x.y.z>, but fork base is 2026.3.2` (a `minHostVersion` miss)
+- `requires <id> contract <M>.x (>= <v>), but host provides <host>` (a `contracts` miss)
+- `requires <id> contract >= <v>, but host provides <host>` (a malformed required contract
+  version)
+- `requires kernel contract "<id>", which this host does not provide` (an unknown contract id)
+
+Skills use the same shape with `skill` in place of `plugin`:
+
+```text
+skill "<id>" <version> is not compatible with this host: <reason>. Run `wednesdayai update` to upgrade WednesdayAI, then retry.
+```
+
+**Remediation:** run `wednesdayai update` and retry. Nothing was installed; the target
+directory does not exist after this refusal. If you publish the artifact and it is simply
+pinned too high, publish a new version with the correct floor.
+
+### Invalid compatibility field
+
+```text
+catalog entry "<id>" declares an invalid compatibility field: <reason>. Report it at https://github.com/ExpansionX/WednesdayAI-plugins/issues.
+```
+
+Skill catalog entries name the skills repository instead:
+`https://github.com/ExpansionX/WednesdayAI-skills/issues`.
+
+**Remediation:** this is a publisher error, not a host problem. Report it on the linked
+repository. Nothing was installed.
+
+### Provenance refusal
+
+```text
+refusing to install "<id>" <version>: provenance verification failed: <detail>
+```
+
+Skills use the same shape:
+
+```text
+refusing to install skill "<id>" <version>: provenance verification failed: <detail>
+```
+
+Common `<detail>` values:
+
+- `no SLSA provenance attestation published for <name>@<version>` — the npm package has no
+  SLSA attestation (predates trusted publishing, or published outside the release workflow).
+- `signer identity does not match <expected>: ...` — the artifact was signed by a different
+  workflow, repository or ref than the pinned identity
+  `https://github.com/<owner>/<repo>/.github/workflows/release.yml@refs/heads/main`.
+- `attestation subject digest does not match the expected sha512 digest` — the attested
+  artifact differs from the catalog-pinned digest.
+
+**Remediation:** none on the client. The artifact must be re-published through the release
+workflow so a correct attestation exists. Never work around this by installing the bare npm
+spec; the catalog pinned a specific, signed artifact and the digest must match it.
+
+### Skill digest, size and stage refusals
+
+- `downloaded archive sha256 <actual> does not match catalog <expected>` — the tarball on the
+  wire differs from the attested digest. Retry once; if it persists, report it on
+  `https://github.com/ExpansionX/WednesdayAI-skills/issues`.
+- `skill archive exceeds the 32 MiB limit` — the skill tarball is over the hard cap. The skill
+  must be republished smaller, or core must raise the cap.
+- `staged skill failed to load: expected SKILL.md named "<id>", found <names|none>` — the
+  archive does not contain a skill with the requested id at its root.
+- `skill "<id>" is already installed at <dir>; re-run with --force to replace it` — self-explanatory.
+- `skill "<id>" is not in the skills catalog (<catalog-url>)` — the id is unknown to the
+  catalog feed currently configured.
+
+## Catalog feeds
+
+The published, machine-readable compatibility matrix is the catalog feed itself. Both feeds are
+plain HTTPS JSON and carry the compatibility fields verbatim per artifact:
+
+| Repository | URL                                                                                  |
+| ---------- | ------------------------------------------------------------------------------------ |
+| Plugins    | `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-plugins/main/catalog.json` |
+| Skills     | `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-skills/main/catalog.json`  |
+
+Environment overrides: `OPENCLAW_CATALOG_URL` and `OPENCLAW_CATALOG_TTL_MS` for plugins,
+`OPENCLAW_SKILLS_CATALOG_URL` for skills, and `OPENCLAW_CATALOG_REMOTE=0` disables every
+remote feed (the bundled offline snapshot is used). See
+[plugins CLI](/cli/plugins#catalog) for the plugin-side details.
+
+A remote feed entry is only accepted when it pins a version and a sha512 integrity digest;
+unpinned remote entries reject the whole remote payload and WednesdayAI falls back to the
+bundled snapshot. Skills carry a sha256 hex digest and a provenance URL instead.
+
+## Publishing a compatible artifact
+
+When you publish a plugin or skill, set the compatibility fields in the artifact manifest
+(`openclaw.plugin.json` for plugins, `package.json` `wednesdayai.minWednesdayVersion` for
+skills). The release pipeline copies them verbatim into the catalog entry, so the manifest is
+the single source of truth. Prefer `minWednesdayVersion: ">=<current WednesdayAI release>"`.
+
+The catalogs only publish artifacts that carry a valid SLSA provenance attestation. Entries
+are cut from artifacts built and published by the `release.yml` workflow of the
+[WednesdayAI-plugins](https://github.com/ExpansionX/WednesdayAI-plugins) (plugins) and
+[WednesdayAI-skills](https://github.com/ExpansionX/WednesdayAI-skills) (skills) repositories
+on `refs/heads/main`, and each entry pins the attested version and digest. An artifact
+published outside that workflow (no attestation, or signed by another workflow/ref) cannot be
+pinned into the catalog, and installs of it will be refused by provenance verification.

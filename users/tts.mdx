@@ -236,7 +236,7 @@ Then run:
   - Accepts `provider/model` or a configured model alias.
 - `modelOverrides`: allow the model to emit TTS directives (on by default).
   - `allowProvider` defaults to `false` (provider switching is opt-in).
-- `maxTextLength`: hard cap for TTS input (chars). `/tts audio` fails if exceeded.
+- `maxTextLength`: hard cap for TTS input (chars), measured on the text before speech cleanup. `/tts audio` fails if exceeded. Cleanup can make the spoken text slightly longer (`x >= 5` becomes "x greater than or equal to 5"); that text is still synthesized.
 - `timeoutMs`: request timeout (ms).
 - `prefsPath`: override the local prefs JSON path (provider/limit/summary).
 - `apiKey` values fall back to env vars (`ELEVENLABS_API_KEY`/`XI_API_KEY`, `OPENAI_API_KEY`).
@@ -273,6 +273,9 @@ Then run:
 - `edge.timeoutMs`: request timeout override (ms).
 - `voiceNoteLoop`: voice note conversation loop mode (`"disabled"` | `"enabled"` | `"both"`). Telegram and WhatsApp only. Default `"disabled"`.
 - `readAloud.enabled`: allow chat clients to read replies aloud on demand through the `tts.speak` gateway RPC (web client's **Read aloud** action). Default `true`. Turn off to stop on-demand synthesis spend; auto-TTS and `/tts` are unaffected.
+- `naturalize.enabled`: rewrite reply text into natural spoken English before any TTS provider synthesizes it (default `true`): arrows, comparison operators, slashes, file paths, hashes and identifiers become words or are dropped, and code blocks are announced as omitted. Markdown, code, emoji and URL paths are always removed regardless. Turn off for non-English assistants; override per agent with `agents.list[].tts.naturalize.enabled`. See [How replies are spoken](#how-replies-are-spoken).
+- `naturalize.mode`: `"rules"` (default) uses only the built-in speech rules. `"llm"` also asks a model to rewrite automatic voice replies, read aloud and `/tts` audio for natural phrasing, which adds a model call (cost and latency) per clip and sends the reply text to that model. Live voice (Voice mode, Discord voice, phone calls) always uses rules. Falls back to the rules text if the model fails.
+- `naturalize.model`: model for the naturalize `llm` rewrite, as provider/model or an alias. Defaults to `messages.tts.summaryModel`, then the default agent model. A local model keeps reply text on your machine.
 
 ### Per-agent TTS (`agents.list[].tts`)
 
@@ -295,6 +298,73 @@ the prefs file) still wins over any configured provider.
 For Discord voice playback there is one more layer: the resolution order is
 `messages.tts` → the route agent's `agents.list[].tts` → `channels.discord.voice.tts`,
 so `voice.tts` still wins for voice channels.
+
+## How replies are spoken
+
+Before any provider synthesizes audio, WednesdayAI prepares the reply text for speech with a
+deterministic cleanup stage. The text on screen is unchanged; only the audio input is cleaned.
+The cleanup has two stages:
+
+**Structural, always on (language-neutral).** Markdown and layout are removed and the result is
+joined into a single line with sentence pauses:
+
+- Headings and emphasis become plain sentences: `## Weather` followed by `It will rain.` is spoken
+  as "Weather. It will rain."
+- Lists become spoken sentences; ordered lists speak their item numbers ("1. Open settings") and
+  task-list checkboxes are dropped.
+- Tables are read row by row: a `| Name | Role |` table becomes "Name: Ada, Role: Admin. Name: Bob,
+  Role: User."
+- Links are spoken by their label text; a bare URL is spoken as its host without `www.`
+  (`https://www.example.com/docs` becomes "example.com").
+- Images, strikethrough text, HTML elements and emoji are dropped. Placeholder tags such as
+  `<your-api-key>` stay as literal text.
+- The output is one line, so providers that truncate input at a newline never lose text.
+
+**English rules (`naturalize.enabled`, default `true`).** Symbols and machine text become words:
+
+| Written                      | Spoken                                          |
+| ---------------------------- | ----------------------------------------------- |
+| `Save -> Done`               | "Save to Done"                                  |
+| `x >= 5`                     | "x greater than or equal to 5"                  |
+| `Settings > Privacy > Clear` | "Settings, then Privacy, then Clear"            |
+| `src/tts/tts.ts`             | "tts.ts"                                        |
+| `TCP/IP`, `input/output`     | "TCP IP", "input or output"                     |
+| `5/month`, `60 km/h`         | "5 per month", "60 kilometres per hour"         |
+| `Tom & Jerry`, `#3`          | "Tom and Jerry", "number 3" (C# keeps its hash) |
+| `~5 minutes`                 | "about 5 minutes"                               |
+| a fenced code block          | "Code example omitted"                          |
+| UUIDs and commit hashes      | dropped                                         |
+
+The rules also turn underscores into spaces, read parentheticals as comma-delimited asides
+(`Restart (after saving) now` becomes "Restart, after saving, now"), and capitalise the first
+letter after a sentence end.
+
+### Turning it off or changing it
+
+`messages.tts.naturalize` controls the pass globally and `agents.list[].tts.naturalize` overrides
+it per agent. `enabled: false` skips only the English rules above: markdown, code, emoji and URL
+paths are still removed, and code blocks are then dropped silently. The switch exists so
+non-English assistants avoid inserted English words like "to" or "or"; a raw `###` or table pipe is
+never worth speaking either way.
+
+### llm mode (opt-in)
+
+`naturalize.mode: "llm"` adds a model rewrite on top of the rules for **batch paths only**:
+automatic voice replies, the web client's Read aloud, and `/tts audio`. Live speech (Voice mode,
+Discord voice, phone calls), the `tts` tool and `tts.convert` always use the rules only, because a
+model call adds cost and latency per clip and sends reply text to that model.
+
+- The model sees the rules-cleaned text, never raw markdown, and the rules run again on its output.
+  If the rewrite fails, is truncated, or is suspiciously shorter than the rules text, WednesdayAI
+  falls back to the rules text and logs a warning (never the text itself).
+- The model is `naturalize.model`, defaulting to `messages.tts.summaryModel`, then the default
+  agent model. A local model keeps reply text on your machine.
+
+### Voice mode
+
+Voice mode cleans the assistant stream with the same rules, clause by clause. Fenced code is
+tracked across the streamed clauses and is not spoken: the block is announced as "Code example
+omitted" (or dropped with the rules off), and prose after a closing fence is spoken.
 
 ## Custom and local providers
 
@@ -612,6 +682,31 @@ When a configured provider fails, the gateway falls back to the next one and log
 which provider served the request: `tts.speak: served by <provider> after N failed provider(s) in
 <latency>ms: <provider>: <error>…`. The error text is redacted of credentials, so it is safe to
 paste into support requests; the failing provider's error says what to fix.
+
+**The voice reads symbols like "dash greater than", "slash" or "hash hash"**
+
+The naturalize pass is off where it should be on. Check `messages.tts.naturalize.enabled` is
+`true` (the default) and that the agent speaking does not override it to `false` with
+`agents.list[].tts.naturalize.enabled`. Config changes need a gateway restart. Code blocks are
+still removed with the pass off, so a voice that reads code back is a separate symptom: check
+whether the clip came from a streaming Voice mode engine, which speaks its own model output and
+does not run this pass.
+
+**The assistant is non-English and the voice inserts English words**
+
+Turn the English rules off for that agent with `agents.list[].tts.naturalize.enabled: false` (or
+globally with `messages.tts.naturalize.enabled: false`). The structural cleanup keeps running —
+markdown, code, emoji and URL paths are still removed — only the English word substitutions stop,
+so code blocks are dropped silently instead of being announced as omitted.
+
+**`naturalize.mode: "llm"` produces no rewritten phrasing**
+
+Check `messages.tts.naturalize.mode` is `"llm"`, that the mode only affects automatic voice
+replies, Read aloud and `/tts audio` (live speech and the `tts` tool never use it), and that
+`naturalize.model` (defaulting to `messages.tts.summaryModel`, then the default agent model)
+resolves to a model the gateway can authenticate. When the model call fails or its rewrite looks
+wrong, OpenClaw silently falls back to the rules text and logs a warning in the gateway logs — the
+warning never contains the reply text.
 
 **TTS is enabled but no audio is sent — only text arrives**
 Check that `messages.tts.auto` is set to `"always"`, `"inbound"`, or `"tagged"` (not `"off"`). The `/tts status` command shows the active mode for the current session. Also confirm at least one provider is available: ElevenLabs or OpenAI API key in config or env vars, or Edge TTS enabled (`messages.tts.edge.enabled` defaults to `true`). Replies shorter than 10 characters and replies that already contain media are always sent as text.

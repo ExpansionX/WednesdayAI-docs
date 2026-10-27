@@ -1,7 +1,8 @@
 ---
-summary: "Skills: managed vs workspace, gating rules, and config/env wiring"
+summary: "Skills: managed vs workspace, gating rules, catalog installs, and config/env wiring"
 read_when:
   - Adding or modifying skills
+  - Installing a skill from the verified skills catalog
   - Changing skill gating or load rules
 title: "Skills"
 ---
@@ -65,6 +66,39 @@ Common flows:
 By default, `clawhub` installs into `./skills` under your current working
 directory (or falls back to the configured OpenClaw workspace). OpenClaw picks
 that up as `<workspace>/skills` on the next session.
+
+## Catalog installs (verified)
+
+Besides ClawHub, WednesdayAI ships its own skills catalog feed and a verified install command:
+
+```bash
+wednesdayai skills install <id>
+wednesdayai skills install <id> --force
+```
+
+`<id>` resolves against the skills catalog at
+`https://raw.githubusercontent.com/ExpansionX/WednesdayAI-skills/main/catalog.json`
+(override with `OPENCLAW_SKILLS_CATALOG_URL`). The catalog pins each skill's version and
+sha256 digest, and every entry carries a provenance URL pointing at a Sigstore bundle.
+
+What the command verifies, in order and failing closed:
+
+1. Compatibility: the entry's `minWednesdayVersion` is checked against the host version
+   (matrix and messages: [Compatibility](/plugins/compatibility)).
+2. Provenance: the Sigstore bundle is verified against the signer identity
+   `https://github.com/ExpansionX/WednesdayAI-skills/.github/workflows/release.yml@refs/heads/main`
+   and the pinned sha256. This happens before the tarball is downloaded.
+3. Digest: the tarball is streamed to a stage directory, hashed while it is written (capped at
+   32 MiB, counted as bytes cross the stream), and the hash is compared to the catalog digest.
+4. Load: the staged copy must load as exactly one skill named `<id>` before it is promoted.
+
+Installs land in the managed skills directory (`~/.openclaw/skills/<id>`, the active state dir
+`$OPENCLAW_STATE_DIR/skills`), where they shadow bundled copies of the same name. Without
+`--force`, an existing install is refused; with `--force` it is replaced only after the new
+copy verifies. The install is recorded in `openclaw.json` under `skills.installs.<id>` with
+`integrity: "sha256:<hex>"`.
+
+Full CLI reference: [skills](/cli/skills#install).
 
 ## Security notes
 
@@ -288,7 +322,9 @@ Notes:
 OpenClaw ships a baseline set of skills as **bundled skills** as part of the
 install (npm package or OpenClaw.app). `~/.openclaw/skills` exists for local
 overrides (for example, pinning/patching a skill without changing the bundled
-copy). Workspace skills are user-owned and override both on name conflicts.
+copy). Workspace skills are user-owned and override both on name conflicts. Skills installed
+with `wednesdayai skills install` live in the same managed directory and shadow the bundled
+copy of the same name; see [Catalog installs (verified)](#catalog-installs-verified).
 
 ## Config reference
 

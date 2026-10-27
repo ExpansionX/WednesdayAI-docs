@@ -8,6 +8,7 @@ component: plugins-cli
 sources:
   - src/cli/plugins-cli.ts
   - src/plugins/catalog.ts
+  - src/plugins/catalog-install.ts
   - src/plugins/catalog.json
   - src/config/types.plugins.ts
   - src/config/schema.help.ts
@@ -21,6 +22,10 @@ Manage Gateway plugins/extensions (loaded in-process).
 
 The legacy `openclaw plugins` alias remains supported. New examples use
 `wednesdayai plugins`.
+
+The singular form is a supported alias: `wednesdayai plugin install <id>` is identical to
+`wednesdayai plugins install <id>`. The canonical command is `plugins`; all WednesdayAI
+messages and docs use that form.
 
 Related:
 
@@ -81,6 +86,19 @@ install specs. The catalog has two layers:
 
 The `list`, `info`, and `install` commands automatically refresh the remote
 catalog before resolving a bare plugin id against it.
+
+### Pinned entries and verification
+
+Remote catalog entries must pin an exact `version` and a sha512 `integrity` digest. If any
+remote entry is missing its pin, the whole remote payload is rejected and WednesdayAI uses the
+bundled offline snapshot instead. The snapshot carries a pinned `brave-search` entry for
+exactly this case: a feed outage must never resolve a bare catalog id to an unrelated unscoped
+npm package. The published feed is never empty either; the release pipeline replaces pinned
+entries in place rather than clearing the feed.
+
+Catalog-pinned installs are verified, not trusted. See
+[Verified catalog installs](#verified-catalog-installs) and
+[Compatibility](/plugins/compatibility) for the refusal messages.
 
 Remote fetching can be disabled entirely (airgap / mirror mode) or pointed at an
 alternate URL via environment variables:
@@ -171,6 +189,52 @@ wednesdayai plugins install -l ./my-plugin
 
 Use `--pin` on npm installs to save the resolved exact spec (`name@version`) in
 `plugins.installs` while keeping the default behavior unpinned.
+
+:::warning
+Installing verifies the plugin by loading it, which **imports the plugin's entry module** and
+runs its top-level code in the CLI process. Dependency lifecycle scripts stay disabled
+(`npm install --ignore-scripts`), and the plugin's `register()` is not called until you run
+`plugins enable`, but module-level side effects do run at install time. For a catalog-pinned
+install the artifact's digest and provenance are verified first. For a direct npm spec, local
+path or archive there is no such verification, so only install sources you trust.
+:::
+
+### Verified catalog installs
+
+When a bare id resolves to a **pinned** catalog entry (one with a `version` and a sha512
+`integrity`), `plugins install` takes the verified rail instead of a plain npm install:
+
+1. **Compatibility preflight** with no network: the entry's `minWednesdayVersion`,
+   `minHostVersion` and `contracts` are checked against this host. See
+   [Compatibility](/plugins/compatibility).
+2. **Sigstore provenance**: the npm SLSA attestation is fetched and verified against the exact
+   signer identity `https://github.com/ExpansionX/WednesdayAI-plugins/.github/workflows/release.yml@refs/heads/main`
+   and the catalog-pinned digest.
+3. **Integrity-checked install**: the npm tarball is installed with the pinned digest as
+   `expectedIntegrity`; a downloaded artifact whose digest differs is refused. The install runs
+   in a stage directory and is verified by loading it before it is promoted; nothing touches
+   the live directory until verification passes.
+4. The command then logs:
+
+   ```text
+   Verified <spec>: sha512 pinned by catalog, provenance signed by <signer identity>
+   ```
+
+A pinned install never falls back to the bundled copy: the catalog pinned one exact artifact,
+and anything else is refused. The install record stores the bare `npmSpec`, so the default
+record stays unpinned unless you pass `--pin`. `--force` replaces an existing install.
+
+Refusals on this path always mean nothing was installed:
+
+- ``plugin "<id>" <version> is not compatible with this host: <reason>. Run `wednesdayai update` to upgrade WednesdayAI, then retry.`` — the pinned version does not fit this host.
+  Run `wednesdayai update` and retry.
+- `refusing to install "<id>" <version>: provenance verification failed: <detail>` — the
+  artifact is not attested, is signed by the wrong workflow or ref, or its digest does not
+  match the catalog. Do not retry from npm; the artifact must be re-published. Full message
+  reference: [Compatibility](/plugins/compatibility#refusal-messages).
+
+Install stays explicit-only for activation: after a verified install, run
+`wednesdayai plugins enable <id>`.
 
 ### Uninstall
 
