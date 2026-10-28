@@ -14,9 +14,13 @@ sources:
   - apps/web/src/ui/DisabledControl.tsx
   - apps/web/src/providers/web-client-runtime.ts
   - packages/gateway-browser-client/src/connection.ts
+  - apps/web/src/providers/run-stall-monitor.ts
+  - apps/web/src/providers/send-outbox.ts
+  - apps/web/src/providers/send-retry.ts
   - apps/web/src/app/completed-history-boundary.ts
   - apps/web/src/app/use-chat-history.ts
   - apps/web/src/app/use-chat-send.ts
+  - apps/web/src/app/use-outbox-restore.ts
   - apps/web/src/ui/Composer.tsx
   - apps/web/src/ui/use-composer-paste.ts
   - apps/web/src/ui/use-dictate-autosend.ts
@@ -338,8 +342,11 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
   `setTimer` check: no frame for two tick intervals closes the socket with code `4000`
   (`tick timeout`) and reconnects, mirroring `src/gateway/client.ts`. `online`, `pageshow` and
   `visibilitychange` (to visible) retry immediately while `reconnecting`, and force a reconnect
-  when the resumed page's socket is stale. There is no per-RPC response timeout; the watchdog
-  bounds every hang on a dead socket.
+  when the resumed page's socket is stale. A resumed page (also the Page Lifecycle `resume`
+  event) whose connected socket has been silent for more than 5 s is probed with `verifyLive()`:
+  one `health` request, and no answer within 5 s closes the socket with `4000`
+  (`liveness probe timeout`) and reconnects. There is no per-RPC response timeout; the watchdog
+  and the probe bound every hang on a dead socket.
 - **Transient connect classification.** `isTransientConnectFailure` treats anything that is not a
   `GatewayRequestError`, an `error.retryable` flag, `UNAVAILABLE`, `RECOVERY_NOT_READY`, or a detail
   code in `TRANSIENT_CONNECT_DETAIL_CODES` (`AUTH_RATE_LIMITED`, `DEVICE_AUTH_SIGNATURE_EXPIRED`,
@@ -349,33 +356,61 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
   refusal — a credential the gateway no longer accepts (`AUTH_DEVICE_TOKEN_MISMATCH`) is the
   common example — clears the credential and re-runs onboarding.
 - **Idempotent sends.** `sendChatMessage` generates one `idempotencyKey` per logical send and
-  `requestChatSendWithRetry` re-sends the identical params until the ack arrives, the turn stops
-  being this client's pending one (session switch, stop, abandon), `connection.isStopped()`, or
-  `SEND_RETRY_DEADLINE_MS` (60 s) has elapsed. A send is retryable when the socket died with the
+  `requestWithSendRetry` (`providers/send-retry.ts`) re-sends the identical params until the ack
+  arrives, the turn stops being this client's pending one (session switch, stop, abandon),
+  `connection.isStopped()`, or `SEND_RETRY_DEADLINE_MS` (60 s) has elapsed. `sessions.steer`
+  (also on `CONFLICT/duplicate_in_flight`, and voided by Stop) and the empty-state
+  `sessions.direct` use the same loop. A send is retryable when the socket died with the
   request in flight (not a `GatewayRequestError`), `error.retryable` is set, or the code is
   `RECOVERY_NOT_READY`; the delay between attempts is `Math.max(250, retryAfterMs)`. The gateway's
   dedupe answers a repeat whose first attempt landed with `in_flight` or the cached result instead
   of a second run, and a cached result for a turn whose final was missed settles the run locally
   through `settleRunMissedDuringGap`.
-- **Reconnect reconcile.** `afterConnect` re-subscribes, then `reconcileOwnRunsAfterReconnect`
-  lists the open chat's runs (`sessions.runs.list`) and settles every locally-owned run: `running`
-  or `queued` keeps tracking and streaming, `terminal` or absent settles against the transcript
-  (the `completed-turn` merge with `completedRunId` and a `done` chunk), and `action-needed`
+- **Dispatch guard.** `request(type, params, { canDispatch })`
+  (`packages/gateway-browser-client/src/connection.ts`) re-checks a caller's precondition after the
+  readiness wait and immediately before dispatch: `false` rejects with `gateway connection closed`
+  instead of sending. A precondition that died while the request waited for reconnect readiness
+  must not still fire - the steer path passes `() => !preSteer.cancelled`, so a Stop that lands
+  during the wait voids the steer (`web-client-runtime.ts`).
+- **Run reconcile.** `reconcileOwnRuns(trigger)` lists the open chat's runs
+  (`sessions.runs.list`) and settles every locally-owned run: `running` or `queued` keeps tracking
+  and streaming, `terminal` or absent settles against the transcript, and `action-needed`
   (interrupted by a restart) settles as aborted and emits the restart notice as a `chatError`.
-  A failed status read changes nothing: tracking and streaming continue and Stop remains the user's
-  escape hatch. Queued follow-ups and an unacked pending turn are left to the existing
-  `loadHistory` and send-retry paths.
+  It runs after every reconnect (`"reconnect"`), when a tracked run's frames go quiet for 15 s
+  (`"stall"`, `RunStallMonitor` in `providers/run-stall-monitor.ts` - a single re-armable timer the
+  runtime touches on own-run registration and on every live frame of a tracked run, fired after a
+  `verifyLive()` probe), and when the tab returns with an
+  own run in flight (`"resume"`). A `final` settlement first reads the transcript and replays the
+  run's durable assistant text through the live stream path before `done`, so the bubble (and
+  auto read aloud) get the whole reply at once. A failed status read changes nothing: tracking and
+  streaming continue and Stop remains the user's escape hatch. Queued follow-ups and an unacked
+  pending turn are left to the existing `loadHistory` and send-retry paths.
 - **Store and stream dedupe.** `prependMessages` drops incoming rows whose `entryId` or `id`
   already exists; `addSyncedMessage` returns state unchanged for an assistant payload whose id
   matches an existing row's `localRunId`; `streamUpdate` opens no second bubble when the final text
   differs from the streamed text only in leading or trailing whitespace.
-- **Draft safety.** A definitive send failure (retries exhausted or a non-retryable error) removes
-  the optimistic user row (`removeMessage`), restores the text to the composer via
-  `handleFillComposer`, and adds the reason as a system message. The composer persists its text per
-  session key under `openclaw-user-client:draft:<sessionKey>` in `sessionStorage` (300 ms debounce,
-  removed when emptied), reads it back on mount, and merges a restore behind text typed meanwhile
-  instead of clobbering it. Logout clears every draft key (`clearAllComposerDrafts`). Attachments
-  are not persisted.
+- **Draft safety.** Every outgoing `chat.send` and `sessions.steer` text is recorded in a
+  `localStorage` send outbox (`apps/web/src/providers/send-outbox.ts`, key
+  `openclaw-user-client:outbox:v1`, 24 h expiry) before the RPC leaves, and removed when the RPC
+  answers. Each entry carries the text, its session key, the run ids its send attempts used, and
+  a lease the sending tab renews every 5 s while the RPC is pending. A failed send restores its
+  text to the composer from the outbox (or, with no entry, the
+  in-hand text) in the chat it was sent from, next to the failure's own error row, and consumes
+  only that send's own settled entry (`restoreAfterFailure` plus `consumeOutboxEntry` in
+  `apps/web/src/app/use-outbox-restore.ts`). Entries left behind by a
+  reload, crash or gateway restart are restored after the chat's next history load
+  (`restoreUnsent`, "Restored a message that was not sent."); entries whose run id appears in the
+  loaded history are dropped silently, and entries still pending (this tab's in-flight set, or a
+  live lease another tab renewed) are left untouched. Queued follow-ups that have not started yet
+  are deliberately not restored after a reload: the gateway's own followup queue holds them across
+  connection resets, and an unconfirmed record is not evidence of loss, so restoring would invite
+  a duplicate send (`dropUnconfirmedPendingQueuedTurns`). The composer persists its text per
+  session key under
+  `openclaw-user-client:draft:<sessionKey>` in `localStorage` (the empty state uses `@new`; 300 ms
+  debounce plus a flush on `pagehide` and on hide, removed when emptied, dropped after 7 days),
+  reads it back on mount, and merges a restore behind text typed meanwhile instead of clobbering
+  it. Logout clears every draft and the outbox (`clearAllComposerDrafts`). Attachments are not
+  persisted.
 
 ## Chat controls and hooks
 
@@ -731,8 +766,10 @@ While `autoSend` is true at take start:
   things hold: the commit's text is non-empty and not whitespace (a denied mic or an empty take never
   sends, and never sends the user's pre-existing draft), the dictated text is observable in the draft
   (the insertion is staged asynchronously, so the armed send waits for the re-render that contains it),
-  and the composer is sendable - `isStreaming`, `submissionDisabled` or `uploading` leave the text in
-  the draft instead of queueing it.
+  and the composer can deliver it - while a reply is streaming the commit routes through
+  `submitWhileStreaming`, the same path Enter takes (steer into the current turn, or queue when
+  attachments are staged) instead of stalling in the draft, while `submissionDisabled` or
+  `uploading` leave the text in the draft.
 - The composer marks the draft dictated before the auto-send runs, so the send carries
   `{ dictated: true }` provenance like a manual send after dictation.
 
@@ -902,8 +939,9 @@ playing state shows on the reply when any of its keys matches.
 `enabled: false`. A failed status read gates the control off instead of guessing the feature is
 live, and only a status for the current agent counts. When the player reports a
 `read_aloud_disabled` refusal, the hook bumps its status revision so the gate re-reads instead of
-staying stale. Playback stops when the session changes, Voice mode engages, or the connection
-drops.
+staying stale. Playback stops when the session changes or Voice mode engages; a connection drop
+does not stop it — the player keeps playing across a reconnect, and the manual control still
+reports `unavailable while offline` until the socket is back.
 
 `providers/read-aloud-text.ts` turns the reply into speech chunks:
 
@@ -928,7 +966,11 @@ writes can never clear it. `unlock()` is a no-op while paused, so the enabling g
 auto-read on, the dictate gesture's unlock) cannot silently un-suspend a paused read. A
 generation counter makes `stop()`, or starting another message, retire in-flight work silently: a
 late synth promise never surfaces audio or errors. `stop()` clears `paused` without resuming the
-context — the next read's `unlock()` does that. `describeReadAloudError` maps a
+context — the next read's `unlock()` does that. A transient synth failure — a socket close,
+`UNAVAILABLE`, or an error the gateway marked `retryable` — is retried up to two extra times with
+500 ms, then 1 s, backoff (honouring `retryAfterMs`), so a blip mid-reply does not end the read;
+`stop()` cancels a waiting retry through the generation counter, and a `read_aloud_disabled`
+refusal is never retried. `describeReadAloudError` maps a
 `read_aloud_disabled` refusal to
 `Read aloud is turned off for this assistant.`, any other gateway error to
 `Couldn't read aloud: <message>`, and a `decodeAudioData` failure to
@@ -978,10 +1020,12 @@ streams.
   playback and drop the queued tail). At the run boundary it flushes and closes. `reset(seed)` marks
   every assistant id on screen as known, so a reply that was already streaming when auto-read turned
   on is never spoken from its beginning; the driver abandons a run the moment the player stops
-  serving its stream (toggle off, chat switch, Voice mode, offline, a manual read).
+  serving its stream (toggle off, chat switch, Voice mode, a manual read).
 - **Gates.** `use-read-aloud.ts` subscribes the driver only while `autoRead` is on, the status
-  reports `enabled`, the connection is up and Voice mode is off; the cleanup unsubscribes,
-  resets the driver and calls `player.stop()`, so queued speech never outlives the gates. The
+  reports `enabled` and Voice mode is off — not on the connection: a blip mid-reply must not
+  tear the subscription down, or the reconnect's re-seed would mark the in-flight reply known
+  and silence the rest of it; the cleanup unsubscribes, resets the driver and calls
+  `player.stop()`, so queued speech never outlives the gates. The
   streaming chunk limits (first chunk 200, later chunks 600 characters) are clamped to the
   status's `maxTextLength` and refreshed whenever the status or agent changes, so a low gateway
   limit never produces a `tts.speak` rejection.
@@ -989,10 +1033,11 @@ streams.
   context synchronously inside the click (`readAloud.unlock()`), keeping Safari/iOS playback
   audible.
 
-**Stop semantics.** Toggling auto-read off, a chat switch, Voice mode or a disconnect stop playback
-through `player.stop()`, and so does the message's **Stop reading** button: the driver abandons the
+**Stop semantics.** Toggling auto-read off, a chat switch or Voice mode stop playback through
+`player.stop()`, and so does the message's **Stop reading** button: the driver abandons the
 run the moment the player stops serving its stream, so its queued and remaining sentences are never
-spoken. Pressing the message's main button during a streaming read only pauses it; **Resume
+spoken. A disconnect does not stop playback; the stream continues across the reconnect. Pressing
+the message's main button during a streaming read only pauses it; **Resume
 reading** continues from the same point. A normal run ending (no stop) flushes the reply's
 remaining sentences into the stream and the queue drains to the end of the reply. An in-flight
 `tts.speak` request is not cancelled on stop; the generation counter retires its result instead of
