@@ -21,12 +21,12 @@ re-exported from `openclaw/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `1.1`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `1.2`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
 | `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `1.0`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.0`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
-| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.1`           | `MsgContext` (`src/auto-reply/templating.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                                                                                              | `MsgContext`, `ChannelGatewayAdapter`                                                               |
+| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.1`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.0`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.2`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -48,19 +48,23 @@ Contract versions are `major.minor` strings. The policy is:
 - **Breaking** (requires a major bump): removing an entry, adding a required member to an
   `implemented` type, changing a signature or type shape, or flipping a direction.
 - **Additive** (requires only a minor bump): new optional members, new members on a `provided`
-  type, and new deprecation markers.
+  type, new required members beneath a newly added optional member (omitting the optional parent
+  omits them), and new deprecation markers.
 
-Two refinements keep the classifier honest: adding optional members to a `provided` type
+Three refinements keep the classifier honest. First, adding members to a `provided` type
 changes the parent's recorded shape text, and that parent change is classified as additive
-as long as every new entry beneath it is optional. The same holds one step removed: a
+as long as every new entry beneath it is absorbable — a new `provided` member (always
+additive, required or not) or an optional one. The same holds one step removed: a
 `provided` entry whose text only embeds the grown type by reference (the registry entry
 `ProtocolSchemas.AgentSummary`, a flattened member like `AgentsListResult.agents`) is
-additive while every addition in its own contract is optional, or while the addition
-that explains the text change is a member of the same type recorded in a sibling contract
-(e.g. an `ingress` member of `MsgContext` whose shape only `sdk` re-prints) and every
-addition in the whole snapshot is optional and nothing was removed; otherwise it is
-breaking.
-Kernel version constants (`plugin-sdk#GATEWAY_CONTRACT_VERSION` and siblings) are exempt
+additive while every addition in the whole contract is absorbable, and breaking otherwise.
+Second, the sdk barrel records each export's whole printed type as one entry with no member
+entries beneath it, so a member added inside a barrel type changes the barrel entry's text
+with nothing in the sdk contract to explain it. A `provided` barrel text change
+(`plugin-sdk#MsgContext`) therefore defers to that type's member subtree in the contract
+that enumerates it (ingress for `MsgContext` and `InboundUserContext`): additive while the
+subtree has diffs and every one of them is additive, breaking otherwise. Kernel version
+constants (`plugin-sdk#GATEWAY_CONTRACT_VERSION` and siblings) are exempt
 from type-text comparison: their literal changes exactly when a contract version is bumped,
 and the per-contract rules already police that bump. Type text is also only compared when
 both snapshots were produced by the same text algorithm (the snapshot's `typeTextVersion`);
@@ -277,8 +281,9 @@ error, never a silent fallback to the default base. It fails CI with:
 The snapshot is deliberately shallow: per entry it records only its presence, whether it is
 optional, its direction, its deprecation marker, and the entry's printed type text, with two
 exceptions: an anonymous object property that gets flattened into dotted child entries records a
-marker instead of its own text (its children carry the shape), and type texts longer than 240
-characters are stored as a `sha256:` digest. For generic interfaces, classes and type aliases
+marker instead of its own text (its children carry the shape), and a non-enumerable type text
+longer than 240 characters is stored as a `sha256:` digest (an enumerable one is flattened
+instead; see below). For generic interfaces, classes and type aliases
 the declaration's type-parameter list — constraints and defaults included — is appended to the
 recorded text (`Box<T> { value: T; } <T>`), because the printed type alone drops them; this
 closes the generic-type-alias known limit in ADR 0117. A member whose type is a named type is tracked by that
@@ -287,6 +292,18 @@ from `openclaw/plugin-sdk` (where the `sdk` contract catches it) or is itself li
 `scripts/contract-surface/roots.ts`; a consequence is that such a change can demand an `sdk` bump
 rather than a bump of the contract whose member actually changed. The test-only
 `openclaw/plugin-sdk/testing` subpath is deliberately excluded from the `sdk` contract.
+
+When an entry's printed text is opaque (past the 240-char digest cap) but the shape behind it is
+enumerable, the generator records that shape as dotted per-member entries and marks the parent
+with a stable marker (`object`, or `object <config>` such as `object $strict` for a zod object
+schema, so a strictness change diffs) — for provided object-shaped types and for zod object schemas
+(the config keys under `TtsConfigSchema` and friends), where member optionality comes from the
+zod `ZodOptional`/`ZodDefault` wrappers and nested `ZodObject` shapes flatten to the same depth
+cap as anonymous types. Introducing that recording changed the emitted type text, so it shipped
+with a `typeTextVersion` bump: snapshots recorded before it are not compared text for text (the
+notice reports the skip). Entry keys, optionality, deprecation and direction are still compared,
+so removals and optionality regressions stay breaking. A same-key retype or signature change is
+not detected on the run that crosses the version bump.
 
 ## Renaming and removing
 

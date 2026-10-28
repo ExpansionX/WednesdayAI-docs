@@ -1,0 +1,131 @@
+---
+summary: "Where upstream openclaw plugin hooks are and are not dispatched, the dispositions for upstream only hooks and how to migrate a plugin across them"
+read_when:
+  - You are migrating a plugin written for upstream openclaw
+  - A plugin shows up as degraded in `wednesdayai plugins list`
+  - You hit a `PLUGIN_HOOK_NOT_DISPATCHED` warning
+title: "Hook parity with upstream openclaw"
+audience: developer
+---
+
+# Hook parity with upstream openclaw
+
+WednesdayAI is a fork of upstream openclaw, and the plugin hook surface has drifted between
+the two. This page is the map. It pins the upstream reference level: openclaw `v2026.6.9`
+(commit `c645ec4`), taken from the `PLUGIN_HOOK_NAMES` array in upstream
+`src/plugins/hook-types.ts`.
+
+Every upstream hook name has one of three statuses:
+
+- `both` — the hook exists in upstream openclaw and WednesdayAI dispatches it. Register it
+  with `api.on` and it works in both.
+- `upstream only` — the hook exists upstream but WednesdayAI does not dispatch it. Each row
+  carries a disposition (below) and, where one exists, the WednesdayAI hook to use instead.
+- `WednesdayAI only` — the hook is a WednesdayAI addition with no upstream equivalent.
+
+An `upstream only` hook has one of two dispositions:
+
+- `planned port` — a port into the WednesdayAI hook surface is planned and tracked.
+- `unsupported` — there is no equivalent seam in WednesdayAI and no port is planned.
+
+WednesdayAI ships no runtime aliases. Registering an upstream only name is never silently
+remapped: if the map names a `Use instead` hook, the plugin must register that hook itself.
+
+## When a hook is not dispatched
+
+When a plugin registers an upstream only hook name with `api.on`, the handler is ignored and
+the plugin keeps loading. The ignored registration is reported as a `PLUGIN_HOOK_NOT_DISPATCHED`
+warning, so a plugin that relies on the handler silently does nothing while still appearing to
+load.
+
+Operators see the warning in four places:
+
+- The gateway startup log, for example:
+
+  ```
+  [plugins] startup: 0 loaded, 1 warning — see warnings below
+    ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream openclaw hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
+      → See the hook parity map: https://docs.wednesdayai.dev/developers/plugins/hook-parity
+  ```
+
+- `wednesdayai plugins list` shows the plugin as `degraded`.
+- `wednesdayai plugins status` lists the issue with its remediation.
+- `wednesdayai plugins doctor` reports the same warnings.
+
+The same rules apply to `api.registerHook`. A typed hook name belongs on `api.on`;
+registering one through `registerHook` warns. An event string that no internal emitter
+produces warns the same way. The event strings that core actually produces are listed in
+[Internal hooks](/automation/hooks).
+
+## Parity table
+
+<!-- hook-parity:start -->
+
+Upstream reference level: openclaw `v2026.6.9` (commit `c645ec4`).
+
+| Hook                            | Status           | Disposition  | Use instead           | Notes                                                                                                   |
+| ------------------------------- | ---------------- | ------------ | --------------------- | ------------------------------------------------------------------------------------------------------- |
+| `after_compaction`              | both             |              |                       |                                                                                                         |
+| `after_tool_call`               | both             |              |                       |                                                                                                         |
+| `agent_end`                     | both             |              |                       |                                                                                                         |
+| `before_agent_start`            | both             |              |                       | Deprecated upstream; use before_model_resolve and before_prompt_build.                                  |
+| `before_compaction`             | both             |              |                       |                                                                                                         |
+| `before_message_write`          | both             |              |                       |                                                                                                         |
+| `before_model_resolve`          | both             |              |                       |                                                                                                         |
+| `before_prompt_build`           | both             |              |                       | Upstream result fields appendContext, prependSystemContext and appendSystemContext are not applied yet. |
+| `before_reset`                  | both             |              |                       |                                                                                                         |
+| `before_tool_call`              | both             |              |                       |                                                                                                         |
+| `gateway_start`                 | both             |              |                       |                                                                                                         |
+| `gateway_stop`                  | both             |              |                       |                                                                                                         |
+| `llm_input`                     | both             |              |                       |                                                                                                         |
+| `llm_output`                    | both             |              |                       |                                                                                                         |
+| `message_received`              | both             |              |                       |                                                                                                         |
+| `message_sending`               | both             |              |                       |                                                                                                         |
+| `message_sent`                  | both             |              |                       |                                                                                                         |
+| `model_call_ended`              | both             |              |                       |                                                                                                         |
+| `session_end`                   | both             |              |                       |                                                                                                         |
+| `session_start`                 | both             |              |                       |                                                                                                         |
+| `subagent_delivery_target`      | both             |              |                       |                                                                                                         |
+| `subagent_ended`                | both             |              |                       |                                                                                                         |
+| `subagent_spawned`              | both             |              |                       |                                                                                                         |
+| `subagent_spawning`             | both             |              |                       | Deprecated upstream; use subagent_spawned to observe launches.                                          |
+| `tool_result_persist`           | both             |              |                       |                                                                                                         |
+| `agent_turn_prepare`            | upstream only    | planned port | `before_prompt_build` | Per-turn prompt contribution (prependContext/appendContext); a port is planned.                         |
+| `before_agent_finalize`         | upstream only    | unsupported  |                       | Can force a revision pass before the final answer; no revise or finalize gate.                          |
+| `before_agent_reply`            | upstream only    | unsupported  |                       | Answers a turn before the model runs ({handled, reply}); no pre-model reply short-circuit.              |
+| `before_agent_run`              | upstream only    | unsupported  | `before_agent_start`  | Fail-closed gate that can block a run; before_agent_start cannot block.                                 |
+| `before_dispatch`               | upstream only    | unsupported  | `message_received`    | Pre-dispatch gate that can handle an inbound message ({handled, text}); no equivalent gate.             |
+| `before_install`                | upstream only    | unsupported  |                       | Install-time policy gate (findings, block); the installer has no plugin hook.                           |
+| `cron_changed`                  | upstream only    | unsupported  |                       | Cron job lifecycle notifications; no plugin hook for cron changes.                                      |
+| `deactivate`                    | upstream only    | unsupported  | `gateway_stop`        | Deprecated upstream alias of gateway_stop.                                                              |
+| `heartbeat_prompt_contribution` | upstream only    | planned port | `before_prompt_build` | Heartbeat-run prompt contribution; a port is planned.                                                   |
+| `inbound_claim`                 | upstream only    | unsupported  | `message_received`    | Claims an inbound message and replies itself; message_received observes but cannot claim.               |
+| `model_call_started`            | upstream only    | unsupported  | `llm_input`           | Model-call start notification; llm_input observes the outgoing model request.                           |
+| `reply_dispatch`                | upstream only    | unsupported  |                       | Plugin-owned reply dispatch; reply dispatch is core-owned.                                              |
+| `reply_payload_sending`         | upstream only    | unsupported  | `message_sending`     | Rewrites reply payloads before channel send; message_sending can modify or cancel outbound text.        |
+| `resolve_exec_env`              | upstream only    | unsupported  |                       | Injects environment variables into the exec tool; no equivalent seam.                                   |
+| `agent_idle`                    | WednesdayAI only |              |                       |                                                                                                         |
+| `before_context_send`           | WednesdayAI only |              |                       |                                                                                                         |
+| `compaction.plan`               | WednesdayAI only |              |                       |                                                                                                         |
+| `context.collect`               | WednesdayAI only |              |                       |                                                                                                         |
+| `context.project`               | WednesdayAI only |              |                       |                                                                                                         |
+| `context.prune`                 | WednesdayAI only |              |                       |                                                                                                         |
+| `storage.afterAppend`           | WednesdayAI only |              |                       |                                                                                                         |
+| `task_outcome`                  | WednesdayAI only |              |                       |                                                                                                         |
+| `transform_llm_input`           | WednesdayAI only |              |                       |                                                                                                         |
+| `transform_llm_output`          | WednesdayAI only |              |                       |                                                                                                         |
+
+<!-- hook-parity:end -->
+
+## Updating the map
+
+Maintainers update the map when the upstream hook surface changes:
+
+1. Copy the upstream hook names at the new tag from upstream `src/plugins/hook-types.ts`
+   (the `PLUGIN_HOOK_NAMES` array at 2026.6.x, the `PLUGIN_HOOK_METADATA` keys at 2026.10.x)
+   into `src/plugins/hook-parity.json` together with the new version, tag and commit.
+2. Run `pnpm exec vitest run src/plugins/hook-parity.test.ts`. The test names every missing
+   or stale disposition.
+3. Fill in the dispositions in `src/plugins/hook-parity.json` and run `pnpm docs:hook-parity`
+   to regenerate the table above.
+4. Amend the compatibility ADR.
