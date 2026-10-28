@@ -125,6 +125,25 @@ Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
 
+## Plugin hook never fires
+
+Use this when a plugin hook handler never runs and the gateway startup log
+shows a `PLUGIN_HOOK_NOT_DISPATCHED` warning, for example:
+
+```
+[plugins] startup: 0 loaded, 1 warning — see warnings below
+  ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream openclaw hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
+    → See the hook parity map: https://docs.wednesdayai.dev/developers/plugins/hook-parity
+```
+
+Per-plugin warnings, including hook registration ones, appear under the
+`[plugins] startup:` summary line. The warning means the plugin registered a
+hook name that this gateway does not dispatch, so the handler is ignored while
+the plugin keeps loading. Run `wednesdayai plugins status` to see the warning
+and its remediation, then check the [hook parity map](/plugins/hook-parity) for
+the WednesdayAI hook name to register instead. The plugin shows as `degraded`
+in `wednesdayai plugins list`.
+
 ## ACP startup identity reconcile fails at startup
 
 Use this when gateway logs include `startup identity reconcile failed for
@@ -523,25 +542,6 @@ The warn-level lines never echo the call arguments or the model-authored
 rejection text; the full error and the original arguments stay in the session
 transcript. Inspect them with `sessions_history` for that session, or read the
 session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
-
-The session reply carries a one-line warning for the same failure, for example
-`⚠️ 📝 Edit: in notes.md failed (not found)`. The suffix is a bounded failure
-class, not the raw error:
-
-- `(invalid tool arguments)` - the model called the tool wrong, for example an
-  edit whose `oldText` does not match the file.
-- `(not found)` - the target file or directory does not exist.
-- `(permission denied)` - the call was denied: errno codes (`EACCES`, `EPERM`,
-  `EROFS`) or a workspace/sandbox guard (`workspaceOnly`, symlink and hardlink
-  guards). This is the only class that means the filesystem refused access.
-- `(blocked by policy)` - a policy, plugin hook or loop guard blocked the call.
-- A bare `failed` with no suffix means the error fit no known class.
-
-The path in the warning echoes the model's own argument and may not be a real
-path. Raw error text (including the errno and resolved path) is shown instead of
-the class only when verbose tool details are on. `exec`/`bash` failures stay out
-of the chat at default verbosity; their full output is in the journal and the
-session transcript.
 
 The file tools accept the argument shapes models commonly send: `edit`,
 `write` and `read` take `path` and also accept `file_path`; `edit` additionally
