@@ -11,11 +11,11 @@ audience: developer
 
 # Coding style
 
-This guide owns the coding conventions for WednesdayAI core. For the PR gate and contribution workflow, see [Contributing](/developers/contributing). For test conventions, see [Testing](/developers/contributing/testing).
+This guide owns the coding conventions for WednesdayAI core. For the PR gate and contribution workflow, see [Contributing](https://docs.wednesdayai.dev/developers/contributing). For test conventions, see [Testing](https://docs.wednesdayai.dev/developers/contributing/testing).
 
 ## Principles
 
-Follow the Development Principles in [Contributing](/developers/contributing). In short:
+Follow the Development Principles in [Contributing](https://docs.wednesdayai.dev/developers/contributing). In short:
 
 - Reuse maintained packages already in the stack instead of building from scratch.
 - Fix bug classes rather than instances. Use real parsers, not regex, for structured formats.
@@ -34,20 +34,30 @@ Follow the Development Principles in [Contributing](/developers/contributing). I
 - **Formatting**: run `pnpm check` before committing. Resolve formatting-only diffs without asking.
 - **Naming**: use WednesdayAI in user-facing docs and headings. `wednesdayai` is the primary binary name and `openclaw` is a permanent backward-compatible alias. Config keys and internal identifiers stay `openclaw`.
 - **Imports**: use the `.js` extension for relative ESM imports, `import type { X }` for type-only imports, and import directly from the original module. Do not create files that only re-export another file.
+- **Process-scoped state across the SDK bundle**: the published `openclaw/plugin-sdk` is a separate tsdown bundle, so extension code that reaches core through the SDK runs against a second copy of every module it imports; plain module-scope mutable state would then split per bundle. Any module-scope mutable state reachable through the SDK must use `resolveProcessScopedMap` (from `openclaw/plugin-sdk/process-scoped-map`) or be routed through an `api.runtime` member instead. Vitest aliases the SDK to `src/`, so test suites run one module graph and cannot see the split: guard split-sensitive bindings with `vi.resetModules()` plus a dynamic re-import in a `*.process-scope.test.ts` test (conformance example: `extensions/telegram/src/conformance.split-graph.test.ts`).
 
 ## Do not duplicate helpers
 
 Before writing a formatter, utility, or helper, search for an existing implementation and import it. If a function already exists, do not create a copy in another file.
 
-| Need                                                  | Use                                                                                    |
-| ----------------------------------------------------- | -------------------------------------------------------------------------------------- |
-| Time, age, duration formatting                        | The centralized modules in `src/infra/` (for example `format-time`)                    |
-| Status tables                                         | `renderTable` in `src/terminal/table.ts`                                               |
-| Colors in terminal output                             | `theme` from `src/terminal/theme.ts` (`theme.success`, `theme.muted`, and so on)       |
-| Spinners and progress bars                            | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`); never hand-roll spinners  |
-| CLI option wiring and commands                        | `src/cli/` and `src/commands/`                                                         |
+| Need                           | Use                                                                                   |
+| ------------------------------ | ------------------------------------------------------------------------------------- |
+| Time, age, duration formatting | The centralized modules in `src/infra/` (for example `format-time`)                   |
+| Status tables                  | `renderTable` in `src/terminal/table.ts`                                              |
+| Colors in terminal output      | `theme` from `src/terminal/theme.ts` (`theme.success`, `theme.muted`, and so on)      |
+| Spinners and progress bars     | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`); never hand-roll spinners |
+| CLI option wiring and commands | `src/cli/` and `src/commands/`                                                        |
+| "Run `main()` when executed"   | `isDirectRun(import.meta.url)` from `scripts/lib/direct-run.mjs`                      |
 
 Never create local `formatAge`, `formatDuration`, or `formatElapsedTime` functions.
+
+## Script entry points
+
+Scripts under `scripts/` decide whether to run `main()` with `isDirectRun(import.meta.url)` from `scripts/lib/direct-run.mjs`. Guards built on `scripts/lib/ts-guard-utils.mjs` get it through `runAsScript(import.meta.url, main)`.
+
+Do not compare `import.meta.url` with `process.argv[1]` directly. Node resolves symlinks in `import.meta.url` but keeps `process.argv[1]` as the caller typed it. A script launched through a symlinked path (the macOS temp directory `/var` is a symlink to `/private/var`, or a symlinked checkout) then skips `main()` and exits 0 without doing anything. `isDirectRun` resolves both sides with `realpathSync`.
+
+`pnpm lint:scripts:direct-run` (part of `pnpm check`) runs `scripts/check-scripts-direct-run.mjs`. It fails on any `process.argv[1]` read in `scripts/` outside the helper and test files.
 
 ## Colors and terminal output
 
@@ -76,32 +86,35 @@ Tool input schemas use `@sinclair/typebox`. Several model providers reject schem
 
 ## Toolchain
 
-| Layer                  | Tool and version                                                                                      |
-| ---------------------- | ----------------------------------------------------------------------------------------------------- |
-| Runtime                | Node.js 24 or newer (ESM)                                                                              |
-| Package manager        | pnpm 10.23.0 (lockfile: `pnpm-lock.yaml`)                                                              |
-| Language               | TypeScript 5.9, strict, ESM (`"type": "module"`), `moduleResolution: NodeNext`, target `es2023`       |
-| CLI framework          | `commander` v15                                                                                        |
-| Build                  | `tsdown` plus post-build scripts run through `tsx`; `pnpm build`                                       |
-| Type checker           | `pnpm tsgo`, using `@typescript/native-preview` (the native TypeScript checker)                        |
-| Linter                 | Oxlint 1 (`--type-aware`); plugins: unicorn, typescript, oxc                                           |
-| Formatter              | Oxfmt 0.35 (`pnpm format:fix` runs `oxfmt --write`)                                                    |
-| Tests                  | Vitest 4 with V8 coverage; several config variants per subsystem                                       |
-| Web UI (control panel) | Lit 3 with `@lit/context` and `@lit-labs/signals`, in `ui/`                                            |
-| Validation             | `@sinclair/typebox` 0.34.52 (pinned: no `^` or `~`); `zod` v4                                          |
-| Logging                | `tslog` with the `src/logging/subsystem.ts` wrapper                                                    |
-| CLI UI                 | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`)                                            |
-| Mobile and macOS apps  | Swift 6; SwiftFormat and SwiftLint; `@Observable` and `@Bindable` (not `ObservableObject`)             |
+| Layer                  | Tool and version                                                                                |
+| ---------------------- | ----------------------------------------------------------------------------------------------- |
+| Runtime                | Node.js 24 or newer (ESM)                                                                       |
+| Package manager        | pnpm 10.23.0 (lockfile: `pnpm-lock.yaml`)                                                       |
+| Language               | TypeScript 5.9, strict, ESM (`"type": "module"`), `moduleResolution: NodeNext`, target `es2023` |
+| CLI framework          | `commander` v15                                                                                 |
+| Build                  | `tsdown` plus post-build scripts run through `tsx`; `pnpm build`                                |
+| Type checker           | `pnpm tsgo`, using `@typescript/native-preview` (the native TypeScript checker)                 |
+| Linter                 | Oxlint 1 (`--type-aware`); plugins: unicorn, typescript, oxc                                    |
+| Formatter              | Oxfmt 0.35 (`pnpm format:fix` runs `oxfmt --write`)                                             |
+| Tests                  | Vitest 4 with V8 coverage; several config variants per subsystem                                |
+| Web UI (control panel) | Lit 3 with `@lit/context` and `@lit-labs/signals`, in `ui/`                                     |
+| Validation             | `@sinclair/typebox` 0.34.52 (pinned: no `^` or `~`); `zod` v4                                   |
+| Logging                | `tslog` with the `src/logging/subsystem.ts` wrapper                                             |
+| CLI UI                 | `src/cli/progress.ts` (`osc-progress` and `@clack/prompts`)                                     |
+| Mobile and macOS apps  | Swift 6; SwiftFormat and SwiftLint; `@Observable` and `@Bindable` (not `ObservableObject`)      |
 
 Notes:
 
 - `extensions/` is excluded from Oxlint (`ignorePatterns`). Extensions manage their own lint.
 - `pnpm build` does not type-check. Run `pnpm tsgo` for that.
-- `pnpm check` runs format check, `tsgo`, `tsgo:web`, Oxlint, several custom lint scripts, and the Swift host environment policy check.
+- `pnpm check` runs format check, `tsgo`, `tsgo:web`, `tsgo:control`, Oxlint, several custom lint scripts, and the Swift host environment policy check.
+- `lint:extensions:no-core-tables` (part of `pnpm check`) runs `scripts/check-extension-core-table-access.ts`. It fails on any reference from `extensions/` to a core session table. Plugins own their tables (Postgres schema `plugin_<id>`, SQLite prefix `plugin_<id>_`) and read conversation data through the plugin-sdk; allowlist entries are test-harness only, each naming the finding that tracks its removal.
+- `lint:sessions:no-sessionkey-identity-parse` (part of `pnpm check`) runs `scripts/check-no-sessionkey-identity-parse.mjs`. It fails on non-test code under `src/`, `ui/src/`, `extensions/`, and `apps/` that derives channel, account, peer kind/id, group, or user identity from `sessionKey` text: splitting, regex matching, or identity-segment string probes on the key, or any access on `parseAgentSessionKey(...).rest`. Identity comes from the persisted session actor (and the SDK `runtimeIdentity` fields), never from parsing the key; `sessionKey` is an opaque bucket id. The rule lives in ADR 0081 (`dev-docs/adr/0081-config-independent-actor-identity.md`); plugin-facing guidance is [Session identity keying](https://docs.wednesdayai.dev/developers/plugins/session-identity-keying). A failure prints one `- <path>:<line> <rule>` line per violation (R1/R2/R3); a file the guard cannot scan reports `<path>:0 SCAN-ERROR` and must be fixed or reported, not ignored. The structural owner files (`src/sessions/session-key-utils.ts`, `src/routing/session-key.ts`, `src/config/sessions/ctx-identity-backfill.ts`, `src/shared/session-visibility.ts`, `apps/web/src/ui/session-key-shape.ts`) are exempt.
+- `lint:adr:unique-numbers` (part of `pnpm check`) runs `scripts/check-adr-numbers.mjs`. It fails when two files in `dev-docs/adr/` share a number, or when a file there is not a flat `<N>-<lowercase-slug>.md`. A new ADR's number is the WednesdayAI-core issue or PR number that carries the decision, zero-padded to 4 digits; ADRs 0001–0122 keep their sequential numbers (ADR 1577, `dev-docs/adr/1577-adr-numbers-are-github-numbers.md`). If the guard fails on your branch, rename your ADR to your issue or PR number.
 
-## Control UI decorators
+## Classic console decorators (`ui/`)
 
-The Control UI uses Lit with legacy decorators. The current Rollup parsing does not support the `accessor` fields that standard decorators require. When you add reactive fields, keep the legacy style:
+The classic Lit console (`ui/`, deprecated and served at `/classic`) uses Lit with legacy decorators. The current Rollup parsing does not support the `accessor` fields that standard decorators require. When you add reactive fields, keep the legacy style. The default console is Control UI v2 (`apps/control`), a React app with no decorators:
 
 ```ts
 @state() foo = "bar";
@@ -112,6 +125,6 @@ The root `tsconfig.json` sets `experimentalDecorators: true` and `useDefineForCl
 
 ## Related
 
-- [Testing](/developers/contributing/testing)
-- [Secure development](/developers/contributing/secure-development)
-- [Contributing](/developers/contributing)
+- [Testing](https://docs.wednesdayai.dev/developers/contributing/testing)
+- [Secure development](https://docs.wednesdayai.dev/developers/contributing/secure-development)
+- [Contributing](https://docs.wednesdayai.dev/developers/contributing)
