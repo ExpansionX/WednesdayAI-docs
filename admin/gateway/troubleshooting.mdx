@@ -125,47 +125,6 @@ Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
 
-## Plugin or skill install refuses
-
-Use this when `wednesdayai plugins install <id>` or `wednesdayai skills install <id>`
-exits with a refusal and nothing was installed. Catalog installs are verified, not
-trusted: compatibility first (no network), then Sigstore provenance, then digest. The
-full message reference is [Compatibility](/plugins/compatibility).
-
-```bash
-wednesdayai --version
-wednesdayai update
-wednesdayai plugins install <id>
-wednesdayai skills install <id>
-```
-
-Look for:
-
-- `plugin "<id>" <version> is not compatible with this host: <reason>. Run
-\`wednesdayai update\` to upgrade WednesdayAI, then retry.`(or the same shape with`skill`) — the catalog entry needs a newer host than you run.
-- `refusing to install "<id>" <version>: provenance verification failed: <detail>` —
-  the npm artifact has no SLSA attestation, was signed by a different workflow or ref,
-  or its digest differs from the catalog pin.
-- `could not load the Sigstore trusted root (needs https://tuf-repo-cdn.sigstore.dev): ...` —
-  the Sigstore trusted-root refresh could not reach the TUF mirror. Check network egress
-  to `https://tuf-repo-cdn.sigstore.dev` (corporate proxies and airgapped hosts are the
-  usual cause), then retry. Nothing was installed.
-- A leftover `.openclaw-install-stage-*` directory next to the install target
-  (`~/.openclaw/extensions/` or `~/.openclaw/skills/`) — the install failed and the stage
-  cleanup also failed. Stage directories are dot-prefixed and skipped by plugin and skill
-  discovery, so they are inert; it is safe to delete the leftover directory manually, and
-  the refusal error includes a `cleanup also failed: ...` note naming it.
-
-Fix options:
-
-1. For a compatibility refusal: run `wednesdayai update`, then retry the install.
-2. For a provenance refusal: do not retry from the bare npm spec. The artifact must be
-   re-published through the release workflow so a correct attestation exists.
-3. For a trusted-root or network failure: restore egress to
-   `https://tuf-repo-cdn.sigstore.dev` and npmjs, then retry.
-4. For a leftover stage directory: confirm no install is running, then remove
-   `.openclaw-install-stage-*` under the state extensions/skills roots.
-
 ## ACP startup identity reconcile fails at startup
 
 Use this when gateway logs include `startup identity reconcile failed for
@@ -564,6 +523,25 @@ The warn-level lines never echo the call arguments or the model-authored
 rejection text; the full error and the original arguments stay in the session
 transcript. Inspect them with `sessions_history` for that session, or read the
 session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
+
+The session reply carries a one-line warning for the same failure, for example
+`⚠️ 📝 Edit: in notes.md failed (not found)`. The suffix is a bounded failure
+class, not the raw error:
+
+- `(invalid tool arguments)` - the model called the tool wrong, for example an
+  edit whose `oldText` does not match the file.
+- `(not found)` - the target file or directory does not exist.
+- `(permission denied)` - the call was denied: errno codes (`EACCES`, `EPERM`,
+  `EROFS`) or a workspace/sandbox guard (`workspaceOnly`, symlink and hardlink
+  guards). This is the only class that means the filesystem refused access.
+- `(blocked by policy)` - a policy, plugin hook or loop guard blocked the call.
+- A bare `failed` with no suffix means the error fit no known class.
+
+The path in the warning echoes the model's own argument and may not be a real
+path. Raw error text (including the errno and resolved path) is shown instead of
+the class only when verbose tool details are on. `exec`/`bash` failures stay out
+of the chat at default verbosity; their full output is in the journal and the
+session transcript.
 
 The file tools accept the argument shapes models commonly send: `edit`,
 `write` and `read` take `path` and also accept `file_path`; `edit` additionally
