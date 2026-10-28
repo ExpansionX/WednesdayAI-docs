@@ -125,46 +125,24 @@ Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
 
-## Plugin or skill install refuses
+## Plugin hook never fires
 
-Use this when `wednesdayai plugins install <id>` or `wednesdayai skills install <id>`
-exits with a refusal and nothing was installed. Catalog installs are verified, not
-trusted: compatibility first (no network), then Sigstore provenance, then digest. The
-full message reference is [Compatibility](/plugins/compatibility).
+Use this when a plugin hook handler never runs and the gateway startup log
+shows a `PLUGIN_HOOK_NOT_DISPATCHED` warning, for example:
 
-```bash
-wednesdayai --version
-wednesdayai update
-wednesdayai plugins install <id>
-wednesdayai skills install <id>
+```
+[plugins] startup: 0 loaded, 1 warning — see warnings below
+  ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream openclaw hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
+    → See the hook parity map: https://docs.wednesdayai.dev/developers/plugins/hook-parity
 ```
 
-Look for:
-
-- `plugin "<id>" <version> is not compatible with this host: <reason>. Run
-\`wednesdayai update\` to upgrade WednesdayAI, then retry.`(or the same shape with`skill`) — the catalog entry needs a newer host than you run.
-- `refusing to install "<id>" <version>: provenance verification failed: <detail>` —
-  the npm artifact has no SLSA attestation, was signed by a different workflow or ref,
-  or its digest differs from the catalog pin.
-- `could not load the Sigstore trusted root (needs https://tuf-repo-cdn.sigstore.dev): ...` —
-  the Sigstore trusted-root refresh could not reach the TUF mirror. Check network egress
-  to `https://tuf-repo-cdn.sigstore.dev` (corporate proxies and airgapped hosts are the
-  usual cause), then retry. Nothing was installed.
-- A leftover `.openclaw-install-stage-*` directory next to the install target
-  (`~/.openclaw/extensions/` or `~/.openclaw/skills/`) — the install failed and the stage
-  cleanup also failed. Stage directories are dot-prefixed and skipped by plugin and skill
-  discovery, so they are inert; it is safe to delete the leftover directory manually, and
-  the refusal error includes a `cleanup also failed: ...` note naming it.
-
-Fix options:
-
-1. For a compatibility refusal: run `wednesdayai update`, then retry the install.
-2. For a provenance refusal: do not retry from the bare npm spec. The artifact must be
-   re-published through the release workflow so a correct attestation exists.
-3. For a trusted-root or network failure: restore egress to
-   `https://tuf-repo-cdn.sigstore.dev` and npmjs, then retry.
-4. For a leftover stage directory: confirm no install is running, then remove
-   `.openclaw-install-stage-*` under the state extensions/skills roots.
+Per-plugin warnings, including hook registration ones, appear under the
+`[plugins] startup:` summary line. The warning means the plugin registered a
+hook name that this gateway does not dispatch, so the handler is ignored while
+the plugin keeps loading. Run `wednesdayai plugins status` to see the warning
+and its remediation, then check the [hook parity map](/plugins/hook-parity) for
+the WednesdayAI hook name to register instead. The plugin shows as `degraded`
+in `wednesdayai plugins list`.
 
 ## ACP startup identity reconcile fails at startup
 

@@ -1,0 +1,259 @@
+---
+summary: "A2A agent-to-agent dialogue between WednesdayAI gateways and A2A 1.0 agents"
+read_when:
+  - Connecting two WednesdayAI gateways so their agents can talk to each other
+  - Setting up gateway-to-gateway A2A over a tailnet
+  - Debugging A2A routing, tokens, or reply forwarding
+title: "A2A"
+---
+
+# A2A (plugin)
+
+Status: supported via plugin as a direct-message channel for agent-to-agent dialogue using
+the A2A 1.0 JSON-RPC protocol. Two WednesdayAI gateways (or any A2A 1.0 agent) can hold
+isolated, per-item conversations. Text only.
+
+## Plugin required
+
+A2A ships as a bundled plugin. The gateway enables it at startup once `channels.a2a` is
+configured; to enable it explicitly:
+
+```json5
+{
+  plugins: { entries: { a2a: { enabled: true } } },
+}
+```
+
+Details: [Plugins](/tools/plugin)
+
+## Quick setup
+
+A2A connects gateways, so a working setup involves two sides. The example below uses two
+gateways named `astro` and `tardis` on one Tailscale tailnet; both hosts run the
+WednesdayAI gateway and each configures the other as a peer.
+
+1. Put both hosts on one tailnet (or any private network with TLS). Do not expose the A2A
+   route publicly; see [Security](#security).
+2. Expose the gateway with Tailscale Serve (HTTPS in front of the local gateway), or bind
+   the gateway to the tailnet interface with `gateway.bind: "tailnet"`.
+3. Generate one bearer token per direction on each side:
+   `openssl rand -hex 32`. Store them as env vars, for example `A2A_TARDIS_TOKEN` and
+   `A2A_ASTRO_TOKEN`.
+4. Configure `channels.a2a` on both gateways. `astro` sends to `tardis` with
+   `peers.tardis.url`; `tardis` sends back with `peers.astro.url`.
+5. Restart the gateway once to load the plugin. Later changes under `channels.a2a`
+   hot-reload the channel, so token rotation does not need a restart.
+
+Minimal config on `astro` (`~/.openclaw/openclaw.json`):
+
+```json5
+{
+  channels: {
+    a2a: {
+      enabled: true,
+      advertisedUrl: "https://astro.<tailnet>.ts.net",
+      replyTimeoutMs: 120000,
+      rateLimitPerMinute: 30,
+      peers: {
+        tardis: {
+          token: "${A2A_TARDIS_TOKEN}", // token tardis presents to astro
+          url: "https://tardis.<tailnet>.ts.net/a2a/v1",
+          outboundToken: "${A2A_ASTRO_TOKEN}", // token astro presents to tardis
+          replyDelivery: "message",
+        },
+      },
+    },
+  },
+}
+```
+
+Mirror it on `tardis` with a peer named `astro` (`token: "${A2A_ASTRO_TOKEN}"`,
+`url: "https://astro.<tailnet>.ts.net/a2a/v1"`, `outboundToken: "${A2A_TARDIS_TOKEN}"`).
+
+Routes served by each gateway:
+
+- `POST /a2a/v1` — JSON-RPC (`SendMessage`, `GetTask`, plus A2A 0.3 dotted aliases such as
+  `message/send`).
+- `GET /.well-known/agent-card.json` and `GET /.well-known/agent.json` — unauthenticated
+  agent card listing agent ids only.
+
+Send manually to verify the round trip:
+
+```bash
+wednesdayai message send --channel a2a --target tardis:factory.WednesdayAI-core.1234 --message "ping"
+```
+
+## Configuration reference
+
+| Key                                       | Default                        | Description                                                                                                         |
+| ----------------------------------------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------- |
+| `channels.a2a.enabled`                    | `true`                         | Enable/disable channel startup.                                                                                     |
+| `channels.a2a.configWrites`               | `true`                         | Allow channel-initiated config writes.                                                                              |
+| `channels.a2a.advertisedUrl`              | derived from the `Host` header | Origin published in the agent card, for example `https://astro.<tailnet>.ts.net`.                                   |
+| `channels.a2a.replyTimeoutMs`             | `120000`                       | How long `SendMessage` waits for the agent reply before returning the task (5s-600s).                               |
+| `channels.a2a.rateLimitPerMinute`         | `30`                           | Requests per peer per minute; `0` disables the limit.                                                               |
+| `channels.a2a.exposeAgents`               | `[]`                           | Agent ids listed in the agent card. Empty lists every configured agent (or the default agent when none are listed). |
+| `channels.a2a.peers.<name>.token`         | required                       | Bearer token this peer must present. Peer names match `^[a-z0-9][a-z0-9._-]{0,63}$`; `a2a` is reserved.             |
+| `channels.a2a.peers.<name>.url`           | none                           | Peer RPC endpoint (`.../a2a/v1`); required to send outbound messages.                                               |
+| `channels.a2a.peers.<name>.outboundToken` | none                           | Bearer token sent with outbound requests to this peer.                                                              |
+| `channels.a2a.peers.<name>.replyDelivery` | `"task"`                       | `"task"` returns the reply as the RPC task result; `"message"` additionally forwards it back to the peer.           |
+
+There is a single default account; no `accounts` map.
+
+## Session isolation
+
+Each inbound message gets a session key built from the peer name and the A2A `contextId`
+(dm scope `per-account-channel-peer`). Two peers never share a session, and the same peer
+with two `contextId`s gets two sessions, including ids that differ only in case. Messages
+for one item run one after another, so each gets its own reply. A `message` send to
+`<peer>:<contextId>` is recorded in the same item session as the replies.
+
+Peer text is command-inert: messages starting with `/` are rejected
+(`TASK_STATE_REJECTED`), and slash commands, `!` bash, inline directives and reset/abort
+words inside a message are never executed, even when `commands.allowFrom` allows every
+sender.
+
+## Routing a peer to an agent
+
+Without a binding, peer traffic goes to the default agent. Bind a peer explicitly:
+
+```json5
+{
+  bindings: [{ agentId: "sdm", match: { channel: "a2a", peer: { kind: "direct", id: "tardis" } } }],
+}
+```
+
+The plugin passes a peer id built from `<peer>` and the `contextId`, with `<peer>` as the
+parent peer, so a binding on the bare peer name matches every context of that peer.
+
+Handler choice per peer:
+
+- **Bound to a restricted agent (recommended, for example `sdm`):**
+  - Peer text runs only with that agent's tools and workspace. Give it read access to
+    docs, memory search and the `message` tool, and no `exec`.
+  - Escalations go through that agent's own channel binding (for example a Discord
+    `#factory-queries` channel or a Telegram topic). A human answers there, and the agent
+    relays with `message` to `a2a:<peer>:<ctx>`.
+  - Blast radius if the peer is compromised: that agent's tools only.
+  - Cost: the bound agent does not see `main`'s private memory unless memory is shared.
+- **Unbound (the default agent catches it):**
+  - Best context, and the human replies in their normal DM.
+  - But every peer message runs with the default agent's full toolset (including `exec`),
+    and its workload gains a new untrusted input. Choose this only if the default agent is
+    already tool-restricted.
+
+## Item dialogues and the contextId convention
+
+One A2A `contextId` per item gives one isolated session per item on each gateway. Targets
+are `<peer>[:<contextId>]`; omitting the context uses `default`.
+
+For ticket-driven workflows use `factory.<repo>.<issue>`, for example
+`tardis:factory.WednesdayAI-core.1234`. The factory can then hold one thread of dialogue
+per issue and the session history stays scoped to that item.
+
+## Reply forwarding and loop cap
+
+- Default (`replyDelivery: "task"`): the reply is returned to the caller as the JSON-RPC
+  task result. Nothing is forwarded.
+- With `replyDelivery: "message"`: final replies are also sent back to the peer
+  automatically (the peer needs a `url`). Each forwarded reply carries a hop counter in
+  the `wednesdayai.hop` metadata; forwarding stops once
+  `session.agentToAgent.maxPingPongTurns` (default `5`, max `5`) is reached, and an empty
+  reply (`NO_REPLY`) ends the exchange. Failed forwards are logged and the task stays
+  completed.
+
+## Security
+
+- **Tailnet only.** Run the A2A route on a private network (WireGuard tailnet or
+  equivalent) with Tailscale Serve in front of the gateway, or `gateway.bind: "tailnet"`.
+  Never expose `/a2a/v1` through Tailscale Funnel or any public proxy.
+- **Per-peer tokens in both directions.** `peers.<name>.token` authenticates inbound
+  requests from that peer; `peers.<name>.outboundToken` authenticates this gateway to the
+  peer. Tokens are compared constant-time (hashed, all peers checked) and invalid tokens
+  return `401`. Changing `channels.a2a` restarts only the A2A channel, so rotating a token
+  needs no gateway restart; tasks still running at that moment fail.
+- **Rate limiting.** Requests are rate-limited per peer (`rateLimitPerMinute`, default
+  30, `0` disables).
+- **No commands.** Peer text never runs commands, bash, directives or reset/abort
+  triggers, regardless of `commands.allowFrom`.
+- **Bounded egress.** Outbound requests are SSRF-guarded and pinned to the peer url host;
+  redirects are not followed. The bound agent's toolset is the blast radius of a
+  compromised peer.
+- The agent card endpoint is unauthenticated by design and lists agent ids only.
+- Requests are capped: 1 MiB body (`413`), 64 KiB text per message (longer text is
+  truncated with a marker), and batches of at most 30. At most 500 tasks are kept;
+  finished tasks are evicted oldest first, and when 500 are still running, new
+  `SendMessage` calls fail with `-32000` "Task capacity reached".
+
+## Limitations
+
+- Text only; no media or file parts.
+- No streaming, push notifications, or task cancellation; push-config methods fail with
+  `-32003` and cancel with `-32004`.
+- Tasks live in memory: a gateway restart fails in-flight tasks (`TASK_STATE_FAILED`).
+- HMAC request signing is not implemented; bearer tokens over an encrypted tailnet are
+  the current auth model.
+- A run that fails locally (for example a missing provider key) fails the task
+  (`TASK_STATE_FAILED`, "Agent run failed"); the local error text is never sent to the
+  peer.
+
+## Factory example
+
+A factory gateway (`tardis`) asks a production gateway (`astro`) when a unit blocks, and
+resumes on the relayed answer.
+
+On `astro` (answers, bound to the tool-restricted `sdm` agent):
+
+```json5
+{
+  bindings: [{ agentId: "sdm", match: { channel: "a2a", peer: { kind: "direct", id: "tardis" } } }],
+  channels: {
+    a2a: {
+      enabled: true,
+      peers: {
+        tardis: {
+          token: "${A2A_TARDIS_TOKEN}",
+          url: "https://tardis.<tailnet>.ts.net/a2a/v1",
+          outboundToken: "${A2A_ASTRO_TOKEN}",
+          replyDelivery: "message",
+        },
+      },
+    },
+  },
+}
+```
+
+On `tardis` (asks, bound to the `factory` agent):
+
+```json5
+{
+  bindings: [
+    { agentId: "factory", match: { channel: "a2a", peer: { kind: "direct", id: "astro" } } },
+  ],
+  channels: {
+    a2a: {
+      enabled: true,
+      peers: {
+        astro: {
+          token: "${A2A_ASTRO_TOKEN}",
+          url: "https://astro.<tailnet>.ts.net/a2a/v1",
+          outboundToken: "${A2A_TARDIS_TOKEN}",
+        },
+      },
+    },
+  },
+}
+```
+
+Manual send from the factory side:
+
+```bash
+wednesdayai message send --channel a2a --target astro:factory.WednesdayAI-core.1234 --message "..."
+```
+
+## Related
+
+- [Channel routing](/channels/channel-routing)
+- [Multi-agent routing](/concepts/multi-agent)
+- [Configuration](/gateway/configuration)
+- [Troubleshooting](/channels/troubleshooting)

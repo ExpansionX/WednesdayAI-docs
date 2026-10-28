@@ -114,14 +114,16 @@ A person links their own chat account without operator involvement:
 Redeeming the code links the sender's `<channel>:<id>` to the linked person's identity **and**
 approves the pairing code, so a linked person can vouch for their own chat account when the channel
 runs `dmPolicy: "pairing"`. The code grants nothing on its own: sending `/link` only queues a
-request, and the claimant must already be a linked person on a paired browser.
+request, and the claimant must already be a linked person on a paired browser. Only codes issued
+by `/link` are claimable: the code a stranger receives from the ordinary `dmPolicy: "pairing"` reply
+is not, so admitting a new sender stays an operator decision (`wednesdayai pairing approve`).
 
 The web client shows these errors:
 
 - Unknown or expired code: `That code isn't valid or has expired.`
-- Too many attempts: `Too many link-code attempts. Try again later.` (5 attempts per device and 15
+- Too many attempts: `Too many attempts. Try again in a few minutes.` (5 attempts per device and 15
   per person per minute, then a 5-minute lockout)
-- Conflict: `<value> is already linked to another person; ask them to unlink it first.`
+- Conflict: `That account is already linked to someone else. Ask your administrator.`
 
 ### 4. OIDC sign-in
 
@@ -164,7 +166,10 @@ Use "wednesdayai devices link <deviceId> --identity <name>" for devices.
 `wednesdayai devices link <deviceId> --identity <name>` moves the `device:<deviceId>` value to the
 target person (linking implicitly unlinks it from the previous person). `devices unlink` and
 `devices remove` drop the value. These device commands are unchanged by the identity command set.
-See [devices](/cli/devices).
+The [Control UI v2](/web/control-ui-v2) console can do the same from the **Nodes & devices** page
+(Fleet group): link a paired device to a person, change its person, or unlink it, over the
+`device.identity.link` and `device.identity.unlink` RPCs (both need `operator.admin`). See
+[devices](/cli/devices).
 
 ## Gateway RPCs
 
@@ -186,14 +191,15 @@ model.
 
 ## What logout does
 
-**Log out** in the web client calls `identity.logout`, which:
+**Log out** in the web client asks the gateway to run `identity.logout` (waiting up to 3 seconds),
+then always clears the browser's own credential and keypair. When the call reaches the gateway it:
 
 - removes the paired device server side,
-- unlinks its `device:<deviceId>` value from every identity,
-- clears the stored credential **and** the browser keypair.
+- unlinks its `device:<deviceId>` value from every identity.
 
 The unlink always runs, even when the pairing removal failed: a device whose credential is gone
-must not keep its link. The next sign-in pairs a fresh device. The keypair is rotated because a
+must not keep its link. If the gateway is unreachable, the browser still forgets itself but the
+paired device and its link remain; remove them with `wednesdayai devices remove <deviceId>`. The next sign-in pairs a fresh device. The keypair is rotated because a
 paired browser belongs to one person: keeping it would let the next person inherit the previous
 person's link.
 

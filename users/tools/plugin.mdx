@@ -1039,41 +1039,47 @@ api.on(
 
 **`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `message:received`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
 
-Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a warning naming the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Warnings surface as `PLUGIN_REGISTER_ERROR` diagnostics in `openclaw plugins doctor`, `openclaw plugins status`, and the gateway startup report; the plugin keeps loading.
+Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a `PLUGIN_HOOK_NOT_DISPATCHED` warning — an upstream openclaw hook name is reported as such with its disposition and replacement hook, and the plugin then shows as `degraded` in `wednesdayai plugins list` (see the [hook parity map](/plugins/hook-parity)) — otherwise the warning names the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Warnings surface as `PLUGIN_REGISTER_ERROR` diagnostics in `openclaw plugins doctor`, `openclaw plugins status`, and the gateway startup report; the plugin keeps loading.
 
 Available hook names and their event/context types are defined in `PluginHookHandlerMap` in the plugin SDK types:
 
-| Hook name                  | Event type                              | Returnable result                       |
-| -------------------------- | --------------------------------------- | --------------------------------------- |
-| `before_model_resolve`     | `PluginHookBeforeModelResolveEvent`     | `{ modelOverride?, providerOverride? }` |
-| `before_prompt_build`      | `PluginHookBeforePromptBuildEvent`      | `{ systemPrompt?, prependContext? }`    |
-| `before_context_send`      | `PluginHookBeforeContextSendEvent`      | `{ messages? }`                         |
-| `before_agent_start`       | `PluginHookBeforeAgentStartEvent`       | model + prompt build result             |
-| `llm_input`                | `PluginHookLlmInputEvent`               | void                                    |
-| `llm_output`               | `PluginHookLlmOutputEvent`              | void                                    |
-| `agent_end`                | `PluginHookAgentEndEvent`               | void                                    |
-| `before_compaction`        | `PluginHookBeforeCompactionEvent`       | void                                    |
-| `after_compaction`         | `PluginHookAfterCompactionEvent`        | void                                    |
-| `before_reset`             | `PluginHookBeforeResetEvent`            | void                                    |
-| `message_received`         | `PluginHookMessageReceivedEvent`        | void                                    |
-| `message_sending`          | `PluginHookMessageSendingEvent`         | `{ content?, cancel? }`                 |
-| `message_sent`             | `PluginHookMessageSentEvent`            | void                                    |
-| `before_tool_call`         | `PluginHookBeforeToolCallEvent`         | `{ params?, block?, blockReason? }`     |
-| `after_tool_call`          | `PluginHookAfterToolCallEvent`          | void                                    |
-| `tool_result_persist`      | `PluginHookToolResultPersistEvent`      | `{ message? }`                          |
-| `before_message_write`     | `PluginHookBeforeMessageWriteEvent`     | `{ block?, message? }`                  |
-| `session_start`            | `PluginHookSessionStartEvent`           | void                                    |
-| `session_end`              | `PluginHookSessionEndEvent`             | void                                    |
-| `subagent_spawning`        | `PluginHookSubagentSpawningEvent`       | `{ status, threadBindingReady? }`       |
-| `subagent_delivery_target` | `PluginHookSubagentDeliveryTargetEvent` | `{ origin? }`                           |
-| `subagent_spawned`         | `PluginHookSubagentSpawnedEvent`        | void                                    |
-| `subagent_ended`           | `PluginHookSubagentEndedEvent`          | void                                    |
-| `gateway_start`            | `PluginHookGatewayStartEvent`           | void                                    |
-| `gateway_stop`             | `PluginHookGatewayStopEvent`            | void                                    |
-| `transform_llm_input`      | `PluginHookTransformLlmInputEvent`      | `{ messages }`                          |
-| `transform_llm_output`     | `PluginHookTransformLlmOutputEvent`     | `{ assistantTexts? }`                   |
-| `agent_idle`               | `PluginHookAgentIdleEvent`              | void                                    |
-| `task_outcome`             | `PluginHookTaskOutcomeEvent`            | void                                    |
+| Hook name                  | Event type                              | Returnable result                                                                        |
+| -------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------- |
+| `before_model_resolve`     | `PluginHookBeforeModelResolveEvent`     | `{ modelOverride?, providerOverride? }`                                                  |
+| `before_prompt_build`      | `PluginHookBeforePromptBuildEvent`      | `{ systemPrompt?, prependContext? }`                                                     |
+| `before_context_send`      | `PluginHookBeforeContextSendEvent`      | `{ messages? }`                                                                          |
+| `before_agent_start`       | `PluginHookBeforeAgentStartEvent`       | model + prompt build result                                                              |
+| `llm_input`                | `PluginHookLlmInputEvent`               | void                                                                                     |
+| `llm_output`               | `PluginHookLlmOutputEvent`              | void                                                                                     |
+| `model_call_ended`         | `PluginHookModelCallEndedEvent`         | void; handlers may update `usage`                                                        |
+| `agent_end`                | `PluginHookAgentEndEvent`               | void                                                                                     |
+| `before_compaction`        | `PluginHookBeforeCompactionEvent`       | void                                                                                     |
+| `after_compaction`         | `PluginHookAfterCompactionEvent`        | void                                                                                     |
+| `before_reset`             | `PluginHookBeforeResetEvent`            | void                                                                                     |
+| `message_received`         | `PluginHookMessageReceivedEvent`        | void                                                                                     |
+| `message_sending`          | `PluginHookMessageSendingEvent`         | `{ content?, cancel? }`                                                                  |
+| `message_sent`             | `PluginHookMessageSentEvent`            | void                                                                                     |
+| `before_tool_call`         | `PluginHookBeforeToolCallEvent`         | `{ params?, block?, blockReason? }`                                                      |
+| `after_tool_call`          | `PluginHookAfterToolCallEvent`          | void                                                                                     |
+| `tool_result_persist`      | `PluginHookToolResultPersistEvent`      | `{ message? }`                                                                           |
+| `before_message_write`     | `PluginHookBeforeMessageWriteEvent`     | `{ block?, message? }`                                                                   |
+| `session_start`            | `PluginHookSessionStartEvent`           | void                                                                                     |
+| `session_end`              | `PluginHookSessionEndEvent`             | void                                                                                     |
+| `subagent_spawning`        | `PluginHookSubagentSpawningEvent`       | `{ status, threadBindingReady? }`                                                        |
+| `subagent_delivery_target` | `PluginHookSubagentDeliveryTargetEvent` | `{ origin? }`                                                                            |
+| `subagent_spawned`         | `PluginHookSubagentSpawnedEvent`        | void                                                                                     |
+| `subagent_ended`           | `PluginHookSubagentEndedEvent`          | void                                                                                     |
+| `gateway_start`            | `PluginHookGatewayStartEvent`           | void                                                                                     |
+| `gateway_stop`             | `PluginHookGatewayStopEvent`            | void                                                                                     |
+| `transform_llm_input`      | `PluginHookTransformLlmInputEvent`      | `{ messages }`                                                                           |
+| `transform_llm_output`     | `PluginHookTransformLlmOutputEvent`     | `{ assistantTexts? }`                                                                    |
+| `storage.afterAppend`      | `PluginHookStorageAfterAppendEvent`     | void                                                                                     |
+| `context.collect`          | `PluginHookContextCollectEvent`         | `PromptContribution` or void                                                             |
+| `context.project`          | `PluginHookContextProjectEvent`         | `{ messages?, projection?, contribution?, failedPluginIds? }` or void                    |
+| `context.prune`            | `PluginHookContextPruneEvent`           | `{ messages?, dropped?, contribution?, compactionHandled?, freezeToolResults? }` or void |
+| `compaction.plan`          | `PluginHookCompactionPlanEvent`         | `{ plan?, messages?, contribution? }` or void                                            |
+| `agent_idle`               | `PluginHookAgentIdleEvent`              | void                                                                                     |
+| `task_outcome`             | `PluginHookTaskOutcomeEvent`            | void                                                                                     |
 
 `agent_idle` fires from the core idle monitor (`tasks.idle` / `tasks.schedule` config) when an
 agent crosses the idle threshold or a schedule window opens; the event carries
@@ -2124,6 +2130,13 @@ entry should not by itself require installing the bundled plugin into
 
 **Gateway method not callable after `api.registerGatewayMethod`**
 Method names must use `pluginId.action` form and must not conflict with core gateway methods. Conflicting names are rejected at load time with a diagnostic. Check gateway startup logs for `registerGatewayMethod` errors. Also confirm the plugin is enabled and the gateway restarted after the plugin change.
+
+**Plugin hook never fires and logs show `PLUGIN_HOOK_NOT_DISPATCHED`**
+The plugin registered a hook name this gateway does not dispatch, so the
+handler is ignored and the plugin keeps loading. Run `wednesdayai plugins
+status` for the warning and its remediation, and check the
+[hook parity map](/plugins/hook-parity) for the dispatched name to register
+instead (with `api.on` for typed hooks).
 
 **`api.on` hook not firing for a specific channel or trigger**
 Hook handlers receive all matching events — filtering by `channelId` or `trigger` is the handler's responsibility. Add a `console.log` at the top of the handler to confirm it fires at all. Then gate on `ctx.channelId` or `ctx.trigger` as needed. For `before_tool_call` blocks, ensure `priority` is high enough that your handler runs before others that might short-circuit.
