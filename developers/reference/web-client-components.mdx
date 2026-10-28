@@ -15,6 +15,9 @@ sources:
   - apps/web/src/providers/web-client-runtime.ts
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/app/completed-history-boundary.ts
+  - apps/web/src/app/completed-history-matching.ts
+  - apps/web/src/app/completed-history-reconcile.ts
+  - apps/web/src/app/completed-history-placement.ts
   - apps/web/src/app/use-chat-history.ts
   - apps/web/src/app/use-chat-send.ts
   - apps/web/src/ui/Composer.tsx
@@ -232,6 +235,14 @@ the user turn (stored as the `openclaw:ui-action` custom entry) and renders as t
 `[ui-action]` text. Both must survive a reload, which is why they persist as history rows rather
 than in a scratch store.
 
+Rendering follows the same identity: `Thread` builds a `surfaceByCall` map keyed by
+`toolCallIdentity` (run key plus call id), stored refs first, and `AssistantMessage` renders a
+surface inside its turn right after the tool block that published it, in every tool display mode.
+A live ref (`LiveSurfaceRef` in `state/surfaces.ts`) carries the `runId` and `toolCallId` from
+`chat.activity`; a live ref whose tool step is not drawn in the thread (another device's run, or
+the run a `uiAction` form submission starts, which the runtime does not track as its own) does not
+render until the turn lands from history.
+
 ## Session vocabulary
 
 The UI says **chat**; the code says **session**. The gateway's `sessions.*` rows are what the user
@@ -382,28 +393,28 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
 client-chat-v3 P2 made the assistant and chat controls live and split `AppShell.tsx` into one hook or
 provider module per concern, each testable without a gateway connection.
 
-| Concern                          | Code                                                                                                                                       | Gateway calls                                                                                              |
-| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
-| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                                                                   | `agents.list`, `sessions.direct`                                                                           |
-| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                                                             | `models.list`, `sessions.patch {model}`                                                                    |
-| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                                                             | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
-| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                                                                | none; browser-local preferences                                                                            |
-| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                                                                | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
-| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                 | `chat.send {replyToId, expectedLeafEntryId, location?}`, `chat.abort`                                      |
-| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                            | `sessions.steer {location?}`, `sessions.runs.list`                                                         |
-| History, older pages, chat leaf  | `app/use-chat-history.ts`, `providers/leaf-tracking.ts`                                                                                    | `chat.history {before}`                                                                                    |
-| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                 | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
-| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                    | `agents.list` `identity.color`                                                                             |
-| Assistant names and avatars      | `app/AppShell.tsx`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                   | `agents.list` `identity.name`, `identity.emoji`                                                            |
-| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                 | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
-| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                           | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
-| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                       | `tts.readAloud.status`, `tts.speak`                                                                        |
-| Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts` | `tts.readAloud.status`, `tts.speak`                                                                        |
-| Dictation auto-send pause        | `ui/AutoSendDelayMenu.tsx`, `providers/auto-send-delay-preference.ts`, `app/use-dictate.ts`                                                | none; browser-local preference                                                                             |
-| Screen wake lock                 | `app/use-screen-wake-lock.ts`                                                                                                              | none; browser Screen Wake Lock API                                                                         |
-| Share location                   | `providers/device-location.ts`, `app/use-device-location.ts`, `ui/Composer.tsx` (`composer-share-location`)                                | none; location rides `chat.send` / `sessions.steer`                                                        |
-| Paste, rich copy, image prep     | `ui/use-composer-paste.ts`, `ui/markdown/html-to-markdown.ts`, `ui/clipboard-html.ts`, `providers/image-resize.ts`                         | none (browser clipboard and canvas APIs)                                                                   |
-| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                                                               | none                                                                                                       |
+| Concern                          | Code                                                                                                                                                                     | Gateway calls                                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                                                                                                 | `agents.list`, `sessions.direct`                                                                           |
+| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                                                                                           | `models.list`, `sessions.patch {model}`                                                                    |
+| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                                                                                           | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
+| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                                                                                              | none; browser-local preferences                                                                            |
+| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                                                                                              | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
+| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                                               | `chat.send {replyToId, expectedLeafEntryId, location?}`, `chat.abort`                                      |
+| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                                                          | `sessions.steer {location?}`, `sessions.runs.list`                                                         |
+| History, older pages, chat leaf  | `app/use-chat-history.ts`, `app/completed-history-matching.ts`, `app/completed-history-reconcile.ts`, `app/completed-history-placement.ts`, `providers/leaf-tracking.ts` | `chat.history {before}`                                                                                    |
+| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                                               | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
+| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                                                  | `agents.list` `identity.color`                                                                             |
+| Assistant names and avatars      | `app/AppShell.tsx`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                                                 | `agents.list` `identity.name`, `identity.emoji`                                                            |
+| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                                               | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
+| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                                                         | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
+| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                                                     | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts`                               | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Dictation auto-send pause        | `ui/AutoSendDelayMenu.tsx`, `providers/auto-send-delay-preference.ts`, `app/use-dictate.ts`                                                                              | none; browser-local preference                                                                             |
+| Screen wake lock                 | `app/use-screen-wake-lock.ts`                                                                                                                                            | none; browser Screen Wake Lock API                                                                         |
+| Share location                   | `providers/device-location.ts`, `app/use-device-location.ts`, `ui/Composer.tsx` (`composer-share-location`)                                                              | none; location rides `chat.send` / `sessions.steer`                                                        |
+| Paste, rich copy, image prep     | `ui/use-composer-paste.ts`, `ui/markdown/html-to-markdown.ts`, `ui/clipboard-html.ts`, `providers/image-resize.ts`                                                       | none (browser clipboard and canvas APIs)                                                                   |
+| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                                                                                             | none                                                                                                       |
 
 ### Completed history boundary and transcript controls
 
@@ -642,10 +653,16 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   assistant/execution data but admits matched newer durable users. Those rows keep their client IDs
   and run ownership; the queued marker clears on the runtime's start event, not on storage adoption.
   The merge retains newer partials, optimistic users, queued turns, older pages and errors without
-  advancing the leaf guard. Legacy identity-less matches are one-to-one FIFO within durable-entry
-  anchor intervals, so identical distinct turns remain distinct. Scoped loaded-history and
-  older-page IDs distinguish replaceable heads from optimistic rows and preserve imported legacy
-  entries. Superseded older-page responses cannot splice into a replacement load.
+  advancing the leaf guard. Kept client notices (run errors, failed sends) park right after the run
+  that precedes them (that run's last stored row, or the matched row, extended to the run's last
+  stored row when the matched row sits earlier), never later than the next matched row, so a later
+  reply landing does not push the notice below that reply. With no anchor the notice falls back to
+  the next matched row, otherwise the tail; once an earlier row has gone to the tail the notice
+  follows it there.
+  Legacy identity-less matches are one-to-one FIFO within durable-entry anchor intervals, so
+  identical distinct turns remain distinct. Scoped loaded-history and older-page IDs distinguish
+  replaceable heads from optimistic rows and preserve imported legacy entries. Superseded
+  older-page responses cannot splice into a replacement load.
   Events received before `chat.send` acknowledges its run are buffered for exact attribution.
   A rejected send recovers the foreign question/reply through the non-destructive merge, including
   first-send-created chats, without deleting its own optimistic question or refusal. A durable foreign
