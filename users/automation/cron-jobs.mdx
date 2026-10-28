@@ -154,7 +154,10 @@ session backends. On Postgres, every epoch-ms column (`created_at_ms`,
 `updated_at_ms`, `next_run_at_ms`, `running_at_ms`, `last_run_at_ms`,
 `last_duration_ms`, `last_failure_alert_at_ms`) is `BIGINT`. A guarded
 `ALTER ... TYPE BIGINT` runs on Gateway start if an older table still has
-32-bit `integer` on those columns. On first start after upgrade, the Gateway imports
+32-bit `integer` on those columns. Definitions also carry a `created_by_json`
+column (SQLite `TEXT`, Postgres `JSONB`) holding the `createdBy` provenance
+stamp (see [Jobs](#jobs)); the column is added automatically on Gateway start.
+On first start after upgrade, the Gateway imports
 `~/.openclaw/cron/jobs.json` (or `cron.store` if you set it) into that table
 with every row `migrated = false`, then the table is the source of truth.
 
@@ -211,6 +214,11 @@ A cron job is a stored record with:
 - optional **delivery mode** (`announce`, `webhook`, or `none`).
 - optional **agent binding** (`agentId`): run the job under a specific agent; if
   missing or unknown, the gateway falls back to the default agent.
+- a **creator stamp** (`createdBy`), set by the Gateway when the job is created: the creating
+  connection's `clientId`, plus `clientMode`, `clientDisplayName`, `clientVersion`, and
+  `deviceId` when the client reported them. The CLI shows up as `cli`, the agent `cron` tool as
+  `gateway-client/agent`, and the Web UI as `openclaw-control-ui`. It is read-only (`cron.add`
+  and `cron.update` reject it), diagnostic only, and absent on jobs created before it existed.
 
 Jobs are identified by a stable `jobId` (used by CLI/Gateway APIs).
 In agent tool calls, `jobId` is canonical; legacy `id` is accepted for compatibility.
@@ -621,6 +629,8 @@ Notes:
 - `wakeGate` is valid only with `sessionTarget: "main"`.
 - Optional fields: `agentId`, `identity` (operator RPC only — not accepted from the agent-facing cron
   tool), `description`, `enabled`, `deleteAfterRun` (defaults to true for `at`), `delivery`.
+- `createdBy` is not accepted on `cron.add` or `cron.update`: the Gateway stamps it from the
+  creating connection and rejects a client-supplied value with `INVALID_REQUEST`.
 - `identity`: a `session.identityLinks` key (matched case-insensitively). Only accepted on
   `sessionTarget: "isolated"` with `payload.kind: "agentTurn"`; the call is rejected on any other
   shape. On match, runs carry that canonical identity as the requester identity
@@ -664,6 +674,8 @@ Notes:
 
 - Job store: `cron_jobs` table in the Gateway session store (SQLite or Postgres).
   Postgres epoch-ms columns are `BIGINT` (SQLite `INTEGER` is already 64-bit).
+  The `created_by_json` column (SQLite `TEXT`, Postgres `JSONB`) stores the
+  `createdBy` provenance stamp and is added automatically on Gateway start.
   `~/.openclaw/cron/jobs.json` is the import source on first start (override with
   `cron.store`). After import the table is truth; the file is not the claim path.
 - Run history: `~/.openclaw/cron/runs/<jobId>.jsonl` (JSONL, auto-pruned by size and line count).
@@ -978,6 +990,8 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 ## Gateway API surface
 
 - `cron.list`, `cron.status`, `cron.add`, `cron.update`, `cron.remove`
+- Jobs returned by `cron.list` / `cron.status` carry a read-only `createdBy` provenance stamp
+  (see the creator stamp under [Jobs](#jobs)).
 - `cron.run` (force or due), `cron.runs`
   For immediate system events without a job, use [`openclaw system event`](/cli/system).
 
@@ -1007,6 +1021,16 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
   `reason: "disabled"`.
 - Hand-editing `~/.openclaw/cron/jobs.json` after the first import does not
   change the table. Use `wednesdayai cron add/edit` or `cron.*` methods.
+
+### A job I didn't create keeps appearing
+
+- Check who created it: `wednesdayai cron list --all --json | jq '.jobs[] | {name, createdBy}'`,
+  the **Created by** column in `wednesdayai cron list`, or the job inspector in the Web UI.
+- `createdBy.clientId: "cli"` means something on a host ran `wednesdayai cron add` (a script,
+  hook, or shell); `gateway-client/agent` means an agent's `cron` tool created it.
+- The Gateway log line `cron: job created` carries the same `createdBy` plus `actor`, `deviceId`,
+  `clientIp`, and `connId` for that connection. `cron: job updated` and `cron: job removed` carry
+  the same connection fields.
 
 ### Main job requires `payload.kind="systemEvent"`
 
