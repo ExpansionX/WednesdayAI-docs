@@ -10,8 +10,6 @@ read_when:
   - You want replies read aloud while they are still being written, or dictation that sends itself when you pause
   - You want to pause a reply that is being read aloud, resume it, or stop it
   - You want dictation to wait longer before it sends itself
-  - You want to know what happens to text you have typed or sent when you close the tab or the
-    connection drops
   - You want to share your location with your messages, or know why the location button is dimmed
   - You wonder why the screen stays awake while you are using your voice
   - You want to paste text from Word, Google Docs or a web page into the message box
@@ -46,11 +44,6 @@ sources:
   - packages/gateway-browser-client/src/connection.ts
   - apps/web/src/providers/web-client-runtime.ts
   - apps/web/src/app/use-chat-send.ts
-  - apps/web/src/app/use-outbox-restore.ts
-  - apps/web/src/ui/use-composer-draft.ts
-  - apps/web/src/providers/send-outbox.ts
-  - apps/web/src/providers/run-stall-monitor.ts
-  - apps/web/src/providers/send-retry.ts
   - apps/web/src/app/use-read-aloud.ts
   - apps/web/src/app/auto-read-driver.ts
   - apps/web/src/providers/auto-read-preference.ts
@@ -213,11 +206,9 @@ remaining buttons beside **Copy** are described in
 The strip under the message box shows the connection state (**Connected**, **Reconnecting...** or
 **Offline**) and the line **AI can make mistakes. Always check facts and important information.**
 
-Text you have typed but not sent yet is kept in this browser on your device, so it comes back even
-after you close the tab, reload the page, or the browser crashes. Drafts are kept per chat - and
-also for the message box before a chat is open - and are dropped once the message is sent, when
-you log out, or after a week. Attached files are not kept this way: attach them again after a
-reload.
+Text you have typed but not sent yet is kept in this browser for the chat you have open, so it
+comes back after a page reload. It is cleared once the message is sent, or when you log out.
+Attached files are not kept this way: attach them again after a reload.
 
 ### Reply to a message
 
@@ -262,8 +253,7 @@ pause, and it becomes **Resume reading**, which continues from the same point. A
 **Stop reading** button beside it stops the read. Pressing the microphone (**Dictate**) also pauses
 a playing read instead of talking over it: the read stays paused when you stop the take, and only
 **Resume reading** (or starting another read) continues it. Starting another reply, starting Voice
-mode, or switching to another chat stops playback too. A dropped connection does not stop it: the
-read continues from where it was once the connection is back.
+mode, switching to another chat, or losing the connection stops playback too.
 
 Your assistant reads the text of the reply: paragraphs, headings and list items, spoken in order.
 Code blocks, tables and embedded HTML are skipped, so a reply that contains only code or a table
@@ -290,11 +280,10 @@ soon as it exists, and the rest follows sentence by sentence without waiting for
 finish. The button stays pressed while the setting is on, and this browser remembers it for your
 WednesdayAI connection the same way it remembers the theme.
 
-- Turning the toggle off stops the reading at once. Switching to another chat or starting Voice
-  mode stops it too, but a dropped connection does not: the rest of the reply is still read out
-  once the connection is back. Selecting **Stop** on the reply ends the reply but does not stop
-  the voice: the rest of that reply is still read out. Turning the toggle off is what silences
-  it.
+- Turning the toggle off stops the reading at once. Switching to another chat, starting Voice
+  mode, or losing the connection stops it too. Selecting **Stop** on the reply ends the reply but
+  does not stop the voice: the rest of that reply is still read out. Turning the toggle off is
+  what silences it.
 - Long replies are spoken in consecutive pieces, like **Read aloud**; each piece is capped so the
   voice never sends too much text at once.
 - If the button is dimmed, hover over it to see why. The reasons are the ones **Read aloud** uses:
@@ -314,11 +303,10 @@ the text, and send it yourself.
 While a reply is being read aloud, pressing the microphone pauses the reading instead of talking
 over it; see [Read a reply aloud](#read-a-reply-aloud).
 
-With auto-send on, a reply being written no longer holds your words back: the dictated text is
-added to the current turn the way Enter adds it - or queued, when a file is attached. Only a
-message box that cannot send at all (for example while a file is still uploading) keeps the text
-in the box for you to send. A dictation that heard nothing (for example after denied microphone
-access) never sends anything, including text you had already typed in the message box.
+The words are sent only when the message box is free. While a reply is being written, or the
+message box cannot send yet, the dictated text waits in the message box for you to send. A
+dictation that heard nothing (for example after denied microphone access) never sends anything,
+including text you had already typed in the message box.
 
 ### Choose a model and Think
 
@@ -779,18 +767,18 @@ If the assistant's server restarts while the panel is open, the lists stay as th
 not disappear - and a message under the groups says **Gateway is starting; runs will refresh
 shortly** until the lists fill in again on their own. If the storage behind the lists fails to
 start, the lists empty and the message instead reads **Session storage failed to start; see
-gateway status**, staying until that is fixed. A queued message whose run had already started
-comes back with the thread. A message queued with **Send after reply** that a restart erased
-before it started is not restored, because the client cannot tell it from one still waiting (see
-[Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming)). Messages
-sent directly are not affected: an unsent message returns to the message box (see
-[The message box will not send, or shows an error](#the-message-box-will-not-send-or-shows-an-error)).
+gateway status**, staying until that is fixed. A message you sent that was still waiting to start
+before the restart is kept, not dropped: it shows up again once the server is back (see
+[Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming)). The
+browser tab keeps such a message for up to 24 hours; after a longer outage it is discarded.
 
 ## Forms and other assistant screens
 
 Your assistant can do more than write text: it can build small screens - a form to fill in, a list
 of buttons to choose from, a table, a simple chart, or a progress bar - and show them right in the
-conversation, under the reply that produced them.
+reply that produced them, directly after the step that showed the screen. The screen stays there
+when the reply finishes and after you reload the page. A screen from a reply another device started,
+or from the reply to a form you sent, appears when that reply finishes.
 
 ### Fill in a form and send it
 
@@ -799,9 +787,9 @@ When your assistant needs an answer, it may show a form instead of asking a plai
 <Steps>
 
 <Step title="Read the screen">
-The form appears under the assistant's message, with a title and the fields your assistant
-chose - text boxes, checkboxes, a date picker, a table or a chart. You can change any field before
-you send.
+The form appears in the reply right after the step that showed it, with a title and the fields
+your assistant chose - text boxes, checkboxes, a date picker, a table or a chart. You can change
+any field before you send.
 </Step>
 
 <Step title="Select the button">
@@ -879,6 +867,9 @@ Each reply is one block: one name, one time and one set of actions. **Copy** and
 cover the whole reply, and **Reply** quotes its last message. Replies saved before this version
 of WednesdayAI can still show as several blocks, one per saved message, because they were stored
 without a record of which reply each message belongs to.
+
+If a reply fails partway, the text already written stays and the error appears below it. The error
+keeps its place when later replies arrive; it is not kept after you reload the page.
 
 ## Screens with images
 
@@ -958,8 +949,7 @@ next) will need a new setup code to sign back in here, or a sign-in provider (Go
 or GitHub) if your administrator enabled one. It also asks the gateway to forget this paired
 device and unlink it from you; if the gateway was unreachable at that moment, ask your
 administrator to remove the device (`wednesdayai devices remove <deviceId>`). It does not affect
-any other browser or device paired with your assistant. Logging out also clears the drafts and
-unsent messages this browser kept on the device.
+any other browser or device paired with your assistant.
 
 The same menu has **Linked accounts**, which shows who this browser is signed in as and lets you
 link your chat accounts (Telegram, Slack, Discord and friends) by entering a `/link` code - see
@@ -972,11 +962,8 @@ link your chat accounts (Telegram, Slack, Discord and friends) by entering a `/l
 The web client lost its connection and reconnects on its own - this is normal after a network
 hitch, when your computer wakes from sleep, or when the assistant's server restarts. Returning to
 the tab or coming back online retries immediately. Nothing is lost while this happens: a reply that
-finished while you were away appears once, a reply cut short by a restart shows a notice (see the
-next item), and an unsent message returns to the message box. A reply that stopped moving while
-the connection silently broke picks up again on its own within about 15 seconds, or within a few
-seconds of you returning to the tab - without reloading. If it still has not recovered after a
-minute, reload the page.
+finished while you were away appears once, and a reply cut short by a restart shows a notice (see
+the next item). If it still has not recovered after a minute, reload the page.
 
 ### A notice says the reply was interrupted
 
@@ -1040,8 +1027,7 @@ fresh in the browser (rather than the home-screen app) or charging the device of
 ### A dictated message sent without me pressing send
 
 If the **Read replies aloud** toggle is on, this is expected: dictation ends itself after a quiet
-moment and sends the words it heard, as long as the message box was free to send. While a reply is
-being written, the words go to the current turn instead of waiting. How long that
+moment and sends the words it heard, as long as the message box was free to send. How long that
 quiet moment is - by default two and a half seconds - is set by the pause chip beside the speaker,
 which offers **1.5 s**, **2.5 s** and **4 s**. Pick a longer pause there if messages kept going out
 before you finished. If you prefer to edit before sending, turn the toggle off; dictation then
@@ -1098,11 +1084,7 @@ of sending it straight away; see
 thread shows **Could not add to the current turn:** or **Could not queue that message:**, your
 text is back in the message box. The same happens when an ordinary send finally fails - for example after repeated
 connection trouble: the thread shows the reason as a system message and your text returns to the
-message box, ready to send again. Text the gateway never confirmed also comes back after the
-fact: even a reload, a crash or the assistant's server restarting cannot lose it (a queued
-**Send after reply** message is the exception, see **Check on Runs**) - reopening the
-chat puts it back in the message box with a notice that reads **Restored a message that was not
-sent.** (or **Restored N messages that were not sent.**). If the box says **Replying isn't supported yet while a reply is
+message box, ready to send again. If the box says **Replying isn't supported yet while a reply is
 streaming...**, remove the quote with its **x** or wait for the reply to finish. If the bottom of
 the screen says **Offline** or **Reconnecting...**, see the first item in this list.
 
