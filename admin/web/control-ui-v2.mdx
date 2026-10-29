@@ -31,9 +31,7 @@ it at the root (`/`). It covers the full operator surface, grouped in the sideba
 **Configure**, **Fleet** and **Learning** (see [What the pages show](#what-the-pages-show)), plus
 a command palette (⌘K or Ctrl+K) and light and dark themes. When an allowlisted plugin
 contributes console UI, a **Plugins** group appears with its pages (see
-[Plugin pages and panels](#plugin-pages-and-panels)). The [classic Control
-UI](/web/control-ui) is deprecated: it serves at `/classic` for one more release and is removed in
-the next release.
+[Plugin pages and panels](#plugin-pages-and-panels)).
 
 Like the [web client](/web/user-client), the console is a **static bundle**. It contains no gateway
 address and no credentials: everything environment-specific arrives at runtime from a small
@@ -59,14 +57,13 @@ pnpm control:build             # writes apps/control/dist (for a CDN or your own
 ## Gateway route
 
 The gateway serves the console itself, **on by default**: the v2 console owns the gateway root
-(`/`), and the deprecated classic console serves at `/classic`. To pin the v2 console to a
-sub-path instead, set `basePath`.
+(`/`). To pin it to a sub-path instead, set `basePath`.
 
 ```json5
 {
   gateway: {
     controlUiV2: {
-      enabled: true, // default; set to false to serve only the classic console
+      enabled: true, // default; set to false to serve no operator console
       // basePath: "/",  // default: the gateway root
       // root: "/srv/wednesdayai-control",  // optional: defaults to the packaged bundle
     },
@@ -78,24 +75,24 @@ Restart the gateway, then open `http://127.0.0.1:18789/` (or your gateway's own 
 explicit `basePath`, open that path instead.
 
 - `config.json` is generated per request: the console connects back to the origin it was loaded
-  from, and links to the web client and classic console that this gateway serves.
+  from, and links to the web client this gateway serves.
 - `basePath` must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes,
   whitespace or control characters, `.` or `..` segments, and query or fragment characters are all
   rejected when the config loads. It also may not equal, contain, or be contained by another active
-  console mount (`gateway.webClient.basePath`, `gateway.controlUi.basePath`); a collision is
-  rejected when the config loads, naming both keys.
+  console mount (`gateway.webClient.basePath`); a collision is rejected when the config loads,
+  naming both keys.
 - With no `root`, a missing packaged bundle answers `503` naming `pnpm control:build:packaged`, and
   the gateway logs a warning at startup. A broken explicit `root` answers `503` with that reason.
-- Configs that were valid before v2 became the default keep working. The classic console moves to
-  `/classic` unless another mount explicitly uses that path, in which case classic keeps the root.
-  v2 takes the root unless something already claims it: an explicit
-  `gateway.controlUi.basePath: "/"` on an active classic console, an explicit
-  `gateway.webClient.basePath: "/"` on an enabled web client, or classic keeping the root as
-  above. Then v2 mounts at `/v2/control`; if that path is taken too (for example an enabled web
-  client at `/v2` or `/v2/control`), v2 stays inactive — exactly its pre-upgrade state —
-  rather than rejecting the config. Asking for it explicitly (`enabled: true`) keeps the error.
-- `gateway.controlUiV2.enabled: false` turns the v2 console off; `wednesdayai dashboard` then
-  points at the classic console (`/classic` by default).
+- The classic console is removed: `gateway.controlUi` no longer carries `enabled`, `basePath` or
+  `root`. A config that still sets them is rewritten when it loads (the keys are dropped, and the
+  gateway persists the rewrite; `openclaw doctor --fix` applies it too). Behaviour change from the
+  classic-console release: a config that pinned the old classic console to the root (its removed
+  `basePath` set to `"/"`) now gets the v2 console at the root instead of v2 standing down to
+  `/v2/control`.
+- Otherwise v2 takes the root unless an enabled `gateway.webClient` explicitly claims `/`, in
+  which case v2 mounts at `/v2/control`.
+- `gateway.controlUiV2.enabled: false` turns the v2 console off; the gateway then serves no
+  operator console (`gateway.controlUi` remains only the admission policy).
 - Bookmarks to `/v2/control/...` are not redirected: with v2 at the root, the request falls
   through to the root console, which opens **Overview**. Update saved links.
 
@@ -104,8 +101,7 @@ explicit `basePath`, open that path instead.
 ```bash
 wednesdayai web serve-control \
   --port 8788 \
-  --gateway-url wss://gateway.example.com \
-  --classic-url https://gateway.example.com/
+  --gateway-url wss://gateway.example.com
 ```
 
 This starts **no gateway** and keeps no state, so instances can run behind a load balancer. Flags win
@@ -119,7 +115,6 @@ over environment variables, which win over defaults.
 | `--host <host>`       | `OPENCLAW_CONTROL_V2_HOST`        | `127.0.0.1`     | Bind host                                |
 | `--base-path <path>`  | `OPENCLAW_CONTROL_V2_BASE_PATH`   | `/`             | Public path the console is mounted under |
 | `--client-url <url>`  | `OPENCLAW_CONTROL_V2_CLIENT_URL`  | unset           | "Client" link in the sidebar             |
-| `--classic-url <url>` | `OPENCLAW_CONTROL_V2_CLASSIC_URL` | unset           | "Classic console" link in the sidebar    |
 
 Links must be absolute `http(s)` URLs or paths starting with a single `/`. Anything unusable - a
 missing gateway URL, a bad link, a bundle with no `index.html`, a port that is not an integer from
@@ -145,10 +140,9 @@ in; supply it (and any other variable from the table above) at run time.
 
 ## Sign in
 
-The console signs in the way the classic console does: paste the **gateway token** (or switch to
-**Password**) and select **Connect**. The browser creates a device identity and the gateway mints a
-device token for it; later visits reconnect with that device token and never show the sign-in
-screen. Select **Sign out** to forget the device token.
+Paste the **gateway token** (or switch to **Password**) and select **Connect**. The browser creates
+a device identity and the gateway mints a device token for it; later visits reconnect with that
+device token and never show the sign-in screen. Select **Sign out** to forget the device token.
 
 The token or password is held in memory only for the connection attempt - it is never written to
 browser storage. Only the device identity, the device token and the theme are stored, under the
@@ -163,11 +157,10 @@ discards the URL token.
 
 ### Origins
 
-The console connects as the classic console's client (`openclaw-control-ui`), so the gateway admits
-it exactly as it admits the classic console. Opened from a loopback address (`127.0.0.1`,
+The console connects as the `openclaw-control-ui` client, whose admission and auth policy is
+`gateway.controlUi`. Opened from a loopback address (`127.0.0.1`,
 `localhost`) it needs no configuration. Any other origin - including the gateway's own address
-when the console is opened by host name - must be listed in `gateway.controlUi.allowedOrigins`, the
-same list the classic console uses:
+when the console is opened by host name - must be listed in `gateway.controlUi.allowedOrigins`:
 
 ```json5
 { gateway: { controlUi: { allowedOrigins: ["https://control.example.com"] } } }
@@ -176,8 +169,8 @@ same list the classic console uses:
 If it is missing, sign-in shows: "This console's origin (`https://control.example.com`) is not
 allowed. Add it to gateway.controlUi.allowedOrigins on the gateway."
 
-The gateway also enforces the allowlist at startup. On a non-loopback bind with either console
-enabled (v2 alone counts), a config that leaves `gateway.controlUi.allowedOrigins` empty is refused.
+The gateway also enforces the allowlist at startup. On a non-loopback bind with the console
+enabled, a config that leaves `gateway.controlUi.allowedOrigins` empty is refused.
 Onboarding and gateway startup seed `http://localhost:<port>` and `http://127.0.0.1:<port>` (plus
 the custom bind host for `bind: "custom"`) when nothing is configured, so a startup refusal usually
 means the list was emptied or the bind changed outside onboarding. Setting
@@ -201,26 +194,88 @@ wednesdayai devices list
 wednesdayai devices approve <requestId>
 ```
 
+Notes:
+
+- Local connections (`127.0.0.1`) are auto-approved.
+- Remote connections (LAN, Tailnet, etc.) require explicit approval.
+- Each browser profile generates a unique device ID, so switching browsers or clearing browser
+  data requires re-pairing.
+- Turns sent from the console are identified by that device as `device:<deviceId>`. Assistants
+  with [workspace lanes](/concepts/workspace-lanes#linking-gateway-devices) keep a private
+  workspace per person, so the device must be linked to a person with
+  `wednesdayai devices link <deviceId> --identity <key>`; an unlinked device gets a denial message
+  naming the `device:<deviceId>` value. The console's **Nodes & devices** page can also link or
+  unlink a paired device. See [Identities](/gateway/identity).
+- Revoke a device with `wednesdayai devices revoke --device <id> --role <role>`; see
+  [Devices CLI](/cli/devices) for token rotation and revocation.
+
+### Insecure HTTP
+
+The console signs in only from a secure context (see [HTTPS](#https)). On plain `http://` to a LAN
+or Tailnet IP it shows the secure-context message and never offers the credential form, whatever
+the gateway config says. To reach a remote gateway, use HTTPS ([Tailscale Serve](#tailscale-access)
+or a TLS reverse proxy), or tunnel to loopback so the browser sees `http://localhost`:
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 <gateway-host>
+```
+
+Then open `http://localhost:18789/`.
+
+Two gateway-side flags relax admission for clients that connect as `openclaw-control-ui`. Neither
+makes the console usable over plain HTTP:
+
+- `gateway.controlUi.allowInsecureAuth: true` accepts token or password auth from a non-secure
+  origin. It does not bypass device identity or pairing checks.
+- `gateway.controlUi.dangerouslyDisableDeviceAuth: true` (break-glass only) disables device
+  identity checks and is a severe security downgrade; revert quickly after emergency use.
+  Connections under this flag are treated as device-less (any presented device block is
+  ignored), so assistants with
+  [workspace lanes](/concepts/workspace-lanes#linking-gateway-devices) deny them.
+
+### Tailscale access
+
+Keep the gateway on loopback and let Tailscale Serve proxy it with HTTPS:
+
+```bash
+openclaw gateway --tailscale serve
+```
+
+Open:
+
+- `https://<magicdns>/` (or your configured `gateway.controlUiV2.basePath`)
+
+By default, console and WebSocket requests over Serve can authenticate via Tailscale identity
+headers (`tailscale-user-login`) when `gateway.auth.allowTailscale` is `true`. The gateway
+verifies the identity by resolving the `x-forwarded-for` address with `tailscale whois` and
+matching it to the header, and only accepts these when the request hits loopback with Tailscale's
+`x-forwarded-*` headers. Set `gateway.auth.allowTailscale: false` (or force
+`gateway.auth.mode: "password"`) if you want to require a token/password even for Serve traffic.
+Tokenless Serve auth assumes the gateway host is trusted. If untrusted local code may run on that
+host, require token/password auth.
+
+For other remote setups, see [Tailscale](/gateway/tailscale) and
+[Remote access](/gateway/remote).
+
 ## config.json
 
 All fields are public; never put a token here. Unknown keys are rejected: the console shows a
 configuration error instead of connecting anywhere.
 
-| Field           | Required | Meaning                                                        |
-| --------------- | -------- | -------------------------------------------------------------- |
-| `schemaVersion` | yes      | Must be `1`                                                    |
-| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment |
-| `clientId`      | yes      | Must be `openclaw-control-ui`                                  |
-| `basePath`      | yes      | Public path the console is served under, with a trailing slash |
-| `links`         | no       | `client` and `classicConsole` sidebar links (URL or `/path`)   |
+| Field           | Required | Meaning                                                                                           |
+| --------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `schemaVersion` | yes      | Must be `1`                                                                                       |
+| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment                                    |
+| `clientId`      | yes      | Must be `openclaw-control-ui`                                                                     |
+| `basePath`      | yes      | Public path the console is served under, with a trailing slash                                    |
+| `links`         | no       | Sidebar links: `client` (URL or `/path`). A legacy `classicConsole` value is accepted and ignored |
 
 ```json
 {
   "schemaVersion": 1,
   "gatewayUrl": "wss://gateway.example.com",
   "clientId": "openclaw-control-ui",
-  "basePath": "/",
-  "links": { "classicConsole": "https://gateway.example.com/" }
+  "basePath": "/"
 }
 ```
 
@@ -277,6 +332,10 @@ badge when the last refresh failed.
 
 - **Agents**: per-agent identity header, config editing, workspace files, the tool catalog with
   profile and per-tool overrides, per-agent skills, channel and cron panels, and a nudge dialog.
+  The identity header shows the agent's avatar image when the identity carries one: the gateway
+  pre-resolves workspace-relative avatar paths and serves them unauthenticated at
+  `/__openclaw__/avatar/<agentId>` (GET/HEAD only, at most 2 MiB), and `agent.identity.get`
+  returns that resolved URL.
   The header links to the agent's sessions and runs, and the open tab is kept in the URL
   (`?tab=`). Agents configured in an
   [`agents.teams`](/gateway/configuration-reference#agentsteams) entry are grouped under their
@@ -318,10 +377,10 @@ badge when the last refresh failed.
 - **Dreams** (needs `dream.status`): dream state, weights and lesson candidates, health, and
   dream and learning run budgets.
 
-Two things the classic console had are not part of v2. Chat with the assistant happens in the
+Two surfaces deliberately live outside the console. Chat with the assistant happens in the
 [web client](/web/user-client) (`/v2/client/` by default; the sidebar's **Client** link opens the
-one this gateway serves). Talk lives only in the deprecated classic console at `/classic` and is
-removed with it; the web client's Dictate and Voice mode buttons are a separate feature (see
+one this gateway serves). Talk existed only in the removed classic console and was deleted with
+it; the web client's Dictate and Voice mode buttons are a separate feature (see
 [Using the web client](/web/using-the-web-client#dictate-and-voice)).
 
 Approvals requested before the console connected are not listed; the bell counts the ones that

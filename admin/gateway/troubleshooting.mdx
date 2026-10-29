@@ -232,7 +232,7 @@ If logs show nonce/signature errors, update the connecting client and verify it:
 
 Related:
 
-- [/web/control-ui](/web/control-ui)
+- [/web/control-ui-v2](/web/control-ui-v2)
 - [/gateway/authentication](/gateway/authentication)
 - [/gateway/remote](/gateway/remote)
 
@@ -542,6 +542,28 @@ The warn-level lines never echo the call arguments or the model-authored
 rejection text; the full error and the original arguments stay in the session
 transcript. Inspect them with `sessions_history` for that session, or read the
 session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
+
+The session reply carries a one-line warning for the same failure, for example
+`⚠️ 📝 Edit: in notes.md failed (not found)`. The suffix is a bounded failure
+class, not the raw error:
+
+- `(invalid tool arguments)` - the model called the tool wrong, for example an
+  edit whose `oldText` does not match the file.
+- `(not found)` - the target file or directory does not exist.
+- `(permission denied)` - the call was denied: errno codes (`EACCES`, `EPERM`,
+  `EROFS`) or a workspace/sandbox guard (`workspaceOnly`, symlink and hardlink
+  guards). Only the errno codes mean the filesystem refused access; a guard
+  denial means changing `workspaceOnly` or the sandbox policy, not file permissions.
+- `(blocked by policy)` - a tool policy or loop guard blocked the call, or a
+  plugin hook blocked it without giving a reason. A hook block with a reason
+  shows a bare `failed`.
+- A bare `failed` with no suffix means the error fit no known class.
+
+The path in the warning echoes the model's own argument and may not be a real
+path. The error text (its first line, capped at 400 characters, including the errno
+and resolved path) is shown instead of the class only when verbose tool details are on. `exec`/`bash` failures stay out
+of the chat at default verbosity; their full output is in the journal and the
+session transcript.
 
 The file tools accept the argument shapes models commonly send: `edit`,
 `write` and `read` take `path` and also accept `file_path`; `edit` additionally
