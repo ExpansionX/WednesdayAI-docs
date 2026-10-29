@@ -40,6 +40,7 @@ sources:
   - apps/web/src/app/use-device-location.ts
   - packages/talk-client/src/silence-endpointer.ts
   - apps/web/src/state/chat.ts
+  - apps/web/src/state/thread-order.ts
   - apps/web/src/state/tool-step-rows.ts
   - apps/web/src/gateway/message-text.ts
   - apps/web/src/gateway/chat-activity-frame.ts
@@ -397,9 +398,16 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
   streaming continue and Stop remains the user's escape hatch. Queued follow-ups and an unacked
   pending turn are left to the existing `loadHistory` and send-retry paths.
 - **Store and stream dedupe.** `prependMessages` drops incoming rows whose `entryId` or `id`
-  already exists; `addSyncedMessage` returns state unchanged for an assistant payload whose id
-  matches an existing row's `localRunId`; `streamUpdate` opens no second bubble when the final text
-  differs from the streamed text only in leading or trailing whitespace.
+  already exists and sorts the merge with `orderThread`. `addSyncedMessage` positions the run
+  before it dedupes (`applyPositionRun`: the run's queued turn un-queues and `turnSeq` anchors the
+  rows that have no stored position), and a deduped sync still returns `orderThread(base)`, so the
+  positioning lands even when the row does not. The sync is dropped only when the answer itself is
+  already on screen: the run's live text row carrying identical content (a final that extends the
+  streamed prose updates the bubble in place, one with new text after a tool step appends after
+  the step), or a provenance match — same-run assistant prose, or an earlier sync of the same
+  event; the run's question, its tool rows and a still-queued turn never suppress it.
+  `streamUpdate` (`gateway/message-text.ts`) opens no second bubble when the final text differs
+  from the streamed text only in leading or trailing whitespace.
 - **Draft safety.** Every outgoing `chat.send` and `sessions.steer` text is recorded in a
   `localStorage` send outbox (`apps/web/src/providers/send-outbox.ts`, key
   `openclaw-user-client:outbox:v1`, 24 h expiry) before the RPC leaves, and removed when the RPC
@@ -627,7 +635,9 @@ Contracts worth keeping when you change them:
   (unless attachments are staged, which inject refuses, in which case it sends `mode: "queue"`).
   The send menu item "Send after reply" (`composer-send-menu-queue`) and desktop Ctrl/Cmd+Enter send
   `sessions.steer` with `mode: "queue"` and show the turn at once with `message-queued-badge`. Both
-  send `fallback: "queue"`. Neither can carry a reply: the composer refuses both while a reply chip is set,
+  send `fallback: "queue"`. The badge is presentation only; the turn's place in the thread is
+  `orderThread`'s derived tail until the run's first frame clears it (see the order bullet below).
+  Neither can carry a reply: the composer refuses both while a reply chip is set,
   because `sessions.steer` has no `replyToId`. On touch-primary devices (coarse pointer), plain Enter
   inserts a native newline, and Ctrl/Cmd+Enter runs the primary action (steer while streaming, queue
   with a staged file, send when idle) instead of queueing. A queued turn is saved in `sessionStorage`
@@ -686,14 +696,14 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   that snapshot: a final replaces its stale partial, while an aborted run keeps the observed stopped
   text rather than an ahead-of-stream durable suffix. `completed-history-boundary.ts` excludes newer
   assistant/execution data but admits matched newer durable users. Those rows keep their client IDs
-  and run ownership; the queued marker clears on the runtime's start event, not on storage adoption.
+  and run ownership; the queued marker clears on the run's first frame (`positionRun`), not on
+  storage adoption.
   The merge retains newer partials, optimistic users, queued turns, older pages and errors without
-  advancing the leaf guard. Kept client notices (run errors, failed sends) park right after the run
-  that precedes them (that run's last stored row, or the matched row, extended to the run's last
-  stored row when the matched row sits earlier), never later than the next matched row, so a later
-  reply landing does not push the notice below that reply. With no anchor the notice falls back to
-  the next matched row, otherwise the tail; once an earlier row has gone to the tail the notice
-  follows it there.
+  advancing the leaf guard. Reconcile decides only which current rows survive the merge:
+  `placeUnmatchedRows` returns `kept` in arrival order and places nothing. The assembled page is
+  `orderThread([...reconciledLoaded, ...kept])`, so a kept client notice (run error, failed send)
+  lands right after the run it reports on through its `anchorRunId`/`anchorSeq`, never below a
+  later reply of that run.
   Legacy identity-less matches are one-to-one FIFO within durable-entry anchor intervals, so
   identical distinct turns remain distinct. Scoped loaded-history and older-page IDs distinguish
   replaceable heads from optimistic rows and preserve imported legacy entries. Superseded
@@ -706,6 +716,25 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   newer chat or foreign reply. Distinct assistant message IDs remain distinct even with identical text.
   Media links and derived attachments share `normalizeMediaUrl`: HTTP(S) and inline raster
   images/WAV are allowed; unsupported schemes and data types remain non-interactive metadata.
+- **Order is server sequence.** The thread order is a pure function of gateway positions, never of
+  insertion order. `gateway-mappers.ts` stamps each history row's transcript position onto
+  `ChatMessage.seq` (`__openclaw.seq`, falling back to the integer form of `__openclaw.rowId`);
+  live `chat` and `chat.activity` frames carry `turnSeq`, the transcript position of the run's
+  first user entry, which `web-client-runtime.ts` copies into every store write. One comparator
+  owns placement, `orderThread(messages)` in `state/thread-order.ts`: a row with its own `seq`
+  sorts there; a still-queued turn sorts into the derived tail (after every positioned row, in
+  send order among themselves); a live user row whose run's reply is loaded but whose stored row
+  sits on an older page sorts just above the run's first positioned row; any other unpositioned
+  row follows its run's last positioned row with `anchorSeq` as the fallback; a client notice
+  follows the run named by `anchorRunId`; a row with no positioning input keeps its arrival slot.
+  Every store action that changes `messages` returns `orderThread(next)`, and an already-ordered
+  input returns the same array reference (render isolation). `seqWatermark` anchors new optimistic
+  rows after everything positioned. A sent message therefore always renders above its reply and
+  above later turns, through streaming, queue and steer, reconnects and reloads. "Queued" is a
+  badge only: it clears on any frame of that run (`positionRun`), when a history load carries the
+  stored message, or when a later own turn takes its transcript position (the gateway drains
+  queued turns first in, first out, so a positioned turn proves the turns queued before it
+  started).
 - **Colours.** `ui/assistant-color.ts` maintains a browser-safe palette identical, in order, to
   `ASSISTANT_IDENTITY_COLORS` in
   `src/shared/assistant-identity-values.ts`. A configured `identity.color` wins; otherwise FNV-1a
