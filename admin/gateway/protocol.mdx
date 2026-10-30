@@ -168,12 +168,6 @@ Common scopes:
 - `operator.approvals`
 - `operator.pairing`
 
-`operator.talk.secrets` admits no method on its own. `talk.config` with `includeSecrets: true`
-returns the unredacted talk config (provider API keys) only to a connection holding
-`operator.talk.secrets` or `operator.admin`; anything else is refused with
-`missing scope: operator.talk.secrets`. Setup-code pairing grants it (see the client profile table
-below).
-
 Narrow session scopes, for bounded chat clients (ADR 0077):
 
 - `operator.sessions.read`
@@ -279,11 +273,6 @@ so widening one never widens the other, and a field added to the schema later ne
 `operator.admin` until an ADR admits it. Before ADR 0083 the whole method needed `operator.admin`;
 a write-only integration can now change these four settings on any session key it names.
 
-A narrow connection never receives the admin-only session fields: the `sessions.patch` echo and
-every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `execSecurity`,
-`execAsk`, `sendPolicy`, `spawnedBy`, `spawnDepth`, `elevatedLevel`, `verboseLevel`,
-`responseUsage` and `groupActivation`. Write and admin connections receive them unchanged.
-
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
 is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods above are the only
@@ -359,7 +348,15 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
 "durationMs": <ms>?, "turnSeq": <int>? }`; when the step published a surface, an extra `ui` object is present
   (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
-  and results are never included. It is broadcast ordered with the session's `chat` frames and is
+  and results are never included. Start frames may also carry a display `verb` (at most 64
+  characters) and `detail` (at most 200 characters): the verb and detail resolved from the shared
+  tool-display spec for the step's arguments, where every argument string is passed through
+  `redactToolDetail` before the resolver runs (redaction must not race a cap that can cut a
+  secret's closing delimiter), and both fields are redacted and capped again before sending -
+  the same label the client's stored chip later resolves from the stored arguments, so a live chip
+  and the chip that replaces it at turn end do not drift; the one accepted difference is a live
+  label that redaction or the cap changed. Raw args and results are still never
+  included. It is broadcast ordered with the session's `chat` frames and is
   droppable under backpressure rather than blocking the turn. `turnSeq` follows the rule under
   [Chat event transcript positions](#chat-event-transcript-positions).
 
@@ -397,11 +394,6 @@ Rules that apply to bootstrap redemption:
   already admitted by `none`, `tailscale` or `trusted-proxy` auth or a shared secret, so a client
   pairing through Tailscale Serve still gets the full profile silently. If redemption fails there,
   the earlier admission stands and the connect proceeds as it would without the token.
-- **Device tokens under ambient auth.** Under `none`, `trusted-proxy` or Tailscale identity auth, a
-  connect that presents `auth.deviceToken` has it verified exactly as under `token` mode. A
-  revoked, unknown or over-scoped token is refused with `AUTH_DEVICE_TOKEN_MISMATCH` (plus
-  `details.deviceTokenReason`), and the client should drop the token and reconnect. A valid token
-  connects under the ambient admission. `auth.token` is not treated as a device credential there.
 
 `openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
 ([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
