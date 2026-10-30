@@ -1312,6 +1312,7 @@ Optional **Docker sandboxing** for the embedded agent. See [Sandboxing](/gateway
           "write",
           "edit",
           "apply_patch",
+          "delete",
           "sessions_list",
           "sessions_history",
           "sessions_send",
@@ -1539,7 +1540,7 @@ single-workspace behavior.
 | `laneKey`        | `canonical-identity`, `account-channel-peer`, `channel-peer` | Selects the actor identity used to compute the deterministic lane id.                                                                                                               |
 | `rootTemplate`   | string                                                       | May use `{agentId}` and required `{laneId}`. Traversal, unsupported placeholders, malformed braces, templates without `{laneId}`, and existing non-directory lane paths are denied. |
 | `sharedFiles`    | string array                                                 | Persona-level files read from the shared agent workspace.                                                                                                                           |
-| `copiedOnCreate` | string array                                                 | Files copied from the persona workspace into a newly created lane when missing. Existing lane files are not overwritten.                                                            |
+| `copiedOnCreate` | string array                                                 | Files copied from the persona workspace into a newly created lane. Existing lane files are not overwritten, and files removed from an existing lane are not restored.               |
 | `laneFiles`      | string array                                                 | Files or directories treated as lane-local user state.                                                                                                                              |
 | `skills`         | `shared`, `lane`, `both`                                     | `shared` loads skills from the persona workspace. `lane` loads them from the lane workspace. `both` is reserved and currently behaves like `shared`.                                |
 | `create`         | `on-first-message`, `manual`                                 | `on-first-message` creates the lane directory when a lane is first resolved. `manual` requires a pre-provisioned directory and skips missing or non-directory lane replies.         |
@@ -1660,7 +1661,7 @@ Within each tier, the first matching `bindings` entry wins.
             "sessions_spawn",
             "session_status",
           ],
-          deny: ["write", "edit", "apply_patch", "exec", "process", "browser"],
+          deny: ["write", "edit", "delete", "apply_patch", "exec", "process", "browser"],
         },
       },
     ],
@@ -1697,6 +1698,7 @@ Within each tier, the first matching `bindings` entry wins.
             "read",
             "write",
             "edit",
+            "delete",
             "apply_patch",
             "exec",
             "process",
@@ -2028,7 +2030,7 @@ sessions keep the configuration resolved when they started.
 
 `tools.profile` sets a base allowlist before `tools.allow`/`tools.deny`:
 
-Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved).
+Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved). When onboarding applies that default profile, it also adds `tools.alsoAllow: ["group:fs"]` (skipped when `tools.allow` is already set) and `tools.fs.workspaceOnly: true`, so a fresh install has workspace-contained filesystem tools including `delete`. Existing configs are not modified; opt in with `tools.alsoAllow: ["group:fs"]` plus `tools.fs.workspaceOnly: true`.
 
 | Profile     | Includes                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
@@ -2042,7 +2044,7 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 | Group              | Tools                                                                                                    |
 | ------------------ | -------------------------------------------------------------------------------------------------------- |
 | `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                            |
-| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                                   |
+| `group:fs`         | `read`, `write`, `edit`, `delete`, `apply_patch`                                                         |
 | `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
 | `group:memory`     | `memory_search`, `memory_get`                                                                            |
 | `group:web`        | `web_search`, `web_fetch`                                                                                |
@@ -2051,6 +2053,12 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 | `group:messaging`  | `message`                                                                                                |
 | `group:nodes`      | `nodes`                                                                                                  |
 | `group:openclaw`   | All built-in tools (excludes provider plugins)                                                           |
+
+`tools.fs.workspaceOnly: true` restricts `read`/`write`/`edit`/`apply_patch` paths to the agent
+workspace. `delete` is always workspace-contained: it deletes one file at a time, refuses
+directories, the workspace root and paths outside the workspace (or the lane directory when
+workspace lanes are on), and ignores `tools.fs.workspaceOnly`. `apply_patch` stays workspace-only
+unless `tools.exec.applyPatch.workspaceOnly` is also set to `false`.
 
 ### `tools.allow` / `tools.deny`
 
@@ -2902,7 +2910,6 @@ See [Network egress policy](/gateway/security/network-egress-policy) for the ful
 - **Auth**: required by default. Non-loopback binds require a shared token/password. Onboarding wizard generates a token by default.
 - `gateway.auth.mode: "none"`: explicit no-auth mode. Use only for trusted local loopback setups; this is intentionally not offered by onboarding prompts.
 - `gateway.auth.mode: "trusted-proxy"`: delegate auth to an identity-aware reverse proxy and trust identity headers from `gateway.trustedProxies` (see [Trusted Proxy Auth](/gateway/trusted-proxy-auth)).
-- **Ambient auth still verifies device tokens**: under `none`, `trusted-proxy` or Tailscale identity auth, a connect that presents `auth.deviceToken` gets it verified as under `token` mode; a revoked, unknown or over-scoped token is refused with `AUTH_DEVICE_TOKEN_MISMATCH`. `auth.token` is not treated as a device credential in those modes. See [Protocol](/gateway/protocol#client-identity).
 - The `openclaw-user-client` web client is exempt from every ambient auth mode: under `none`, `trusted-proxy` and Tailscale identity auth it is still refused (`CLIENT_DEVICE_CREDENTIAL_REQUIRED`) unless it presents its bounded device token or redeems its bounded bootstrap token. Hosting it behind a reverse proxy keeps working; the proxy identity just never replaces the device credential. Other client ids are unaffected. See [Protocol](/gateway/protocol) for the full rule.
 - `gateway.auth.allowTailscale`: when `true`, Tailscale Serve identity headers can satisfy Control UI/WebSocket auth (verified via `tailscale whois`); HTTP API endpoints still require token/password auth. This tokenless flow assumes the gateway host is trusted. Defaults to `true` when `tailscale.mode = "serve"`.
 - `gateway.auth.rateLimit`: optional failed-auth limiter. Applies per client IP and per auth scope (shared-secret and device-token are tracked independently). Blocked attempts return `429` + `Retry-After`.
