@@ -27,6 +27,7 @@ Notes:
 
 - Interactive prompts (like keychain/OAuth fixes) only run when stdin is a TTY and `--non-interactive` is **not** set. Headless runs (cron, Telegram, no terminal) will skip prompts.
 - `--fix` (alias for `--repair`) writes a backup to `~/.openclaw/openclaw.json.bak` and drops unknown config keys, listing each removal.
+- Channel warnings and repairs come from the channel plugins: doctor loads channel plugins (Telegram, and other plugin-backed channels) best-effort from its working config, including when the config file has schema errors that would otherwise load as an empty config, so each plugin's doctor warnings and repairs still run. A channel plugin that fails to load does not abort doctor; doctor continues without that plugin's checks.
 - Telegram checks warn when `channels.telegram.timeoutSeconds` or `channels.telegram.accounts.<id>.timeoutSeconds` is outside the safe 30-50 second polling window. The warning includes the config path, configured value, applied safe value, and `docs.wednesdayai.dev`.
 - `wednesdayai doctor --fix` removes unsafe Telegram timeout overrides when the safe applied value is the default 30 seconds, and rewrites above-maximum overrides to the safe maximum 50 seconds.
 - Telegram duplicate-poller checks read the running gateway channel-status snapshot and warn when two pollers share one bot token. The warning includes account id and sanitized token fingerprint, never the raw token, with restart or disable guidance.
@@ -58,6 +59,29 @@ client is recreated from the repaired config.
 Doctor also reports duplicate Telegram pollers when the running gateway status shows two accounts
 trying to own the same bot token. The output uses a sanitized token fingerprint. Fix the duplicate
 account or token fallback, then restart the gateway.
+
+## Restart recovery
+
+If the gateway was interrupted while work was in flight, `wednesdayai doctor` lists blocked
+recovery items with a plain-language reason for each. The boot log collapses these into one
+`restart recovery: blocked items need operator action` line that points at `wednesdayai doctor`.
+
+Items blocked for more than 7 days are stale. Doctor offers a one-shot bulk cancel:
+
+```text
+Cancel 3 recovery item(s) blocked for more than 7 days? Cancel marks them abandoned;
+nothing is re-run or re-sent.
+```
+
+Confirm once and doctor plans and applies the cancel for each stale item. A cancel marks the item
+abandoned — it never re-executes a task or re-sends a message. If an adapter refuses the cancel
+for a specific item, doctor reports `cancelled N, rejected M (reason)` and continues with the
+remaining items; rejected items stay blocked for the normal per-item repair flow.
+
+Prompt flags follow the usual doctor rules: `--yes` (and `--repair`) auto-confirm the bulk cancel
+and every per-item repair confirm, so a stale backlog is cleared without prompts. An explicit
+`--non-interactive` takes precedence and is inspection-only: doctor reports the stale count
+(`N item(s) blocked for more than 7 days`) and never plans, cancels, or repairs anything.
 
 ## macOS: `launchctl` env overrides
 
