@@ -298,7 +298,13 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `onActiveSessionRowChange`, `onQueuedRunStarted`, `onRunResumed`, `onToolStep`,
   `onOwnTurnStarted`, `onOwnTurnQueued`, `onSteerTurnSettled`, `onAssistantReply` and
   `onActiveLeafConflict` subscriptions. `onToolStep` turns each `chat.activity` frame of a run
-  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); `onRunResumed`
+  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); a start frame's
+  optional `verb`/`detail` (redacted, length-capped display strings resolved from the shared
+  tool-display spec; the wire contract is the `chat.activity` bullet in
+  [Protocol](/gateway/protocol#assistant-ui-surfaces)) are stored with the row and never cleared
+  by a later frame of the same call, and `ToolDisplay` renders them as the live chip's label —
+  for a call with no stored arguments yet, full mode shows the same title/verb/detail line
+  instead of an invented `{}` dump. `onRunResumed`
   restores the typing indicator on the first live frame of a run adopted after a reload;
   `ui/assistant-turns.ts` groups a run's rows into one reply block for `ui/Thread.tsx`.
   `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
@@ -781,11 +787,28 @@ Availability comes from `talk.catalog`, and updates on reconnect:
 `useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
 `transcript` while recording, `commit: { text: string; nonce: number; autoSend: boolean } | null`,
 `consumeCommit(): void`,
-and `errorMessage` (mic denied or no input device). The live transcript previews in the textarea as a
+and `errorMessage` (mic denied or no input device, a microphone that stops sending audio, or a
+transcription relay that ended the take). The live transcript previews in the textarea as a
 read-only draft with an accent border and muted text (`.cl-composer--dictating`), without breaking the
 textarea height cap. When dictation stops or encounters a capture error, `commit` receives the final or
 last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
 calls `onDictateCommitConsumed` to clear the commit.
+
+`VoiceSeam` (`providers/voice.ts`) starts the mic inside the toggle click and requests the session
+concurrently: `capture.start` runs before any await, so `AudioContext` creation and `resume()`
+happen while the tap's user activation is fresh (`packages/talk-client/src/audio-capture.ts`
+constructs and resumes the context before the `getUserMedia` await — a context created after it
+can stay suspended on a slow phone link and produce zero frames). Frames captured before the
+session id lands and `session.ready` arrives buffer in order and are sent once ready, so the relay
+never drops a take's first words; stopping a not-yet-ready session waits up to 10 s
+(`SESSION_READY_TIMEOUT_MS`) before it closes, so the buffered frames are not lost. A dead take
+ends visibly: a 3 s frame-silence watchdog (`CAPTURE_SILENCE_TIMEOUT_MS`, re-armed per frame)
+retires the session with `talk.session.cancelTurn` and reports **Your microphone stopped sending
+audio. Tap Dictate to try again.**, and a `session.closed` that arrives mid-take with no stop in
+flight reports **Transcription stopped unexpectedly. Tap Dictate to try again.** without closing
+the session. A rejected `talk.session.create` stops the capture it already owns without waiting
+for its acquisition, so a hung `getUserMedia` cannot leave the take recording; the next tap issues
+a fresh create.
 
 **One-tap dictation (`useDictate(runtime, { autoSend, autoSendDelayMs })`).** Both options are
 take-start snapshots: `autoSend` is the auto-read preference (`AppShell` passes
