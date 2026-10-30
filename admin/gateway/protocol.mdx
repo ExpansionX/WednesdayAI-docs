@@ -168,6 +168,12 @@ Common scopes:
 - `operator.approvals`
 - `operator.pairing`
 
+`operator.talk.secrets` admits no method on its own. `talk.config` with `includeSecrets: true`
+returns the unredacted talk config (provider API keys) only to a connection holding
+`operator.talk.secrets` or `operator.admin`; anything else is refused with
+`missing scope: operator.talk.secrets`. Setup-code pairing grants it (see the client profile table
+below).
+
 Narrow session scopes, for bounded chat clients (ADR 0077):
 
 - `operator.sessions.read`
@@ -272,6 +278,11 @@ and the stored entry is unchanged. The write and narrow field sets are two separ
 so widening one never widens the other, and a field added to the schema later needs
 `operator.admin` until an ADR admits it. Before ADR 0083 the whole method needed `operator.admin`;
 a write-only integration can now change these four settings on any session key it names.
+
+A narrow connection never receives the admin-only session fields: the `sessions.patch` echo and
+every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `execSecurity`,
+`execAsk`, `sendPolicy`, `spawnedBy`, `spawnDepth`, `elevatedLevel`, `verboseLevel`,
+`responseUsage` and `groupActivation`. Write and admin connections receive them unchanged.
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
@@ -386,6 +397,11 @@ Rules that apply to bootstrap redemption:
   already admitted by `none`, `tailscale` or `trusted-proxy` auth or a shared secret, so a client
   pairing through Tailscale Serve still gets the full profile silently. If redemption fails there,
   the earlier admission stands and the connect proceeds as it would without the token.
+- **Device tokens under ambient auth.** Under `none`, `trusted-proxy` or Tailscale identity auth, a
+  connect that presents `auth.deviceToken` has it verified exactly as under `token` mode. A
+  revoked, unknown or over-scoped token is refused with `AUTH_DEVICE_TOKEN_MISMATCH` (plus
+  `details.deviceTokenReason`), and the client should drop the token and reconnect. A valid token
+  connects under the ambient admission. `auth.token` is not treated as a device credential there.
 
 `openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
 ([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
