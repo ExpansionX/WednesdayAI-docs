@@ -168,6 +168,12 @@ Common scopes:
 - `operator.approvals`
 - `operator.pairing`
 
+`operator.talk.secrets` admits no method on its own. `talk.config` with `includeSecrets: true`
+returns the unredacted talk config (provider API keys) only to a connection holding
+`operator.talk.secrets` or `operator.admin`; anything else is refused with
+`missing scope: operator.talk.secrets`. Setup-code pairing grants it (see the client profile table
+below).
+
 Narrow session scopes, for bounded chat clients (ADR 0077):
 
 - `operator.sessions.read`
@@ -273,6 +279,11 @@ so widening one never widens the other, and a field added to the schema later ne
 `operator.admin` until an ADR admits it. Before ADR 0083 the whole method needed `operator.admin`;
 a write-only integration can now change these four settings on any session key it names.
 
+A narrow connection never receives the admin-only session fields: the `sessions.patch` echo and
+every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `execSecurity`,
+`execAsk`, `sendPolicy`, `spawnedBy`, `spawnDepth`, `elevatedLevel`, `verboseLevel`,
+`responseUsage` and `groupActivation`. Write and admin connections receive them unchanged.
+
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
 is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods above are the only
@@ -346,10 +357,11 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
 - `chat.activity` (`operator.sessions.read`) streams bounded per-step tool activity for a turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
-"durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
+"durationMs": <ms>?, "turnSeq": <int>? }`; when the step published a surface, an extra `ui` object is present
   (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
   and results are never included. It is broadcast ordered with the session's `chat` frames and is
-  droppable under backpressure rather than blocking the turn.
+  droppable under backpressure rather than blocking the turn. `turnSeq` follows the rule under
+  [Chat event transcript positions](#chat-event-transcript-positions).
 
 ### Client identity
 
@@ -385,6 +397,11 @@ Rules that apply to bootstrap redemption:
   already admitted by `none`, `tailscale` or `trusted-proxy` auth or a shared secret, so a client
   pairing through Tailscale Serve still gets the full profile silently. If redemption fails there,
   the earlier admission stands and the connect proceeds as it would without the token.
+- **Device tokens under ambient auth.** Under `none`, `trusted-proxy` or Tailscale identity auth, a
+  connect that presents `auth.deviceToken` has it verified exactly as under `token` mode. A
+  revoked, unknown or over-scoped token is refused with `AUTH_DEVICE_TOKEN_MISMATCH` (plus
+  `details.deviceTokenReason`), and the client should drop the token and reconnect. A valid token
+  connects under the ambient admission. `auth.token` is not treated as a device credential there.
 
 `openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
 ([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
@@ -841,7 +858,11 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   Every returned row additionally carries `__openclaw.rowId`, an opaque identity of the returned
   ROW (the entry's storage position; placeholder chunks suffix a chunk ordinal) that is unique
   within the session and stable across pages, reloads and window shifts — a client can key rows
-  with it instead of a positional fallback id, which moves when the head window slides.
+  with it instead of a positional fallback id, which moves when the head window slides. Every
+  returned row also carries `__openclaw.seq: <int>`, the transcript entry's per-session
+  monotonic position as a number: the gateway derives it from the cursor paired with the row, so
+  every placeholder chunk of one oversized row carries its row's own `seq`. Clients order the
+  thread with it ([Chat event transcript positions](#chat-event-transcript-positions)).
 - A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
   plus the same reference under upstream's field names, `__openclaw.replyToId` and
   `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
@@ -1080,11 +1101,29 @@ carry a `runId` prefixed with `session-chat-` (for example `session-chat-<uuid>`
 reuse the standard display pipeline, so they look like any other assistant reply.
 `chat.inject` is unchanged.
 
+### Chat event transcript positions
+
+Every transcript entry has a per-session monotonic integer position, its `seq`. `chat.history`
+exposes it as `__openclaw.seq` on every returned row (above). Live frames carry the position of
+their run's user turn, so a client can order the thread from gateway positions instead of
+reconstructing it from arrival order:
+
+- `chat` events (`delta`, `final`, `error`, `aborted`) and `chat.activity` events carry optional
+  `turnSeq: <int ≥ 0>`: the transcript `seq` of the run's first user entry.
+- `turnSeq` is omitted while it is unknown: the user-entry append has not resolved yet, or the
+  run wrote no user entry at all (heartbeat and system-event turns, inline command replies). A
+  client must not hold its first frame waiting for the field.
+- The existing `seq` field on `chat` events is unchanged and keeps its other meaning: a per-run
+  stream counter for frame ordering within one run, not a transcript position.
+- For a run remapped to a client-supplied run id, the gateway stamps the recorded seq of the
+  client id when it has one and falls back to the source run id otherwise.
+
 ### The chat error event
 
 A dispatched turn that fails without an assistant reply ends with a `chat` broadcast event
-carrying `state: "error"`: `{ runId, sessionKey, seq, state: "error", errorMessage }`. `seq`
-continues the per-run sequence the other `chat` events for that run use, and the event reaches
+carrying `state: "error"`: `{ runId, sessionKey, seq, state: "error", errorMessage, turnSeq? }`. `seq`
+continues the per-run sequence the other `chat` events for that run use, `turnSeq` follows the
+[transcript position rule](#chat-event-transcript-positions), and the event reaches
 operator subscriptions and node sessions the same way the final event does. `chat.send` answers
 `started` immediately, so this event is the only signal a failed turn gives the requesting client;
 the run disappears from the active-run tracking and `chat.history` gains no assistant message.
