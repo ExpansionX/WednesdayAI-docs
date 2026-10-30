@@ -53,6 +53,11 @@ This script:
 - starts the gateway via Docker Compose
 - generates a gateway token and writes it to `.env`
 
+New deployments onboarded here (no `tools.profile` set yet) get workspace-contained
+`read`/`write`/`edit`/`delete` tools for the first-run ritual: the wizard writes
+`tools.profile: "messaging"` plus `tools.alsoAllow: ["group:fs"]` and
+`tools.fs.workspaceOnly: true`. Existing configs keep their current tool policy.
+
 Optional env vars:
 
 - `OPENCLAW_IMAGE` — use a remote image instead of building locally (e.g. `ghcr.io/openclaw/openclaw:latest`)
@@ -538,13 +543,13 @@ precedence, and troubleshooting.
 - Image: `openclaw-sandbox:bookworm-slim`
 - One container per agent
 - Agent workspace access: `workspaceAccess: "none"` (default) uses `~/.openclaw/sandboxes`
-  - `"ro"` keeps the sandbox workspace at `/workspace` and mounts the agent workspace read-only at `/agent` (disables `write`/`edit`/`apply_patch`)
+  - `"ro"` keeps the sandbox workspace at `/workspace` and mounts the agent workspace read-only at `/agent` (disables `write`/`edit`/`delete`/`apply_patch`)
   - `"rw"` mounts the agent workspace read/write at `/workspace`
 - Auto-prune: idle > 24h OR age > 7d
 - Network: `none` by default (explicitly opt-in if you need egress)
   - `host` is blocked.
   - `container:<id>` is blocked by default (namespace-join risk).
-- Default allow: `exec`, `process`, `read`, `write`, `edit`, `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status`
+- Default allow: `exec`, `process`, `read`, `write`, `edit`, `apply_patch`, `delete`, `image`, `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `subagents`, `session_status`
 - Default deny: `browser`, `canvas`, `nodes`, `cron`, `discord`, `gateway`
 
 ### Enable sandboxing
@@ -786,7 +791,7 @@ Example:
 
 ### Security notes
 
-- Hard wall only applies to **tools** (exec/read/write/edit/apply_patch).
+- Hard wall only applies to **tools** (exec/read/write/edit/delete/apply_patch). `delete` is additionally always confined to the workspace, so it cannot breach the hard wall.
 - Host-only tools like browser/camera/canvas are blocked by default.
 - Allowing `browser` in sandbox **breaks isolation** (browser runs on host).
 
