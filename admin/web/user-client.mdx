@@ -176,14 +176,14 @@ For single-origin deployments the gateway can serve the bundle itself. This is *
 }
 ```
 
-With this config the client is at `https://gateway.example.com/v2/client/`, beside the Control UI v2
-console at the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
+With this config the client is at `https://gateway.example.com/v2/client/`, beside the Control UI at
+the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
 `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
 
 - `config.json` is synthesized per request: `gatewayUrl` is the gateway's own origin, so the client
   connects back to where it was loaded from, and `assistantName` is the configured assistant name
   (`ui.assistant.name`, else the default agent's identity, else `Assistant`).
-- `basePath` defaults to `/v2/client` (the default in the sample above). It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It also may not collide with another active SPA mount: a base path of `/` while the Control UI v2 console is enabled, or base paths that contain one another, are rejected when the config loads, naming both keys. With a distinct base path the other consoles are unaffected.
+- `basePath` defaults to `/v2/client` (the default in the sample above). It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It also may not collide with another active SPA mount: a base path of `/` while the Control UI or the control UI v2 console is enabled, or base paths that contain one another, are rejected when the config loads, naming both keys. With a distinct base path the other consoles are unaffected.
 - `root` is optional. Unset, the gateway serves the packaged `dist/web-client` bundle and logs
   which directory it picked. Set, it always wins - including when it is broken, which answers `503`
   with that reason rather than silently falling back. When neither resolves, the route answers
@@ -274,6 +274,15 @@ restart needs no change to the serving layer and no re-pairing:
   `talk.catalog` is retried - Dictate keeps its last known availability instead of latching
   unavailable after one failed read. `agents.list` and `models.list` are fetched again on every
   reconnect, so a restart or a first failed fetch cannot empty the sidebar or the model menu.
+- **Thread order survives a drop too.** The client orders the thread by the transcript position
+  the gateway records for every message (`__openclaw.seq` on `chat.history` rows, and the
+  optional `turnSeq` on live `chat` and `chat.activity` frames) rather than by the order frames
+  arrive, so a reconnect or a reload cannot move a sent message below later replies (ADR 0106
+  amendment, server-sequence ordering). Two known gaps remain: a **Queued** badge and the
+  composer's queue mode go stale when a reconnect loses a queued follow-up's start frames,
+  clearing only on the next history load or a later own turn (#1878), and after lost frames a
+  later send can briefly render above an older still-queued one until the next positioned frame
+  or history load (#1898).
 - **Nothing typed or sent is lost.** Composer drafts are kept per chat in `localStorage`
   (including the composer before a chat is open) and survive a reload, a tab close and a crash;
   they are dropped after 7 days or on logout. Every send is also recorded in a `localStorage`
