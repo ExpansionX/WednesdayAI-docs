@@ -251,7 +251,7 @@ If logs show nonce/signature errors, update the connecting client and verify it:
 
 Related:
 
-- [/web/control-ui](/web/control-ui)
+- [/web/control-ui-v2](/web/control-ui-v2)
 - [/gateway/authentication](/gateway/authentication)
 - [/gateway/remote](/gateway/remote)
 
@@ -585,7 +585,9 @@ of the chat at default verbosity; their full output is in the journal and the
 session transcript.
 
 The file tools accept the argument shapes models commonly send: `edit`,
-`write` and `read` take `path` and also accept `file_path`; `edit` additionally
+`write`, `read` and `delete` take `path` and also accept `file_path`; `delete`
+removes one file and refuses directories, the workspace root, and paths outside
+the workspace; `edit` additionally
 accepts legacy top-level `oldText`/`newText` or `old_string`/`new_string`, which
 are folded into the `edits` list, and `edits` may arrive as a JSON string;
 `write` accepts empty `content` (it creates or truncates the file). A recurring
@@ -598,6 +600,54 @@ Related:
 - [/tools](/tools)
 - [/logging](/logging)
 - [/concepts/session](/concepts/session)
+
+## Agent keeps re-running BOOTSTRAP onboarding
+
+Use this when the agent re-injects `BOOTSTRAP.md` on every session and
+onboarding never completes. Onboarding is stamped complete
+(`onboardingCompletedAt`) only once `BOOTSTRAP.md` is gone from the workspace,
+and the ritual ends with "Delete this file", which needs filesystem tools.
+
+Check:
+
+1. Confirm `BOOTSTRAP.md` still exists in the agent workspace. Then check the
+   tool policy:
+
+   ```bash
+   openclaw config get tools.profile
+   openclaw config get tools.allow
+   openclaw config get tools.alsoAllow
+   openclaw config get tools.exec.security
+   ```
+
+   The `delete` tool ships with the `group:fs` group and the `coding` profile.
+   A `messaging` profile (the onboarding default on older installs) has no fs
+   tools at all, so the agent cannot write `IDENTITY.md` or delete
+   `BOOTSTRAP.md`.
+
+2. If `tools.exec.security: "deny"` blocks shell access, the agent has no exec
+   fallback either; `delete` is the only way to finish the ritual.
+
+Fix (opt in for existing deployments):
+
+```json5
+{
+  tools: {
+    alsoAllow: ["group:fs"],
+    fs: { workspaceOnly: true },
+  },
+}
+```
+
+New installs get this from onboarding automatically when no explicit
+`tools.profile` is set. `tools.fs.workspaceOnly: true` scopes `read`/`write`/
+`edit`/`apply_patch` to the workspace; `delete` is always workspace-contained.
+
+If the workspace uses lanes, the gateway must be on a version where lane seed
+files are copied only at lane creation: earlier versions re-copied
+`BOOTSTRAP.md` from the persona root on every turn, so a lane could never
+finish onboarding. Upgrading fixes this; the persona-root `BOOTSTRAP.md` stays
+as the lane seed template by design, so completion is per lane.
 
 ## Tool output caps and context pruning log lines
 
