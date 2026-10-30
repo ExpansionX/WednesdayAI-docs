@@ -108,6 +108,12 @@ When a device token is issued, `hello-ok` also includes:
 }
 ```
 
+The payload also carries a `features` object: required `methods` and `events` list the RPC
+methods and events this gateway serves, and the optional `capabilities` string array advertises
+param-level feature flags a client must detect before sending (for example
+`"chat.send.turnContext"` — see the `chat.send` params below). Older gateways omit
+`capabilities`, so its absence means the feature is unavailable.
+
 ### Node example
 
 ```json
@@ -346,11 +352,10 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
 - `chat.activity` (`operator.sessions.read`) streams bounded per-step tool activity for a turn. The
   event carries `{ "runId": "...", "sessionKey": "...", "toolCallId": "...", "name": "...",
 "status": "running" | "done" | "error" | "waiting-approval", "startedAt": <epoch ms>,
-"durationMs": <ms>?, "turnSeq": <int>? }`; when the step published a surface, an extra `ui` object is present
+"durationMs": <ms>? }`; when the step published a surface, an extra `ui` object is present
   (`{ "surfaceId": "...", "revision": <int> }`). `name` is a display title only - tool arguments
   and results are never included. It is broadcast ordered with the session's `chat` frames and is
-  droppable under backpressure rather than blocking the turn. `turnSeq` follows the rule under
-  [Chat event transcript positions](#chat-event-transcript-positions).
+  droppable under backpressure rather than blocking the turn.
 
 ### Client identity
 
@@ -842,11 +847,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   Every returned row additionally carries `__openclaw.rowId`, an opaque identity of the returned
   ROW (the entry's storage position; placeholder chunks suffix a chunk ordinal) that is unique
   within the session and stable across pages, reloads and window shifts — a client can key rows
-  with it instead of a positional fallback id, which moves when the head window slides. Every
-  returned row also carries `__openclaw.seq: <int>`, the transcript entry's per-session
-  monotonic position as a number: the gateway derives it from the cursor paired with the row, so
-  every placeholder chunk of one oversized row carries its row's own `seq`. Clients order the
-  thread with it ([Chat event transcript positions](#chat-event-transcript-positions)).
+  with it instead of a positional fallback id, which moves when the head window slides.
 - A user message that quoted another message gains `__openclaw.replyTo: { id, sender?, body? }`,
   plus the same reference under upstream's field names, `__openclaw.replyToId` and
   `__openclaw.replyToPreview: { text, senderLabel? }`. `body` is at most 2000 characters and
@@ -906,6 +907,22 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     the model can use the position on this request only; like that note it is never persisted
     into the message text, stays out of `chat.history` and replay, and is kept only in the stored
     row's `__openclaw.ingress.untrusted` carrier. It is ignored for `uiAction` submits.
+  - `turnContext` (optional string, at most 4000 characters; longer is `INVALID_REQUEST`) is a
+    per-turn client instruction for embedded-runner turns. The gateway trims it and strips
+    control characters (newline and tab are kept), the cache boundary marker, and the refusal
+    test token, then appends it as the last part of that turn's model-facing system prompt:
+    after the cache boundary marker and after any plugin system-prompt additions. The stable
+    pre-boundary prompt is unchanged, so a turn whose context differs misses the provider prompt
+    cache only after the boundary. It is absent from later turns and is never stored: not in
+    transcript rows, `clean_user_message`, session metadata, or the persisted system-prompt
+    report, and plugin prompt hooks and model-call diagnostics see the prompt without it. Only
+    operator-enabled raw request capture (cache trace, model payload log) records it, as part
+    of the full provider request. A send carrying `turnContext` is never steered into a run
+    that is already streaming; it queues as its own turn, and queued turns with different
+    `turnContext` values are never collected into one run. CLI backends ignore it (their system
+    prompt is not resent per turn). It is ignored for `uiAction` submits and is not accepted by
+    `sessions.steer`. Clients detect support from `hello-ok.features.capabilities` containing
+    `"chat.send.turnContext"` before sending it, since older gateways reject unknown params.
 - A `sessions.steer`-queued follow-up registers its own run-table entry once its run actually
   starts, from run start to run end (never from the moment it was merely enqueued). From then it
   is exactly as abortable and listable as a run started any other way - see the `queued` outcome
@@ -1085,29 +1102,11 @@ carry a `runId` prefixed with `session-chat-` (for example `session-chat-<uuid>`
 reuse the standard display pipeline, so they look like any other assistant reply.
 `chat.inject` is unchanged.
 
-### Chat event transcript positions
-
-Every transcript entry has a per-session monotonic integer position, its `seq`. `chat.history`
-exposes it as `__openclaw.seq` on every returned row (above). Live frames carry the position of
-their run's user turn, so a client can order the thread from gateway positions instead of
-reconstructing it from arrival order:
-
-- `chat` events (`delta`, `final`, `error`, `aborted`) and `chat.activity` events carry optional
-  `turnSeq: <int ≥ 0>`: the transcript `seq` of the run's first user entry.
-- `turnSeq` is omitted while it is unknown: the user-entry append has not resolved yet, or the
-  run wrote no user entry at all (heartbeat and system-event turns, inline command replies). A
-  client must not hold its first frame waiting for the field.
-- The existing `seq` field on `chat` events is unchanged and keeps its other meaning: a per-run
-  stream counter for frame ordering within one run, not a transcript position.
-- For a run remapped to a client-supplied run id, the gateway stamps the recorded seq of the
-  client id when it has one and falls back to the source run id otherwise.
-
 ### The chat error event
 
 A dispatched turn that fails without an assistant reply ends with a `chat` broadcast event
-carrying `state: "error"`: `{ runId, sessionKey, seq, state: "error", errorMessage, turnSeq? }`. `seq`
-continues the per-run sequence the other `chat` events for that run use, `turnSeq` follows the
-[transcript position rule](#chat-event-transcript-positions), and the event reaches
+carrying `state: "error"`: `{ runId, sessionKey, seq, state: "error", errorMessage }`. `seq`
+continues the per-run sequence the other `chat` events for that run use, and the event reaches
 operator subscriptions and node sessions the same way the final event does. `chat.send` answers
 `started` immediately, so this event is the only signal a failed turn gives the requesting client;
 the run disappears from the active-run tracking and `chat.history` gains no assistant message.
