@@ -1,9 +1,9 @@
 ---
-summary: "Gateway restart-recovery control plane: readiness, journal, Doctor, and what recovers on default vs sqlite installs"
+summary: "Gateway restart-recovery control plane: readiness, journal, Doctor, and what recovers on every install"
 read_when:
   - A gateway restart leaves chat, deliveries, or session runs blocked
   - Interpreting /readyz recovery snapshots or doctor.recovery.*
-  - Confirming which adapters run on default/jsonl vs sqlite storage
+  - Understanding storage-backed RPC answers during a restart
 title: "Restart recovery"
 ---
 
@@ -23,7 +23,10 @@ Snapshot `phase` walks:
 
 `blocked` is the failure phase (journal unwritable/corrupt, owner lock held, producer prepare failed). Admission stays closed.
 
-A subsystem safety hold is different from a durable blocked item. In particular, `storage_preservation_blocked` rejects all root work, so `/healthz` remains `200` while `/readyz` returns `503` with `ready: false` and `degraded: true`.
+A subsystem safety hold is different from a durable blocked item. Session storage no longer holds
+root work: the fail-fast lifecycle opens storage before this control plane runs, and a storage
+start failure exits the process instead of degrading it (see
+[Session storage recovery](/gateway/session-storage-recovery)).
 
 `ready` may still be `degraded: true` when items remain `blocked` (unknown settlement). Root work is admitted; operators repair those items with Doctor.
 
@@ -40,32 +43,70 @@ Probes are unauthenticated. `Cache-Control: no-store`. Only `GET` and `HEAD` are
 
 Chat `send` / `chat.send` / `agent` RPCs reject with `RECOVERY_NOT_READY` (`recovery_pending`) until admission opens.
 
+## Restart window
+
+Between shutdown and the next listener, connections are refused (`ECONNREFUSED`). The window is
+about 10 s on a production host: up to 5 s of interactive-work drain, then close and boot.
+
+`listening on …` means the process is bound. `gateway ready: accepting work (startup Nms)` means
+root work is admitted; when restart recovery runs, `/readyz` returns 200 at the same point.
+Measure the window from the old process's `signal SIGTERM received` line to the new
+`gateway ready` line.
+
+`GatewayClient` reconnects with a 1 s→30 s backoff, and CLI sessions park requests until the
+next hello. Other callers retry after reconnect.
+
+Idle `agent_idle` triggers and cron schedule windows wait while admission is closed and fire on
+the first tick after it opens, so a boot no longer produces one `RECOVERY_NOT_READY` enqueue
+failure per configured agent. A `HH:MM-HH:MM` schedule window that elapses entirely during the
+wait is skipped rather than fired late, the same as any other tick the monitor misses. A cron
+schedule window whose occurrences pass during the wait fires once, not once per missed occurrence.
+
 ## Storage-backed RPCs during a restart
 
-On a sqlite or postgres install the gateway serves its WebSocket before its session storage is published, because the storage supervisor starts behind the recovery owner fence. Storage-backed methods — run history, `chat.history`, the session-run and task reads, and the session
-writers (`sessions.create`, `sessions.patch`, `sessions.reset`, `sessions.delete`, `sessions.compact`,
-`chat.inject`) — are held at dispatch for up to 10 seconds while that start completes. The hold keeps
-required reads from using a JSONL fallback and keeps boot-write methods from landing only in JSONL;
-the full method classification is in
-[Protocol](/gateway/protocol#session-storage-readiness). If the start finishes inside the hold, the handler runs normally. If the gateway is still starting after 10 seconds, they answer retryable `RECOVERY_NOT_READY` (`storage_starting`), and the log carries a single warning from the `gateway/storage-fence` subsystem — `session storage still starting after 10000ms; storage-backed methods answer RECOVERY_NOT_READY` — once per boot, not one line per request. A client that reconnects during a restart therefore never sees an empty list or an error burst: it gets the real transcript once storage is ready, and if storage takes longer than the hold its first request gets a retryable error and the client keeps its run list until a retry succeeds.
+Session storage opens during boot through the fail-fast lifecycle — before the restart-recovery
+fence — so a storage start failure exits the process and nothing serves. While the open is still
+in flight, storage-backed methods — run history, `chat.history`, the session-run and task reads,
+and the session writers (`sessions.create`, `sessions.patch`, `sessions.reset`, `sessions.delete`,
+`sessions.compact`, `chat.inject`) — are held at dispatch for up to 10 seconds so a client that
+reconnects during a restart never sees an empty list or an error burst: it gets the real transcript
+once storage is ready. If the gateway is still starting after 10 seconds, they answer retryable
+`RECOVERY_NOT_READY` (`storage_starting`), and the log carries a single warning from the
+`gateway/storage-fence` subsystem — `session storage still starting after 10000ms; storage-backed
+methods answer RECOVERY_NOT_READY` — once per boot, not one line per request. The full method
+classification is in [Protocol](/gateway/protocol#session-storage-readiness).
 
-`UNAVAILABLE` with `details.code = "storage_start_failed"` from these methods means session storage did not start in this process while the gateway kept serving: restart recovery failed non-fatally. `details.reasonCodes` names the cause — `owner_lock_held` (another gateway process still holds the owner lock for this state dir; stop it), `prior_owner_unproven` or `owner_fence_unavailable` (the owner fence could not be established), `journal_unavailable` / `journal_unwritable` / `journal_corrupt` (the state dir's restart-recovery journal cannot be opened, written, or parsed), `storage_supervisor_start_failed` (the storage supervisor itself failed to start), or `assembly_failed` (recovery assembly threw); a failure that carries no specific code answers `recovery_start_failed`. That list is the complete set of start-failure codes. The answer is immediate and non-retryable by design, and clients may latch on it. The same failure answers the session writers above without running their handler, so a write refused this way never lands only in the JSONL store. Diagnose with the gateway log lines `restart-recovery journal unavailable` / `restart-recovery owner fence unavailable`, `storage.v1` (`wednesdayai status` or `wednesdayai doctor --deep`), and the restart-recovery troubleshooting below.
+`UNAVAILABLE` with `details.code = "storage_start_failed"` from these methods means the storage
+gate never reached ready in this process while the gateway kept serving: restart recovery failed
+non-fatally after storage was expected to open (a journal or owner-fence failure, or a failure of
+the storage-dependent startup work itself). `details.reasonCodes` names the cause —
+`owner_lock_held`, `prior_owner_unproven` or `owner_fence_unavailable` (the restart-recovery owner
+fence could not be established),
+`journal_unavailable` / `journal_unwritable` / `journal_corrupt` (the state dir's
+restart-recovery journal cannot be opened, written, or parsed),
+`storage_supervisor_start_failed` (the storage-dependent startup work failed after the open), or
+`assembly_failed` (recovery assembly threw); a failure that carries no specific code answers
+`recovery_start_failed`. This is rare by construction: storage itself exits the process on
+failure. Clients may latch on the answer; it clears only after the restart. Diagnose with the
+gateway log lines `restart-recovery journal unavailable` / `restart-recovery owner fence
+unavailable`, `storage.v1` (`wednesdayai status` or `wednesdayai doctor --deep`), and the
+restart-recovery troubleshooting below.
 
 During shutdown the hold applies in reverse: the storage state turns `stopping` at shutdown entry, so requests arriving between admission close and socket close answer retryable `RECOVERY_NOT_READY` (`storage_stopping`, "gateway is stopping") instead of a storage error, held for up to the same 10 seconds. The socket can close before the hold expires, though, so a client may instead see the connection drop. From the client's perspective both answers are retryable — reconnect and send the request again; it lands on the next process.
 
 ## What recovers
 
-On **every** install (default, `fs-jsonl`, and sqlite):
+On **every** install:
 
 - outbound delivery (`core:outbound-delivery`)
 - session runs (`core:session-runs`)
 - agent turns (`core:agent-turns`)
 - Pi embedded (`core:pi-embedded`)
 - ACP runtime (`core:acp-runtime`)
-- storage supervisor (`core:storage-supervisor`)
 - plugin-owned work without an adapter (`core:plugin-owned-work` → `unsupported_runtime` block). A plugin's task passes are not included: the task pipeline recovers them.
 
-**Not** on default or `fs-jsonl` installs: task-run (`core:task-runs`) and cron/heartbeat (`core:cron-heartbeat`) adapters assemble only when sqlite session storage publishes `taskRuns` / `cronJobs`. Do not expect those surfaces to recover on default installs.
+Task-run (`core:task-runs`) and cron/heartbeat (`core:cron-heartbeat`) adapters assemble only when
+the SQL session runtime publishes `taskRuns` / `cronJobs`.
 
 Session-run and embedded-Pi resume require a persistent agent-turn work queue. On the default loopback runtime, automatic resume and `sessions.runs.continue` fail closed before changing run state; configure durable session storage or cancel the run instead.
 
@@ -162,8 +203,8 @@ If an adapter throws after its mutation may have started, automatic recovery rec
 - **`/readyz` stays 503 with `recovery_pending`:** no runtime installed, or admission still recovering. Check gateway logs for journal/lock errors.
 - **`/readyz` 503, `phase: blocked`, `journal_unwritable` / `journal_corrupt`:** the sqlite file at `${stateDir}/restart-recovery.sqlite` is preserved; do not delete it to “fix” corruption.
 - **`/readyz` 200 but `degraded: true`:** blocked items remain. An interrupted task pass clears on its own after its lease is reclaimed. Inspect the others with Doctor, and do not restart in a loop expecting unknown settlement to resume on its own.
-- **Two live gateways on one state dir:** the second fails owner CAS / kernel lock (`owner_lock_held`). Stop the prior process. While the loser keeps serving, its storage-backed RPCs answer non-retryable `UNAVAILABLE` (`storage_start_failed`) — see [Storage-backed RPCs during a restart](#storage-backed-rpcs-during-a-restart).
-- **`storage_start_failed` from run history or `chat.history` with the gateway otherwise healthy:** restart recovery could not start session storage in this process. `details.reasonCodes` names the hold (`owner_lock_held`, `prior_owner_unproven`, `owner_fence_unavailable`, `journal_unavailable`, `journal_unwritable`, `journal_corrupt`, `storage_supervisor_start_failed`, `assembly_failed`). Remove the cause — stop the other process, or repair the state dir's journal — then restart the gateway. Clients may latch on this answer; it clears only after the restart.
+- **Two live gateways on one state dir:** the second fails session-storage ownership and exits (the database is owned by the first gateway; see [Session storage recovery](/gateway/session-storage-recovery)). It may instead fail restart-recovery owner CAS / kernel lock (`owner_lock_held`). Stop the prior process before starting the second.
+- **`storage_start_failed` from run history or `chat.history` with the gateway otherwise healthy:** the storage gate never reached ready while this process kept serving — a restart-recovery failure, not a storage failure (storage start failures exit the process). `details.reasonCodes` names the hold (`owner_lock_held`, `prior_owner_unproven`, `owner_fence_unavailable`, `journal_unavailable`, `journal_unwritable`, `journal_corrupt`, `storage_supervisor_start_failed`, `assembly_failed`). Remove the cause — stop the other process, or repair the state dir's journal — then restart the gateway. Clients may latch on this answer; it clears only after the restart.
 - **A user reports `ACP error (ACP_TURN_INTERRUPTED)` or `ACP_GATEWAY_DRAINING` around a restart:** expected behavior, not a fault. The first is a turn the shutdown cancelled; the second is a message that arrived while the gateway was draining and was never sent to the agent. Inspect the rows with `sessions.runs.list` (filter `kind: "acp"`); what the user should do is in [ACP agents](/tools/acp-agents#gateway-restarts).
 
 ## Related
