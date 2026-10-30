@@ -1312,6 +1312,7 @@ Optional **Docker sandboxing** for the embedded agent. See [Sandboxing](/gateway
           "write",
           "edit",
           "apply_patch",
+          "delete",
           "sessions_list",
           "sessions_history",
           "sessions_send",
@@ -1660,7 +1661,7 @@ Within each tier, the first matching `bindings` entry wins.
             "sessions_spawn",
             "session_status",
           ],
-          deny: ["write", "edit", "apply_patch", "exec", "process", "browser"],
+          deny: ["write", "edit", "delete", "apply_patch", "exec", "process", "browser"],
         },
       },
     ],
@@ -1697,6 +1698,7 @@ Within each tier, the first matching `bindings` entry wins.
             "read",
             "write",
             "edit",
+            "delete",
             "apply_patch",
             "exec",
             "process",
@@ -2028,7 +2030,7 @@ sessions keep the configuration resolved when they started.
 
 `tools.profile` sets a base allowlist before `tools.allow`/`tools.deny`:
 
-Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved).
+Local onboarding defaults new local configs to `tools.profile: "messaging"` when unset (existing explicit profiles are preserved). When onboarding applies that default profile, it also adds `tools.alsoAllow: ["group:fs"]` (skipped when `tools.allow` is already set) and `tools.fs.workspaceOnly: true`, so a fresh install has workspace-contained filesystem tools including `delete`. Existing configs are not modified; opt in with `tools.alsoAllow: ["group:fs"]` plus `tools.fs.workspaceOnly: true`.
 
 | Profile     | Includes                                                                                                  |
 | ----------- | --------------------------------------------------------------------------------------------------------- |
@@ -2042,7 +2044,7 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 | Group              | Tools                                                                                                    |
 | ------------------ | -------------------------------------------------------------------------------------------------------- |
 | `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                            |
-| `group:fs`         | `read`, `write`, `edit`, `apply_patch`                                                                   |
+| `group:fs`         | `read`, `write`, `edit`, `delete`, `apply_patch`                                                         |
 | `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
 | `group:memory`     | `memory_search`, `memory_get`                                                                            |
 | `group:web`        | `web_search`, `web_fetch`                                                                                |
@@ -2051,6 +2053,12 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 | `group:messaging`  | `message`                                                                                                |
 | `group:nodes`      | `nodes`                                                                                                  |
 | `group:openclaw`   | All built-in tools (excludes provider plugins)                                                           |
+
+`tools.fs.workspaceOnly: true` restricts `read`/`write`/`edit`/`apply_patch` paths to the agent
+workspace. `delete` is always workspace-contained: it deletes one file at a time, refuses
+directories, the workspace root and paths outside the workspace (or the lane directory when
+workspace lanes are on), and ignores `tools.fs.workspaceOnly`. `apply_patch` stays workspace-only
+unless `tools.exec.applyPatch.workspaceOnly` is also set to `false`.
 
 ### `tools.allow` / `tools.deny`
 
