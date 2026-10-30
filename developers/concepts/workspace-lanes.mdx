@@ -201,9 +201,24 @@ files are:
 - `USER.md`
 - `BOOTSTRAP.md`
 
-Seed copies are copied from the persona workspace only when the lane file is missing. Existing lane
-files are not overwritten. Symlink and hardlink aliases that escape the persona workspace are
+Seed files are copied from the persona workspace only when the lane is created. Existing lane files
+are not overwritten, and persona files added or changed after creation are not propagated into
+existing lanes: a lane that deletes its `BOOTSTRAP.md` after completing onboarding does not get it
+back on later turns. Symlink and hardlink aliases that escape the persona workspace are
 skipped, and dangling symlinks in the lane are treated as existing rather than followed.
+
+Creation is atomic: the lane directory is seeded in a hidden temporary sibling
+of the lane path, named `.<lane directory name>.creating-<uuid>` (under the
+default root template: `.workspace.creating-<uuid>` in the lanes root),
+and renamed into place only after every seed file has been written. A failed
+seed write removes the temporary directory and fails that turn; the next turn
+retries creation, so a published lane always has its seed files. A leftover
+`.<lane directory name>.creating-<uuid>` directory can only come from a crash
+mid-creation and is safe to delete.
+
+Each lane completes onboarding independently: the lane's agent deletes its own `BOOTSTRAP.md` copy
+when the ritual is done, and the shared persona workspace keeps its `BOOTSTRAP.md` as the seed
+template for new lanes.
 
 ### Supported strategies
 
