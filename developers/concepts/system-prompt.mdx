@@ -46,6 +46,8 @@ When `agents.defaults.systemPrompt.cache.boundary` is `auto` (default), the asse
 
 Constants are exported once from `src/agents/system-prompt.ts` and imported by the system-prompt report parser so assembler and parser cannot drift (ADR 0051). Set `cache.boundary: "off"` to render one continuous prompt with no cache-boundary marker. Changing marker text invalidates provider prompt-cache prefixes once at upgrade time — see [Prompt Caching](/reference/prompt-caching).
 
+One more per-turn tail exists outside the section list: a `chat.send` request may carry `turnContext`, a sanitized client instruction that WednesdayAI appends as the final part of that turn's volatile suffix — after the boundary marker and after any plugin system-prompt additions. It appears on that turn only and is never persisted; see [Gateway protocol](/gateway/protocol).
+
 ## Prompt modes
 
 WednesdayAI can render smaller system prompts for sub-agents. The runtime sets a
@@ -184,7 +186,12 @@ compaction.
 Large files are truncated with a marker. The max per-file size is controlled by
 `agents.defaults.bootstrapMaxChars` (default: 20000). Total injected bootstrap
 content across files is capped by `agents.defaults.bootstrapTotalMaxChars`
-(default: 150000). Missing files inject a short missing-file marker.
+(default: 150000). Missing files inject a short missing-file marker. The one
+exception in the default list is `BOOTSTRAP.md`: once onboarding completes it is
+supposed to be gone, so an absent `BOOTSTRAP.md` is omitted entirely and no
+marker is injected. Files listed explicitly in
+`systemPrompt.sections.projectContext.files` follow their own `optional`
+setting instead of this built-in default.
 
 Sub-agent sessions with the legacy default list only inject `AGENTS.md` and `TOOLS.md` (other bootstrap files
 are filtered out to keep the sub-agent context small). Configured Project Context file lists are already explicit, so they are not filtered by the legacy sub-agent allowlist.
