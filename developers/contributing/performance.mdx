@@ -1,9 +1,9 @@
 ---
-description: "How to measure performance locally: model latency and CLI startup benches"
-summary: "How to measure performance locally: model latency and CLI startup benches"
+summary: "How to measure performance locally: model latency, CLI startup and runtime budget gates"
 read_when:
   - Measuring or comparing model latency or CLI startup time
   - Checking a change for a performance regression
+  - Running the runtime budget gates before a PR
 title: "Measuring performance"
 audience: developer
 ---
@@ -44,7 +44,39 @@ It benchmarks these commands:
 
 Output includes the average, p50, p95, min and max, and the exit-code and signal distribution for each command. Run `pnpm build` first when you benchmark `dist/entry.js`.
 
+## Runtime budgets
+
+Config: `config/perf-budgets.json` · Runner: `scripts/perf/` (ADR 0040, ADR 1967)
+
+Usage:
+
+```bash
+pnpm build && pnpm web:build:packaged && pnpm control:build:packaged && pnpm check:perf
+```
+
+Pass `--runs N` to change the number of sequential boot samples (default 5) and `--measure-baselines` to write the measured values back into `config/perf-budgets.json`.
+
+`check:perf` is a before-PR command, not part of `pnpm check`: it needs the prerequisite build above and boots the built gateway.
+
+What it measures per run (`--runs` defaults to 5, sequential):
+
+- Gateway cold start: spawn `dist/entry.js gateway run` to the first HTTP 200 from `/ready` (not `/health`, which answers as soon as the listener opens). Reports p50 and p95.
+- Idle RSS: sampled 2 s after `/ready` answers.
+- Package size: tarball, `dist/` and `extensions/` bytes from `npm pack --dry-run --json --ignore-scripts`.
+
+The boot is isolated: the child gets a throwaway temp dir for `HOME`, `OPENCLAW_HOME`, `OPENCLAW_STATE_DIR`, `OPENCLAW_CONFIG_PATH` and its cwd, and `OPENCLAW_NO_RESPAWN=1` so the measured PID is the gateway itself. Channels and plugins load normally — their boot cost is part of the budget. Every exit path stops the child and removes the temp dir.
+
+Exit codes:
+
+- `0` — no `block`-mode budget with a measured baseline failed. Advisory outcomes still exit zero: a `warn`-mode budget that is over target or regressed beyond its baseline tolerance prints a `::warning::` annotation, and a `block`-mode budget on `baseline: null` (unmeasured is unproven) never fails regardless of status.
+- `1` — only a `block`-mode budget with a measured baseline failed (over target or regressed). New budgets start in `warn`.
+- `2` — a prerequisite is missing (`dist/entry.js`, `dist/web-client`, `dist/control-ui-v2`, or an unsupported platform), the arguments are invalid (unknown flag, or `--runs` that is not a positive integer), an adapter or the baseline-recording step errored.
+- `130` / `143` — interrupted by SIGINT / SIGTERM; the measured gateway is stopped and the temp dir cleaned up before exit.
+
+`--measure-baselines` rewrites `config/perf-budgets.json` with the measured values and writes a dated report under `dev-docs/workstreams/platform-budgets-gates/diagnostics/`. Targets and baselines live in the config — do not copy numbers into docs.
+
 ## Related
 
-- [Tests](/developers/reference/test)
-- [Coding style](/developers/contributing/coding-style)
+- [Tests](/reference/test)
+- [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing): complexity guards in tests use input-scaling ratios, not absolute time bounds
+- [Coding style](https://docs.wednesdayai.dev/developers/contributing/coding-style)
