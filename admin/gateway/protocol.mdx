@@ -111,7 +111,8 @@ When a device token is issued, `hello-ok` also includes:
 The payload also carries a `features` object: required `methods` and `events` list the RPC
 methods and events this gateway serves, and the optional `capabilities` string array advertises
 param-level feature flags a client must detect before sending (for example
-`"chat.send.turnContext"` — see the `chat.send` params below). Older gateways omit
+`"chat.send.turnContext"` — see the `chat.send` params below — or
+`"chat.history.spanTranscripts"` — see the `chat.history` params). Older gateways omit
 `capabilities`, so its absence means the feature is unavailable.
 
 ### Node example
@@ -740,7 +741,22 @@ logged as `late invoke result dropped` at warn level.
   and drops older ones whole (the newest message is always kept), and it does not move `cursor`, so
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
-  `details.reason = "invalid_cursor"`. During the boot window the call is held by the dispatch
+  `details.reason = "invalid_cursor"`.
+- `spanTranscripts` (optional boolean, `apps/web` only today) pages across the session key's
+  earlier transcripts - idle, daily and explicit resets each start a new transcript under the
+  same key. Rows then carry `__openclaw.transcriptId` and `__openclaw.rowId` becomes
+  `"<sessionId>:<seq>"` (placeholder chunk ids derive from it); `__openclaw.seq` stays
+  per-transcript. When a transcript is exhausted the read continues into its predecessor, at most
+  8 hops, stopping at the key's oldest transcript or at a tombstone (a deleted chat's history
+  never reappears). Every item cursor carries the transcript id, so paging cannot drift into
+  another chat; when a page ends because an older transcript was reached, the cursor is a
+  transcript-head cursor and `hasMore` is true. A transcript-head cursor sent without
+  `spanTranscripts` is refused with `INVALID_REQUEST` and `details.reason = "invalid_cursor"`.
+  Without the flag, behavior is unchanged and rows keep `__openclaw.rowId = String(seq)`.
+  Clients detect support from `hello-ok.features.capabilities` containing
+  `"chat.history.spanTranscripts"` before sending it, since older gateways reject unknown
+  params.
+  During the boot window the call is held by the dispatch
   fence and answered per [Session storage readiness](#session-storage-readiness), never with an
   empty page. The leaf and reply fields that client-chat-v3 P2
   added are described below.
@@ -868,14 +884,15 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   reference is stored as a custom transcript entry written just before the user turn, so it never
   enters the model context.
 - `chat.send` (`operator.write`; narrow-admitted) takes
-  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, expectedLeafEntryId?, dictated?, location?}`
+  `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, replyToTranscriptId?, expectedLeafEntryId?, dictated?, location?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
   running). When an embedded run is already active in the session and the queue policy enqueues the
   turn behind it, the answer is `{ runId, status: "queued" }`, sent once the policy decides (at
   most 30 s). No empty `final` is broadcast for a queued turn; its events stream under `runId` when
   the queue drains. P2 added the last two params, and `dictated` (described below) is also optional:
   - `replyToId` is the entry id of the message being replied to (the `__openclaw.id` of a
-    `chat.history` message). The gateway looks it up in this session's own transcript and gives the
+    `chat.history` message). The gateway looks it up in this session's own transcript first, then
+    through the chat's earlier transcripts (see `replyToTranscriptId` below), and gives the
     turn's prompt the quoted message as reply context: its text (at most 2000 characters) and its
     sender (the assistant's name for an assistant message, otherwise the connecting client's
     `displayName` or `User`). It also persists the reference beside the user turn, which is how
@@ -883,7 +900,18 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     session, that write waits until this turn's own run starts. An id that does not resolve in this
     session (unknown, or from another session) keeps an id-only reference - no body or sender - and
     logs a warning; the message still sends. The reference is persisted only when the session
-    already has a stored session id.
+    already has a stored session id. `replyToTranscriptId` (ADR 1966 span history) names the
+    transcript holding `replyToId` when the target predates the current one (from the row's
+    `__openclaw.transcriptId`). The gateway then resolves the entry exclusively in that
+    transcript - entry ids are unique only per `(session_id, entry_id)`, so a
+    current-transcript-first fallback could silently quote a different message sharing the id -
+    and the owner-checked `transcriptInChat` probe (the same check `chat.history` cursor binding
+    uses, keyed on the resolved store key) keeps the read inside this chat: a transcript of
+    another chat, an unknown one, or a tombstone keeps an id-only reference, and no other
+    transcript is read. Naming the current transcript also resolves exclusively there: a miss
+    reports not-found instead of walking predecessors. Without the param, resolution reads the
+    current transcript first, then a bounded predecessor walk (at most 8 hops, stopping at
+    tombstones).
   - `expectedLeafEntryId` (string or `null`) refuses the send when the chat has moved on since the
     caller last read it. It is compared for exact equality with the leaf `chat.history` reports
     (`leafEntryId`). A mismatch is refused with `INVALID_REQUEST`, message
