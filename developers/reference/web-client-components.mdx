@@ -83,7 +83,7 @@ apps/web/src/
   ui/          the component layer: Shell, Sidebar, TopBar, Thread, Composer, ... + client.css
   state/       chat.ts (zustand store), types.ts
   providers/   gateway and events seams, WebClientRuntime, theme, attachments, preferences, and the chat runtime modules (leaf tracking, queued turns, chat list)
-  runs/        RunsController and the projection behind the Runs panel
+  runs/        RunsController and the projection of in-flight runs
   gateway/     connection, device identity, setup-code parsing
 ```
 
@@ -325,15 +325,14 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   data, not UI state.
 - Runs live in `runs/` behind `RunsController`. Its `start()` and `stop()` are one boolean, so
   components take a **reference-counted lease** with `useRunsLease(controller)`
-  (`ui/use-runs-lease.ts`); the Sidebar holds one for the live badge and the `RightPanel` holds
-  another while open.
+  (`ui/use-runs-lease.ts`); the busy-state projection in `app/use-busy-sessions.ts` holds one so
+  the sidebar's busy dots stay live.
 
 ```ts
-// Do this: the sidebar badge and the panel each hold a lease
-useRunsLease(runsController); // Sidebar: badge stays live with the panel closed
-useRunsLease(controller, true); // RightPanel: refresh on join
+// Do this: the busy-state projection holds a lease for the shell's lifetime
+useRunsLease(runsController); // Sidebar busy dots stay live
 
-// Not this: closing the panel would stop the controller and freeze the badge
+// Not this: an unbalanced start/stop would stop the controller under other readers
 useEffect(() => {
   controller.start();
   return () => controller.stop();
@@ -1121,7 +1120,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
 ### Busy state
 
 - `selectBusySessionKeys(rows)` (`runs/runs-model.ts`) maps the `sessions.runs.list` projection
-  the sidebar and Runs panel already read to the session keys with a run in flight: rows whose
+  the sidebar already reads to the session keys with a run in flight: rows whose
   `groupForSessionRunStatus(status)` is `queued` or `running`, excluding `kind === "heartbeat"`
   (heartbeat output is suppressed in chat; counting it would pulse the busy state on every tick).
 - `useBusySessionKeys(controller)` (`app/use-busy-sessions.ts`) reads the projection with
