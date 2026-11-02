@@ -70,6 +70,13 @@ Summarize keeps a short bullet list of dropped messages and injects it as a synt
 
 Defaults: `debounceMs: 1000`, `cap: 20`, `drop: summarize`.
 
+## When a followup turn fails
+
+- A followup turn runs its agent at most once. If the agent run finishes but sending its reply fails, the gateway logs `Followup reply failed after the agent run: <error>` and does not run the turn again. The run stays recorded as completed. Payloads that reach channel delivery are still retried by the [outbound delivery queue](/gateway/outbound-delivery).
+- Any other failed followup (for example, one that cannot start its run) is retried once. If the retry also fails, the followup is dropped and the gateway logs `followup queue: dropped a follow-up for <session> after its retry failed: <error>`.
+- Aborted followups are not retried.
+- Messages queued behind a failed followup still run.
+
 ## Per-session overrides
 
 - Send `/queue <mode>` as a standalone command to store the mode for the current session.
@@ -91,6 +98,9 @@ The queue is draining but a long run is blocking newer messages. Enable verbose 
 
 **Messages are dropped**
 The `cap` limit was reached and `drop: old` or `drop: new` discarded messages. Check your `cap` setting (`agents.defaults.queue.cap`); the default is 20. Increase it, or switch `drop: summarize` to keep a compact summary of dropped messages instead of discarding them.
+
+**A queued message never got a reply**
+Search the gateway log (`openclaw logs --follow`) for `Followup reply failed after the agent run` or `dropped a follow-up`. The first means the agent ran but its reply could not be sent; the turn is not re-run, so resend the message once the channel is healthy. The second means the followup failed twice and was dropped; the error after the colon names the cause.
 
 **Agent seems stuck and won't process new messages**
 Check `openclaw status` for a session that is still marked active. A crashed run can leave the per-session lane locked. Restart the gateway to clear in-process state. For persistent issues, check `openclaw logs --follow` for `abort` or `timeout` events.
