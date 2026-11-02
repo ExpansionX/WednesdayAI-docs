@@ -675,11 +675,23 @@ logged as `late invoke result dropped` at warn level.
   [Session storage readiness](#session-storage-readiness) — never an empty page and never
   live-only records. Unlike
   `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
-  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
+  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason` - with one
+  exception: the per-run execution `context` (ADR 1929) is stripped from every row, so a polled
+  listing does not grow with the per-run snapshot. Only `sessions.runs.get` returns it.
 - Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
   run: `{ "record": <SessionRunRecord> }`, or `{ "record": null }` for an unknown id or an
   unconfigured store - this method never errors on a missing id. It reads the durable store only,
-  so it never returns the synthetic `live:` records that `sessions.runs.list` adds.
+  so it never returns the synthetic `live:` records that `sessions.runs.list` adds. The record may
+  carry an optional execution `context` snapshot (ADR 1929) holding sizes, counts, names and
+  sanitized labels only: the provider/model that answered, the fallback candidates that failed
+  before it (each `provider/model` plus an optional reason, never error text), token usage, the
+  stop reason, the error kind, the final prompt's composition in characters (system prompt,
+  workspace files, skills, tools, per-source injected context and messages), the injected
+  workspace files by basename with sizes and truncated/missing flags, and tool and skill names
+  (capped at 200). It never holds prompt text, injected text, file contents, file paths or
+  fallback error strings. Runs recorded before the feature, runs registered outside the
+  embedded-agent terminal seam (ACP, subagent registry), and heartbeat, nudge, announce and
+  main-session cron turns carry no context.
 - Operators may call `sessions.runs.events` (`operator.read`) with `{sessionRunId}` for that
   run's full event history, unpaged: `{ "events": [<SessionRunEvent>] }` (empty without a
   configured store). Unlike `tasks.runs.events`, each event's raw `payloadJson` is included, not
@@ -742,7 +754,8 @@ logged as `late invoke result dropped` at warn level.
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
   `details.reason = "invalid_cursor"`.
-- `spanTranscripts` (optional boolean, `apps/web` only today) pages across the session key's
+- `spanTranscripts` (optional boolean, `apps/web` and the Control UI v2 console today) pages
+  across the session key's
   earlier transcripts - idle, daily and explicit resets each start a new transcript under the
   same key. Rows then carry `__openclaw.transcriptId` and `__openclaw.rowId` becomes
   `"<sessionId>:<seq>"` (placeholder chunk ids derive from it); `__openclaw.seq` stays
