@@ -268,7 +268,7 @@ scope it needs.
 
 | Fields in the call besides `key`                                                                  | Admitted for                                                              |
 | ------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------- |
-| only `label`, `model`, `thinkingLevel` and `reasoningLevel` (any subset)                          | `operator.write`, `operator.admin`, or a narrow `operator.sessions.write` |
+| only `label`, `model`, `thinkingLevel`, `reasoningLevel` and `archived` (any subset)              | `operator.write`, `operator.admin`, or a narrow `operator.sessions.write` |
 | any other field (for example `execHost`, `sendPolicy`, `verboseLevel`), alone or mixed with those | `operator.admin` only                                                     |
 
 A field counts when it is present, whatever its value, so `{ "execHost": null }` still needs admin,
@@ -278,7 +278,13 @@ and the stored entry is unchanged. The write and narrow field sets are two separ
 (`SESSIONS_PATCH_WRITE_FIELDS` and `NARROW_SESSION_PATCH_FIELDS` in `src/gateway/method-scopes.ts`),
 so widening one never widens the other, and a field added to the schema later needs
 `operator.admin` until an ADR admits it. Before ADR 0083 the whole method needed `operator.admin`;
-a write-only integration can now change these four settings on any session key it names.
+a write-only integration can now change these five settings on any session key it names. `archived`
+joined both allowlists with ADR 0083's amendment (2026-11-02): `true` sets `archived: true` and
+`archivedAt: <now>` on the stored entry, `false` deletes both, the echo projects them like any
+allowed field, and only the unarchive patch clears them — a new message and `sessions.reset` leave
+an archived session archived. `sessions.list` rows project `archived: true` for archived sessions
+(see [sessions.list sorting, agent activity, and visibility](#sessionslist-sorting-agent-activity-and-visibility));
+there is no server-side filter for it, clients filter.
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
@@ -631,10 +637,14 @@ logged as `late invoke result dropped` at warn level.
     while the first is still in flight returns `CONFLICT` with
     `details.reason = "duplicate_in_flight"`.
   - `queue` and `interrupt` accept attachments under the same contract as `chat.send`: any file
-    type, raster images inline, everything else through the inbound media store (see the
-    `chat.send` bullet below). An attachment without base64 `content` (for example, url-only)
-    returns `INVALID_REQUEST` with `details.reason = "attachment_content_required"` rather than
-    being dropped on the way to the agent.
+    type, inline base64 `content` or an ADR 1330 `uploadId` reference, raster images inline,
+    everything else through the inbound media store (see the `chat.send` bullet below). An
+    attachment with neither `content` nor an `uploadId` (for example, url-only) is dropped by the
+    wire normalizer, and a call that loses an entry that way returns `INVALID_REQUEST` with
+    `details.reason = "attachment_content_required"` rather than silently delivering less than
+    was sent. Attachment resolution runs after the last pre-start refusal (lane admission, the
+    inject guard, the interrupt settle wait), so a steer refused before its turn starts consumes
+    no uploads and its `uploadId` references stay retryable.
   - A `message` that is blank once trimmed returns `INVALID_REQUEST`, as does a session whose send
     policy denies the send. `sessions.steer` has no `replyToId` and no `expectedLeafEntryId`: a
     steered or queued message carries neither a reply reference nor a leaf guard.
@@ -675,23 +685,11 @@ logged as `late invoke result dropped` at warn level.
   [Session storage readiness](#session-storage-readiness) — never an empty page and never
   live-only records. Unlike
   `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
-  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason` - with one
-  exception: the per-run execution `context` (ADR 1929) is stripped from every row, so a polled
-  listing does not grow with the per-run snapshot. Only `sessions.runs.get` returns it.
+  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
 - Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
   run: `{ "record": <SessionRunRecord> }`, or `{ "record": null }` for an unknown id or an
   unconfigured store - this method never errors on a missing id. It reads the durable store only,
-  so it never returns the synthetic `live:` records that `sessions.runs.list` adds. The record may
-  carry an optional execution `context` snapshot (ADR 1929) holding sizes, counts, names and
-  sanitized labels only: the provider/model that answered, the fallback candidates that failed
-  before it (each `provider/model` plus an optional reason, never error text), token usage, the
-  stop reason, the error kind, the final prompt's composition in characters (system prompt,
-  workspace files, skills, tools, per-source injected context and messages), the injected
-  workspace files by basename with sizes and truncated/missing flags, and tool and skill names
-  (capped at 200). It never holds prompt text, injected text, file contents, file paths or
-  fallback error strings. Runs recorded before the feature, runs registered outside the
-  embedded-agent terminal seam (ACP, subagent registry), and heartbeat, nudge, announce and
-  main-session cron turns carry no context.
+  so it never returns the synthetic `live:` records that `sessions.runs.list` adds.
 - Operators may call `sessions.runs.events` (`operator.read`) with `{sessionRunId}` for that
   run's full event history, unpaged: `{ "events": [<SessionRunEvent>] }` (empty without a
   configured store). Unlike `tasks.runs.events`, each event's raw `payloadJson` is included, not
@@ -754,8 +752,7 @@ logged as `late invoke result dropped` at warn level.
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
   `details.reason = "invalid_cursor"`.
-- `spanTranscripts` (optional boolean, `apps/web` and the Control UI v2 console today) pages
-  across the session key's
+- `spanTranscripts` (optional boolean, `apps/web` only today) pages across the session key's
   earlier transcripts - idle, daily and explicit resets each start a new transcript under the
   same key. Rows then carry `__openclaw.transcriptId` and `__openclaw.rowId` becomes
   `"<sessionId>:<seq>"` (placeholder chunk ids derive from it); `__openclaw.seq` stays
@@ -896,6 +893,12 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   `sender` (the quoted message's author) at most 200; both are absent on an id-only reference. The
   reference is stored as a custom transcript entry written just before the user turn, so it never
   enters the model context.
+- A user message that arrived from another session's turn - an inter-session relay (ADR 0081's
+  provenance: `provenance.kind === "inter_session"`) - gains `__openclaw.sourceAgentId: <agentId>`,
+  the agent whose session sent it, parsed from the stored `sourceSessionKey` with
+  `parseAgentSessionKey` (never a hand-split of the key). Messages without inter-session
+  provenance omit the field. The web client renders it as the **From \<assistant\>** label on the
+  row.
 - `chat.send` (`operator.write`; narrow-admitted) takes
   `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, replyToTranscriptId?, expectedLeafEntryId?, dictated?, location?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
@@ -936,19 +939,33 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     before instead of being re-checked against a leaf that may have advanced; a `/stop` message is
     not checked. The guard narrows the race between two devices. It is not a lock: two sends that
     arrive together can both pass.
-  - `attachments` accepts any file type (ADR 0093). Raster images (mime sniffed from the bytes,
+  - `attachments` accepts any file type (ADR 0093). An attachment item carries inline base64
+    `content` (a binary `ArrayBuffer` or typed-array view is normalized to base64), or, since
+    ADR 1330, an `uploadId` referencing a file the client uploaded over `POST /v2/uploads` - an
+    item with neither is dropped before validation. Raster images (mime sniffed from the bytes,
     else the declared type; SVG never counts as inline) travel as inline `images[]`; every other
     file is written through the inbound media store and handed to the turn as media paths, with
     the mime resolved from the sniffed bytes, else the declared type, else
     `application/octet-stream` (a sniffed WAV is stored as `audio/wav` unless the client declared
-    `audio/x-wav`). Limits: 32 attachments per message and 5,000,000 decoded bytes per file.
-    Every attachment is validated before any file is stored, and a failure answers
-    `INVALID_REQUEST` with one of `too many attachments (max 32)`,
+    `audio/x-wav`). Limits: 32 attachments per message and 5,000,000 decoded bytes per `content`
+    item. An `uploadId` reference does not count against that byte budget: its file is bounded by
+    the upload endpoint's own 50 MiB per-file cap instead. A reference resolves only inside the
+    sending device's own upload directory (the device id comes from the verified connection,
+    never the request), is claimed atomically before it is read, and is consumed by the first
+    send that reads it: a raster image of 5 MB or less is read into inline base64 like a
+    `content` image, anything else is moved into the inbound media store. A missing, foreign,
+    malformed or already-consumed id answers `INVALID_REQUEST` with
+    `attachment upload expired or not found`. Every attachment is validated before any file is
+    stored, and a failure answers `INVALID_REQUEST` with one of `too many attachments (max 32)`,
     `attachment <fileName>: content must be base64 string`,
     `attachment <fileName>: invalid base64 content`, or
-    `attachment <fileName>: exceeds size limit (N > 5000000 bytes)`. A retry or in-flight replay
-    of the same `idempotencyKey` is answered without re-parsing, so a replay never writes
-    duplicate media-store files.
+    `attachment <fileName>: exceeds size limit (N > 5000000 bytes)`; a batch that fails after
+    files were written is rolled back, so a rejected batch leaves no partial media files and
+    returns claimed uploads for a retry. A mixed `content`/`uploadId` batch is delivered to the
+    turn in the order the client listed it. A retry or in-flight replay of the same
+    `idempotencyKey` is answered without re-parsing or re-consuming uploads (attachment
+    resolution runs after the idempotency dedupe), so a replay never writes duplicate
+    media-store files.
   - `dictated` (optional boolean) marks speech-to-text provenance: some or all of `message` was
     dictated. The turn gets a user-role "Speech input (untrusted metadata)" note so the model can
     tolerate mis-transcribed names; the note is never persisted into the message text. It is
@@ -1060,7 +1077,10 @@ fallbacks, and an unavailable preview is omitted; these flags do not request a f
   heartbeat sessions. The structural classifier treats the root segments `acp`, `cron`, `hook`,
   `heartbeat`, and `subagent` as internal. It also hides `main:heartbeat`,
   `dashboard:*:heartbeat`, and keys matching the persisted `heartbeatIsolatedBaseSessionKey`.
-  Unknown key shapes remain visible.
+  Since ADR 0083's amendment it also hides rows whose persisted entry records the a2a channel -
+  `entry.channel` or `entry.lastChannel` of `a2a`, assistant-to-assistant sessions - classified
+  from stored entry fields only, never from the key text (ADR 0081). Unknown key shapes remain
+  visible.
 - `true` includes internal cron, ACP, hook, heartbeat, and subagent sessions.
 
 When `includeAgentActivity` is true, the result initializes every agent returned by
@@ -1111,8 +1131,15 @@ distinct from `updatedAt`, which other writes such as renames and inbound routin
 
 Rows that are not user-facing carry `internal: true` (`GatewaySessionRow.internal`): the
 structural classifier treats the root segments `acp`, `cron`, `hook`, `heartbeat`, and `subagent`
-as internal, as do the built-in isolated-heartbeat shapes and persisted isolated-heartbeat
-sessions. The same rows survive the `true` value of `includeInternal` and are hidden by `false`.
+as internal, as do the built-in isolated-heartbeat shapes, persisted isolated-heartbeat sessions,
+and rows whose persisted entry records the a2a channel (`entry.channel` or `entry.lastChannel` of
+`a2a`). The same rows survive the `true` value of `includeInternal` and are hidden by `false`.
+
+An archived session carries `archived: true` on its row (`archivedAt` is not projected; the field
+is absent on a live session). Archiving is entry state, not a filter: the projection is
+deliberately not paired with a `sessions.list` filter parameter, so clients filter the rows
+themselves. Only `sessions.patch { archived: false }` clears the flag; a new message and
+`sessions.reset` leave an archived session archived.
 
 Each row also carries `agentId` (optional, string): the agent the session key is attributed to,
 from the key's `agent:<id>:` prefix, or the default agent for keys without one (including bare
@@ -1334,8 +1361,10 @@ logic, not a second enum value on create.
 
 Result: `{sessionId, audio: {inputEncoding: "pcm16", inputSampleRateHz, channels: 1}}`.
 `inputSampleRateHz` is `16000` for `transcription` and `stt-tts`, and `24000` for `realtime`;
-capture at the advertised rate. The response is written before `session.ready`. Audio appended
-before `session.ready` is dropped, not rejected. Input is base64 PCM16 mono. Output audio events
+capture at the advertised rate. The response is written before `session.ready`. `appendAudio`
+for a session that has not readied is rejected with `Talk session is not ready for audio`, so
+clients must buffer captured audio until the session's `session.ready` `talk.event` and flush it
+in capture order then. Input is base64 PCM16 mono. Output audio events
 are PCM16 mono at 24 kHz.
 
 Gate and provider errors are `UNAVAILABLE`:
