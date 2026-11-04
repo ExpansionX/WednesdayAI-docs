@@ -43,25 +43,6 @@ Probes are unauthenticated. `Cache-Control: no-store`. Only `GET` and `HEAD` are
 
 Chat `send` / `chat.send` / `agent` RPCs reject with `RECOVERY_NOT_READY` (`recovery_pending`) until admission opens.
 
-## Restart window
-
-Between shutdown and the next listener, connections are refused (`ECONNREFUSED`). The window is
-about 10 s on a production host: up to 5 s of interactive-work drain, then close and boot.
-
-`listening on …` means the process is bound. `gateway ready: accepting work (startup Nms)` means
-root work is admitted; when restart recovery runs, `/readyz` returns 200 at the same point.
-Measure the window from the old process's `signal SIGTERM received` line to the new
-`gateway ready` line.
-
-`GatewayClient` reconnects with a 1 s→30 s backoff, and CLI sessions park requests until the
-next hello. Other callers retry after reconnect.
-
-Idle `agent_idle` triggers and cron schedule windows wait while admission is closed and fire on
-the first tick after it opens, so a boot no longer produces one `RECOVERY_NOT_READY` enqueue
-failure per configured agent. A `HH:MM-HH:MM` schedule window that elapses entirely during the
-wait is skipped rather than fired late, the same as any other tick the monitor misses. A cron
-schedule window whose occurrences pass during the wait fires once, not once per missed occurrence.
-
 ## Storage-backed RPCs during a restart
 
 Session storage opens during boot through the fail-fast lifecycle — before the restart-recovery
@@ -193,6 +174,10 @@ a probe could not verify are kept for a later boot (capped at 7 days) instead of
 Plans bind to the current owner generation. A restart invalidates an unused plan. `status` and `health` project the same `recovery.v1` snapshot (owner generation and startedAt only; bootId/pid are redacted).
 
 `doctor.recovery.inspect` separates `items`, the current epoch's actionable inventory, from `historyItems`, retained audit rows from prior epochs and the legacy journal table. Plans can target only `items`; a historical item ID returns `doctor_item_missing`.
+
+Each inspected item carries `itemId`, a `title`, a `reasonText` sentence and an `actions` list projected by the gateway, so the CLI and the Control UI show the same text. Adapters record a `subject` (agent, session, run, cron job, channel, trigger, timestamps and a preview of at most 200 characters) and the `operatorActions` their `apply` accepts for the item; an empty list offers no action. A rejected plan or apply carries `reasonText` next to `reasonCode`.
+
+**Run again** is `doctor.recovery.apply` with `replay: true` on a `cancel` plan. After the cancel applies, the gateway starts the work again from the target the adapter recorded in the journal (never from the request): `cron.run` with `force` for a cron job, or a nudge into the same session for a nudge turn the gateway itself created. It starts the work at most once per item, and only when the cancel really discarded the item. The outcome is recorded as a `replay` action row (`replay_started`, `replay_not_started` or `replay_failed`); the apply response returns `replay: { result: "requested" }` without waiting. Session runs, nudges from other agents or plugins, one-shot (`at`) cron jobs, cron wake or alert turns, and a cron schedule with no later occurrence offer no Run again. Every action row records the adapter, source id and acting client (`<client id>@<device id>`).
 
 Doctor publishes only evidence observed after a mutation: a fresh matching adapter observation first, then the observation returned by `apply`. It never reuses pre-apply evidence. A mutation that returns without either form of evidence is rejected with `doctor_evidence_changed`.
 
