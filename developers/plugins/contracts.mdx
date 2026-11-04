@@ -21,12 +21,12 @@ re-exported from `openclaw/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.1`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.5`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
 | `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `1.1`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
-| `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.0`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
+| `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.1`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.4`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.5`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.8`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -212,7 +212,8 @@ An extension may import core only through the plugin-sdk surface:
 - `openclaw/plugin-sdk` (alias `wednesdayai/plugin-sdk`), and
 - its exported `./plugin-sdk/*` subpaths, for example `openclaw/plugin-sdk/account-id`,
   `openclaw/plugin-sdk/keyed-async-queue`, `openclaw/plugin-sdk/process-scoped-map`,
-  `openclaw/plugin-sdk/escape-regexp`, `openclaw/plugin-sdk/control-ui`,
+  `openclaw/plugin-sdk/lazy-runtime`, `openclaw/plugin-sdk/escape-regexp`,
+  `openclaw/plugin-sdk/control-ui`,
   `openclaw/plugin-sdk/provider-web-search` and
   `openclaw/plugin-sdk/provider-media-understanding`, and
 - `openclaw/plugin-sdk/testing` from test files only. Importing it from production code is
@@ -243,6 +244,36 @@ Rule ids:
   file instead of a test file.
 - `stale-allowlist-entry` — an allowlist entry whose file no longer deep-imports `src/`, so the
   exception can be deleted.
+
+## Lazy imports
+
+Plugins load from TypeScript source through jiti, which hands a second concurrent `import()` of
+a module that is still evaluating a partially initialized copy. Calling into it throws
+`ReferenceError: Cannot access '<name>' before initialization`. Wrap every relative dynamic
+import in a module-level loader from `openclaw/plugin-sdk/lazy-runtime`:
+
+```ts
+import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+
+const loadSend = createLazyRuntimeModule(() => import("./send.js"));
+
+export async function send(text: string) {
+  return (await loadSend()).sendMessage(text);
+}
+```
+
+The loader caches the module, retries after a failed load, and runs one first load at a time
+per process. Never use top-level `await` in a plugin module: a module that awaited a loader while
+it was being evaluated would wait on itself.
+
+The gate is `pnpm lint:extensions:no-bare-lazy-import`
+(`scripts/check-extension-lazy-imports.ts`), part of `pnpm check`. Rule ids:
+
+- `bare-relative-dynamic-import` — a `./` or `../` `import()` that is not the direct argument of
+  `createLazyRuntimeModule(() => import(...))`.
+- `top-level-await` — an `await` or `for await` outside any function.
+
+Test files are exempt.
 
 ## Changing a contract
 
