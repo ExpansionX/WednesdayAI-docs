@@ -34,9 +34,6 @@ Notes:
 - State integrity checks now detect orphan transcript files in the sessions directory and can archive them as `.deleted.<timestamp>` to reclaim space safely.
 - Doctor includes a memory-search readiness check and can recommend `openclaw configure --section model` when embedding credentials are missing.
 - If sandbox mode is enabled but Docker is unavailable, doctor reports a high-signal warning with remediation (`install Docker` or `openclaw config set agents.defaults.sandbox.mode off`).
-- Shell completion: `wednesdayai doctor` reconciles shell completion for `wednesdayai`. It silently upgrades
-  legacy OpenClaw completion blocks, regenerates missing caches, and prompts to enable completion if missing
-  (skipped in `--non-interactive` mode; PowerShell requires manual setup). See [Shell completion](/cli/completion).
 
 ## Telegram polling repair
 
@@ -66,23 +63,42 @@ account or token fallback, then restart the gateway.
 ## Restart recovery
 
 If the gateway was interrupted while work was in flight, `wednesdayai doctor` lists blocked
-recovery items with a plain-language reason for each. The boot log collapses these into one
-`restart recovery: blocked items need operator action` line that points at `wednesdayai doctor`.
+recovery items grouped under a plain-language reason. Each item shows what it was (for example
+`• Chat run · agent main`), its agent, session and start time, and its source id. The boot log
+collapses these into one `restart recovery: blocked items need operator action` line that points
+at `wednesdayai doctor`. The Control UI **Recovery** page shows the same items and actions.
 
 Items blocked for more than 7 days are stale. Doctor offers a one-shot bulk cancel:
 
 ```text
-Cancel 3 recovery item(s) blocked for more than 7 days? Cancel marks them abandoned;
+Discard 3 recovery item(s) blocked for more than 7 days? Discard marks them abandoned;
 nothing is re-run or re-sent.
 ```
 
-Confirm once and doctor plans and applies the cancel for each stale item. A cancel marks the item
-abandoned — it never re-executes a task or re-sends a message. If an adapter refuses the cancel
-for a specific item, doctor reports `cancelled N, rejected M (reason)` and continues with the
+Confirm once and doctor plans and applies the discard for each stale item. A discard marks the item
+abandoned — it never re-executes a task or re-sends a message. If an adapter refuses the discard
+for a specific item, doctor reports `discarded N, rejected M (reason)` and continues with the
 remaining items; rejected items stay blocked for the normal per-item repair flow.
 
-Prompt flags follow the usual doctor rules: `--yes` (and `--repair`) auto-confirm the bulk cancel
-and every per-item repair confirm, so a stale backlog is cleared without prompts. An explicit
+When two or more items share a reason and all of them can be discarded, doctor offers to discard
+the whole group at once. Then, for each remaining item, doctor offers only the actions the
+gateway will accept for it, plus **Skip for now** and **Stop**:
+
+- **Continue**: resume from the last saved point. A step that already ran may run again.
+- **Reattach**: rejoin work still running in another process.
+- **Mark complete**: record the work as done. Nothing is re-run or re-sent.
+- **Discard**: mark the work abandoned. Nothing is re-run or re-sent, and the item does not come
+  back after a restart.
+- **Run again** (cron jobs and nudges only): discard the item, then start the same work again.
+  Steps that already ran may repeat.
+
+Each action asks for confirmation. If the gateway rejects an action, doctor prints the reason and
+moves on to the next item.
+
+Prompt flags follow the usual doctor rules: `--yes` (and `--repair`) auto-confirm the stale bulk
+cancel, so a stale backlog is cleared without prompts, and continue every item that offers
+**Continue**. They never discard, mark complete or run again an item that is not stale; the
+per-reason bulk discard and those per-item choices need an interactive terminal. An explicit
 `--non-interactive` takes precedence and is inspection-only: doctor reports the stale count
 (`N item(s) blocked for more than 7 days`) and never plans, cancels, or repairs anything.
 
