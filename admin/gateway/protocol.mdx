@@ -685,11 +685,23 @@ logged as `late invoke result dropped` at warn level.
   [Session storage readiness](#session-storage-readiness) — never an empty page and never
   live-only records. Unlike
   `tasks.runs.list`, the row is not summarized: it is the full `SessionRunRecord`, including
-  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason`.
+  `gatewayInstanceId`, `recoveryMode`, `lastEvidencePointer` and `recoveryReason` - with one
+  exception: the per-run execution `context` (ADR 1929) is stripped from every row, so a polled
+  listing does not grow with the per-run snapshot. Only `sessions.runs.get` returns it.
 - Operators may call `sessions.runs.get` (`operator.read`) with `{sessionRunId}` for a single
   run: `{ "record": <SessionRunRecord> }`, or `{ "record": null }` for an unknown id or an
   unconfigured store - this method never errors on a missing id. It reads the durable store only,
-  so it never returns the synthetic `live:` records that `sessions.runs.list` adds.
+  so it never returns the synthetic `live:` records that `sessions.runs.list` adds. The record may
+  carry an optional execution `context` snapshot (ADR 1929) holding sizes, counts, names and
+  sanitized labels only: the provider/model that answered, the fallback candidates that failed
+  before it (each `provider/model` plus an optional reason, never error text), token usage, the
+  stop reason, the error kind, the final prompt's composition in characters (system prompt,
+  workspace files, skills, tools, per-source injected context and messages), the injected
+  workspace files by basename with sizes and truncated/missing flags, and tool and skill names
+  (capped at 200). It never holds prompt text, injected text, file contents, file paths or
+  fallback error strings. Runs recorded before the feature, runs registered outside the
+  embedded-agent terminal seam (ACP, subagent registry), and heartbeat, nudge, announce and
+  main-session cron turns carry no context.
 - Operators may call `sessions.runs.events` (`operator.read`) with `{sessionRunId}` for that
   run's full event history, unpaged: `{ "events": [<SessionRunEvent>] }` (empty without a
   configured store). Unlike `tasks.runs.events`, each event's raw `payloadJson` is included, not
@@ -752,7 +764,8 @@ logged as `late invoke result dropped` at warn level.
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
   `details.reason = "invalid_cursor"`.
-- `spanTranscripts` (optional boolean, `apps/web` only today) pages across the session key's
+- `spanTranscripts` (optional boolean, `apps/web` and the Control UI v2 console today) pages
+  across the session key's
   earlier transcripts - idle, daily and explicit resets each start a new transcript under the
   same key. Rows then carry `__openclaw.transcriptId` and `__openclaw.rowId` becomes
   `"<sessionId>:<seq>"` (placeholder chunk ids derive from it); `__openclaw.seq` stays
@@ -770,6 +783,29 @@ logged as `late invoke result dropped` at warn level.
   fence and answered per [Session storage readiness](#session-storage-readiness), never with an
   empty page. The leaf and reply fields that client-chat-v3 P2
   added are described below.
+- Operators may call the three `doctor.recovery.*` methods to inspect and repair the
+  restart-recovery journal (behaviour and reason codes in
+  [Restart recovery](/gateway/restart-recovery)). `doctor.recovery.inspect` (`operator.read`, no
+  params) answers `{ "available": true, "snapshot", "items", "historyItems", "actions",
+"incidents", "storage" }`, or `{ "available": false, "reason": "<code>" }` while the control
+  plane or its journal is not serving. `items` is the current epoch's actionable inventory and
+  `historyItems` the retained rows from earlier epochs; each entry is the server-side operator
+  projection of one journal row: `itemId`, `title`, `reasonText`, `disposition`, the recorded
+  `subject` (agent, session, run, cron job, channel, trigger, timestamps, a bounded preview) and
+  the item's own `actions` - only the actions the gateway will accept for that item, each
+  `{ "id", "requestedAction", "replay", "label", "description", "recommended" }`. The top-level
+  `actions` array is the audit trail: one row per recorded action with the requested action, its
+  result and the acting client (`"<client id>@<device id>"`). `doctor.recovery.plan` and
+  `doctor.recovery.apply` (`operator.admin`) drive repairs: plan takes
+  `{ "itemId", "requestedAction" }` and answers
+  `{ "plan": <RecoveryPlan>, "authorityToken": "..." }`, a one-time token bound to the plan digest
+  and the current owner generation; apply takes
+  `{ "plan", "authorityToken", "confirm": true, "replay": false }` (`replay` optional) and answers
+  `{ "result": "applied", "disposition": "..." }` - plus
+  `"replay": { "result": "requested" }` when Run again was requested - or
+  `{ "result": "rejected", "reasonCode": "...", "reasonText": "..." }`. `replay: true` (Run again)
+  is accepted only on a `cancel` plan and only when the journal holds a replay target for that
+  item; the target is read from the journal, never from the request.
 
 ### Session storage readiness
 
@@ -897,8 +933,9 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   provenance: `provenance.kind === "inter_session"`) - gains `__openclaw.sourceAgentId: <agentId>`,
   the agent whose session sent it, parsed from the stored `sourceSessionKey` with
   `parseAgentSessionKey` (never a hand-split of the key). Messages without inter-session
-  provenance omit the field. The web client renders it as the **From \<assistant\>** label on the
-  row.
+  provenance omit the field. Per ADR 0120, the field is also omitted when the source agent is
+  internal (`userFacing: false`) — user clients never learn internal agent ids. The web client
+  renders the field as the **From \<assistant\>** label on the row.
 - `chat.send` (`operator.write`; narrow-admitted) takes
   `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, replyToTranscriptId?, expectedLeafEntryId?, dictated?, location?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
