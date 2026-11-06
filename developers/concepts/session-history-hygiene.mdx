@@ -39,6 +39,19 @@ Legacy rows (written before the carrier existed) keep the older derived path: `c
 
 At the model boundary, every user turn is stamped `[Ddd YYYY-MM-DD HH:MM GMT±H]` and inbound framing is composed on the current turn only. From the next turn on, the same message renders byte-stable as `stamp + raw text` — see [Date & Time](/date-time).
 
+### Inbound framing labels
+
+Each framing block is labelled by where its fields come from:
+
+| Block                                                                                                       | Label                | Fields                                                                                                                                                         |
+| ----------------------------------------------------------------------------------------------------------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `## Inbound Context` (system prompt, byte-stable per session)                                               | `gateway-generated`  | `chat_id`, `account_id`, `channel`, `provider`, `surface`, `chat_type`                                                                                         |
+| `Conversation info` (current user turn)                                                                     | `gateway-generated`  | `message_id`, `reply_to_id`, `sender_id`, `timestamp`, `topic_id`, and flags such as `is_group_chat`, `was_mentioned`, `has_reply_context` and `history_count` |
+| `Conversation context` (current user turn)                                                                  | `untrusted metadata` | `conversation_label`, `sender`, `group_subject`, `group_channel`, `group_space`, `thread_label`                                                                |
+| `Sender`, `Replied message`, `Forwarded message context`, `Chat history since last reply`, `Thread starter` | `untrusted`          | sender-chosen names, quoted bodies and history                                                                                                                 |
+
+`gateway-generated` means the transport asserts the value; it is authoritative as identity or routing data. It does not mean the value is free of sender-chosen text. On some channels an identifier embeds a handle the account holder picked, such as an IRC nick ([#2113](https://github.com/ExpansionX/WednesdayAI-core/issues/2113)). Rows stored before #2106 carry the old `Conversation info (untrusted metadata)` header, and the strippers still remove it.
+
 ### Speech input provenance
 
 When some or all of a turn's text is produced by speech-to-text, the gateway composes a user-role `Speech input (untrusted metadata): { "transcribed": true, "note": "…" }` block onto the current model turn only. It is never rendered on later turns, never baked into storage, and never sent to clients: `chat.history` returns the raw user text with no metadata stripping, so the block is absent there as well.
