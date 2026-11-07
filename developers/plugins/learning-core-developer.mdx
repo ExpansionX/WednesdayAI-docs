@@ -23,6 +23,7 @@ sources:
   - extensions/learning-core/src/consolidation-judge.ts
   - extensions/learning-core/src/consolidation-effects.ts
   - extensions/learning-core/src/gateway-lesson-review.ts
+  - extensions/learning-core/src/produce-pass.ts
   - extensions/learning-core/src/promote-pass.ts
   - extensions/learning-core/src/consolidation-pass.ts
   - extensions/learning-core/src/distill-pass.ts
@@ -367,6 +368,10 @@ exact prompt that produced it. `buildJudgeInput` emits
 pre-v2 candidate without one, a single-message window built from `excerpt`), up to
 `JUDGE_SIMILAR_K` (5) similar active lessons, and up to `JUDGE_EXEMPLARS_MAX` (6) operator
 exemplars from `listLessonExemplars`. The consolidation pass loads the exemplars once per run.
+`rankSimilarLessons` scores active lessons by distinctive-token overlap with the candidate excerpt
+and shows the top `JUDGE_SIMILAR_K` (5). Lessons with no shared token still fill any free slots,
+and ties go to the newest lesson (the ranking pool is read in `created_at` order), so a
+contradicting lesson that shares no words with the candidate can reach the judge.
 
 `validateJudgeVerdict(value, allowedLessonIds, window)` keeps the base checks (`action` enum,
 `confidence` in [0, 1], `reason` string, `lessonId` in `allowedLessonIds`) and adds the v2 rules:
@@ -391,6 +396,31 @@ messages as `evidence[].quotes` — the first three cited window messages as `Ev
 entries (text sliced to 500), the primary quote being the first user-role one. The invalidate
 path stores the redacted judge reason as `invalidationReason`. `promote` marks its lessons
 `origin.producer: "promote"`.
+
+### Consolidation and produce execution
+
+`runConsolidationPass` accepts `RunConsolidationPassParams`, including optional
+`capPreflight?: { agentId: string; utcDay: string }`. When present, the pass pre-flights the daily
+budget against `store.readBudgetUsage({ pass: "consolidation", agentId })`:
+
+- **Cap preflight.** If `usage.utcDay === preflight.utcDay` and `usage.spent >= maxCallsPerAgentPerDay`,
+  the run stands down before judging: it makes no model call, claims no candidates for judging, and
+  writes no `learning_budget` reservation row. The run records `capExhausted: true` in
+  `ConsolidationRunSummary`, sets `budgetSkipped = selected.length`, and immediately runs the
+  deterministic expiry sweep (`expireUnsampled`, finalizing untagged candidates as `not_sampled_expired`).
+  If `preflight.utcDay` is not today, the gate stays off and per-candidate reservation remains the
+  authority. The standalone `learning-core.consolidation` pass provides no `capPreflight`.
+- **Deterministic candidate selection.** `pickCandidates` partitions candidates deterministically:
+  correction and contradiction candidates rank ahead of plain failures, followed by remaining tagged
+  candidates, then untagged candidates. Each group is sorted newest first (`endedAt` descending), so
+  the oldest untagged candidates are the ones that expire.
+- **Produce integration.** `ProduceBodies.consolidation` receives
+  `{ producerTaskId, producerFingerprint, budgetDay, onReport }`, where `budgetDay` is the lineage's
+  pinned reservation day, else today; the plugin's produce body forwards it as
+  `capPreflight.utcDay`. A capped produce run records `items.capExhausted: true`; when it finalized
+  nothing it also records `producerReason: "cap_exhausted"`, which the `tasks.runEvents` allowlist
+  in `src/gateway/server-methods/tasks-run-events.ts` surfaces. The run then takes the next-day
+  carry.
 
 ### Distill eligibility
 

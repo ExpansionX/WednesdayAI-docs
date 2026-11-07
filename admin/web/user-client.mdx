@@ -16,6 +16,9 @@ sources:
   - src/config/gateway-spa-mounts.ts
   - src/config/types.gateway.ts
   - src/gateway/web-client-route.ts
+  - src/gateway/client-uploads-http.ts
+  - apps/web/bundle-budget.json
+  - scripts/check-web-bundle-budget.mjs
   - src/gateway/server-close.ts
   - src/gateway/server-chat.ts
   - src/config/sessions/run-pending-writes.ts
@@ -41,7 +44,7 @@ sources:
   - apps/web/src/ui/assistant-turns.ts
   - extensions/ui-surfaces/index.ts
   - packages/ui-contract/src/index.ts
-generated: 2026-10-26
+generated: 2026-11-02
 ---
 
 # Web client hosting
@@ -78,6 +81,13 @@ pnpm --dir apps/web build      # writes apps/web/dist (for a CDN or your own hos
 
 Without either, `web serve` exits non-zero and the gateway route answers `503` - both naming
 `pnpm web:build:packaged`.
+
+Anyone packaging the web client from source should also pass its bundle budget gate:
+`pnpm web:budget` reads the built bundle's Vite manifest and compares the gzipped entry chunk and
+the gzipped total initial JavaScript against the limits in `apps/web/bundle-budget.json`, printing
+a per-chunk table and failing on a breach. `pnpm web:build:packaged` runs the same check for the
+web app and deletes the manifest afterwards, so it never ships; `pnpm web:budget:update` reseeds
+the limits from a fresh build (measured size plus a 5% margin, rounded up to the next KiB).
 
 ## Choose a deployment
 
@@ -176,14 +186,14 @@ For single-origin deployments the gateway can serve the bundle itself. This is *
 }
 ```
 
-With this config the client is at `https://gateway.example.com/v2/client/`, beside the Control UI at
-the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
+With this config the client is at `https://gateway.example.com/v2/client/`, beside the Control UI v2
+console at the gateway root. Restart the gateway after changing `gateway.webClient` (Linux:
 `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
 
 - `config.json` is synthesized per request: `gatewayUrl` is the gateway's own origin, so the client
   connects back to where it was loaded from, and `assistantName` is the configured assistant name
   (`ui.assistant.name`, else the default agent's identity, else `Assistant`).
-- `basePath` defaults to `/v2/client` (the default in the sample above). It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It also may not collide with another active SPA mount: a base path of `/` while the Control UI or the control UI v2 console is enabled, or base paths that contain one another, are rejected when the config loads, naming both keys. With a distinct base path the other consoles are unaffected.
+- `basePath` defaults to `/v2/client` (the default in the sample above). It must be a single-slash path: a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It also may not collide with another active SPA mount: a base path of `/` while the Control UI v2 console is enabled, or base paths that contain one another, are rejected when the config loads, naming both keys. With a distinct base path the other consoles are unaffected.
 - `root` is optional. Unset, the gateway serves the packaged `dist/web-client` bundle and logs
   which directory it picked. Set, it always wins - including when it is broken, which answers `503`
   with that reason rather than silently falling back. When neither resolves, the route answers
@@ -274,6 +284,20 @@ restart needs no change to the serving layer and no re-pairing:
   `talk.catalog` is retried - Dictate keeps its last known availability instead of latching
   unavailable after one failed read. `agents.list` and `models.list` are fetched again on every
   reconnect, so a restart or a first failed fetch cannot empty the sidebar or the model menu.
+- **Thread order survives a drop too.** The thread is append-only: committed rows keep the order
+  the gateway saved them in, and live rows are appended at the bottom, so a reconnect or a reload
+  cannot move a sent message below later replies. A message sent while a reply streams waits at
+  the bottom marked **Queued** until it joins that reply or starts its own turn, and one sent
+  while another message of yours is already waiting queues behind it (ADR 1966). A reply to a
+  message from an older session - above a **New session** divider - keeps its quote. The
+  chat is continuous across the gateway's idle, daily and `/new` resets: a **New session**
+  divider marks where a fresh session began, every earlier message stays above it, and
+  **Load older** continues into the older sessions. The reads span earlier sessions only when the
+  gateway advertises `chat.history.spanTranscripts`; against an older gateway the web client reads
+  only the current session - no divider, no older-session paging. One known gap remains: a
+  **Queued** badge and the composer's queue mode go stale when a reconnect loses a queued
+  follow-up's start frames, clearing only on the next history load or when a later own reply
+  finishes and `sessions.runs.list` reports the queued run terminal (#1878).
 - **Nothing typed or sent is lost.** Composer drafts are kept per chat in `localStorage`
   (including the composer before a chat is open) and survive a reload, a tab close and a crash;
   they are dropped after 7 days or on logout. Every send is also recorded in a `localStorage`
@@ -339,13 +363,6 @@ as amended. Setting `features.voice`/`--voice`/`OPENCLAW_WEB_FEATURE_VOICE` chan
 can see; it is kept as a no-op alias for one release (AGENTS.md's deprecated-alias rule) and will
 be removed in a later release.
 
-The Runs panel likewise depends on gateway configuration outside `config.json`: its queued and task
-lists need SQLite or Postgres session storage (`session.storage.backend`). On the default JSONL
-backend those lists show an explanatory unavailable message. The session runs list still shows the
-sessions that are streaming a reply right now (the gateway merges live runs into `sessions.runs.list`,
-see [Protocol](/gateway/protocol)), but keeps no history - see
-[Using the web client](/web/using-the-web-client#check-on-runs).
-
 Example:
 
 ```json
@@ -373,40 +390,40 @@ which its setup code mints and its device token is bound to (see
 
 Methods the client calls with `operator.sessions.read`:
 
-| Method                                    | What it powers                                                                                                                                                                  |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`, `models.authStatus`             | Start-up checks: the connection is alive, and the gateway has a model provider credential                                                                                       |
-| `agents.list`                             | The assistant picker, the sidebar's assistants, and the names, avatars and colours the chat surfaces show. Fetched again on every reconnect                                     |
-| `models.list`                             | The model menu, and whether Think is available for the chat's model. Fetched again on every reconnect                                                                           |
-| `sessions.list`                           | The sessions list, with the assistant filter, search and paging                                                                                                                 |
-| `sessions.describe`                       | The open session's own row: title, model and Think level                                                                                                                        |
-| `sessions.direct`                         | The device's direct session for an assistant, computed by the gateway (ADR 0109) so assistant picks land in the dmScope-correct session. Retried on transient connection errors |
-| `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a session                                                                                     |
-| `chat.history`                            | Loading a chat and its older messages, and learning the chat's latest message so a send can notice the chat changed elsewhere                                                   |
-| `identity.self`                           | The **Linked accounts** dialog: who this browser is (`Signed in as …`) and the person's linked accounts, read from the verified device id (see [Identities](/gateway/identity)) |
-| `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection. Retried up to 3 times on failure; the last known availability is kept instead of latching unavailable         |
-| `tts.readAloud.status`                    | Whether the **Read aloud** button and the **Read replies aloud** auto-read toggle are available, and the text limit the client caps both paths' chunks to                       |
-| `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas))      |
+| Method                                    | What it powers                                                                                                                                                                                                        |
+| ----------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`, `models.authStatus`             | Start-up checks: the connection is alive, and the gateway has a model provider credential                                                                                                                             |
+| `agents.list`                             | The assistant picker, the sidebar's assistants, and the names, avatars and colours the chat surfaces show. Fetched again on every reconnect                                                                           |
+| `models.list`                             | The model menu, and whether Think is available for the chat's model. Fetched again on every reconnect                                                                                                                 |
+| `sessions.list`                           | The sessions list, with the assistant filter, search and paging                                                                                                                                                       |
+| `sessions.describe`                       | The open session's own row: title, model and Think level                                                                                                                                                              |
+| `sessions.direct`                         | The device's direct session for an assistant, computed by the gateway (ADR 0109) so assistant picks land in the dmScope-correct session. Retried on transient connection errors                                       |
+| `sessions.subscribe`                      | Live `sessions.changed` events, so the list refreshes when another device changes a session                                                                                                                           |
+| `chat.history`                            | Loading a chat and its older messages - spanning earlier sessions when the gateway advertises `chat.history.spanTranscripts` - and learning the chat's latest message so a send can notice the chat changed elsewhere |
+| `identity.self`                           | The **Linked accounts** dialog: who this browser is (`Signed in as …`) and the person's linked accounts, read from the verified device id (see [Identities](/gateway/identity))                                       |
+| `talk.catalog`                            | Whether Dictate and Voice mode are available for this connection. Retried up to 3 times on failure; the last known availability is kept instead of latching unavailable                                               |
+| `tts.readAloud.status`                    | Whether the **Read aloud** button and the **Read replies aloud** auto-read toggle are available, and the text limit the client caps both paths' chunks to                                                             |
+| `chat.surfaces.list`, `chat.surfaces.get` | Assistant UI: the chat's published surfaces and their revisions, and whether the `ui-surfaces` plugin is enabled (see [Assistant UI and Canvas](#assistant-ui-and-canvas))                                            |
 
 Methods the client calls with `operator.sessions.write`:
 
-| Method                     | What it powers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`). When the user turned on location sharing, the send carries an optional `location` object - the device fix for that message, shown to the assistant as untrusted metadata on that turn only and stripped from history. The `uiAction` parameter submits an assistant-composed form: it carries no message body and starts the next turn (see [Assistant UI and Canvas](#assistant-ui-and-canvas))                                     |
-| `chat.surfaces.pin`        | Pinning a surface to the top of the Canvas panel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `chat.abort`               | Stop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| `sessions.steer`           | While a reply streams, Send (or Enter on desktop) adds to the current turn (`inject`, falling back to `queue`). With a file attached, Send queues (`queue`). Send after reply and desktop Ctrl/Cmd+Enter queue. On touch devices Enter inserts a newline and Ctrl/Cmd+Enter does what Send does. A steer can carry the same optional `location` object as `chat.send`. Transient connection errors are retried within a 60 s window, keeping the same idempotency key so the gateway's dedupe still applies. A dictated auto-send finishing while a reply streams takes this same route |
-| `sessions.patch`           | Rename, model, Think and Send reasoning. Only `label`, `model`, `thinkingLevel` and `reasoningLevel`; any other field is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `sessions.title.prepare`   | Suggest a title                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
-| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`, or `realtime` — the operator-chosen speech-to-speech engine). Refused while `talk.conversation.enabled` is false; a `realtime` create is also refused while `talk.conversation.engine` is not `"realtime"`                                                                                                                                                                                                                                                                                                                    |
-| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline                                                                                                                                                                                                                                                                                          |
-| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| `tts.speak`                | The **Read aloud** button on replies, and the **Read replies aloud** auto-read toggle: synthesize reply text into inline audio to play. Auto-read speaks a streaming reply sentence by sentence, so one reply can produce several `tts.speak` requests, each under the advertised `maxTextLength`                                                                                                                                                                                                                                                                                       |
-| `identity.link.claim`      | Redeeming a `/link` code in the **Linked accounts** dialog: links `<channel>:<id>` to this person and approves the pairing code. Rate limited per device and per person (see [Identities](/gateway/identity#proofs-of-control))                                                                                                                                                                                                                                                                                                                                                         |
-| `identity.logout`          | **Log out**: removes the paired device server side, unlinks its `device:<deviceId>` value and clears the browser credential and keypair                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Method                     | What it powers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| -------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `chat.send`                | Sending a message, optionally quoting an earlier message (`replyToId`, with `replyToTranscriptId` naming the earlier session when the quoted message predates the current one) and guarding against a chat that changed elsewhere (`expectedLeafEntryId`). Attachments ride the send as `uploadId` references to files uploaded over `POST /v2/uploads` (see [Attachment uploads over HTTP](#attachment-uploads-over-http)). When the user turned on location sharing, the send carries an optional `location` object - the device fix for that message, shown to the assistant as untrusted metadata on that turn only and stripped from history. The `uiAction` parameter submits an assistant-composed form: it carries no message body and starts the next turn (see [Assistant UI and Canvas](#assistant-ui-and-canvas)) |
+| `chat.surfaces.pin`        | Pinning a surface to the top of the Canvas panel                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| `chat.abort`               | Stop                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `sessions.steer`           | While a reply streams, Send (or Enter on desktop) adds to the current turn (`inject`, falling back to `queue`). With a file attached, Send queues (`queue`). Send after reply and desktop Ctrl/Cmd+Enter queue. On touch devices Enter inserts a newline and Ctrl/Cmd+Enter does what Send does. A steer can carry the same optional `location` object as `chat.send`. Transient connection errors are retried within a 60 s window, keeping the same idempotency key so the gateway's dedupe still applies. A dictated auto-send finishing while a reply streams takes this same route                                                                                                                                                                                                                                       |
+| `sessions.patch`           | Rename, model, Think, Send reasoning and archive state. Only `label`, `model`, `thinkingLevel`, `reasoningLevel` and `archived`; any other field is refused                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `sessions.title.prepare`   | Suggest a title                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `talk.session.create`      | Start Dictate (`transcription`) or Voice mode (`stt-tts`, or `realtime` — the operator-chosen speech-to-speech engine). Refused while `talk.conversation.enabled` is false; a `realtime` create is also refused while `talk.conversation.engine` is not `"realtime"`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `talk.session.appendAudio` | Stream microphone audio into that session                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `talk.session.bargeIn`     | Report a local interruption while reply speech is playing                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `talk.session.mark`        | Acknowledge played reply audio, in milliseconds of audio played for that turn. Realtime sessions send a session-monotonic timestamp (the bridge's playback tracker rejects backwards timestamps); cascaded sessions keep the played-audio offset the relay maps through its alignment timeline                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `talk.session.cancelTurn`  | Cancel the current voice turn                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `talk.session.close`       | End Dictate or Voice mode                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `tts.speak`                | The **Read aloud** button on replies, and the **Read replies aloud** auto-read toggle: synthesize reply text into inline audio to play. Auto-read speaks a streaming reply sentence by sentence, so one reply can produce several `tts.speak` requests, each under the advertised `maxTextLength`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `identity.link.claim`      | Redeeming a `/link` code in the **Linked accounts** dialog: links `<channel>:<id>` to this person and approves the pairing code. Rate limited per device and per person (see [Identities](/gateway/identity#proofs-of-control))                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `identity.logout`          | **Log out**: removes the paired device server side, unlinks its `device:<deviceId>` value and clears the browser credential and keypair                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 Gateway settings that decide what users can do with those methods:
 
@@ -417,7 +434,9 @@ Gateway settings that decide what users can do with those methods:
 - **Assistants.** The picker lists the agents the gateway's `agents.list` method returns: every
   `agents.list` entry in config plus the default agent, or, with none configured, the default agent
   plus each agent directory under the gateway state directory. `identity.name` and `identity.color`
-  set how each one looks; an assistant with no colour gets a stable one derived from its id. An
+  set how each one looks; an assistant with no colour gets a stable one derived from its id. A
+  configured `agents.list[].name` wins over the identity name, and an `agents.list[].description`,
+  if set, appears as a tooltip on the sidebar row and in the assistant picker. An
   agent with `agents.list[].userFacing: false` is internal: the gateway omits it (and its sessions
   and runs) from every user-client answer, so web-client users never see it in the picker, the
   sidebar or their chat lists — only operators do. See
@@ -435,12 +454,43 @@ Gateway settings that decide what users can do with those methods:
 - **Suggest a title.** Each use sends the chat's first message (up to 1000 characters) to the
   assistant's default model - the agent's configured model, not the model picked for the chat. The
   limit is 3 calls per 60 seconds per device and address, and it cannot be changed.
-- **Reach.** A paired client can read, send to and change the four `sessions.patch` settings of any
+- **Reach.** A paired client can read, send to and change the five `sessions.patch` settings of any
   session on the gateway, including channel and sub-agent sessions; per-session ownership does not
   exist yet (ADR 0077 section 5, ADR 0083). Pair only people who should have that reach.
 
 Adding to the current turn, Send after reply, replies and the notice that a chat changed elsewhere
 need no gateway setting.
+
+### Attachment uploads over HTTP
+
+File attachments no longer ride the WebSocket. The browser POSTs each file to `POST /v2/uploads`
+on the gateway's HTTP origin with its paired device credential, and the subsequent `chat.send`
+references the upload by `uploadId`. The deployment must satisfy:
+
+- **Origin.** The endpoint enforces the same origin allowlist as the websocket connect: the
+  browser's origin must be in `gateway.webClient.allowedOrigins`, and the browser must be able to
+  reach the gateway's `http://`/`https://` origin, not only its `ws://`/`wss://` one. The
+  endpoint sits at the gateway root (`/v2/uploads`); the web client's `basePath` is irrelevant.
+- **Body size.** The per-file cap is 50 MiB (`CLIENT_UPLOAD_MAX_BYTES` in
+  `src/gateway/client-uploads-http.ts`); there is no total-size limit per message. A reverse proxy
+  in front of the gateway may impose a smaller request-body limit (nginx's `client_max_body_size`
+  defaults to 1 MiB): raise it to at least 50 MiB, or large attachments are refused with `413`
+  before the gateway sees them.
+- **CSP.** `wednesdayai web serve` sends a `Content-Security-Policy` whose `connect-src` already
+  includes the gateway's http(s) origin alongside its `ws:`/`wss://` one (see
+  `src/static-host/static-app.ts`); the gateway route does the same. A self-hosted bundle must
+  match (see [Rules the host must follow](#rules-the-host-must-follow)).
+- **Lifetime.** An upload that is never sent is deleted by the gateway's sweep after 24 hours;
+  there is no DELETE route. Each upload is bound to the paired device that uploaded it: another
+  device's `chat.send` cannot consume it, and a consumed `uploadId` cannot be replayed.
+- **Errors.** Every refusal answers
+  `{ "ok": false, "error": { "code": ..., "message": ... } }`: `403 FORBIDDEN_ORIGIN` (the
+  browser's origin is not in `gateway.webClient.allowedOrigins`, or the request carries no
+  `Origin` header), `401 UNAUTHORIZED` (a missing, invalid or revoked device token, or a token
+  whose scope set lacks `operator.sessions.write`), `400 EMPTY_BODY`, `413 PAYLOAD_TOO_LARGE`,
+  and `500 UPLOAD_FAILED` (the body could not be stored). Repeated failed authentications feed
+  the same device-token auth rate limiter as the WebSocket connect: once the bucket empties, the
+  endpoint answers `429` (`rate_limited`) with a `Retry-After` header until then.
 
 ### Link this device
 
@@ -502,9 +552,14 @@ that showed them. Each chat also gets a **Canvas** panel (the top-bar toggle) li
 surface the assistant published in that chat at its latest revision; pins survive a reload and a
 gateway restart. Each tool step appears live
 as a tool line inside the reply that ran it (from the `chat.activity` event, which carries the
-step's display name only, never its arguments or results), in order with the reply's text. When
-the turn is stored, the same line fills in its details in place; it never moves or disappears,
-also after a reload. Every assistant row of one run renders as a single reply block.
+step's display name and, on start, a redacted, length-capped display verb and detail - what the
+step is doing, such as the file being read or the command being run - never its raw arguments or
+results), in order with the reply's text, which arrives complete before the next step appears.
+When the turn is stored, the same line gains its result in place; the stored line resolves its
+label from the same arguments the live verb/detail came from, so the two do not drift (the one
+exception is a live label that redaction or the cap shortened), and the
+line never moves or disappears, also after a reload. Every assistant row of one run renders as a
+single reply block.
 
 This is the bundled `ui-surfaces` plugin, and it is **off by default** (ADR 0034). Enable it
 explicitly, then restart the gateway:
@@ -662,7 +717,9 @@ For `sessions.list`, the client sends `includeInternal`, `sortBy`, `sortOrder`, 
 `includeAgentActivity: true`. When `includeInternal` is `false`, the gateway applies the shared
 `isUserFacingSessionKey` rules: session keys whose root segment is `acp`, `cron`, `hook`,
 `heartbeat`, or `subagent` are excluded, as are isolated heartbeat keys such as `main:heartbeat` and
-`dashboard:*:heartbeat`.
+`dashboard:*:heartbeat`. A session whose persisted entry records the a2a channel -
+assistant-to-assistant traffic (`entry.channel` or `entry.lastChannel` of `a2a`) - is returned as
+internal as well, so clients group it with the other background sessions.
 
 Deploy matching web client and gateway versions together. A newer bundle can send
 `includeInternal`, `sortBy`, `sortOrder`, and `includeAgentActivity` to `sessions.list`; an older
@@ -691,11 +748,10 @@ enabling the preference shows nothing because the transcript has no reasoning co
 ## What users see that is not live yet
 
 Some controls are drawn but switched off, with a tooltip naming the tracked finding that enables
-them (for example "Search — GitHub #698"). Selecting one sends nothing to the gateway. They are:
-**Search** in the message box; the **Feedback** and **Regenerate** actions on replies;
-**Settings** and **Keyboard shortcuts** in the account menu. **Calendar**, **Memory** and
-**Add extension** cite the extension panel roadmap item (GitHub #634) instead; **Feedback**,
-**Regenerate**, **Settings**, **Keyboard shortcuts** and the message-box **Search** cite their
+them. Selecting one sends nothing to the gateway. They are: the **Feedback** and **Regenerate**
+actions on replies; **Settings** and **Keyboard shortcuts** in the account menu. **Calendar**,
+**Memory** and **Add extension** cite the extension panel roadmap item (GitHub #634) instead;
+**Feedback**, **Regenerate**, **Settings** and **Keyboard shortcuts** cite their
 own tracked finding (GitHub #696-#700) instead. The assistant picker, per-assistant colour,
 session filter and search, paging past the first page, the model switcher and Think, queue/steer
 while a reply streams, rename and Suggest, and replying to a message are live (client-chat-v3
@@ -708,11 +764,16 @@ screens, the composer's **Read replies aloud** toggle reads streaming replies se
 sentence and sends dictation when the user pauses, user messages render markdown, pasted rich
 text (Word, Google Docs, web pages) converts to markdown in the draft, the copy button writes
 structured rich text with a plain-text fallback, and large images are downscaled to at most
-2048 px on attach; see [Using the web client](/web/using-the-web-client) for what users see.
+2048 px on attach. The 2026-11 client everyday slice added more: file attachments upload over the
+gateway's authenticated HTTP endpoint with per-file progress and cancel instead of riding the
+WebSocket, a very long plain-text paste becomes a `pasted-text.txt` attachment, sessions can be
+archived from the top bar and hidden from the sidebar, assistant-to-assistant sessions group as
+internal, assistants show their description on hover, and messages relayed from another
+assistant's session carry the sending assistant's name; see
+[Using the web client](/web/using-the-web-client) for what users see.
 
-Two known gaps in that slice: an image that cannot be re-encoded under the 5 MB attachment cap
-is still rejected at attach time (#1330), and stopping a read-aloud does not cancel a
-`tts.speak` request already in flight.
+One known gap remains: stopping a read-aloud does not cancel a `tts.speak` request already in
+flight.
 
 **Canvas** in the top bar is no longer on this list: it is live with the `ui-surfaces` plugin
 enabled and explains itself when it is not (see
@@ -765,7 +826,8 @@ Send these headers on every response:
 
 - `Content-Security-Policy` with `frame-ancestors 'none'`, `script-src 'self'`, `font-src 'self'`
   (the bundled fonts load from the same origin), and `connect-src` listing `'self'` plus the
-  gateway origin with its `ws:`/`wss:` scheme
+  gateway origin with its `ws:`/`wss:` scheme and its `http:`/`https:` one - attachments upload
+  over `POST /v2/uploads` (see [Attachment uploads over HTTP](#attachment-uploads-over-http))
 - `X-Frame-Options: DENY`
 - `X-Content-Type-Options: nosniff`
 - `Referrer-Policy: no-referrer`
@@ -780,7 +842,7 @@ client at the previous gateway.
 
 ## Related
 
-- [Using the web client](/web/using-the-web-client) - what your users see: pairing, chat, and runs
+- [Using the web client](/web/using-the-web-client) - what your users see: pairing and chat
 - [Control UI v2](/web/control-ui-v2) - the operator console at the gateway root, a separate app with its own route
 - [Brand tokens](/reference/brand-tokens) - the shared colour and font package (developers)
 - [Web client components](/reference/web-client-components) - how the client UI is built (developers)

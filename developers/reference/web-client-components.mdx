@@ -40,6 +40,7 @@ sources:
   - apps/web/src/app/use-device-location.ts
   - packages/talk-client/src/silence-endpointer.ts
   - apps/web/src/state/chat.ts
+  - apps/web/src/state/thread-order.ts
   - apps/web/src/state/tool-step-rows.ts
   - apps/web/src/gateway/message-text.ts
   - apps/web/src/gateway/chat-activity-frame.ts
@@ -82,7 +83,7 @@ apps/web/src/
   ui/          the component layer: Shell, Sidebar, TopBar, Thread, Composer, ... + client.css
   state/       chat.ts (zustand store), types.ts
   providers/   gateway and events seams, WebClientRuntime, theme, attachments, preferences, and the chat runtime modules (leaf tracking, queued turns, chat list)
-  runs/        RunsController and the projection behind the Runs panel
+  runs/        RunsController and the projection of in-flight runs
   gateway/     connection, device identity, setup-code parsing
 ```
 
@@ -297,7 +298,13 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `onActiveSessionRowChange`, `onQueuedRunStarted`, `onRunResumed`, `onToolStep`,
   `onOwnTurnStarted`, `onOwnTurnQueued`, `onSteerTurnSettled`, `onAssistantReply` and
   `onActiveLeafConflict` subscriptions. `onToolStep` turns each `chat.activity` frame of a run
-  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); `onRunResumed`
+  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); a start frame's
+  optional `verb`/`detail` (redacted, length-capped display strings resolved from the shared
+  tool-display spec; the wire contract is the `chat.activity` bullet in
+  [Protocol](/gateway/protocol#assistant-ui-surfaces)) are stored with the row and never cleared
+  by a later frame of the same call, and `ToolDisplay` renders them as the live chip's label —
+  for a call with no stored arguments yet, full mode shows the same title/verb/detail line
+  instead of an invented `{}` dump. `onRunResumed`
   restores the typing indicator on the first live frame of a run adopted after a reload;
   `ui/assistant-turns.ts` groups a run's rows into one reply block for `ui/Thread.tsx`.
   `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
@@ -318,15 +325,14 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   data, not UI state.
 - Runs live in `runs/` behind `RunsController`. Its `start()` and `stop()` are one boolean, so
   components take a **reference-counted lease** with `useRunsLease(controller)`
-  (`ui/use-runs-lease.ts`); the Sidebar holds one for the live badge and the `RightPanel` holds
-  another while open.
+  (`ui/use-runs-lease.ts`); the busy-state projection in `app/use-busy-sessions.ts` holds one so
+  the sidebar's busy dots stay live.
 
 ```ts
-// Do this: the sidebar badge and the panel each hold a lease
-useRunsLease(runsController); // Sidebar: badge stays live with the panel closed
-useRunsLease(controller, true); // RightPanel: refresh on join
+// Do this: the busy-state projection holds a lease for the shell's lifetime
+useRunsLease(runsController); // Sidebar busy dots stay live
 
-// Not this: closing the panel would stop the controller and freeze the badge
+// Not this: an unbalanced start/stop would stop the controller under other readers
 useEffect(() => {
   controller.start();
   return () => controller.stop();
@@ -397,9 +403,16 @@ return the user to onboarding. The contracts live in `gateway/connection.ts` (tr
   streaming continue and Stop remains the user's escape hatch. Queued follow-ups and an unacked
   pending turn are left to the existing `loadHistory` and send-retry paths.
 - **Store and stream dedupe.** `prependMessages` drops incoming rows whose `entryId` or `id`
-  already exists; `addSyncedMessage` returns state unchanged for an assistant payload whose id
-  matches an existing row's `localRunId`; `streamUpdate` opens no second bubble when the final text
-  differs from the streamed text only in leading or trailing whitespace.
+  already exists and sorts the merge with `orderThread`. `addSyncedMessage` positions the run
+  before it dedupes (`applyPositionRun`: the run's queued turn un-queues and `turnSeq` anchors the
+  rows that have no stored position), and a deduped sync still returns `orderThread(base)`, so the
+  positioning lands even when the row does not. The sync is dropped only when the answer itself is
+  already on screen: the run's live text row carrying identical content (a final that extends the
+  streamed prose updates the bubble in place, one with new text after a tool step appends after
+  the step), or a provenance match — same-run assistant prose, or an earlier sync of the same
+  event; the run's question, its tool rows and a still-queued turn never suppress it.
+  `streamUpdate` (`gateway/message-text.ts`) opens no second bubble when the final text differs
+  from the streamed text only in leading or trailing whitespace.
 - **Draft safety.** Every outgoing `chat.send` and `sessions.steer` text is recorded in a
   `localStorage` send outbox (`apps/web/src/providers/send-outbox.ts`, key
   `openclaw-user-client:outbox:v1`, 24 h expiry) before the RPC leaves, and removed when the RPC
@@ -627,7 +640,9 @@ Contracts worth keeping when you change them:
   (unless attachments are staged, which inject refuses, in which case it sends `mode: "queue"`).
   The send menu item "Send after reply" (`composer-send-menu-queue`) and desktop Ctrl/Cmd+Enter send
   `sessions.steer` with `mode: "queue"` and show the turn at once with `message-queued-badge`. Both
-  send `fallback: "queue"`. Neither can carry a reply: the composer refuses both while a reply chip is set,
+  send `fallback: "queue"`. The badge is presentation only; the turn's place in the thread is
+  `orderThread`'s derived tail until the run's first frame clears it (see the order bullet below).
+  Neither can carry a reply: the composer refuses both while a reply chip is set,
   because `sessions.steer` has no `replyToId`. On touch-primary devices (coarse pointer), plain Enter
   inserts a native newline, and Ctrl/Cmd+Enter runs the primary action (steer while streaming, queue
   with a staged file, send when idle) instead of queueing. A queued turn is saved in `sessionStorage`
@@ -686,14 +701,14 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   that snapshot: a final replaces its stale partial, while an aborted run keeps the observed stopped
   text rather than an ahead-of-stream durable suffix. `completed-history-boundary.ts` excludes newer
   assistant/execution data but admits matched newer durable users. Those rows keep their client IDs
-  and run ownership; the queued marker clears on the runtime's start event, not on storage adoption.
+  and run ownership; the queued marker clears on the run's first frame (`positionRun`), not on
+  storage adoption.
   The merge retains newer partials, optimistic users, queued turns, older pages and errors without
-  advancing the leaf guard. Kept client notices (run errors, failed sends) park right after the run
-  that precedes them (that run's last stored row, or the matched row, extended to the run's last
-  stored row when the matched row sits earlier), never later than the next matched row, so a later
-  reply landing does not push the notice below that reply. With no anchor the notice falls back to
-  the next matched row, otherwise the tail; once an earlier row has gone to the tail the notice
-  follows it there.
+  advancing the leaf guard. Reconcile decides only which current rows survive the merge:
+  `placeUnmatchedRows` returns `kept` in arrival order and places nothing. The assembled page is
+  `orderThread([...reconciledLoaded, ...kept])`, so a kept client notice (run error, failed send)
+  lands right after the run it reports on through its `anchorRunId`/`anchorSeq`, never below a
+  later reply of that run.
   Legacy identity-less matches are one-to-one FIFO within durable-entry anchor intervals, so
   identical distinct turns remain distinct. Scoped loaded-history and older-page IDs distinguish
   replaceable heads from optimistic rows and preserve imported legacy entries. Superseded
@@ -706,6 +721,25 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   newer chat or foreign reply. Distinct assistant message IDs remain distinct even with identical text.
   Media links and derived attachments share `normalizeMediaUrl`: HTTP(S) and inline raster
   images/WAV are allowed; unsupported schemes and data types remain non-interactive metadata.
+- **Order is server sequence.** The thread order is a pure function of gateway positions, never of
+  insertion order. `gateway-mappers.ts` stamps each history row's transcript position onto
+  `ChatMessage.seq` (`__openclaw.seq`, falling back to the integer form of `__openclaw.rowId`);
+  live `chat` and `chat.activity` frames carry `turnSeq`, the transcript position of the run's
+  first user entry, which `web-client-runtime.ts` copies into every store write. One comparator
+  owns placement, `orderThread(messages)` in `state/thread-order.ts`: a row with its own `seq`
+  sorts there; a still-queued turn sorts into the derived tail (after every positioned row, in
+  send order among themselves); a live user row whose run's reply is loaded but whose stored row
+  sits on an older page sorts just above the run's first positioned row; any other unpositioned
+  row follows its run's last positioned row with `anchorSeq` as the fallback; a client notice
+  follows the run named by `anchorRunId`; a row with no positioning input keeps its arrival slot.
+  Every store action that changes `messages` returns `orderThread(next)`, and an already-ordered
+  input returns the same array reference (render isolation). `seqWatermark` anchors new optimistic
+  rows after everything positioned. A sent message therefore always renders above its reply and
+  above later turns, through streaming, queue and steer, reconnects and reloads. "Queued" is a
+  badge only: it clears on any frame of that run (`positionRun`), when a history load carries the
+  stored message, or when a later own turn takes its transcript position (the gateway drains
+  queued turns first in, first out, so a positioned turn proves the turns queued before it
+  started).
 - **Colours.** `ui/assistant-color.ts` maintains a browser-safe palette identical, in order, to
   `ASSISTANT_IDENTITY_COLORS` in
   `src/shared/assistant-identity-values.ts`. A configured `identity.color` wins; otherwise FNV-1a
@@ -752,11 +786,28 @@ Availability comes from `talk.catalog`, and updates on reconnect:
 `useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
 `transcript` while recording, `commit: { text: string; nonce: number; autoSend: boolean } | null`,
 `consumeCommit(): void`,
-and `errorMessage` (mic denied or no input device). The live transcript previews in the textarea as a
+and `errorMessage` (mic denied or no input device, a microphone that stops sending audio, or a
+transcription relay that ended the take). The live transcript previews in the textarea as a
 read-only draft with an accent border and muted text (`.cl-composer--dictating`), without breaking the
 textarea height cap. When dictation stops or encounters a capture error, `commit` receives the final or
 last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
 calls `onDictateCommitConsumed` to clear the commit.
+
+`VoiceSeam` (`providers/voice.ts`) starts the mic inside the toggle click and requests the session
+concurrently: `capture.start` runs before any await, so `AudioContext` creation and `resume()`
+happen while the tap's user activation is fresh (`packages/talk-client/src/audio-capture.ts`
+constructs and resumes the context before the `getUserMedia` await — a context created after it
+can stay suspended on a slow phone link and produce zero frames). Frames captured before the
+session id lands and `session.ready` arrives buffer in order and are sent once ready, so the relay
+never drops a take's first words; stopping a not-yet-ready session waits up to 10 s
+(`SESSION_READY_TIMEOUT_MS`) before it closes, so the buffered frames are not lost. A dead take
+ends visibly: a 3 s frame-silence watchdog (`CAPTURE_SILENCE_TIMEOUT_MS`, re-armed per frame)
+retires the session with `talk.session.cancelTurn` and reports **Your microphone stopped sending
+audio. Tap Dictate to try again.**, and a `session.closed` that arrives mid-take with no stop in
+flight reports **Transcription stopped unexpectedly. Tap Dictate to try again.** without closing
+the session. A rejected `talk.session.create` stops the capture it already owns without waiting
+for its acquisition, so a hung `getUserMedia` cannot leave the take recording; the next tap issues
+a fresh create.
 
 **One-tap dictation (`useDictate(runtime, { autoSend, autoSendDelayMs })`).** Both options are
 take-start snapshots: `autoSend` is the auto-read preference (`AppShell` passes
@@ -1069,7 +1120,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
 ### Busy state
 
 - `selectBusySessionKeys(rows)` (`runs/runs-model.ts`) maps the `sessions.runs.list` projection
-  the sidebar and Runs panel already read to the session keys with a run in flight: rows whose
+  the sidebar already reads to the session keys with a run in flight: rows whose
   `groupForSessionRunStatus(status)` is `queued` or `running`, excluding `kind === "heartbeat"`
   (heartbeat output is suppressed in chat; counting it would pulse the busy state on every tick).
 - `useBusySessionKeys(controller)` (`app/use-busy-sessions.ts`) reads the projection with

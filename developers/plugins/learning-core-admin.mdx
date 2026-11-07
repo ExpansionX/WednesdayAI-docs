@@ -156,16 +156,19 @@ no applied effect and no unrefunded consolidation spend can switch producer.
 Every `produce` run records a `pass.metrics` row whose `items.producer` is `consolidation`,
 `promote`, or `null` when the run took no ownership (nothing finalized and nothing spent), and
 `items.producerReason` says why (`disabled`, `unconfigured`, `notScheduled`, `upgrade_day`,
-`notRunnable`, `frozen_conflict`, `no_effect`, and so on). Standalone `learning-core.promote`
-runs record the same fields.
+`notRunnable`, `frozen_conflict`, `cap_exhausted` when the agent's daily consolidation cap was
+already spent so the run made no model call, `no_effect`, and so on; `items.capExhausted: true`
+appears on every run that stood down for the cap). Standalone `learning-core.promote` runs record
+the same fields.
 
 When a `produce` run applied a lesson effect (in this attempt or an earlier one of the same work
 item), it queues `learning-core.reconcile-skills`, and with `distill.enabled`, the reconcile run
 queues `learning-core.distill`. These follow-ups are written in the same transaction that
 completes the run. A consolidation run stopped by `maxCallsPerRun` or its time budget, with
 candidates and daily capacity left, queues an immediate continuation; any other run that leaves
-claimable candidates behind (including a spent daily cap) queues a next-day carry, available at
-the next UTC midnight. Pending candidates are therefore processed without a new session.
+claimable candidates behind (including a spent daily cap, which writes no reservation rows) queues
+a next-day carry, available at the next UTC midnight. Pending candidates are therefore processed
+without a new session.
 
 While consolidation is runnable, a standalone promote changes nothing: it neither writes lessons
 nor skips untagged candidates. Promote also leaves alone any agent whose current UTC day's bucket
@@ -230,9 +233,11 @@ For each selected candidate the pass sends its capture window to the configured 
 through the analysis runtime. The window holds up to 12 redacted user and assistant messages
 (4,000 characters at most). Heartbeat, cron and subagent turns are dropped at capture, and a
 session with no human turn yields no candidate. The pass also sends the anchor message, the tags,
-up to five similar active lessons, and up to six operator-reviewed examples. The judge answers
-with one JSON verdict (`action`, `lessonId`, `text`, `kind`, `sourceIndexes`, `rejectCategory`,
-`reason`, `confidence` from 0 to 1), and the plugin validates it.
+up to five of the agent's active lessons (most similar first, filling remaining slots with the
+newest lessons even when they share no words, so a contradiction can be caught), and up to six
+operator-reviewed examples. The judge answers with one JSON verdict (`action`, `lessonId`, `text`,
+`kind`, `sourceIndexes`, `rejectCategory`, `reason`, `confidence` from 0 to 1), and the plugin
+validates it.
 
 A lesson is a reusable rule for how the agent behaves. Facts about the user, other people,
 events, health, money or legal matters belong to memory, and the judge rejects them. `add` and

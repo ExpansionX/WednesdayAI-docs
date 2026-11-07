@@ -59,7 +59,7 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 ### Unit / integration (default `pnpm test`)
 
 - Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/reference/test).
-- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, the gateway-browser-client suite under `packages/gateway-browser-client/src/**`, and the classic control-UI suite under `ui/src/**`
+- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, and the gateway-browser-client suite under `packages/gateway-browser-client/src/**`
 - Scope:
   - Pure unit tests
   - In-process integration tests (gateway auth, routing, tooling, parsing, config)
@@ -87,9 +87,10 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 - Scope: the `openclaw-control-ui` React console (Control UI v2, the default operator console at
   the gateway root) — the runtime-config parser, the gateway, runs, fleet, approvals and config
   stores, the shared schema-form config engine (`apps/control/src/config-form/`), the shell
-  (sign-in, sidebar, command palette, theme), and the views across the four navigation groups:
-  Monitor (Overview, Sessions, Runs, Usage, Logs, Debug), Configure (Agents, Automations,
-  Channels, Skills, Settings), Fleet (Nodes, Instances, Storage) and Learning (Learning, Dreams).
+  (sign-in, sidebar, command palette, theme), and the views across the five navigation groups:
+  Monitor (Overview, Sessions, Runs, Recovery, Usage, Logs, Debug), Configure (Agents, Automations,
+  Channels, Skills, Settings), Fleet (Nodes, Instances, Storage), Learning (Learning, Dreams) and
+  Plugins (pages contributed by plugins).
   Gateway connection behaviour comes from `packages/gateway-browser-client`, faked
   with the fake connection and socket its `test-support` export provides.
 - Type-check with `pnpm tsgo:control` (part of `pnpm check`); a coverage report with
@@ -117,14 +118,17 @@ gateway (harness: `test/helpers/user-client-web-harness.ts`; the packaging suite
 packaged bundle without a browser). They are part of the e2e lane and need
 `pnpm build` first.
 
-| File                                                 | Covers                                                                                                                                                                                                                                                                                                                            |
-| ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                                                |
-| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                                            |
-| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller, markdown styling under `.prose`, `color-scheme` following the theme, the live Runs badge, high-contrast text on the accent colour                                                                                                                                                             |
-| `test/console-brand-parity.e2e.test.ts`              | Control UI computed tokens and font loading identical between a pinned base commit and the branch (slow: builds two Control UIs, up to 10 minutes)                                                                                                                                                                                |
-| `test/control-ui-v2-packaging.e2e.test.ts`           | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default root mount                                                                                                           |
-| `test/control-ui-v2.e2e.test.ts`                     | The console in real Chromium: gateway-hosted sign-in with a seeded session, the classic-console link and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
+| File                                                 | Covers                                                                                                                                                                                                                                                                                                  |
+| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                      |
+| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                  |
+| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller (bottom on open, follows appends, keeps position on load-older), markdown styling under `.prose`, `color-scheme` following the theme, the composer's live and disabled controls, a long thread kept in the scroller, and quiet token-styled buttons across themes    |
+| `test/user-client-web-attachments.e2e.test.ts`       | HTTP attachment uploads against a real gateway: a 12 MB PDF sent by `uploadId` with visible progress, cancelling an in-flight upload from the chip, and a 12,000-character paste staged as `pasted-text.txt` (ADR 1330, #1340)                                                                          |
+| `test/user-client-web-voice-recovery.e2e.test.ts`    | Voice mode's dead-capture watchdog: a take whose microphone stops sending audio ends visibly with the mic-silent message within seconds, and the next tap starts listening again (#1938)                                                                                                                |
+| `test/user-client-web-archive.e2e.test.ts`           | Archiving a chat on one client hides it from a second client and unarchiving restores it (ADR 0083 amendment)                                                                                                                                                                                           |
+| `test/web-client-packaging.e2e.test.ts`              | The packaged web bundle built by `scripts/build-web-app.mjs --app web`: self-hosted brand fonts, no Vite manifest shipped, the initial JS fitting `apps/web/bundle-budget.json` (#1145), and gateway serving at the default mount path                                                                  |
+| `test/control-ui-v2-packaging.e2e.test.ts`           | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default root mount                                                                                 |
+| `test/control-ui-v2.e2e.test.ts`                     | The console in real Chromium: gateway-hosted sign-in with a seeded session and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
 
 The unit-level guard `test/brand-tokens-contrast.test.ts` (contrast ratios and `color-scheme` per
 theme) runs in the normal `pnpm test` lane and needs no browser. See
@@ -142,20 +146,6 @@ pnpm exec vitest run --config vitest.e2e.config.ts test/user-client-web-brand.e2
 
 If a filtered run also fails, treat it as a real failure.
 </Warning>
-
-### Control UI (classic `ui/`)
-
-- Command: `pnpm test:ui` (also runs as the `ui` lane of `pnpm test`)
-- Config: `ui/vitest.config.ts`, which composes two projects:
-  - `node` (`ui/vitest.node.config.ts`): `ui/src/**/*.node.test.ts` in a node environment. These suites stub globals such as `window`/`location` or read `node:fs`, which a real browser page cannot do.
-  - `chromium` (`ui/vitest.browser.config.ts`): every other `ui/src/**/*.test.ts` in headless playwright chromium.
-- Every `ui/src` test file belongs to exactly one project; membership follows the `.node.test.ts` suffix, so name a node-style suite accordingly.
-- Failure screenshots are written to `ui/.vitest-screenshots/` and attachments to `ui/.vitest-attachments/`. Both are git-ignored: a test run must never modify a tracked file.
-- Run one project on its own with `pnpm --dir ui exec vitest run --config vitest.node.config.ts <file>` (or `vitest.browser.config.ts`).
-
-The classic console is deprecated (served at `/classic`, removed next release); new console work
-belongs in `apps/control` (Control UI v2). See ADR 0105
-(`dev-docs/adr/0105-control-ui-v2-default-console.md`).
 
 ### E2E (gateway smoke)
 

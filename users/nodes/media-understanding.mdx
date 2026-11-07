@@ -113,35 +113,43 @@ understanding provider **without a plugin extension**:
 ```json5
 {
   models: {
-    providers: [
-      {
-        id: "my-proxy",
-        type: "openai-completions", // or openai-responses
-        baseUrl: "https://my-ai-gateway.example.com",
-        apiKey: "sk-...", // or use environment variable
+    providers: {
+      "my-proxy": {
+        api: "openai-completions", // or "openai-responses"
+        baseUrl: "https://my-ai-gateway.example.com/v1",
+        apiKey: "sk-...", // or use an environment variable
+        models: [
+          /* your chat models */
+        ],
       },
-    ],
+    },
   },
   tools: {
     media: {
-      models: [
-        {
-          provider: "my-proxy", // matches the provider id above
-          model: "gpt-4o-mini", // model available via your proxy
-          capabilities: ["image", "audio", "video"],
-        },
-      ],
+      audio: {
+        models: [
+          {
+            provider: "my-proxy",
+            model: "whisper-1", // a speech-to-text model your proxy serves — chat model ids do not work here
+          },
+        ],
+      },
     },
   },
 }
 ```
 
-This synthesis is applied automatically when the config is loaded. The proxy provider
-is registered with audio, image, and video capabilities using standard OpenAI-compatible wire formats.
+The synthesis is applied automatically when the config is loaded: the proxy provider is registered with audio, image and video capabilities using standard OpenAI-compatible wire formats.
 
-Core sends the configured model id on the request as written in config. Proxy-side model
-aliasing and routing are operator configuration on the proxy — WednesdayAI does not rewrite
-or map model ids for the hop.
+**Image and video** ride the active chat model through the proxy when that model accepts image input; a chat model known to be text-only is skipped, and the proxy image/video path uses the OpenAI-compatible chat-completions wire regardless of whether the entry declares `openai-completions` or `openai-responses`.
+
+**Audio is never auto-detected** on a config-provided proxy: core cannot know which transcription model the proxy routes, so you must name one in `tools.media.audio.models`. A shared `tools.media.models` entry with `capabilities: ["audio"]` works for the main pass, and for the pre-mention transcription of group voice notes too, but only once `tools.media.audio` exists at all (even as `{}`): with that key absent the pre-mention pass returns before it resolves any model, so a voice note in a `requireMention` group reaches the mention check untranscribed. `tools.media.audio.models` covers both paths on its own.
+
+Without that entry the gateway logs `media auto-selection exhausted: voice notes are never auto-detected on an OpenAI-compatible models.providers entry (my-proxy) …` and `openclaw doctor` names the provider and the same fix. When `tools.media.audio` exists but resolves nothing usable, the pre-mention transcription pass for `requireMention` group voice notes warns with the same remedy on the `media-understanding/audio-preflight` logger.
+
+**Credentials** resolve under the proxy's raw `models.providers` key, in the standard order: stored auth profile, core env map, provider-declared env var, then `models.providers.<id>.apiKey` (first hit wins). The key and the endpoint always come from the same entry, so a proxy key whose id aliases a canonical media id (for example `gemini` vs `google`) is never borrowed from the canonical provider's credentials.
+
+Core sends the configured model id on the request as written in config. Proxy-side model aliasing and routing are operator configuration on the proxy — WednesdayAI does not rewrite or map model ids for the hop.
 
 ```json5
 {
@@ -287,6 +295,8 @@ already set. Credentials resolve in this order, first hit wins:
 
 A provider whose credential resolves nowhere is **skipped** during auto-detection rather than
 tried and failed.
+
+If instead the log says `media auto-selection exhausted: voice notes are never auto-detected on an OpenAI-compatible models.providers entry`, your estate is a config-provided proxy rather than a provider extension — see [Config-provided proxy bindings](#config-provided-proxy-bindings-openai-compatible) and set `tools.media.audio.models`.
 
 <Note>
 Step 3 did not work in releases up to and including 0.4.10: a provider whose id core did not

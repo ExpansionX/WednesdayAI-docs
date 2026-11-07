@@ -68,6 +68,7 @@ cat ~/.openclaw/openclaw.json
 - State integrity and permissions checks (sessions, transcripts, state dir).
 - Config file permission checks (chmod 600) when running locally.
 - Model auth health: checks OAuth expiry, can refresh expiring tokens, and reports auth-profile cooldown/disabled states.
+- Media capability check: warns when no enabled media-understanding provider covers image/audio/video. A config-provided OpenAI-compatible proxy (`models.providers.<id>`) is never auto-detected for voice notes, so the warning names the proxy and the `tools.media.audio.models` fix.
 - Extra workspace dir detection (`~/openclaw`).
 - Sandbox image repair when sandboxing is enabled.
 - Legacy service migration and extra gateway detection.
@@ -128,12 +129,17 @@ Current migrations:
   → `agents.defaults.models` + `agents.defaults.model.primary/fallbacks` + `agents.defaults.imageModel.primary/fallbacks`
 - `browser.ssrfPolicy.allowPrivateNetwork` → `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`
 
-Keys that lost their only consumer are removed rather than migrated. `session.storage.consumerClaims.progressWindowMs`
-and `session.storage.consumerClaims.maxRetentionBackstopMs` only fed the removed automatic
-history pruning (ADR 0098), so doctor deletes them and logs one message per key, for example:
+Keys that lost their only consumer are removed rather than migrated.
+`session.storage.consumerClaims.progressWindowMs` and
+`session.storage.consumerClaims.maxRetentionBackstopMs` only fed the removed automatic history
+pruning (ADR 0098). `gateway.restartResilience.mode` and
+`gateway.restartResilience.forceMarksRecovery` never changed restart behaviour: the drain is
+bounded solely by `gateway.restartResilience.drainTimeoutMs`, which is unchanged, and a restart
+always marks still-running runs interrupted so they can be recovered. Doctor deletes each one and
+logs one message per key, for example:
 `Removed session.storage.consumerClaims.progressWindowMs: it applied to automatic history
-pruning, which was removed (auto-migrated on load).` The gateway applies the same removal
-automatically when a legacy config loads, so a stale key never blocks startup.
+pruning, which was removed (auto-migrated on load).` The gateway applies the same removal in
+memory when a legacy config loads, so a retired key never blocks startup.
 
 ### 2b) OpenCode Zen provider overrides
 

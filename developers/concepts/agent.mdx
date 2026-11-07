@@ -36,9 +36,9 @@ On the first turn of a new session, OpenClaw injects the contents of these files
 
 Blank files are skipped. Large files are trimmed and truncated with a marker so prompts stay lean (read the file for full content).
 
-If a file is missing, OpenClaw injects a single “missing file” marker line (and `openclaw setup` will create a safe default template).
+If a file is missing, OpenClaw injects a single “missing file” marker line (and `openclaw setup` will create a safe default template). An absent `BOOTSTRAP.md` is the exception: it is omitted from the injected context with no marker, because it is supposed to be gone once onboarding completes.
 
-`BOOTSTRAP.md` is only created for a **brand new workspace** (no other bootstrap files present). If you delete it after completing the ritual, it should not be recreated on later restarts.
+`BOOTSTRAP.md` is only created for a **brand new workspace** (no other bootstrap files present). The agent finishes the ritual by deleting it with the built-in `delete` tool, and after that it is not recreated and no longer injected on later restarts.
 
 To disable bootstrap file creation entirely (for pre-seeded workspaces), set:
 
@@ -48,8 +48,8 @@ To disable bootstrap file creation entirely (for pre-seeded workspaces), set:
 
 ## Built-in tools
 
-Core tools (read/exec/edit/write and related system tools) are always available,
-subject to tool policy. `apply_patch` is optional and gated by
+Core tools (read/exec/edit/write/delete and related system tools) are always available,
+subject to tool policy. `delete` removes one file per call and is always confined to the agent workspace (or the lane workspace when lanes are on), even when `tools.fs.workspaceOnly` is `false`. `apply_patch` is optional and gated by
 `tools.exec.applyPatch`. `TOOLS.md` does **not** control which tools exist; it's
 guidance for how _you_ want them used.
 
@@ -58,8 +58,8 @@ guidance for how _you_ want them used.
 Tool profiles set a baseline tool set before allow/deny lists apply. Set globally with `tools.profile` or per-agent with `agents.list[].tools.profile`:
 
 - `minimal` — read, write, edit, exec only
-- `coding` — coding-oriented tools (read, write, edit, exec, apply_patch, browser)
-- `messaging` — messaging-oriented tools (message, sessions tools)
+- `coding` — coding-oriented tools (read, write, edit, delete, exec, apply_patch, browser)
+- `messaging` — messaging-oriented tools (message, sessions tools). Note: this profile has no filesystem tools, so onboarding adds `tools.alsoAllow: ["group:fs"]` on new deployments to give the agent workspace-contained `read`/`write`/`edit`/`delete`
 - `full` — all tools (default when no profile is set)
 
 ### Tool allow/deny
@@ -102,9 +102,12 @@ Per-provider overrides: `tools.byProvider.<provider>.allow/deny` scopes tool pol
 
 `tools.fs.workspaceOnly: true` restricts filesystem tools (read/write/edit/apply_patch) to the agent workspace directory.
 
-Unset (the default), the filesystem tools can reach any path the gateway user can access; the
-sandbox is also off by default. Set `workspaceOnly: true` as a single guardrail against accidental
+Unset (the default), `read`, `write` and `edit` can reach any path the gateway user can access;
+the sandbox is also off by default. `apply_patch` stays workspace-only unless
+`tools.exec.applyPatch.workspaceOnly` is also set to `false`. The `delete` tool is always workspace-contained regardless of this setting. Set `workspaceOnly: true` as a single guardrail against accidental
 writes outside the workspace.
+
+Known limitation: with `workspaceOnly: true`, `read` refuses bundled and managed `SKILL.md` paths outside the workspace, so skill instructions cannot be loaded. Workaround: set `tools.fs.workspaceOnly: false`.
 
 ### Exec configuration
 

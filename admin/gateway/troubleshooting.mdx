@@ -125,6 +125,25 @@ Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
 
+## Host plugin SDK warning at startup
+
+Use this when gateway logs include
+`plugins: host plugin SDK unavailable; plugins load it through jiti: ...`.
+
+At startup the gateway prepares its own copy of the plugin SDK and hands it to
+plugins, so they do not reload the SDK through jiti. This warning means that
+handoff failed; the text after the colon is the underlying error. Plugins still
+load through the jiti fallback and keep working, but startup is slower and
+plugins run against their own SDK copy instead of the host one.
+
+Fix options:
+
+1. Restart the gateway. The handoff is retried on every startup, so a transient
+   failure clears on its own.
+2. If the warning repeats, read the error at the end of the log line. A missing
+   or damaged plugin-sdk build in the installed package is the usual cause;
+   update or reinstall WednesdayAI.
+
 ## Plugin hook never fires
 
 Use this when a plugin hook handler never runs and the gateway startup log
@@ -232,7 +251,7 @@ If logs show nonce/signature errors, update the connecting client and verify it:
 
 Related:
 
-- [/web/control-ui](/web/control-ui)
+- [/web/control-ui-v2](/web/control-ui-v2)
 - [/gateway/authentication](/gateway/authentication)
 - [/gateway/remote](/gateway/remote)
 
@@ -543,8 +562,32 @@ rejection text; the full error and the original arguments stay in the session
 transcript. Inspect them with `sessions_history` for that session, or read the
 session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
 
+The session reply carries a one-line warning for the same failure, for example
+`⚠️ 📝 Edit: in notes.md failed (not found)`. The suffix is a bounded failure
+class, not the raw error:
+
+- `(invalid tool arguments)` - the model called the tool wrong, for example an
+  edit whose `oldText` does not match the file.
+- `(not found)` - the target file or directory does not exist.
+- `(permission denied)` - the call was denied: errno codes (`EACCES`, `EPERM`,
+  `EROFS`) or a workspace/sandbox guard (`workspaceOnly`, symlink and hardlink
+  guards). Only the errno codes mean the filesystem refused access; a guard
+  denial means changing `workspaceOnly` or the sandbox policy, not file permissions.
+- `(blocked by policy)` - a tool policy or loop guard blocked the call, or a
+  plugin hook blocked it without giving a reason. A hook block with a reason
+  shows a bare `failed`.
+- A bare `failed` with no suffix means the error fit no known class.
+
+The path in the warning echoes the model's own argument and may not be a real
+path. The error text (its first line, capped at 400 characters, including the errno
+and resolved path) is shown instead of the class only when verbose tool details are on. `exec`/`bash` failures stay out
+of the chat at default verbosity; their full output is in the journal and the
+session transcript.
+
 The file tools accept the argument shapes models commonly send: `edit`,
-`write` and `read` take `path` and also accept `file_path`; `edit` additionally
+`write`, `read` and `delete` take `path` and also accept `file_path`; `delete`
+removes one file and refuses directories, the workspace root, and paths outside
+the workspace; `edit` additionally
 accepts legacy top-level `oldText`/`newText` or `old_string`/`new_string`, which
 are folded into the `edits` list, and `edits` may arrive as a JSON string;
 `write` accepts empty `content` (it creates or truncates the file). A recurring
@@ -557,6 +600,59 @@ Related:
 - [/tools](/tools)
 - [/logging](/logging)
 - [/concepts/session](/concepts/session)
+
+## Agent keeps re-running BOOTSTRAP onboarding
+
+Use this when the agent re-injects `BOOTSTRAP.md` on every session and
+onboarding never completes. Onboarding is stamped complete
+(`onboardingCompletedAt`) only once `BOOTSTRAP.md` is gone from the workspace,
+and the ritual ends with "Delete this file", which needs filesystem tools.
+
+Check:
+
+1. Confirm `BOOTSTRAP.md` still exists in the agent workspace. Then check the
+   tool policy:
+
+   ```bash
+   openclaw config get tools.profile
+   openclaw config get tools.allow
+   openclaw config get tools.alsoAllow
+   openclaw config get tools.exec.security
+   ```
+
+   The `delete` tool ships with the `group:fs` group and the `coding` profile.
+   A `messaging` profile (the onboarding default on older installs) has no fs
+   tools at all, so the agent cannot write `IDENTITY.md` or delete
+   `BOOTSTRAP.md`.
+
+2. If `tools.exec.security: "deny"` blocks shell access, the agent has no exec
+   fallback either; `delete` is the only way to finish the ritual.
+
+Fix (opt in for existing deployments). If `tools.allow` is empty or unset,
+add the fs group alongside your profile, keeping any existing `alsoAllow`
+entries:
+
+```json5
+{
+  tools: {
+    alsoAllow: ["group:fs"],
+    fs: { workspaceOnly: true },
+  },
+}
+```
+
+If `tools.allow` already lists tools, add `"group:fs"` to that list instead.
+Config validation rejects `allow` and `alsoAllow` in the same scope.
+
+New installs get this from onboarding automatically when no explicit
+`tools.profile` is set. `tools.fs.workspaceOnly: true` scopes `read`/`write`/
+`edit`/`apply_patch` to the workspace; `delete` is always workspace-contained.
+
+If the workspace uses lanes, the gateway must be on a version where lane seed
+files are copied only at lane creation: earlier versions re-copied
+`BOOTSTRAP.md` from the persona root on every turn, so a lane could never
+finish onboarding. Upgrading fixes this; the persona-root `BOOTSTRAP.md` stays
+as the lane seed template by design, so completion is per lane.
 
 ## Tool output caps and context pruning log lines
 

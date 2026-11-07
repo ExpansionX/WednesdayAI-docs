@@ -301,7 +301,7 @@ const { text } = await api.runtime.stt.transcribeAudioFile({
 
 Notes:
 
-- Uses the media-understanding audio configuration (`tools.media.audio`) and provider fallback order; providers are plugin extensions and must be enabled (`plugins.entries.<vendor>.enabled: true`) or a local CLI (Whisper) must be installed.
+- Uses the media-understanding audio configuration (`tools.media.audio`) and provider fallback order; providers are plugin extensions and must be enabled (`plugins.entries.<vendor>.enabled: true`) or a local CLI (Whisper) must be installed. A config-provided OpenAI-compatible proxy (`models.providers.<id>` with `api: "openai-completions"` or `"openai-responses"`) needs no plugin extension, but voice notes are never auto-detected on it — name a speech-to-text model in `tools.media.audio.models` (see [Config-provided proxy bindings](/nodes/media-understanding#config-provided-proxy-bindings-openai-compatible)).
 - Returns `{ text: undefined }` when no transcription output is produced (for example skipped/unsupported input, or no provider/CLI available).
 
 ### Identity helpers
@@ -408,7 +408,11 @@ const ingress: MessageIngress | undefined = getMessageIngress(message);
 //   generated time, not the original send time
 // ingress.triggerId: heartbeat run id (used for heartbeat transcript pruning)
 // ingress.trusted: { channel?, provider?, surface?, chatType?, accountId?, senderId?, messageId? }
-// ingress.untrusted: InboundUserContext, the framing payloads the gateway itself generated
+// ingress.untrusted: InboundUserContext, the framing payloads collected at the gateway; only
+//   `conversation` holds gateway-generated ids and flags, the rest (`conversationContext`,
+//   `sender`, `speechInput`, `deviceLocation`, replies, history, …) is untrusted data;
+//   `sender.id` is a deprecated alias of `trusted.senderId`, and `conversation` still carries the
+//   deprecated pre-#2106 keys (`sender`, `group_subject`, …); read them from `conversationContext`
 
 const time = messageTime(message); // receivedAt when present, else message.timestamp
 ```
@@ -735,6 +739,11 @@ update command reconciles bundled install records first, so a copied bundled
 record can become `source: "bundled"` before npm update selection runs.
 If stored integrity metadata changes between updates, WednesdayAI warns and asks for confirmation (use global `--yes` to bypass prompts).
 
+A bare plugin id resolves against the plugin catalog. Catalog-pinned installs are
+compatibility-checked and provenance-verified before anything is installed; see
+[Verified catalog installs](/cli/plugins#verified-catalog-installs) and
+[Compatibility](/plugins/compatibility).
+
 Plugins may also register their own top-level commands (example: `wednesdayai voicecall`).
 
 ### Managed installs vs bundled copies
@@ -1039,7 +1048,7 @@ api.on(
 
 **`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `message:received`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
 
-Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a `PLUGIN_HOOK_NOT_DISPATCHED` warning — an upstream openclaw hook name is reported as such with its disposition and replacement hook, and the plugin then shows as `degraded` in `wednesdayai plugins list` (see the [hook parity map](/plugins/hook-parity)) — otherwise the warning names the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Warnings surface as `PLUGIN_REGISTER_ERROR` diagnostics in `openclaw plugins doctor`, `openclaw plugins status`, and the gateway startup report; the plugin keeps loading.
+Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a `PLUGIN_HOOK_NOT_DISPATCHED` warning — an upstream openclaw hook name is reported as such with its disposition and replacement hook, and the plugin then shows as `degraded` in `wednesdayai plugins list` (see the [hook parity map](/plugins/hook-parity)) — otherwise the warning names the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Hook-name warnings surface as `PLUGIN_HOOK_NOT_DISPATCHED` and the other registration warnings as `PLUGIN_REGISTER_ERROR`, in `wednesdayai plugins doctor`, `wednesdayai plugins status`, and the gateway startup report; the plugin keeps loading.
 
 Available hook names and their event/context types are defined in `PluginHookHandlerMap` in the plugin SDK types:
 

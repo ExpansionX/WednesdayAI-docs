@@ -1,5 +1,5 @@
 ---
-summary: "Pair your browser, chat, choose a model, queue messages, rename chats, pick a theme, and check on runs in the WednesdayAI web client"
+summary: "Pair your browser, chat, attach files, queue messages, archive chats, rename chats, and pick a theme in the WednesdayAI web client"
 read_when:
   - You have a WednesdayAI web client link and a setup code
   - You want to pair a new browser with WednesdayAI
@@ -15,7 +15,8 @@ read_when:
   - You want to share your location with your messages, or know why the location button is dimmed
   - You wonder why the screen stays awake while you are using your voice
   - You want to paste text from Word, Google Docs or a web page into the message box
-  - You want to know why a picture larger than 5 MB attaches anyway
+  - You want to know how large an attachment can be, or what the progress on an attachment means
+  - You want to tidy the chat list by archiving a conversation you are not using
   - You want to send another message while a reply is still being written
   - You open the web client on several devices and want to know when replies and unread replies show up, or how desktop notifications work
   - You want to install the web client to your device's home screen
@@ -60,6 +61,7 @@ sources:
   - apps/web/src/providers/device-location.ts
   - apps/web/src/app/use-screen-wake-lock.ts
   - apps/web/src/providers/image-resize.ts
+  - apps/web/src/providers/attachment-upload.ts
   - apps/web/src/providers/session-list-runtime.ts
   - apps/web/src/ui/Composer.tsx
   - apps/web/src/ui/use-composer-paste.ts
@@ -67,6 +69,7 @@ sources:
   - apps/web/src/ui/clipboard-html.ts
   - apps/web/src/ui/markdown/html-to-markdown.ts
   - packages/talk-client/src/silence-endpointer.ts
+  - apps/web/src/providers/voice-capture-gate.ts
   - packages/gateway-browser-client/src/runs/runs-model.ts
   - apps/web/src/app/use-busy-sessions.ts
   - apps/web/src/ui/AccountMenu.tsx
@@ -81,7 +84,7 @@ sources:
   - apps/web/src/state/chat.ts
   - apps/web/index.html
   - apps/web/public/manifest.webmanifest
-generated: 2026-10-27
+generated: 2026-11-02
 ---
 
 # Using the web client
@@ -232,6 +235,9 @@ it from then on, including when you reopen the chat later.
   another chat and back, or reload the page.
 - A quote belongs to one chat. Switching to another chat discards it, and sending a message uses
   it up, even if that send fails.
+- A quote on a message from an earlier session - one above a **New session** divider - keeps
+  working: the reply still quotes the older message, and the quote stays with your message after
+  the send.
 - You cannot quote a message while a reply is still being written. If you try to add to the
   current turn, or queue, with a quote in place, the message box shows **Replying isn't supported
   yet while a reply is streaming. Wait for it to finish, or remove your reply and send a plain
@@ -247,6 +253,11 @@ the same rule as any other image (see [Screens with images](#screens-with-images
 
 Press Cmd+Z (Ctrl+Z on Windows and Linux) to undo a paste: the text the paste replaced comes back
 exactly as it was.
+
+A paste of plain text longer than 10,000 characters does not go into the message box: it is
+attached as a text file named **pasted-text.txt** instead, the same way an attached file is (see
+[Attach files](#attach-files)), so a copy of a long document does not flood the conversation.
+Shorter pastes, and pastes with formatting, are inserted as before.
 
 Pasting a picture (for example a screenshot on your clipboard) attaches it as if you had used the
 attach button, including the automatic shrinking described in
@@ -396,26 +407,62 @@ You do not have to wait for a reply to finish before sending your next message:
 
 - Press **Enter**, or select the send arrow (**Add to current turn**), to add your message to the
   current turn: your assistant reads it before its next step, without waiting for the reply to
-  finish. The message appears in the thread straight away. On a phone or tablet, Enter adds a new
-  line instead - tap the send arrow. If your assistant cannot take the message right now, it is
-  queued instead and marked **Queued**.
+  finish. While the reply is still streaming, the message waits at the bottom of the thread
+  marked **Queued** until the assistant takes it - it then joins the reply where the conversation
+  has reached, or starts its own turn. While one of your messages is already waiting in the
+  queue, Enter queues your message behind it (in the order you sent them) instead of adding it
+  to the current turn. On a phone or tablet, Enter adds a new line instead - tap
+  the send arrow. If your assistant cannot take the message right now, it is queued instead and
+  marked **Queued**.
 - With a file attached, the send arrow reads **Queue message** instead, and queues the message and
   the file for after the reply.
 - To queue on purpose, select the small arrow beside the send arrow (**Send options**) and choose
   **Send after reply**, or press **Ctrl+Enter** (**Cmd+Enter** on a Mac) on a computer. A queued
   message appears in the thread marked **Queued** and is sent as soon as the current reply
-  finishes. The label goes away when your assistant starts on it. Until then, queuing keeps
-  working. A queued message that is still waiting when you reload the page in the same browser tab
-  comes back marked **Queued**.
+  finishes; queued messages run in the order you sent them. The label goes away as soon as your
+  assistant starts on the message: the first streamed text, tool activity or reply of that run
+  clears it, and so does the start of a later message of yours, which proves the earlier queued
+  ones have run. Until then, queuing keeps working.
 - **Stop** ends the current reply early at any time, including a reply started in another browser
   or tab.
 
 While the reply is in progress, the message box shows **Add to [your assistant's name]'s current
 turn...** as its hint text.
 
-Whichever way you send it, your message appears in the thread above the reply it produced: a
-message added to the current turn shows the moment you select it, without waiting for the
-assistant's answer, and a queued message stays above any reply that arrives after it.
+Whichever way you send it, your message keeps its place in the thread. Messages appear in the
+order they were created and never reshuffle: a message sent while a reply is streaming waits at
+the bottom until it joins that reply or starts its own turn, and one sent while another message
+of yours is already waiting queues behind it. Once a message is part of the
+saved conversation its position is fixed - reconnecting or reloading the page shows the same
+thread in the same order.
+
+A queued message whose run has already started is part of the saved conversation, so it comes
+back after a reload in its place, without the **Queued** label. One that has not started yet is
+not shown after a reload in the same browser tab until the assistant starts on it - the client
+cannot see the gateway's waiting queue - but the message itself is not lost: it still runs when
+its turn comes, and its reply appears then. If the gateway itself restarts first, the waiting
+message is gone.
+
+Your chat is one continuous conversation, even when the assistant starts a fresh session behind
+the scenes. Depending on your session reset settings (`session.reset`), WednesdayAI starts a
+fresh session after a period of inactivity or once a day, and always when you send `/new`, so
+the assistant can run its end-of-session journal and memory work. When that
+happens, a **New session** divider appears in the thread where the fresh session began; every
+earlier message stays above it in its original order, and **Load older** at the top of the thread
+keeps going into those older sessions.
+
+This depends on the server being recent enough. If the gateway is older than the web client, the
+thread shows only the current session: earlier sessions are not fetched, no **New session**
+divider appears, and **Load older** reaches only the current session. Ask the person who manages
+WednesdayAI to update the gateway.
+
+One known gap is worth knowing:
+
+- After a connection drops and comes back, a queued message can keep its **Queued** label, and
+  the message box can keep behaving as if a reply were still running. The label clears when the
+  conversation is fetched again (switching chats or reloading does it), or when a later message of
+  yours finishes: the client then checks on the earlier message and clears it once its reply has
+  finished.
 
 Adding to the current turn needs some text, and cannot carry a file. Attachments go with a queued
 message, but the **+** button is dimmed while a reply is being written, so attach files before you
@@ -456,6 +503,16 @@ own:
 </Steps>
 
 If stopping fails, the words heard so far stay in the message box, so nothing you said is lost.
+Your first words are kept too: the microphone starts the moment you select the button, and anything
+captured while the transcription service is still connecting is sent when the service is ready. On
+a slow connection, stopping can take a few seconds while that service catches up with your words.
+
+If a take fails part-way - for example your microphone stops sending audio, or the transcription
+stops unexpectedly - the microphone button leaves its recording state within a few seconds and a
+red message below the message box names what happened (**Your microphone stopped sending audio.
+Tap Dictate to try again.** or **Transcription stopped unexpectedly. Tap Dictate to try again.**).
+The words heard so far stay in the message box. Select the microphone again to start a fresh take;
+you never need to reopen the chat.
 
 When you send a dictated message, your assistant is told the text came from speech. That way it can
 allow for mis-heard names and similar-sounding words. This note is not shown in the chat bubble;
@@ -486,6 +543,15 @@ stays paused until you select **Resume reading** on that reply.
    microphone.
 
 </Steps>
+
+The microphone starts the moment you select the wave button: your first words are captured while
+the connection to the voice service is still opening and are sent once it is ready, so nothing
+you say first is lost.
+
+If your microphone stops sending audio - for example another app has taken it over - Voice mode
+ends the conversation on its own after about three seconds of silence and shows **Your microphone
+stopped sending audio. Tap to start voice again.** Select the wave button again to start a fresh
+conversation.
 
 A short phrase may play while your assistant is still thinking (for example "One moment."), and
 another when it starts using a tool on your behalf (for example "Working on that."). Both are
@@ -559,17 +625,19 @@ Notes and limits:
 ### Attach files
 
 Select the **+** button (**Attach files**) in the message box, or drag files onto it. You can
-attach several at once. The web client accepts any file type, up to 32 files, 5 MB each and
-18 MB total per message (images show a thumbnail; other files appear as a card). Large pictures
-are shrunk automatically first: an image wider or taller than 2048 pixels is scaled down to fit
-inside that size and re-encoded, so a photo too large for the 5 MB limit attaches instead of being
-refused. Pictures are never enlarged, animated GIFs are left untouched, and an image that still
-cannot be made to fit is rejected like any other oversized file. Images are described
-automatically when the chat's model cannot see images. Each attachment appears as a small
-card above the message box; select its **x** to remove it before sending. A file that is empty, a
-non-image file larger than 5 MB, or an attachment that pushes the message over 18 MB or 32 files
-is rejected before anything is sent, with a message under the message box explaining why. The
-**+** button is dimmed while a file is uploading or a reply is being written.
+attach several at once, up to 32 files, each up to 50 MB (images show a thumbnail; other files
+appear as a card). There is no limit on the total size of a message's attachments. Each file is
+sent to your assistant's server over its own secure, authenticated upload while you keep typing:
+the attachment card shows the upload's progress, and Send stays unavailable until every file has
+finished uploading. Selecting a card's **x** while it is still uploading cancels that upload and
+removes the card. Large pictures are shrunk automatically first: an image wider or taller than
+2048 pixels is scaled down to fit inside that size and re-encoded, so a photo that is too large
+attaches instead of being refused. Pictures are never enlarged, animated GIFs are left untouched,
+and an image that still cannot be made small enough is rejected like any other oversized file.
+Images are described automatically when the chat's model cannot see images. A file that is empty
+or larger than 50 MB, or a message with more than 32 files, is rejected before anything is sent,
+with a message under the message box explaining why. The **+** button is dimmed while a file is
+uploading or a reply is being written.
 
 ### See older messages
 
@@ -595,10 +663,15 @@ that has unseen replies, also shows a small dot beside its title - see
 
 With no sessions yet, the list reads **No sessions yet**.
 
-Scheduled jobs, isolated heartbeat checks, subagents and other internal conversations are hidden
-by default. Turn on **Show internal** beside **Sessions** to include them. They appear in their own
-**Internal** group at the end of the list. A normal conversation that also contains heartbeat
-activity is not hidden.
+Scheduled jobs, isolated heartbeat checks, subagents, conversations your assistants hold with
+each other, and other internal conversations are hidden by default. Turn on **Show internal**
+beside **Sessions** to include them. They appear in their own **Internal** group at the end of the
+list. A normal conversation that also contains heartbeat activity is not hidden.
+
+A message that reached this chat through another conversation - for example, when your assistant
+handed part of a task to a specialist and the specialist's answer is relayed back to you - shows
+**From [assistant name]** above it. If the sending assistant is not one you can see in your
+assistant list, the label reads **From another assistant**.
 
 Use the **Sort sessions** control to choose **Newest**, **Oldest**, **Title A-Z**, **Title Z-A**,
 **Key A-Z** or **Key Z-A**. Sorting, assistant filtering, search and **Show internal** apply to your
@@ -611,7 +684,8 @@ alphabetical sorts show one ungrouped list.
 - Select **Browse assistants** at the top of the sidebar to open the assistant picker: a list of
   every assistant you can talk to, each with its own colour. Some assistants work behind the
   scenes — a specialist your assistant hands part of a task to, for example — and those are not
-  listed; you reach them through the assistant you normally talk to. Pick an assistant to open its
+  listed; you reach them through the assistant you normally talk to. Hovering an assistant, in the
+  sidebar or the picker, shows its description when it has one. Pick an assistant to open its
   conversation right away; the assistant stays selected afterwards. Close it with **Close**,
   **Escape**, or by clicking outside it.
 - Or start typing in the message box with no conversation open: the first send opens the
@@ -683,6 +757,24 @@ sessions.title.prepare; retry after 60s** (the number of seconds varies). Wait t
 the button again, or type a title yourself. If no title could be produced, the box shows **Could
 not suggest a title**.
 
+### Archive a chat
+
+Select **Archive chat** in the top bar to tuck the chat you are reading away. Nothing is deleted:
+the conversation and its history stay exactly as they are. On an archived chat the button reads
+**Unarchive chat** and puts it back.
+
+- Archived chats are hidden from the sidebar. To see them, turn on **Show archived** in the menu
+  beside **Sessions** (the menu that also has **Show internal**): they appear in their own
+  **Archived** group after **Internal**. The chat you are reading stays in the list even when it
+  is archived.
+- Archiving is shared across your devices: archive a chat on your phone and it disappears from
+  the sidebar on your computer too.
+- A new message in an archived chat does not bring it back on its own, and neither does the
+  fresh session the gateway starts behind the scenes after an idle period, once a day, or when
+  you send `/new`; unarchive the chat if you want it listed again.
+- If the gateway refuses the archive or unarchive, a red message appears beside the archive
+  button and the chat stays where it was; try again.
+
 ### This chat changed elsewhere
 
 Each send is checked against the latest message this window has shown you. If the chat has moved on
@@ -715,8 +807,7 @@ While your assistant is working on a reply anywhere, the chat shows it in three 
 - The message box offers **Stop**, **Add to current turn** and **Send after reply** as usual, and
   they work on that reply even though another device started it.
 
-The Runs panel lists the same work in progress; see [Check on Runs](#check-on-runs). Sending into
-a chat that gained messages elsewhere meanwhile is covered in
+Sending into a chat that gained messages elsewhere meanwhile is covered in
 [This chat changed elsewhere](#this-chat-changed-elsewhere).
 
 A chat counts as **unread** in this browser (or installed app) when an assistant reply arrived
@@ -750,41 +841,6 @@ dots and the title count are the notification.
 
 Coming back to a tab you left in the background also catches the open chat up: messages that
 arrived elsewhere are fetched and shown without a reload.
-
-## Check on Runs
-
-**Runs** are things your assistant is doing or has done - answering you, working through a task,
-and so on. The **Runs** row under **Extensions** in the sidebar shows a number badge whenever
-something is running, even while the panel is closed.
-
-Select **Runs** to open a panel with four groups:
-
-| Group               | Meaning                                               |
-| ------------------- | ----------------------------------------------------- |
-| **Queued**          | Waiting to start.                                     |
-| **Running**         | In progress right now.                                |
-| **Needs attention** | Stopped in a state that needs a person to look at it. |
-| **Finished**        | Completed, failed, or cancelled.                      |
-
-Select any entry to see more detail about it, and select it again to hide the detail. The panel
-updates live as things change. Use **Refresh** to check now, **Load more** where it appears to see
-older entries, and **Close** (or select **Runs** again) to close the panel. On a phone the panel
-opens as a full-screen sheet over the conversation, and **Close** returns you to the chat.
-
-The Runs panel only shows live data when the person who manages WednesdayAI has set up SQLite or
-Postgres storage for it. Without that, every group reads "Nothing here.", a message under the
-groups explains the storage requirement, and the badge stays hidden. Ask them if you need it.
-
-If the assistant's server restarts while the panel is open, the lists stay as they are - rows do
-not disappear - and a message under the groups says **Gateway is starting; runs will refresh
-shortly** until the lists fill in again on their own. If the storage behind the lists fails to
-start, the lists empty and the message instead reads **Session storage failed to start; see
-gateway status**, staying until that is fixed. A queued message whose run had already started
-comes back with the thread. A message queued with **Send after reply** that a restart erased
-before it started is not restored, because the client cannot tell it from one still waiting (see
-[Keep chatting while a reply is streaming](#keep-chatting-while-a-reply-is-streaming)). Messages
-sent directly are not affected: an unsent message returns to the message box (see
-[The message box will not send, or shows an error](#the-message-box-will-not-send-or-shows-an-error)).
 
 ## Forms and other assistant screens
 
@@ -870,10 +926,11 @@ You should see the same **Queued** and **Submitted** labels and the same message
 
 While your assistant works on a reply, each tool it uses appears in the reply as it happens, as a
 tool line in your **Tools** display form, between the parts of the reply text it came between.
-While the reply is still being written, the line shows only the tool's name; when the reply
-finishes, the same line fills in its details (for example the file it read) without moving.
-Nothing you have seen disappears or jumps when the reply finishes, and a reload shows the reply
-the same way. A reply that used no tools shows no tool lines. With **Tools → Hide**, tool lines
+While the reply is still being written, the line shows the tool's name and what it is doing (for
+example the file it is reading or the command it is running); when the reply finishes, the same
+line gains the step's result without moving. Each sentence of reply text arrives in full before
+the next tool line appears. Nothing you have seen disappears or jumps when the reply finishes,
+and a reload shows the reply the same way. A reply that used no tools shows no tool lines. With **Tools → Hide**, tool lines
 stay hidden, except errors and failures. A hidden announcement area tells your screen reader the
 name of each tool step as it starts; when tool lines are hidden, nothing is announced there.
 
@@ -926,7 +983,6 @@ different reason: see [Choose a model and Think](#choose-a-model-and-think).)
 | ---------------- | ------------------------------------------- |
 | Sidebar          | **Calendar**, **Memory**, **Add extension** |
 | Account menu     | **Settings**, **Keyboard shortcuts**        |
-| Message box      | **Search**                                  |
 | Under each reply | **Feedback**, **Regenerate**                |
 
 **Canvas** in the top bar is not on this list: it opens the Canvas panel. If it is dimmed instead,
@@ -935,8 +991,8 @@ turned assistant screens on yet; see
 [Forms and other assistant screens](#forms-and-other-assistant-screens).
 
 The tooltips for **Calendar**,
-**Memory**, **Add extension**, **Settings**, **Keyboard shortcuts**, **Search** in the message
-box, **Feedback** and **Regenerate** read "coming with the extension panel SDK" followed by a
+**Memory**, **Add extension**, **Settings**, **Keyboard shortcuts**, **Feedback** and
+**Regenerate** read "coming with the extension panel SDK" followed by a
 tracked issue number.
 
 **Dictate** and **Voice mode**, the microphone and wave buttons beside the send arrow, are not on
@@ -989,14 +1045,6 @@ If the assistant's server restarted while a reply was being written, the thread 
 restarted before this reply finished. Your message was delivered; send it again to retry.** Your
 message arrived - nothing was lost. The old reply does not continue on its own, so send the message
 again if you still want an answer.
-
-### The Runs panel says the gateway is starting
-
-Right after a restart the panel keeps what it showed and says **Gateway is starting; runs will
-refresh shortly**. It fills in again on its own - no action needed. If it instead says
-**Session storage failed to start; see gateway status** and the message stays, the storage behind
-the lists did not start; tell the person who manages WednesdayAI, who can see the cause in the
-gateway status.
 
 ### Dictate or Voice mode will not start, or the button is dimmed
 
@@ -1063,8 +1111,22 @@ briefly or use a headset so speaker echo is not mistaken for you.
 
 Check the strip under the message box. **Reconnecting...** or **Offline** releases the microphone
 and returns Voice mode to the wave button. That is expected. Select the button again after the
-strip says **Connected**. If the strip stays **Connected** and the conversation still ends, try
-once more and tell the person who manages WednesdayAI the time it failed.
+strip says **Connected**. If the strip stays **Connected** and Voice mode still ends with **Your
+microphone stopped sending audio. Tap to start voice again.**, your browser stopped sending
+microphone frames - the same situation Dictate describes below. Select the wave button again to
+start a fresh conversation. If the conversation ends with no message, try once more and tell the
+person who manages WednesdayAI the time it failed.
+
+### Dictate says the microphone stopped sending audio, or transcription stopped
+
+While recording, a red message below the message box reading **Your microphone stopped sending
+audio. Tap Dictate to try again.** means your browser stopped sending microphone frames (for
+example after a phone call or another app interrupted the microphone), and **Transcription stopped
+unexpectedly. Tap Dictate to try again.** means the transcription service ended the take. Either
+way the microphone button leaves its recording state within a few seconds and the words heard so
+far stay in the message box. Select the microphone again to start a fresh take - reloading the
+page is not needed. If the first message repeats, check that no other app is holding the
+microphone, then try a headset.
 
 ### On iPhone or iPad, Voice mode starts but you hear no reply
 
@@ -1089,11 +1151,11 @@ a new setup code.
 
 ### A file will not attach
 
-Check that the file is under 5 MB, is not empty, and that the attachments for the message stay
-within the limits: 32 files in total and no more than 18 MB across all of them. Any file type is
-accepted. A picture is shrunk automatically first - scaled to at most 2048 pixels on its longest
-edge and re-encoded - so a photo over 5 MB usually attaches after all; an image that still cannot
-be made to fit (and any other file type over 5 MB) is rejected.
+Check that the file is under 50 MB, is not empty, and that the message carries no more than
+32 files. Any file type is accepted; there is no limit on the total size of a message's
+attachments. A picture is shrunk automatically first - scaled to at most 2048 pixels on its longest
+edge and re-encoded - so a large photo usually attaches after all; an image that still cannot
+be made small enough (and any other file type over 50 MB) is rejected.
 
 ### The message box will not send, or shows an error
 
@@ -1105,10 +1167,11 @@ text is back in the message box. The same happens when an ordinary send finally 
 connection trouble: the thread shows the reason as a system message and your text returns to the
 message box, ready to send again. Text the gateway never confirmed also comes back after the
 fact: even a reload, a crash or the assistant's server restarting cannot lose it (a queued
-**Send after reply** message is the exception, see **Check on Runs**) - reopening the
+**Send after reply** message is the exception) - reopening the
 chat puts it back in the message box with a notice that reads **Restored a message that was not
-sent.** (or **Restored N messages that were not sent.**). If the box says **Replying isn't supported yet while a reply is
-streaming...**, remove the quote with its **x** or wait for the reply to finish. If the bottom of
+sent.** (or **Restored N messages that were not sent.**). If the box says **Replying isn't
+supported yet while a reply is streaming...**, remove the quote with its **x** or wait for the
+reply to finish. If the bottom of
 the screen says **Offline** or **Reconnecting...**, see the first item in this list.
 
 ### A notice says the chat changed elsewhere
