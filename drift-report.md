@@ -1,150 +1,212 @@
-# Docs drift report v0.6.0
+# Docs drift report v0.6.1
 
-- 62 persona page(s) likely missing/stale
-- 0 covered, 86 unmapped
+- 60 persona page(s) likely missing/stale
+- 0 covered, 151 unmapped
 
 ## Likely missing/stale persona pages
 
 - `developers/contributing.mdx` (core changed: `CONTRIBUTING.md`)
-- `admin/channels/broadcast-groups.mdx` (core changed: `docs/channels/broadcast-groups.md`)
+- `admin/channels/a2a.mdx` (core changed: `docs/channels/a2a.md`)
 - `admin/channels/discord.mdx` (core changed: `docs/channels/discord.md`)
+- `admin/channels/index.mdx` (core changed: `docs/channels/index.md`)
 - `admin/channels/nostr.mdx` (core changed: `docs/channels/nostr.md`)
-- `admin/channels/pairing.mdx` (core changed: `docs/channels/pairing.md`)
-- `admin/channels/telegram.mdx` (core changed: `docs/channels/telegram.md`)
 - `developers/contributing/coding-style.mdx` (core changed: `docs/contributing/coding-style.md`)
+- `developers/contributing/documentation.mdx` (core changed: `docs/contributing/documentation.md`)
+- `developers/contributing/performance.mdx` (core changed: `docs/contributing/performance.md`)
 - `developers/contributing/release.mdx` (core changed: `docs/contributing/release.md`)
 - `developers/contributing/secure-development.mdx` (core changed: `docs/contributing/secure-development.md`)
 - `developers/contributing/testing.mdx` (core changed: `docs/contributing/testing.md`)
+- `admin/gateway/background-process.mdx` (core changed: `docs/gateway/background-process.md`)
+- `admin/gateway/config-writes-developer.mdx` (core changed: `docs/gateway/config-writes-developer.md`)
 - `admin/gateway/config-writes.mdx` (core changed: `docs/gateway/config-writes.md`)
 - `admin/gateway/configuration-examples.mdx` (core changed: `docs/gateway/configuration-examples.md`)
 - `admin/gateway/configuration-reference.mdx` (core changed: `docs/gateway/configuration-reference.md`)
 - `admin/gateway/configuration.mdx` (core changed: `docs/gateway/configuration.md`)
+- `admin/gateway/doctor.mdx` (core changed: `docs/gateway/doctor.md`)
 - `admin/gateway/heartbeat.mdx` (core changed: `docs/gateway/heartbeat.md`)
 - `admin/gateway/identity.mdx` (core changed: `docs/gateway/identity.md`)
-- `admin/gateway/logging.mdx` (core changed: `docs/gateway/logging.md`)
-- `admin/gateway/outbound-delivery.mdx` (core changed: `docs/gateway/outbound-delivery.md`)
-- `admin/gateway/pairing.mdx` (core changed: `docs/gateway/pairing.md`)
-- `admin/gateway/production-validation.mdx` (core changed: `docs/gateway/production-validation.md`)
+- `admin/gateway/multiple-gateways.mdx` (core changed: `docs/gateway/multiple-gateways.md`)
 - `admin/gateway/protocol.mdx` (core changed: `docs/gateway/protocol.md`)
+- `admin/gateway/restart-recovery.mdx` (core changed: `docs/gateway/restart-recovery.md`)
 - `admin/gateway/sandbox-vs-tool-policy-vs-elevated.mdx` (core changed: `docs/gateway/sandbox-vs-tool-policy-vs-elevated.md`)
+- `admin/gateway/sandboxing-admin.mdx` (core changed: `docs/gateway/sandboxing-admin.md`)
 - `admin/gateway/sandboxing-developer.mdx` (core changed: `docs/gateway/sandboxing-developer.md`)
+- `admin/gateway/sandboxing-user.mdx` (core changed: `docs/gateway/sandboxing-user.md`)
+- `admin/gateway/sandboxing.mdx` (core changed: `docs/gateway/sandboxing.md`)
 - `admin/gateway/security/index.mdx` (core changed: `docs/gateway/security/index.md`)
 - `admin/gateway/tailscale.mdx` (core changed: `docs/gateway/tailscale.md`)
-- `admin/gateway/tools-invoke-http-api.mdx` (core changed: `docs/gateway/tools-invoke-http-api.md`)
+- `admin/gateway/tasks.mdx` (core changed: `docs/gateway/tasks.md`)
 - `admin/gateway/troubleshooting.mdx` (core changed: `docs/gateway/troubleshooting.md`)
-- `admin/install/development-channels.mdx` (core changed: `docs/install/development-channels.md`)
 - `admin/install/docker.mdx` (core changed: `docs/install/docker.md`)
-- `admin/install/exe-dev.mdx` (core changed: `docs/install/exe-dev.md`)
 - `admin/install/gcp.mdx` (core changed: `docs/install/gcp.md`)
+- `admin/install/hetzner.mdx` (core changed: `docs/install/hetzner.md`)
 - `admin/install/index.mdx` (core changed: `docs/install/index.md`)
-- `admin/install/installer.mdx` (core changed: `docs/install/installer.md`)
-- `admin/install/northflank.mdx` (core changed: `docs/install/northflank.mdx`)
-- `admin/install/railway.mdx` (core changed: `docs/install/railway.mdx`)
-- `admin/install/render.mdx` (core changed: `docs/install/render.mdx`)
-- `admin/install/uninstall.mdx` (core changed: `docs/install/uninstall.md`)
+- `admin/install/nix.mdx` (core changed: `docs/install/nix.md`)
 - `admin/install/updating.mdx` (core changed: `docs/install/updating.md`)
 - `developers/plugins/agent-signals.mdx` (core changed: `docs/plugins/agent-signals.md`)
-- `developers/plugins/agent-turn-runner.mdx` (core changed: `docs/plugins/agent-turn-runner.md`)
+- `developers/plugins/analysis-runtime.mdx` (core changed: `docs/plugins/analysis-runtime.md`)
+- `developers/plugins/community.mdx` (core changed: `docs/plugins/community.md`)
+- `developers/plugins/compatibility.mdx` (core changed: `docs/plugins/compatibility.md`)
 - `developers/plugins/contracts.mdx` (core changed: `docs/plugins/contracts.md`)
 - `developers/plugins/control-ui.mdx` (core changed: `docs/plugins/control-ui.md`)
-- `developers/plugins/identity-oidc.mdx` (core changed: `docs/plugins/identity-oidc.md`)
+- `developers/plugins/hook-parity.mdx` (core changed: `docs/plugins/hook-parity.md`)
 - `developers/plugins/learning-core-admin.mdx` (core changed: `docs/plugins/learning-core-admin.md`)
 - `developers/plugins/learning-core-developer.mdx` (core changed: `docs/plugins/learning-core-developer.md`)
 - `developers/plugins/learning-core.mdx` (core changed: `docs/plugins/learning-core.md`)
 - `developers/plugins/manifest.mdx` (core changed: `docs/plugins/manifest.md`)
-- `developers/plugins/session-identity-keying.mdx` (core changed: `docs/plugins/session-identity-keying.md`)
-- `developers/plugins/ui-surfaces.mdx` (core changed: `docs/plugins/ui-surfaces.md`)
-- `admin/providers/elevenlabs.mdx` (core changed: `docs/providers/elevenlabs.md`)
-- `admin/providers/index.mdx` (core changed: `docs/providers/index.md`)
-- `admin/providers/kokoro.mdx` (core changed: `docs/providers/kokoro.md`)
+- `users/tools/acp-agents.mdx` (core changed: `docs/tools/acp-agents.md`)
+- `users/tools/apply-patch.mdx` (core changed: `docs/tools/apply-patch.md`)
 - `users/tools/exec-admin.mdx` (core changed: `docs/tools/exec-admin.md`)
 - `users/tools/exec-approvals.mdx` (core changed: `docs/tools/exec-approvals.md`)
 - `users/tools/exec-developer.mdx` (core changed: `docs/tools/exec-developer.md`)
-- `users/tools/exec-user.mdx` (core changed: `docs/tools/exec-user.md`)
 - `users/tools/exec.mdx` (core changed: `docs/tools/exec.md`)
 - `users/tools/index.mdx` (core changed: `docs/tools/index.md`)
 - `users/tools/multi-agent-sandbox-tools.mdx` (core changed: `docs/tools/multi-agent-sandbox-tools.md`)
 - `users/tools/plugin.mdx` (core changed: `docs/tools/plugin.md`)
-- `users/tools/slash-commands.mdx` (core changed: `docs/tools/slash-commands.md`)
+- `users/tools/skills.mdx` (core changed: `docs/tools/skills.md`)
 - `users/tools/subagents.mdx` (core changed: `docs/tools/subagents.md`)
 
 ## Unmapped core docs (no persona rule)
 
 - `CHANGELOG.md`
 - `docs/.i18n/known-stale.txt`
-- `docs/CNAME`
-- `docs/assets/install-script.svg`
 - `docs/automation/auto-reply.md`
+- `docs/automation/cron-jobs.md`
 - `docs/automation/cron-vs-heartbeat.md`
 - `docs/automation/hooks.md`
-- `docs/cli/agent-nudge.md`
-- `docs/cli/agent.md`
+- `docs/automation/troubleshooting.md`
+- `docs/automation/webhook.md`
+- `docs/cli/completion.md`
+- `docs/cli/cron.md`
 - `docs/cli/dashboard.md`
 - `docs/cli/devices.md`
 - `docs/cli/doctor.md`
 - `docs/cli/identity.md`
+- `docs/cli/inbox.md`
 - `docs/cli/index.md`
-- `docs/cli/memory.md`
-- `docs/cli/pairing.md`
-- `docs/cli/qr.md`
-- `docs/cli/sessions.md`
+- `docs/cli/onboard.md`
+- `docs/cli/plugins.md`
+- `docs/cli/security.md`
+- `docs/cli/skills.md`
+- `docs/cli/update.md`
 - `docs/concepts/agent-coordination.md`
+- `docs/concepts/agent-loop.md`
 - `docs/concepts/agent.md`
-- `docs/concepts/compaction.md`
+- `docs/concepts/config-changes-user.md`
 - `docs/concepts/context.md`
-- `docs/concepts/memory.md`
-- `docs/concepts/multi-agent.md`
+- `docs/concepts/oauth.md`
 - `docs/concepts/queue.md`
-- `docs/concepts/session-analytics.md`
 - `docs/concepts/session-history-hygiene.md`
-- `docs/concepts/session-pruning.md`
 - `docs/concepts/session-tool.md`
-- `docs/concepts/session.md`
 - `docs/concepts/system-prompt.md`
 - `docs/concepts/workspace-lanes.md`
-- `docs/design/learning-core.md`
+- `docs/diagnostics/otel-langfuse.md`
 - `docs/docs.json`
+- `docs/help/debugging.md`
+- `docs/help/environment.md`
 - `docs/help/faq.md`
 - `docs/help/testing.md`
-- `docs/index.md`
+- `docs/help/troubleshooting.md`
 - `docs/logging.md`
+- `docs/logs/2026-05-28-webui-ops-console-validation.md`
 - `docs/nodes/audio.md`
-- `docs/plans/agent-turn-production-observability/decisions-ledger.md`
-- `docs/plans/agent-turn-production-observability/phase-5/027-repo-verify-cmd-script-pre-soak-dev-log-changelog-pointer-workstream-tracker-closeout.md`
-- `docs/plans/agent-turn-production-observability/phase-5/030-post-deployment-live-validation-window-run-the-deployed-validator-against-the-real-gateway-after-the-168h-attestation.md`
-- `docs/plans/agent-turn-production-observability/plan.md`
-- `docs/plans/agent-turn-production-observability/zenith-brief.md`
-- `docs/plans/npm-trusted-publishing/phase-7/031-operator-runbook.md`
-- `docs/plans/npm-trusted-publishing/phase-8/055-operator-runbook-docs-supersession.md`
-- `docs/platforms/digitalocean.md`
-- `docs/platforms/index.md`
-- `docs/platforms/mentra-glass.md`
-- `docs/platforms/oracle.md`
-- `docs/platforms/raspberry-pi.md`
-- `docs/platforms/wednesdayai-glass.md`
+- `docs/nodes/index.md`
+- `docs/nodes/media-understanding.md`
+- `docs/nodes/troubleshooting.md`
+- `docs/pi.md`
+- `docs/plans/npm-docs-removal/.precheck.passed`
+- `docs/plans/npm-docs-removal/decisions-ledger.md`
+- `docs/plans/npm-docs-removal/evidence/gate-evidence.md`
+- `docs/plans/npm-docs-removal/evidence/milestone-real-surface-handoff.json`
+- `docs/plans/npm-docs-removal/evidence/milestone-scrutiny-handoff.json`
+- `docs/plans/npm-docs-removal/evidence/red-proof.md`
+- `docs/plans/npm-docs-removal/evidence/task-validator-handoff.json`
+- `docs/plans/npm-docs-removal/evidence/terminal-review-handoff.json`
+- `docs/plans/npm-docs-removal/phase-1-ship-npm-docs-removal.md`
+- `docs/plans/npm-docs-removal/phase-1/T1-npm-docs-removal-control-ui-help-migration-and-validation-time-fixes.md`
+- `docs/plans/npm-docs-removal/plan.md`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-1.json`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-1.md`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-2.json`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-2.md`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-3.json`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-3.md`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-5.json`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-5.md`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-6.json`
+- `docs/plans/npm-docs-removal/reviews/adversarial-review-round-6.md`
+- `docs/plans/npm-docs-removal/reviews/round-1/claude-opus-5.md`
+- `docs/plans/npm-docs-removal/reviews/round-1/claude-opus-5.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-1/gpt-5.6-sol.md`
+- `docs/plans/npm-docs-removal/reviews/round-1/gpt-5.6-sol.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-1/kimi-k3.md`
+- `docs/plans/npm-docs-removal/reviews/round-1/kimi-k3.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-2/claude-opus-5.md`
+- `docs/plans/npm-docs-removal/reviews/round-2/claude-opus-5.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-2/gpt-5.6-sol.md`
+- `docs/plans/npm-docs-removal/reviews/round-2/gpt-5.6-sol.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-2/kimi-k3.md`
+- `docs/plans/npm-docs-removal/reviews/round-2/kimi-k3.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-3/claude-opus-5.md`
+- `docs/plans/npm-docs-removal/reviews/round-3/claude-opus-5.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-3/gpt-5.6-sol.md`
+- `docs/plans/npm-docs-removal/reviews/round-3/gpt-5.6-sol.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-3/kimi-k3.md`
+- `docs/plans/npm-docs-removal/reviews/round-3/kimi-k3.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-5/claude-opus-5.md`
+- `docs/plans/npm-docs-removal/reviews/round-5/claude-opus-5.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-5/gpt-5.6-sol.md`
+- `docs/plans/npm-docs-removal/reviews/round-5/gpt-5.6-sol.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-5/kimi-k3.md`
+- `docs/plans/npm-docs-removal/reviews/round-5/kimi-k3.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-6/claude-opus-5.md`
+- `docs/plans/npm-docs-removal/reviews/round-6/claude-opus-5.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-6/gpt-5.6-sol.md`
+- `docs/plans/npm-docs-removal/reviews/round-6/gpt-5.6-sol.runner.json`
+- `docs/plans/npm-docs-removal/reviews/round-6/kimi-k3.md`
+- `docs/plans/npm-docs-removal/reviews/round-6/kimi-k3.runner.json`
+- `docs/plans/npm-docs-removal/validation-ledger.json`
+- `docs/plans/npm-trusted-publishing/phase-6/051-thin-oidc-publish-workflow.md`
+- `docs/plans/substrate-webui-surface/decisions-ledger.md`
+- `docs/platforms/windows.md`
+- `docs/reference/api-usage-costs.md`
+- `docs/reference/brand-tokens.md`
+- `docs/reference/inbox-api.md`
+- `docs/reference/inbox-ms365.md`
 - `docs/reference/prompt-caching.md`
-- `docs/reference/secretref-credential-surface.md`
-- `docs/reference/secretref-user-supplied-credentials-matrix.json`
 - `docs/reference/session-management-compaction.md`
+- `docs/reference/templates/AGENTS.dev.md`
+- `docs/reference/templates/AGENTS.md`
+- `docs/reference/templates/BOOTSTRAP.md`
 - `docs/reference/test.md`
 - `docs/reference/token-use.md`
-- `docs/reference/trusted-npm-publishing-developer.md`
 - `docs/reference/web-client-components.md`
-- `docs/start/docs-directory.md`
+- `docs/reference/wizard.md`
+- `docs/start/bootstrapping.md`
 - `docs/start/getting-started.md`
-- `docs/start/hubs.md`
+- `docs/start/onboarding.md`
 - `docs/start/openclaw.md`
 - `docs/start/wizard-cli-reference.md`
 - `docs/start/wizard.md`
-- `docs/strategy/channel-integration-contract.md`
-- `docs/superpowers/specs/2026-06-28-core-stability-debt.md`
-- `docs/superpowers/specs/2026-08-21-npm-trusted-publishing.md`
-- `docs/superpowers/specs/2026-09-30-context-window-pipeline.md`
-- `docs/superpowers/specs/2026-10-16-client-chat-v3-p4.decisions.json`
-- `docs/superpowers/specs/2026-10-16-client-chat-v3-p4.md`
-- `docs/superpowers/specs/2026-10-17-wednesdayai-factory-design.md`
-- `docs/talk/realtime-voice-api.md`
+- `docs/strategy/integration-kernel.md`
+- `docs/strategy/targets.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w1-store.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w2-tools.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w3-nudges.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w4-client-api.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w5-sources-categories.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w6-calendar-stub.md`
+- `docs/superpowers/plans/2026-11-10-inbox-w7-ms365.md`
+- `docs/superpowers/specs/2026-06-28-core-roadmap.md`
+- `docs/superpowers/specs/2026-06-28-distribution-rail.md`
+- `docs/superpowers/specs/2026-06-28-lean-core-reduction.md`
+- `docs/superpowers/specs/2026-06-28-platform-budgets-gates.md`
+- `docs/superpowers/specs/2026-07-25-context-collect-raw-user-text.md`
+- `docs/superpowers/specs/2026-08-20-upstream-plugin-compat.md`
+- `docs/superpowers/specs/2026-09-29-npm-docs-removal.decisions.json`
+- `docs/superpowers/specs/2026-09-29-npm-docs-removal.md`
 - `docs/talk/realtime-voice-conversation.md`
+- `docs/talk/realtime-voice-user.md`
 - `docs/talk/realtime-voice.md`
 - `docs/tts.md`
 - `docs/web/control-ui-v2.md`
@@ -156,3 +218,4 @@
 - `docs/web/user-client.md`
 - `docs/web/using-the-web-client.md`
 - `docs/web/webchat.md`
+- `docs/wednesdayai-site/developers/restart-recovery.mdx`
