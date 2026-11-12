@@ -486,6 +486,16 @@ logged as `late invoke result dropped` at warn level.
 
 - Nodes may call `skills.bins` to fetch the current list of skill executables
   for auto-allow checks.
+- Nodes may send `node.event` with `event: "device.context"` to publish live device state.
+  The payload is `optIn` (required boolean) plus any of `glassesWorn` (boolean), `glassesBattery`
+  (integer 0–100), `audioRoute` (`glasses`, `phone_speaker`, `phone_receiver`, `headphones`,
+  `bluetooth`, `car`, `other`), `watchReachable` (boolean), and `foregroundGlassesApp` (string, at
+  most 64 characters). Invalid fields are dropped one by one. The gateway stores the latest state
+  only for a connection with an authenticated device identity whose device id is linked to a
+  person in `session.identityLinks` (`device:<deviceId>`). `optIn: false` or a disconnect clears
+  it, with no TTL, so the app republishes on connect. Turns whose session actor is that person
+  get a "Device context (untrusted metadata)" block; see
+  [Session history hygiene](/concepts/session-history-hygiene#device-context-provenance).
 
 ### Operator helper methods
 
@@ -1018,12 +1028,16 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   - `turnContext` (optional string, at most 4000 characters; longer is `INVALID_REQUEST`) is a
     per-turn client instruction for embedded-runner turns. The gateway trims it and strips
     control characters (newline and tab are kept), the cache boundary marker, and the refusal
-    test token, then appends it as the last part of that turn's model-facing system prompt:
-    after the cache boundary marker and after any plugin system-prompt additions. The stable
-    pre-boundary prompt is unchanged, so a turn whose context differs misses the provider prompt
-    cache only after the boundary. It is absent from later turns and is never stored: not in
-    transcript rows, `clean_user_message`, session metadata, or the persisted system-prompt
-    report, and plugin prompt hooks and model-call diagnostics see the prompt without it. Only
+    test token, then renders it as the closing `Turn context (client-provided):` lane of that
+    turn's current user prompt envelope, after the user message (ADR 2105 PR 6). The system
+    prompt is untouched — the whole cached prefix stays byte-identical across turns, with and
+    without a context. One exception: when core cannot resolve the turn's current user row in
+    the final provider input (an overflow compaction cut it out of a continuation request, or a
+    `transform_llm_input` hook replaced the messages without their ingress carrier), the context
+    rides that provider request's system-prompt tail instead (the legacy placement). It is
+    absent from later turns and is never stored: not in transcript
+    rows, `clean_user_message`, session metadata, or the persisted system-prompt report, and
+    plugin prompt hooks and model-call diagnostics see the prompt without it. Only
     operator-enabled raw request capture (cache trace, model payload log) records it, as part
     of the full provider request. A send carrying `turnContext` is never steered into a run
     that is already streaming; it queues as its own turn, and queued turns with different
@@ -1177,12 +1191,6 @@ is absent on a live session). Archiving is entry state, not a filter: the projec
 deliberately not paired with a `sessions.list` filter parameter, so clients filter the rows
 themselves. Only `sessions.patch { archived: false }` clears the flag; a new message and
 `sessions.reset` leave an archived session archived.
-
-Each row also carries `agentId` (optional, string): the agent the session key is attributed to,
-from the key's `agent:<id>:` prefix, or the default agent for keys without one (including bare
-`global` and `unknown` keys). It is attribution, not the store that holds the row, so do not use
-it for store routing. Clients must not parse the key to recover the agent (ADR 0081); read this
-field instead.
 
 Each row also carries `agentId` (optional, string): the agent the session key is attributed to,
 from the key's `agent:<id>:` prefix, or the default agent for keys without one (including bare
