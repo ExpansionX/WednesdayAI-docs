@@ -1,5 +1,4 @@
 ---
-description: "Secrets, placeholders, secret scanning, dependency and patch policy, and local credential files"
 summary: "Secrets, placeholders, secret scanning, dependency and patch policy, and local credential files"
 read_when:
   - Committing code, fixtures, or docs that touch credentials or config values
@@ -7,6 +6,8 @@ read_when:
   - Changing a pinned, patched or Carbon dependency
 title: "Secure development"
 audience: developer
+description: Secrets, placeholders, secret scanning, dependency and patch
+  policy, and local credential files
 ---
 
 # Secure development
@@ -22,15 +23,18 @@ This guide covers the practices contributors follow while writing code. For repo
 ## Local credential files
 
 - Web provider credentials live in `~/.openclaw/credentials/`. Rerun `wednesdayai login` if you are logged out.
-- Pi and agent sessions live in `~/.openclaw/agents/<agentId>/sessions/*.jsonl` (newest by default).
+- Agent sessions live in the SQL session database, `~/.openclaw/sessions.db` by default (plus
+  `backups/` and the legacy import archive under the state directory).
 
 Never copy these into the repository, a fixture, or a log entry.
 
 ## Security scanning
 
-The project uses `detect-secrets` for automated secret detection in CI. See `.detect-secrets.cfg` for configuration and `.secrets.baseline` for the baseline.
+The primary gate is a **blocking pre-push gitleaks scan**. `git push` runs `git-hooks/pre-push`, which scans every commit that is not yet on any remote with `scripts/pre-push/secrets-scan.sh` (config in `.gitleaks.toml`, shared with the weekly backstop below; it disables the entropy-only `generic-api-key` rule to keep the blocking gate on provider-specific rules). Leaks block the push; for a confirmed false positive, add its Fingerprint to `.gitleaksignore`. Install gitleaks with `brew install gitleaks` (or a release binary); without it the push goes ahead with a warning. `OPENCLAW_SKIP_PREPUSH=1` skips the pre-push hook for WIP pushes. See the Local hooks section of [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing).
 
-Run it locally:
+As a backstop for skipped hooks (`--no-verify`, `OPENCLAW_SKIP_PREPUSH=1`), the Deterministic Security workflow runs a weekly full-repo gitleaks and Semgrep scan (Tuesday 04:17 UTC, plus on-demand `workflow_dispatch`).
+
+As an optional extra check you can still run `detect-secrets` locally; it is no longer run by any active automation. The baseline is `.secrets.baseline` (configuration in `.detect-secrets.cfg`):
 
 ```bash
 pip install detect-secrets==1.5.0
@@ -39,12 +43,18 @@ detect-secrets scan --baseline .secrets.baseline
 
 ## Dependency policy
 
-- Dependencies listed in `pnpm.patchedDependencies` must use exact versions (no `^` or `~`). Patching a dependency requires explicit approval.
-- `@sinclair/typebox` is pinned to an exact version for the same reason.
+- Dependencies listed in `pnpm-workspace.yaml` `patchedDependencies` must use exact versions (no `^` or `~`). Patching a dependency requires explicit approval.
+- pnpm applies those patches only to pnpm installs. For npm-installed gateways, `src/infra/dependency-patches.ts` applies the same patch files in memory when each module loads. A new patch therefore also needs:
+  - a `DEPENDENCY_PATCHES` entry, which `src/infra/dependency-patches.test.ts` checks against `pnpm-workspace.yaml`;
+  - an installed-tree scenario in `INSTALLED_PATCH_SCENARIOS`, which `scripts/release-installed-package/installed-patches.e2e.test.ts` runs against an `npm install -g` of the packed tarball.
+
+  See ADR 2085.
+
+- `@sinclair/typebox` is pinned to an exact version as well.
 - Never update the Carbon dependency (`@buape/carbon`).
 - Never use `npm link` or `pnpm link` for local installs. Build with `npm pack` and install the tarball globally.
 
 ## Related
 
-- [Coding style](/developers/contributing/coding-style)
-- [Release](/developers/contributing/release)
+- [Coding style](https://docs.wednesdayai.dev/developers/contributing/coding-style)
+- [Release](https://docs.wednesdayai.dev/developers/contributing/release)

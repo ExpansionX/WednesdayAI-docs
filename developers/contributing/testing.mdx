@@ -1,5 +1,4 @@
 ---
-description: "Testing policy: frameworks, coverage thresholds, which suite to run, and how to add regressions"
 summary: "Testing policy: frameworks, coverage thresholds, which suite to run, and how to add regressions"
 read_when:
   - Writing or changing tests
@@ -7,11 +6,13 @@ read_when:
   - Fixing a bug and adding a regression test
 title: "Testing policy"
 audience: developer
+description: "Testing policy: frameworks, coverage thresholds, which suite to
+  run, and how to add regressions"
 ---
 
 # Testing policy
 
-This guide owns the testing policy. For lanes, worker settings and environment variables, see [Tests](/developers/reference/test). For the live, Docker and provider test kit, see [Testing kit](/users/help/testing).
+This guide owns the testing policy. For lanes, worker settings and environment variables, see [Tests](/reference/test). For the live, Docker and provider test kit, see [Testing kit](/help/testing).
 
 ## Policy
 
@@ -20,31 +21,89 @@ This guide owns the testing policy. For lanes, worker settings and environment v
 - **Thresholds**: `vitest.config.ts` sets global coverage thresholds of 70% for lines, functions and statements, and 55% for branches.
 - **Coverage run**: `pnpm test:coverage` runs `vitest.unit.config.ts` with coverage, so only the unit suite counts toward the thresholds.
 - **Stubs**: prefer per-instance stubs over `SomeClass.prototype.method = ...` unless you document why.
-- **Environment**: use `vi.stubEnv()` scoped per test.
+- **Environment**: use `vi.stubEnv()` scoped per test. `test/setup.ts` restores stubs after every test with `afterEach(vi.unstubAllEnvs())`, because Vitest applies `unstubEnvs` only before each test; without this the last test of a file leaks its stubs into the next file in the worker.
+- **Synthetic plugin configs**: under Vitest, an explicit test plugin config (for example `plugins.load.paths`) no longer cold-loads the bundled-by-default plugins (`device-pair`, `learning-core`, `phone-control`, `talk-voice`) that it does not name. To test with one of them, name it: `entries: { "<id>": { enabled: true } }` or `allow: ["<id>"]`. Do not stub `OPENCLAW_BUNDLED_PLUGINS_DIR` or stamp `activationMigrationVersion` just to avoid the load cost; `applyTestPluginDefaults` pre-disables unnamed bundled defaults for test configs (`src/plugins/config-state.ts`).
 - **Workers**: do not set the worker count above 16. It has been tried.
+- **Symlinked temp directory**: the CI Node test lane sets `TMPDIR` to a symlink, matching macOS where `/var` links to `/private/var`. When a test compares a temp path with a path Node resolved (such as `import.meta.url` or `realpathSync`), resolve both sides first. Build fixture temp roots under `await fs.realpath(os.tmpdir())` when the code under test resolves paths. Gate Linux-only `/proc` fixtures with an explicit `platform: "linux"` and mock the proc read. Do not assume Linux-only fixtures such as `/dev/shm`; inject the error instead (for example `EXDEV` via `vi.spyOn(fs, "link")`).
+- **Colored console output**: subsystem console lines carry ANSI color whenever the shell looks color-capable (`TERM=xterm-256color`, `COLORTERM` or `TERM_PROGRAM` set), even without a TTY. Before an anchored assertion such as `toMatch(/^…/)` on a captured console line, strip it with `stripAnsi` from `src/terminal/ansi.ts`; otherwise the test passes under `NO_COLOR` and fails in an ordinary terminal (#1524).
 - **Reachability over isolation**: a test that mocks past the dispatch or routing seam, by calling the changed function directly, proves the unit. It does not prove the unit is reached on the real path. For any bugfix or behavior change, add at least one test that drives the real entry point, and assert the original symptom (for example, "N completions to 1 turn") rather than only an internal return value. An isolation-only green suite once hid a dead-code feature (ADR 0006).
+- **Plugin loads**: a plugin that imports `openclaw/plugin-sdk` makes jiti load the SDK graph from TypeScript source unless the caller prepared the host SDK first: 20-40 s of synchronous work per worker, which times out under full-lane load (#1029). `loadGatewayPlugins` and the conformance runner call `preparePluginSdkHost()` (`src/plugins/sdk-alias.ts`) for you, so plugins get the host's own SDK instances through jiti `virtualModules` (ADR 1032). A test that calls `loadOpenClawPlugins` directly with an SDK-importing plugin must `await preparePluginSdkHost()` first. When a test exercises loader behavior rather than a specific plugin, write small fixture plugins and point `OPENCLAW_BUNDLED_PLUGINS_DIR` at their directory (`src/plugins/loader.test-helpers.ts`); leave real-plugin coverage to the plugin's own tests and the e2e lane.
+- **Timing assertions**: do not bound how fast something happened with wall-clock time (`expect(Date.now() - startedAt).toBeLessThan(n)`); full-lane load stretches sub-second work past any fixed bound (#1868). Prove promptness causally: wedge the slow stage on a promise that never settles, so reaching the assertion proves nothing waited on it, and let the test timeout catch a hang. When a real timer is the behavior under test, assert lower bounds and size the window well above child-process or I/O startup latency (#1870). Complexity guards compare calibrated batch timings at input sizes n and 8n against a ratio threshold, never an absolute ms bound (#1873).
+- **Temp fixtures**: create fixture files in a private `fs.mkdtempSync(path.join(os.tmpdir(), "<prefix>-"))` directory and remove it recursively, never bare `os.tmpdir()`: code that scans its own directory (log rotation, backups) pays for every entry there (#1812). Prefer the existing helpers: `makeTempWorkspace` from `src/test-helpers/workspace.ts` already removes its dirs after the test file (import it statically), and `withTempDir` from `src/test-utils/temp-dir.ts` scopes a dir to a callback (#1886, #1952). As a backstop, every Vitest config inherits the global setup `test/global-tmpdir.ts`, which points `TMPDIR`, `TEMP` and `TMP` at one run-scoped `wai-vt-*` directory and removes it when the run ends, so a forgotten fixture cannot outlive the run (#2035). The tsx, jiti and Node compile caches inside it are links to the host temp dir, so spawned CLIs stay warm. Keep cleaning up per file anyway: a run holds every file's leftovers until it ends. Fixed paths outside `os.tmpdir()` are not covered.
+- **Live gateway paths**: the deploy gate runs on the gateway host. Under Vitest, the default file log goes to `$OPENCLAW_TEST_HOME/logs` (#1263). Never write to, rotate, or delete files under `/tmp/openclaw` (`resolvePreferredOpenClawTmpDir()`) from a test. Known remaining offender: TTS output (#2021).
+- **Host-dependent fixtures**: a fixture generated from host runtime data (ICU case mappings) must record the host's version and compare across versions by a documented stability rule, not demand an exact match. Example: `unicodeVersion` in `test/fixtures/exec-allowlist-glob-parity.json`. Regenerate it with `pnpm exec:glob-parity:gen` only for matcher or generator changes, never for a Node upgrade (#1983).
 
 ## Commands
 
-| Command                | What it runs                                                                                  |
-| ---------------------- | --------------------------------------------------------------------------------------------- |
-| `pnpm test`            | Script policy suites, then every default-on lane through `scripts/test-parallel.mjs`          |
-| `pnpm test:fast`       | Unit suite only (`vitest.unit.config.ts`)                                                      |
-| `pnpm test:coverage`   | Unit suite with V8 coverage                                                                    |
-| `pnpm test:e2e`        | Gateway end-to-end smoke (needs `pnpm build` first)                                            |
-| `pnpm test:live`       | Live provider tests. The script sets `OPENCLAW_LIVE_TEST=1` and `CLAWDBOT_LIVE_TEST=1` itself |
+| Command              | What it runs                                                                                  |
+| -------------------- | --------------------------------------------------------------------------------------------- |
+| `pnpm test`          | Script policy suites, then every default-on lane through `scripts/test-parallel.mjs`          |
+| `pnpm test:fast`     | Unit suite only (`vitest.unit.config.ts`)                                                     |
+| `pnpm test:coverage` | Unit suite with V8 coverage                                                                   |
+| `pnpm test:e2e`      | Gateway end-to-end smoke (needs `pnpm build` first)                                           |
+| `pnpm test:live`     | Live provider tests. The script sets `OPENCLAW_LIVE_TEST=1` and `CLAWDBOT_LIVE_TEST=1` itself |
 
 On memory-constrained hosts, run `OPENCLAW_TEST_PROFILE=low OPENCLAW_TEST_SERIAL_GATEWAY=1 pnpm test`.
 
-Docker runners: `pnpm test:docker:live-models`, `pnpm test:docker:live-gateway`, and the onboarding end-to-end run `pnpm test:docker:onboard`. See [Testing kit](/users/help/testing) for details.
+`pnpm test` includes the e2e lane and the gateway canvas tests, which run the built CLI (`dist/entry.js`) and the A2UI bundle. Run `pnpm build` first, or those tests fail with `missing dist/entry.(m)js` or a canvas `503`.
+
+Docker runners: `pnpm test:docker:live-models`, `pnpm test:docker:live-gateway`, and the onboarding end-to-end run `pnpm test:docker:onboard`. See [Testing kit](/help/testing) for details.
+
+### Real infrastructure in tests
+
+- Default lanes (`pnpm test`, `pnpm test:fast`, and the per-area lanes) never start Docker and never reach a real Postgres or Redis. `test/test-env.ts` deletes `OPENCLAW_DB_URL`, `OPENCLAW_DATABASE_URL` and `DATABASE_URL` unless `OPENCLAW_LIVE_PG_TEST=1`, so a DSN exported in your shell does not reach them.
+- Real-Postgres tests, including those in `scripts/`, are named `*.pg.integration.test.ts` and gate on `OPENCLAW_LIVE_PG_TEST=1` plus `OPENCLAW_DATABASE_URL`. Base `vitest.config.ts` excludes them; they run only through `pnpm test:pg` (`vitest.pg.config.ts`).
+- `pnpm test:pg` with no URL starts its own `postgres:16` container. With `OPENCLAW_DB_URL` set it requires `--authorize-isolated-database` (a throwaway database on your server, no Docker) or `--authorize-disposable-url` (the whole database is disposable).
+- Tests that need Docker itself additionally gate on `OPENCLAW_TEST_PG_LANE=container`.
+- Fixtures shared by a live file and its fake or SQLite sibling go in `<base>.test-helpers.ts`.
+- Redis-backed behavior is tested with fakes (`src/config/sessions/ctx-redis-cache.test.ts`). A future real-Redis test follows the same pattern with its own opt-in lane.
 
 ## Which suite should I run?
 
-- Editing logic or tests: run `pnpm test`, and `pnpm test:coverage` if you changed a lot. That already includes core, channels, extensions, gateway and e2e unless you opt a lane out.
+- Editing logic or tests: run `pnpm test`, and `pnpm test:coverage` if you changed a lot. That already includes core, channels, extensions, gateway, e2e and the workspace suites (`apps/web`, `apps/control`, `packages/gateway-browser-client`, `packages/host-bridge`) unless you opt a lane out.
 - Debugging a single e2e file: run `pnpm test:e2e` or pass a path. Do not treat a missing e2e section in a failed `pnpm test` log as proof that e2e was skipped. The runner may have aborted after an earlier lane.
 - Debugging "my bot is down", provider-specific failures, or tool calling: run a narrowed `pnpm test:live`.
 
 If `pnpm test` flakes on a loaded host, rerun once before treating it as a regression, then isolate with `pnpm vitest run <path/to/test>`.
+
+## GitHub Actions
+
+The PR verification workflows are **archived** in `.github/workflows-archived/` (ADR 0118, ADR 2399). GitHub cannot run them, and `pnpm check` fails if a workflow outside the allowlist appears in `.github/workflows/`. The local commands below are the proof; do not restore a workflow to validate a PR.
+
+| Workflow (archived)                         | Local equivalent                                                                                                                                                |
+| ------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CI (`ci.yml`)                               | `pnpm check`, `pnpm build`, `pnpm build:strict-smoke`, `pnpm test`, `pnpm test:docker:session-storage`, `pnpm check:docs`                                       |
+| Docs surface check                          | `node scripts/docs-surface-check.mjs --mode=source`                                                                                                             |
+| Install Smoke                               | `pnpm test:dockerfiles:smoke`; `pnpm test:web-image:smoke`; after a stable promotion `pnpm test:install:hosted`                                                 |
+| Runtime Risk                                | `node scripts/ci/select-risk-tests.mjs --base origin/main --head HEAD`                                                                                          |
+| Sandbox Common Smoke                        | `pnpm test:dockerfiles:smoke`                                                                                                                                   |
+| Workflow Sanity                             | `pnpm lint:workflows`                                                                                                                                           |
+| npm-publish verify-dev (removed job)        | `pnpm release:verify-dev` after merges that publish to `dev`                                                                                                    |
+| Deterministic Security (PR trigger removed) | `git-hooks/pre-push` secret scan; full scans: `gitleaks dir .` and `uvx --with 'setuptools<81' semgrep==1.101.0 scan --config security/semgrep/wednesdayai.yml` |
+
+The per-job command list for every archived workflow lives in `.github/workflows-archived/README.md`.
+
+These stay enabled:
+
+- **Deterministic Security**: a weekly (Tuesday 04:17 UTC) and on-demand gitleaks and semgrep full-repo scan; PRs are scanned locally.
+- **release-please**, **npm-publish**: releases need the npm OIDC trusted-publishing identity, which exists only in GitHub Actions; **npm-parity** is the daily registry watchdog that opens issues.
+- **docs-site-links**: a weekly live-site link check against `docs.wednesdayai.dev`; it opens a `docs site link gaps` issue.
+- **CodeRabbit**: a GitHub App that reviews PRs. It is configured in `.coderabbit.yaml` and uses no Actions minutes.
+
+A PR gets only a CodeRabbit review in GitHub; run the local gates before opening it and list them under "Deterministic gate evidence".
+
+List the commit SHA the local gates ran on. A PR with no Actions runs, or a CodeRabbit review that was skipped or rate-limited, is expected — not a finding or a blocker; do not re-request it.
+
+No CI catches breakage between PRs: after merging a batch, run `pnpm check` on `main` locally.
+
+### Local hooks
+
+- `pnpm install` points `core.hooksPath` at `git-hooks/`, except under `CI=true`.
+- pre-commit fixes lint and format on staged files.
+- pre-push runs the gitleaks scan of unpushed commits, then `pnpm check`, then the advisory local review.
+- Install gitleaks with `brew install gitleaks` (or a release binary). Without it the push goes ahead with a warning.
+- A false positive goes into `.gitleaksignore` by Fingerprint.
+- `OPENCLAW_SKIP_PREPUSH=1` skips the hook for WIP pushes.
 
 ## Adding regressions
 
@@ -58,6 +117,6 @@ When you fix a provider or model issue discovered in live:
 
 ## Related
 
-- [Tests](/developers/reference/test)
-- [Testing kit](/users/help/testing)
-- [Coding style](/developers/contributing/coding-style)
+- [Tests](/reference/test)
+- [Testing kit](/help/testing)
+- [Coding style](https://docs.wednesdayai.dev/developers/contributing/coding-style)
