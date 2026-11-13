@@ -1,7 +1,7 @@
 ---
 summary: "Testing kit: unit/e2e/live suites, Docker runners, and what each test covers"
 read_when:
-  - Running tests locally (the CI lanes are disabled)
+  - Running tests locally (the PR verification workflows are archived; ADR 2399)
   - Looking for the live, Docker, or credentials kit
   - Debugging gateway + agent behavior
 title: "Testing"
@@ -21,9 +21,9 @@ Policy, thresholds, "which suite should I run?" and adding regressions live in [
 ## Build prerequisite
 
 `pnpm test` is not self-contained: a few suites exercise the shipped artifacts rather
-than the TypeScript sources, so run `pnpm build` first (the disabled CI lane ran
-`pnpm canvas:a2ui:bundle` for the same reason; heavy GitHub Actions workflows are disabled —
-ADR 0118).
+than the TypeScript sources, so run `pnpm build` first (the archived CI lane ran
+`pnpm canvas:a2ui:bundle` for the same reason; PR verification workflows are archived in
+`.github/workflows-archived/` — ADR 0118, ADR 2399).
 
 - `test/gateway.multi.e2e.test.ts` and `test/gateway.restart-recovery.e2e.test.ts` spawn
   `dist/index.js`.
@@ -59,14 +59,14 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 ### Unit / integration (default `pnpm test`)
 
 - Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/reference/test).
-- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, and the gateway-browser-client suite under `packages/gateway-browser-client/src/**`
+- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, the gateway-browser-client suite under `packages/gateway-browser-client/src/**`, and the host-bridge suite under `packages/host-bridge/src/**`
 - Scope:
   - Pure unit tests
   - In-process integration tests (gateway auth, routing, tooling, parsing, config)
   - Channel, extension, core, gateway, and e2e smoke as part of the same command
   - Deterministic regressions for known bugs
 - Expectations:
-  - Runs locally by default (`pnpm test`); no CI check runs it while the heavy workflows are disabled (ADR 0118)
+  - Runs locally by default (`pnpm test`); no GitHub check runs it, because the PR verification workflows are archived (ADR 0118, ADR 2399)
   - No real keys required
 
 ### Web client
@@ -109,6 +109,16 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
   runs controller, model and grouping. Its `gateway-browser-client/test-support` export is the
   fake connection and socket both app suites import.
 - Run one file on its own with `pnpm --dir packages/gateway-browser-client exec vitest run --config vitest.config.ts <file>`
+
+### Host bridge
+
+- Command: `pnpm test:host-bridge` (also runs as the `host-bridge` lane of `pnpm test`)
+- Config: `packages/host-bridge/vitest.config.ts` — a single node project
+- Files: `packages/host-bridge/src/**/*.test.ts`
+- Scope: the message contract between the web client and an app host (ADR 2242 D2) — envelope
+  and payload validators, snapshot revisions, host detection, posting and request timeouts. The
+  web client's own suite (`apps/web/src/app/AppShell.host-bridge.test.tsx`) drives the adapter.
+- Run one file on its own with `pnpm --dir packages/host-bridge exec vitest run --config vitest.config.ts <file>`
 
 ### Web client and brand e2e suites
 
@@ -165,7 +175,7 @@ If a filtered run also fails, treat it as a real failure.
   - Multi-instance gateway end-to-end behavior
   - WebSocket/HTTP surfaces, node pairing, and heavier networking
 - Expectations:
-  - Runs in CI only when the pipeline is re-enabled (currently disabled; ADR 0118)
+  - Runs locally only; the CI pipeline that ran it is archived (ADR 0118, ADR 2399)
   - No real keys required
   - More moving parts than unit tests (can be slower)
 
