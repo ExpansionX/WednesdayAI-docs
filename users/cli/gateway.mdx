@@ -196,7 +196,14 @@ openclaw gateway restart
 # Or: openclaw config validate
 ```
 
-Repair with `openclaw doctor --fix`, or fix the named key manually and re-check with `openclaw config validate`, then retry the restart. `gateway stop` is never gated; a first start of a stopped gateway is not gated either (the failure surfaces as a normal startup error instead).
+Repair with `openclaw doctor --fix`, or fix the named key manually and re-check with `openclaw config validate`, then retry the restart. `gateway stop` is never gated; a first start of a stopped gateway is not gated either (the failure surfaces as a normal startup error instead). On macOS, `gateway start`/`restart` on an installed but unloaded LaunchAgent are gated too; with an invalid config the CLI reports that the service stays stopped until the config is valid.
+
+### macOS restart behavior
+
+- `gateway restart` unloads and reloads the LaunchAgent. If the previous gateway is still draining (up to about 25 s after SIGTERM), the CLI prints `Waiting for the previous gateway to finish shutting down (up to 40s)…` and retries until launchd frees the label.
+- If the reload still fails, the error says whether launchd still has the job. When it does not, it names the unchanged plist and the recovery command: `openclaw gateway start`, or `launchctl bootstrap gui/$UID ~/Library/LaunchAgents/<label>.plist`.
+- `gateway start` and `gateway restart` reload a LaunchAgent whose plist is installed but not loaded; no reinstall is needed. `gateway status` reports this state as `Service is installed but not loaded.`
+- The LaunchAgent plist is written atomically with mode `0600`.
 
 ## Discover gateways (Bonjour)
 
