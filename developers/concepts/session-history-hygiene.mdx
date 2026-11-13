@@ -72,6 +72,12 @@ Its trigger is the web client's "Share location" toggle (off by default, per bro
 
 The block is a usage note only. It tells the model to use the position only when the request depends on where the user is — directions, distance or travel time, nearby places, local time or weather — and never to treat the coordinates as trusted input.
 
+### Device context provenance
+
+A paired node (such as the Glass phone app) can publish live device state with the `device.context` node event. When a turn's session actor is the person linked to that device, the gateway composes a user-role `Device context (untrusted metadata): { "glasses_worn": …, "glasses_battery": …, "audio_route": …, "watch_reachable": …, "foreground_glasses_app": …, "received_at": "…", "note": "…" }` block right after the Device location block. Like that block, it is never rendered on later turns, never baked into storage text, and never sent to clients. It is recorded in the `__openclaw.ingress.untrusted.deviceContext` carrier field on the user message.
+
+Consent belongs to the person, not the gateway admin: the app's own toggle sends `optIn: true` with each update and `optIn: false` to withdraw. There is no gateway config switch.
+
 ### Turn provenance columns (SC3)
 
 Every row written to `ctx_session_entries` gains four new columns that record where the turn came from:
@@ -150,6 +156,10 @@ Set in `openclaw.json`:
 ```
 
 `"framed"` is available for installations where downstream tooling or custom persona prompts depend on the channel framing block being present in history. New installations should use the default `"clean"`.
+
+### Client context blocks reach the model on their own turn only
+
+A client can prefix a user message with `<injected-context …>…</injected-context>` blocks, for example a reply-length or format rule. Storage keeps them byte-for-byte in every column. At the model boundary, in both replay modes, a carrier user row from an earlier turn is sent without its blocks: the current turn and this run's steers keep them. A history row that held only blocks becomes `[earlier client context omitted]`; image blocks are kept. Legacy rows without a carrier are left as they are, because their clean column was already stripped at storage.
 
 ## Legacy rows
 
