@@ -123,6 +123,8 @@ The agent reads this on each heartbeat and handles all items in one turn.
 
 See [Heartbeat](/gateway/heartbeat) for full configuration.
 
+> Per-agent note: once any `agents.list[]` entry defines a `heartbeat` block, **only those agents** run heartbeats (`isHeartbeatEnabledForAgent` in `src/infra/heartbeat-runner.config.ts`) — an explicit block on one agent turns heartbeats off for every other agent.
+
 ## Cron: Precise Scheduling
 
 Cron jobs run at precise times and can run in isolated sessions without affecting main context.
@@ -153,7 +155,7 @@ per-job offset in a 0-5 minute window.
 ### Cron example: Daily morning briefing
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Morning briefing" \
   --cron "0 7 * * *" \
   --tz "America/New_York" \
@@ -170,7 +172,7 @@ This runs at exactly 7:00 AM New York time, uses Opus for quality, and announces
 ### Cron example: One-shot reminder
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Meeting reminder" \
   --at "20m" \
   --session main \
@@ -229,13 +231,13 @@ The most efficient setup uses **both**:
 
 ```bash
 # Daily morning briefing at 7am
-openclaw cron add --name "Morning brief" --cron "0 7 * * *" --session isolated --message "..." --announce
+wednesdayai cron add --name "Morning brief" --cron "0 7 * * *" --session isolated --message "..." --announce
 
 # Weekly project review on Mondays at 9am
-openclaw cron add --name "Weekly review" --cron "0 9 * * 1" --session isolated --message "..." --model opus
+wednesdayai cron add --name "Weekly review" --cron "0 9 * * 1" --session isolated --message "..." --model opus
 
 # One-shot reminder
-openclaw cron add --name "Call back" --at "2h" --session main --system-event "Call back the client" --wake now
+wednesdayai cron add --name "Call back" --at "2h" --session main --system-event "Call back the client" --wake now
 ```
 
 ## Lobster: Deterministic workflows with approvals
@@ -270,13 +272,13 @@ See [Lobster](/tools/lobster) for full usage and examples.
 
 Both heartbeat and cron can interact with the main session, but differently:
 
-|         | Heartbeat                                          | Cron (main)                   | Cron (isolated)            |
-| ------- | -------------------------------------------------- | ----------------------------- | -------------------------- |
-| Session | Main or configured base; optional isolated sibling | Main (`agent.turn` kind cron) | `cron:<jobId>`             |
-| History | Shared by default; fresh with `isolatedSession`    | Shared                        | Fresh each run             |
-| Context | Full by default; lightweight with `lightContext`   | Full                          | None (starts clean)        |
-| Model   | Heartbeat or main session model                    | Main session model            | Can override               |
-| Output  | Delivered if not `HEARTBEAT_OK`                    | Cron turn on main             | Announce summary (default) |
+|         | Heartbeat                                                                              | Cron (main)                   | Cron (isolated)            |
+| ------- | -------------------------------------------------------------------------------------- | ----------------------------- | -------------------------- |
+| Session | Main or configured base; optional isolated sibling                                     | Main (`agent.turn` kind cron) | `cron:<jobId>`             |
+| History | Shared by default; fresh with `isolatedSession`                                        | Shared                        | Fresh each run             |
+| Context | Full by default; lightweight with `lightContext` (isolated `:heartbeat` sessions only) | Full                          | None (starts clean)        |
+| Model   | Heartbeat or main session model                                                        | Main session model            | Can override               |
+| Output  | Delivered if not `HEARTBEAT_OK`                                                        | Cron turn on main             | Announce summary (default) |
 
 ### When to use main session cron
 
@@ -289,7 +291,7 @@ Use `--session main` with `--system-event` when you want:
 - No separate isolated run
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Check project" \
   --every "4h" \
   --session main \
@@ -307,7 +309,7 @@ Use `--session isolated` when you want:
 - History that doesn't clutter main session
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Deep analysis" \
   --cron "0 6 * * 0" \
   --session isolated \
@@ -327,7 +329,7 @@ Use this when "is there anything to do?" is cheap to answer but the response is 
 | -------------------------------------------------- | ----------------------------------------------------------- |
 | A check on the heartbeat cadence, gating each turn | Heartbeat `wakeGate`                                        |
 | A check at an exact time / fixed cron schedule     | Cron `wakeGate` payload                                     |
-| A one-off external trigger from a script           | [`openclaw agent nudge`](/cli/agent-nudge)                  |
+| A one-off external trigger from a script           | [`wednesdayai agent nudge`](/cli/agent-nudge)               |
 | A typed payload from a plugin or hook              | [`api.runtime.signals.nudge`](/plugins/agent-signals#nudge) |
 
 A **heartbeat wake-gate** turns the periodic heartbeat into a gate: it runs the cheap check first
