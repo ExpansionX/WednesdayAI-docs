@@ -1,0 +1,311 @@
+---
+summary: "TypeBox schemas as the single source of truth for the gateway protocol"
+read_when:
+  - Updating protocol schemas or codegen
+title: "TypeBox"
+---
+
+# TypeBox as protocol source of truth
+
+Last updated: 2026-09-30
+
+TypeBox is a TypeScript-first schema library. We use it to define the **Gateway
+WebSocket protocol** (handshake, request/response, server events). Those schemas
+drive **runtime validation**, **JSON Schema export**, and **Swift codegen** for
+the macOS app. One source of truth; everything else is generated.
+
+If you want the higher-level protocol context, start with
+[Gateway architecture](/next/developers/concepts/architecture).
+
+## Mental model (30 seconds)
+
+Every Gateway WS message is one of three frames:
+
+- **Request**: `{ type: "req", id, method, params }`
+- **Response**: `{ type: "res", id, ok, payload | error }`
+- **Event**: `{ type: "event", event, payload, seq?, stateVersion? }`
+
+The first frame **must** be a `connect` request. After that, clients can call
+methods (e.g. `health`, `send`, `chat.send`) and subscribe to events (e.g.
+`presence`, `tick`, `agent`).
+
+Connection flow (minimal):
+
+```
+Client                    Gateway
+  |---- req:connect -------->|
+  |<---- res:hello-ok --------|
+  |<---- event:tick ----------|
+  |---- req:health ---------->|
+  |<---- res:health ----------|
+```
+
+Common methods + events:
+
+| Category  | Examples                                                  | Notes                                                                   |
+| --------- | --------------------------------------------------------- | ----------------------------------------------------------------------- |
+| Core      | `connect`, `health`, `status`                             | `connect` must be first                                                 |
+| Messaging | `send`, `poll`, `agent`, `agent.wait`                     | side-effects need `idempotencyKey`                                      |
+| Chat      | `chat.history`, `chat.send`, `chat.abort`, `chat.inject`  | WebChat uses these                                                      |
+| Sessions  | `sessions.list`, `sessions.patch`, `sessions.delete`      | scope varies by method/params (ADR 0083); `sessions.delete` needs admin |
+| Nodes     | `node.list`, `node.invoke`, `node.pair.*`                 | Gateway WS + node actions                                               |
+| Events    | `tick`, `presence`, `agent`, `chat`, `health`, `shutdown` | server push                                                             |
+
+Authoritative lists live in `src/gateway/server-methods-list.ts` (`listGatewayMethods()` and
+`GATEWAY_EVENTS`).
+
+## Where the schemas live
+
+- Source: `src/gateway/protocol/schema.ts`, which re-exports the per-area files in
+  `src/gateway/protocol/schema/` (the registry is `schema/protocol-schemas.ts`)
+- Runtime validators (AJV): `src/gateway/protocol/index.ts`
+- Server handshake: `src/gateway/server/ws-connection/message-handler.ts`; method dispatch and
+  scope checks: `src/gateway/server-methods.ts`
+- Node client: `src/gateway/client.ts`
+- Committed JSON Schema snapshot: `src/gateway/protocol/gateway-protocol.schema.json`. The root
+  carries `x-protocol-version` (the `PROTOCOL_VERSION` number) and `x-error-codes` (the
+  `ErrorCodes` values), and every nested position that reuses a named definition carries
+  `x-schema-name` so non-TypeScript generators can name shared types. The npm tarball ships the
+  same file at `dist/contracts/gateway-protocol.schema.json`, alongside the exec and system-run
+  parity fixtures under `dist/contracts/fixtures/` (used by the native apps' parity tests).
+- Generated Swift models: owned by the
+  [WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository, which regenerates
+  them from the synced snapshot (`npm run contracts:sync`).
+
+## Current pipeline
+
+- `pnpm protocol:gen`
+  - writes JSON Schema (draft‑07) to `src/gateway/protocol/gateway-protocol.schema.json`
+- `pnpm protocol:check`
+  - regenerates the snapshot and verifies it is committed
+- Swift gateway models are generated in WednesdayAI-apps from the synced snapshot, not in core.
+
+## How the schemas are used at runtime
+
+- **Server side**: every inbound frame is validated with AJV. The handshake only
+  accepts a `connect` request whose params match `ConnectParams`.
+- **Client side**: the JS client validates event and response frames before
+  using them.
+- **Method surface**: the Gateway advertises the supported `methods` and
+  `events` in `hello-ok`.
+
+## Example frames
+
+Connect (first message):
+
+```json
+{
+  "type": "req",
+  "id": "c1",
+  "method": "connect",
+  "params": {
+    "minProtocol": 3,
+    "maxProtocol": 3,
+    "client": {
+      "id": "openclaw-macos",
+      "displayName": "macos",
+      "version": "1.0.0",
+      "platform": "macos 15.1",
+      "mode": "ui",
+      "instanceId": "A1B2"
+    }
+  }
+}
+```
+
+Hello-ok response:
+
+```json
+{
+  "type": "res",
+  "id": "c1",
+  "ok": true,
+  "payload": {
+    "type": "hello-ok",
+    "protocol": 3,
+    "server": { "version": "dev", "connId": "ws-1" },
+    "features": { "methods": ["health"], "events": ["tick"] },
+    "snapshot": {
+      "presence": [],
+      "health": {},
+      "stateVersion": { "presence": 0, "health": 0 },
+      "uptimeMs": 0
+    },
+    "policy": { "maxPayload": 1048576, "maxBufferedBytes": 1048576, "tickIntervalMs": 30000 }
+  }
+}
+```
+
+Request + response:
+
+```json
+{ "type": "req", "id": "r1", "method": "health" }
+```
+
+```json
+{ "type": "res", "id": "r1", "ok": true, "payload": { "ok": true } }
+```
+
+Event:
+
+```json
+{ "type": "event", "event": "tick", "payload": { "ts": 1730000000 }, "seq": 12 }
+```
+
+## Minimal client (Node.js)
+
+Smallest useful flow: connect + health.
+
+```ts
+import { WebSocket } from "ws";
+
+const ws = new WebSocket("ws://127.0.0.1:18789");
+
+ws.on("open", () => {
+  ws.send(
+    JSON.stringify({
+      type: "req",
+      id: "c1",
+      method: "connect",
+      params: {
+        minProtocol: 3,
+        maxProtocol: 3,
+        client: {
+          id: "cli",
+          displayName: "example",
+          version: "dev",
+          platform: "node",
+          mode: "cli",
+        },
+      },
+    }),
+  );
+});
+
+ws.on("message", (data) => {
+  const msg = JSON.parse(String(data));
+  if (msg.type === "res" && msg.id === "c1" && msg.ok) {
+    ws.send(JSON.stringify({ type: "req", id: "h1", method: "health" }));
+  }
+  if (msg.type === "res" && msg.id === "h1") {
+    console.log("health:", msg.payload);
+    ws.close();
+  }
+});
+```
+
+## Worked example: add a method end‑to‑end
+
+Example: add a new `system.echo` request that returns `{ ok: true, text }`.
+
+1. **Schema (source of truth)**
+
+Add to a schema file under `src/gateway/protocol/schema/` (here a new `system-echo.ts`, re-exported
+from `src/gateway/protocol/schema.ts`):
+
+```ts
+export const SystemEchoParamsSchema = Type.Object(
+  { text: NonEmptyString },
+  { additionalProperties: false },
+);
+
+export const SystemEchoResultSchema = Type.Object(
+  { ok: Type.Boolean(), text: NonEmptyString },
+  { additionalProperties: false },
+);
+```
+
+Add both to `ProtocolSchemas` in `schema/protocol-schemas.ts` and export types:
+
+```ts
+  SystemEchoParams: SystemEchoParamsSchema,
+  SystemEchoResult: SystemEchoResultSchema,
+```
+
+```ts
+export type SystemEchoParams = Static<typeof SystemEchoParamsSchema>;
+export type SystemEchoResult = Static<typeof SystemEchoResultSchema>;
+```
+
+2. **Validation**
+
+In `src/gateway/protocol/index.ts`, export an AJV validator:
+
+```ts
+export const validateSystemEchoParams = ajv.compile<SystemEchoParams>(SystemEchoParamsSchema);
+```
+
+3. **Server behavior**
+
+Add a handler in `src/gateway/server-methods/system.ts`:
+
+```ts
+export const systemHandlers: GatewayRequestHandlers = {
+  "system.echo": ({ params, respond }) => {
+    const text = String(params.text ?? "");
+    respond(true, { ok: true, text });
+  },
+};
+```
+
+Register it in `src/gateway/server-methods.ts` (already merges `systemHandlers`), add
+`"system.echo"` to `BASE_METHODS` in `src/gateway/server-methods-list.ts`, and classify it in
+`src/gateway/method-scopes.ts` (`METHOD_SCOPE_GROUPS`). A method with no scope needs
+`operator.admin`, and a test fails if an advertised method is unclassified. The narrow
+`operator.sessions.*` web client can call a method only if it is also listed in
+`NARROW_SESSION_READ_METHODS` or `NARROW_SESSION_WRITE_METHODS`, which is an ADR 0077 amendment; a
+rule that depends on the call's params (like the `sessions.patch` field guard) is ADR 0083.
+
+4. **Regenerate**
+
+```bash
+pnpm protocol:check
+```
+
+5. **Tests + docs**
+
+Add a server test in `src/gateway/server.*.test.ts` and note the method in docs.
+
+## Swift codegen behavior
+
+Swift codegen lives in the
+[WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository. Its generator reads
+the synced schema snapshot and emits:
+
+- `GatewayFrame` enum with `req`, `res`, `event`, and `unknown` cases
+- Strongly typed payload structs/enums (named via `x-schema-name` for reused definitions)
+- `ErrorCode` values and `GATEWAY_PROTOCOL_VERSION` (from `x-protocol-version` and `x-error-codes`)
+
+Unknown frame types are preserved as raw payloads for forward compatibility.
+
+## Versioning + compatibility
+
+- `PROTOCOL_VERSION` is defined in `src/gateway/protocol/schema/protocol-schemas.ts` and exported
+  from `src/gateway/protocol/schema.ts`.
+- Clients send `minProtocol` + `maxProtocol`; the server rejects mismatches.
+- The Swift models keep unknown frame types to avoid breaking older clients.
+
+## Schema patterns and conventions
+
+- Most objects use `additionalProperties: false` for strict payloads.
+- `NonEmptyString` is the default for IDs and method/event names.
+- The top-level `GatewayFrame` uses a **discriminator** on `type`.
+- Methods with side effects usually require an `idempotencyKey` in params
+  (example: `send`, `poll`, `agent`, `chat.send`).
+- `agent` accepts optional `internalEvents` for runtime-generated orchestration context
+  (for example subagent/cron task completion handoff); treat this as internal API surface.
+
+## Live schema JSON
+
+The committed snapshot is `src/gateway/protocol/gateway-protocol.schema.json` in this repository.
+The published npm package ships the same file at `dist/contracts/gateway-protocol.schema.json`
+plus the exec and system-run parity fixtures under `dist/contracts/fixtures/`; native clients
+read both from there (WednesdayAI-apps syncs them with `npm run contracts:sync`).
+
+## When you change schemas
+
+1. Update the TypeBox schemas.
+2. Run `pnpm protocol:check`.
+3. Commit the regenerated schema snapshot. Swift models are not generated here: WednesdayAI-apps
+   picks them up through its `contracts:sync` flow (a weekly bot PR against the pinned core
+   version).

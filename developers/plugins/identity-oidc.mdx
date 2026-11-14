@@ -41,6 +41,7 @@ Restart the gateway afterwards. Once enabled, the sign-in routes live under
           // webClientUrl: "https://assistant.example.com/v2/client/", // default
           // cookieSecret: "${IDENTITY_OIDC_COOKIE_SECRET}", // required for multi-replica
           // inviteTtlDays: 7, // default
+          // nativeRedirects: ["wednesdayai://auth"], // native app landings, see "Native apps"
           providers: [
             {
               id: "google",
@@ -78,14 +79,21 @@ Restart the gateway afterwards. Once enabled, the sign-in routes live under
   `<publicBaseUrl>/plugins/identity-oidc/<providerId>/callback`, so register exactly that redirect
   URI with each provider.
 - `webClientUrl`: where sign-in lands. Defaults to `<publicBaseUrl>/v2/client/`. Must be an
-  absolute `https` URL (loopback plain `http` is allowed) without a fragment and without control
-  characters: the sign-in handler appends its own `#setup=`/`#oauthError=` fragments.
+  absolute `https` URL (loopback plain `http` is allowed) without a fragment, without control
+  characters and in ASCII (percent-encode anything else, because the URL is sent verbatim in the
+  `Location` header): the sign-in handler appends its own `#setup=`/`#oauthError=` fragments.
 - `cookieSecret`: at least 32 characters (checked after trimming). The flow state (provider,
   state, PKCE verifier, nonce) lives in a sealed cookie, never in server memory, so any replica
   can serve the callback. Set one shared value when more than one gateway replica serves the
   routes; otherwise a secret is generated under `<state dir>/identity-oidc/`. Supports
   `${ENV_VAR}` secret references.
 - `inviteTtlDays`: how long invites stay valid. Default `7`.
+- `nativeRedirects`: the exact-match allowlist of native app landing targets (see
+  [Native apps](#native-apps)). Default none. Each entry is a universal/app link (`https://…`), an
+  app scheme (`wednesdayai://auth`) or a loopback address (`http://127.0.0.1:<port>/…` or
+  `http://[::1]:<port>/…`). Entries with a fragment, control characters, non-ASCII characters
+  (percent-encode them), plain `http` on any other host, or a `javascript:`, `data:`, `file:`,
+  `blob:` or `vbscript:` scheme are refused when the config loads.
 - `providers` (at least one): see below. `id` is `[a-z0-9][a-z0-9-]{0,31}`; duplicate ids log an
   error and the later duplicates are skipped. `label` overrides the displayed name.
   `clientSecret` accepts `${ENV_VAR}` secret references. `type: "oidc"` requires an `issuer` and,
@@ -142,6 +150,17 @@ wednesdayai oidc uninvite Alice --provider google
 wednesdayai oidc invites           # or --json
 ```
 
+Add `--enrollment-profile wednesdayai-glass-node` (repeatable) to an invite to also let that person
+enroll WednesdayAI Glass when the invite is claimed. People who are already linked get or lose a
+profile with `grant`/`revoke`. (The flag is not `--profile`: that is the global CLI option that
+selects a named config profile.)
+
+```bash
+wednesdayai oidc invite Alice --provider google --email alice@example.com --enrollment-profile wednesdayai-glass-node
+wednesdayai oidc grant Alice --enrollment-profile wednesdayai-glass-node
+wednesdayai oidc revoke Alice --enrollment-profile wednesdayai-glass-node
+```
+
 - The person must already exist: `Unknown identity "Alic". Add it first: wednesdayai identity add Alic`.
 - The provider must be configured: `Unknown provider "<id>". Configured providers: google, github.`
 - The email must contain exactly one `@`.
@@ -170,8 +189,47 @@ On success the extension links the sign-in to the person and calls the identity 
 user-client device bootstrap, then redirects to `<webClientUrl>#setup=<token>`. The browser pairs
 as its own device exactly as it does with a scanned setup code.
 
-That token is a bearer code: it pairs whichever browser redeems it, and re-pairing moves the
-device link to the token's person. A `#setup=` link that arrives at a browser which is already
-paired is therefore never redeemed silently; the web client asks for explicit confirmation first
-and only on confirm logs the current device out and re-pairs. See
-[Identities](/gateway/identity#what-logout-does).
+That token is a bearer code: it pairs whichever browser redeems it. A device's person never
+changes (#2307): a setup code for someone other than the device's current owner is refused at
+connect (`bootstrap_device_owned`) rather than moving the link. A `#setup=` link that arrives at a
+browser which is already paired is therefore never redeemed silently; the web client asks for
+explicit confirmation first and only on confirm logs the current device out, which deregisters
+it, and then pairs a brand-new device for the token's person. See
+[Identities](/admin/gateway/identity#what-logout-does).
+
+## Native apps
+
+A native app (WednesdayAI Glass) signs in through the same provider flow but lands on an app link
+instead of the web client, and receives a setup code only it can redeem.
+
+1. The app makes a fresh PKCE pair (RFC 7636): a random 43–128 character `verifier` and
+   `challenge = base64url(sha256(verifier))`.
+2. It opens, in the system browser session,
+   `<publicBaseUrl>/plugins/identity-oidc/<providerId>/start` with these query parameters:
+
+   | Parameter               | Value                                                |
+   | ----------------------- | ---------------------------------------------------- |
+   | `redirect`              | one `nativeRedirects` entry, character for character |
+   | `profile`               | `wednesdayai-glass-node` (default `user-client`)     |
+   | `code_challenge`        | the S256 challenge (43 base64url characters)         |
+   | `code_challenge_method` | `S256`                                               |
+
+   A `redirect` not on the allowlist, an unknown `profile`, the Glass profile without a
+   `redirect`, a `redirect` without `code_challenge`, or any challenge that is not S256 is refused
+   with HTTP 400 before the sign-in starts.
+
+3. After sign-in the browser lands on `<redirect>#setup=<token>`, or `<redirect>#oauthError=<reason>`.
+   The app connects with `client.id = "wednesdayai-glass-node"`, `auth.bootstrapToken = <token>` and
+   `auth.bootstrapCodeVerifier = <verifier>`; without the verifier the gateway refuses the code with
+   `bootstrap_code_verifier_invalid` (see [Gateway protocol](/admin/gateway/protocol#client-identity)).
+
+The Glass profile is only minted for a person the operator granted it (`oidc invite …
+--enrollment-profile`,
+or `oidc grant`). Anyone else gets `#oauthError=profile_not_granted` on the app link; the flow never
+falls back to a different credential. `oidc revoke` stops future enrollments only: an already
+paired device keeps its pairing until you remove it.
+
+Use the platform's browser session, never an embedded WebView: iOS
+`ASWebAuthenticationSession`, Android Custom Tabs with verified App Links, and on desktop a
+loopback listener on `http://127.0.0.1:<port>`. Google blocks sign-in inside embedded WebViews
+with `403 disallowed_useragent`, and RFC 8252 requires the external user agent for native apps.

@@ -1,0 +1,149 @@
+---
+summary: "Date and time handling across envelopes, prompts, tools, and connectors"
+read_when:
+  - You are changing how timestamps are shown to the model or users
+  - You are debugging time formatting in messages or system prompt output
+title: "Date and Time"
+---
+
+# Date & Time
+
+WednesdayAI renders timestamps to the model and users in one canonical format,
+`[Ddd YYYY-MM-DD HH:MM GMT±H]` (for example `[Wed 2026-10-07 21:47 GMT+10]`), with explicit GMT
+offsets instead of zone abbreviations. Message envelopes default to host-local time; the stamp
+on each user turn uses `agents.defaults.userTimezone`.
+Provider timestamps are preserved so tools keep their native semantics (current time is available via `session_status`).
+
+## Message envelopes (local by default)
+
+Inbound messages are wrapped with a timestamp (minute precision):
+
+```
+[Provider ... Mon 2026-01-05 16:26 GMT-8] message text
+```
+
+This envelope timestamp is **host-local by default**, regardless of the provider timezone.
+
+You can override this behavior:
+
+```json5
+{
+  agents: {
+    defaults: {
+      envelopeTimezone: "local", // "utc" | "local" | "user" | IANA timezone
+      envelopeTimestamp: "on", // "on" | "off"
+      envelopeElapsed: "on", // "on" | "off"
+    },
+  },
+}
+```
+
+- `envelopeTimezone: "utc"` uses UTC.
+- `envelopeTimezone: "local"` uses the host timezone.
+- `envelopeTimezone: "user"` uses `agents.defaults.userTimezone` (falls back to host timezone).
+- Use an explicit IANA timezone (e.g., `"America/Chicago"`) for a fixed zone.
+- `envelopeTimestamp: "off"` removes absolute timestamps from envelope headers, disables the
+  stamp on user turns, and drops the timestamp prevention line from the system prompt.
+- `envelopeElapsed: "off"` removes elapsed time suffixes (the `+2m` style).
+
+### Examples
+
+**Local (default):**
+
+```
+[WhatsApp +1555 Sun 2026-01-18 00:19 GMT-8] hello
+```
+
+**User timezone:**
+
+```
+[WhatsApp +1555 Sun 2026-01-18 00:19 GMT-6] hello
+```
+
+**Elapsed time enabled:**
+
+```
+[WhatsApp +1555 +30s Sun 2026-01-18 05:19 GMT+0] follow-up
+```
+
+## Message stamps and the raw transcript
+
+User messages are stored exactly as received. The stamp and any inbound framing are added when
+the message is sent to the model, not when it is stored:
+
+- Every user turn is stamped `[Ddd YYYY-MM-DD HH:MM GMT±H]` in `agents.defaults.userTimezone`,
+  from the time the channel reported when available.
+- Inbound framing (conversation and sender context) is composed on the current turn only. Later
+  turns render the same message byte-stable as `stamp + raw text`.
+- Replies that begin with a timestamp are stripped before display on every assistant surface
+  (streams, finals, history, channel sends), and a line in the system prompt asks the model
+  never to begin a reply with a timestamp.
+
+## System prompt: Current Date & Time
+
+If the user timezone is known, the system prompt includes a dedicated
+**Current Date & Time** section with the **time zone only** (no clock/time format)
+to keep prompt caching stable:
+
+```
+Time zone: America/Chicago
+```
+
+When the agent needs the current time, use the `session_status` tool; the status
+card includes a timestamp line.
+
+When message stamps are on (the default), the section also carries one prevention line telling
+the model that user messages may begin with a system-added timestamp and that its replies must
+not begin with one.
+
+## System event lines (local by default)
+
+Queued system events inserted into agent context are prefixed with a timestamp using the
+same timezone selection as message envelopes (default: host-local).
+
+```
+System: [2026-01-12 12:19 GMT-6] Model switched.
+```
+
+### Configure user timezone + format
+
+```json5
+{
+  agents: {
+    defaults: {
+      userTimezone: "America/Chicago",
+      timeFormat: "auto", // auto | 12 | 24
+    },
+  },
+}
+```
+
+- `userTimezone` sets the **user-local timezone** for prompt context.
+- `timeFormat` controls **12h/24h display** in the prompt. `auto` follows OS prefs.
+
+## Time format detection (auto)
+
+When `timeFormat: "auto"`, WednesdayAI inspects the OS preference (macOS/Windows)
+and falls back to locale formatting. The detected value is **cached per process**
+to avoid repeated system calls.
+
+## Tool payloads + connectors (raw provider time + normalized fields)
+
+Channel tools return **provider-native timestamps** and add normalized fields for consistency:
+
+- `timestampMs`: epoch milliseconds (UTC)
+- `timestampUtc`: ISO 8601 UTC string
+
+Raw provider fields are preserved so nothing is lost.
+
+- Slack: epoch-like strings from the API
+- Discord: UTC ISO timestamps
+- Telegram/WhatsApp: provider-specific numeric/ISO timestamps
+
+If you need local time, convert it downstream using the known timezone.
+
+## Related docs
+
+- [System Prompt](/next/developers/concepts/system-prompt)
+- [Timezones](/next/developers/concepts/timezone)
+- [Messages](/next/developers/concepts/messages)

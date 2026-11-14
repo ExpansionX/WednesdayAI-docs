@@ -1,0 +1,114 @@
+# Bifrost
+
+Bifrost is an LLM proxy that routes requests to multiple backends (Anthropic, OpenAI,
+Bedrock, Gemini, Ollama, and more) with routing rules, prompt cache optimisation,
+semantic caching, fallback chains, and cost tracking.
+
+WednesdayAI communicates with bifrost as a single provider (`bifrost`) using the
+OpenAI-compatible API. Bifrost handles all model-specific logic internally.
+
+## Prerequisites
+
+Run a bifrost instance locally or on your own infrastructure. See
+[bifrost documentation](https://github.com/maximhq/bifrost) for setup.
+
+Deploy/upgrade Bifrost first, then WednesdayAI. Cost arrives in-band as
+`extra_fields.cost`, which older Bifrost builds do not send — WednesdayAI records
+those calls as missing cost (`gateway-unpriced`) until the gateway is updated.
+
+## Setup
+
+```bash
+wednesdayai auth
+# Choose: Proxy / Gateway → Bifrost
+```
+
+Onboarding prompts for your base URL, an optional virtual key (placeholder
+`sk-bf-...`; leave blank for local trust mode), and the model aliases you want
+available (e.g. `medium`, `fast`, `anthropic/claude-sonnet-4-6`). When Bifrost is
+reachable, the alias prompt is pre-filled from `/v1/models` and each model's
+context window, max output tokens, image input, and reasoning support are
+discovered from the same endpoint. Aliases Bifrost does not describe are asked for
+explicitly: their context window, plus whether they support reasoning and accept
+images. The written config always sets `contextWindow` and `input` per model — no
+silent 128k / text-only / non-reasoning defaults.
+
+## Model aliases vs direct model IDs
+
+You can use either:
+
+- **Routing aliases** (`medium`, `fast`) — bifrost maps these to real models via routing rules
+- **Direct model IDs** (`anthropic/claude-sonnet-4-6`) — bypasses routing, uses that model directly
+
+Bifrost decides which backend and model to use. WednesdayAI does not influence routing.
+
+## Usage dashboard
+
+Cost arrives in-band as `extra_fields.cost` on `/v1/chat/completions`. This needs a Bifrost
+build with `BifrostResponseExtraFields.Cost`; older gateways record cost as missing
+(`gateway-unpriced`), and `/usage cost` counts those entries as missing cost rather
+than $0. Cache read/write tokens come from Bifrost's explicit split
+(`cached_read_tokens` / `cached_write_tokens`), and the resolved model is stored as
+`message.responseModel`. `/usage cost` reads the configured session store (JSONL
+transcripts or the sqlite/postgres store).
+
+## Caching
+
+Bifrost's prompt cache optimisation and semantic cache run on the bifrost side.
+WednesdayAI does not send `cache_control` markers to bifrost — bifrost's
+`CacheOptimizer` analyses request structure autonomously.
+
+WednesdayAI sends only `x-bf-conversation-id` (stickiness, log grouping, affinity).
+It never adds `x-bf-cache-key` on its own. Agent-turn response caching is controlled
+only by the operator's Bifrost semantic-cache config (`default_cache_key`) or an
+explicit `x-bf-cache-key` set in `models.providers.bifrost.headers`, which passes
+through unchanged.
+
+## Timeout
+
+The default 600-second timeout covers slow local models (first token can take
+5–10 minutes on cold start). Set `agents.defaults.timeoutSeconds` in `openclaw.json`
+if you need a different value.
+
+## Agent turns that stall after one turn (upstream provider tool-call drops)
+
+Symptom: an agent runs the first turn, then goes silent — it produces reasoning
+tokens and stops without a visible reply or tool execution. Raw stream from the
+upstream shows `finish_reason: "tool_calls"` (the model intended to call a tool) but
+**no `tool_calls` delta was ever streamed** — the tool-call payload is missing
+entirely. A single-space `delta.content` (`" "`) in the final chunk is a telltale
+artefact of the affected backends.
+
+### Root cause
+
+This is an **upstream provider defect, not a WednesdayAI or Bifrost bug**. When Bifrost
+(or OpenRouter behind it) load-balances a reasoning model such as Kimi K2.6 or Qwen3.6
+across heterogeneous backends, some backends — observed on **Cloudflare- and
+Parasail-hosted vLLM endpoints** (`system_fingerprint: vllm-...`) — emit
+`finish_reason=tool_calls` without the accompanying tool-call chunks. The same request
+succeeds when routed to a compliant backend (e.g. SiliconFlow).
+
+The client stack behaves correctly: `pi-ai` only materialises a `toolCall` block when a
+`tool_calls` delta is actually streamed, and the agent loop ends the turn when no tool
+calls are present. There is nothing to recover — the tool call was never sent.
+
+### Fix: exclude the offending upstreams at the routing layer
+
+Pin routing away from the non-compliant backends. This is configuration, on the
+provider side, not in WednesdayAI:
+
+- **OpenRouter console** (account-wide): add the offending providers (e.g. Cloudflare)
+  to the _Ignored Providers_ list, and/or set a preferred provider order favouring a
+  known-good backend. Keep fallbacks enabled so a rate-limited good backend fails over
+  to another good one rather than hard-failing.
+- **Bifrost routing**: if you run your own Bifrost, restrict the Kimi/Qwen tier routes
+  to compliant upstreams, or normalise the response (strip `finish_reason=tool_calls`
+  back to `stop` when no tool-call chunks arrived) so the client is not left expecting a
+  tool call that never comes.
+
+> **History:** earlier WednesdayAI builds carried a client-side "stall recovery"
+> mechanism (reasoning-only and phantom-tool-use steer retries) that attempted to
+> re-prompt the model on this symptom. It was removed in 2026-05 once the cause was
+> confirmed to be upstream: retrying the same broken backend did not help, and the steer
+> prompts polluted the transcript. The correct fix is routing-level provider exclusion.
+> See `docs/logs/2026-05-27-bifrost-tool-call-drop-diagnosis.md`.

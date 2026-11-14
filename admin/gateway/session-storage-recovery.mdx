@@ -81,7 +81,7 @@ writers) are held at dispatch for up to 10 seconds while the start completes; af
 answer retryable `RECOVERY_NOT_READY` (`storage_starting`). During shutdown they answer
 `storage_stopping` until the socket closes. Because a start failure exits the process, a serving
 gateway normally reports `ready`. See
-[Protocol](/gateway/protocol#session-storage-readiness) for the method classification.
+[Protocol](/admin/gateway/protocol#session-storage-readiness) for the method classification.
 
 ## Configuration
 
@@ -124,7 +124,7 @@ per-session `*.jsonl` transcripts are import sources only, never served or writt
 - **Receipts** live in the database (`ctx_legacy_imports`), so the import is resumable: failed
   sources retry on the next owner open, imported-but-unarchived sources finish archiving, and only
   completed sources are skipped. A failing source never fails startup.
-  `openclaw session-storage import` runs the sweep to completion on demand and retries sources past
+  `wednesdayai session-storage import` runs the sweep to completion on demand and retries sources past
   their attempt cap. When a sweep pass finishes (not aborted) with actual work, the gateway logs
   one `legacy import completed` line summarizing the pass: `sources` (sources processed),
   `failed`, `rejected` (rejected legacy lines), and `pendingArchive` (imported sources whose
@@ -146,17 +146,17 @@ Transcripts whose session key cannot be resolved are imported under
 `agent:<agentId>:legacy:<sessionId>`. The operator override map
 `<stateDir>/recovery/session-key-overrides.json` (`{ "<sessionId>": "<full sessionKey>" }`) is
 still honoured for import key resolution; add mappings there before running
-`openclaw session-storage import`.
+`wednesdayai session-storage import`.
 
 ## Backups
 
-`openclaw session-storage backup` writes a consistent SQLite copy with `VACUUM INTO` from a
+`wednesdayai session-storage backup` writes a consistent SQLite copy with `VACUUM INTO` from a
 separate read-only worker connection (appends never wait on it). Gateway backup paths stay
 under `<stateDir>/backups/`; a local-owner CLI can use another `--out` path. The backup
 connection waits up to 5 seconds for a lock, so two backups, or a backup and the pre-import
 snapshot, no longer fail immediately with `database is locked` when they open a cold WAL database
 together.
-`openclaw session-storage restore <file>` replaces the database offline — stop the gateway
+`wednesdayai session-storage restore <file>` replaces the database offline — stop the gateway
 first; restore refuses while a gateway owns storage. The source is recovered through SQLite
 (committed `-wal` frames included) from a private temporary copy, never from the backup file
 itself, into a staged `0600` file that is integrity-checked and fsynced before anything
@@ -171,7 +171,7 @@ rename. A failed restore never deletes a pre-restore archive — the error names
 kept — while a failure after the rename leaves the restored database published. For Postgres
 use `pg_dump` / managed backups.
 
-`openclaw session-storage validate` also runs SQLite integrity and context checks on a separate
+`wednesdayai session-storage validate` also runs SQLite integrity and context checks on a separate
 read-only worker connection, not the gateway event loop or live writer's queue. With WAL enabled,
 the checks share one consistent read snapshot. Without WAL, each statement releases its read
 lock before the next scan so validation does not hold up owner commits for the entire pass.
@@ -258,8 +258,8 @@ terminates the process, since serving without ownership could admit a second wri
 - **`session storage is owned by...`:** another process owns the database. For a `cli` holder,
   retry when it finishes; for a gateway on another host or config, run the command where that
   gateway runs so it can proxy over RPC.
-- **Legacy import stuck or a source failing:** `openclaw session-storage status` reports per-state
-  counts; `openclaw session-storage import` retries failed sources immediately. Repeated failures
+- **Legacy import stuck or a source failing:** `wednesdayai session-storage status` reports per-state
+  counts; `wednesdayai session-storage import` retries failed sources immediately. Repeated failures
   name the source path and cause in the gateway log — never edit transcripts in place while the
   gateway runs.
 - **`session storage unavailable: ... flagged for SQL reconciliation` (`binding_needs_reconcile`):**

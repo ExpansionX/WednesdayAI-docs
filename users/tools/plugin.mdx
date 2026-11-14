@@ -39,7 +39,7 @@ Fast path:
 1. See what’s already loaded:
 
 ```bash
-openclaw plugins list
+wednesdayai plugins list
 ```
 
 2. Install an official plugin (example: Voice Call):
@@ -56,30 +56,32 @@ WhatsApp is published as the first dependency-bearing first-party npm plugin. `w
 
 3. Restart the Gateway, then configure under `plugins.entries.<id>.config`.
 
-See [Voice Call](/plugins/voice-call) for a concrete example plugin.
-Looking for third-party listings? See [Community plugins](/plugins/community).
+See [Voice Call](/developers/plugins/voice-call) for a concrete example plugin.
+Looking for third-party listings? See [Community plugins](/developers/plugins/community).
 
 ## Available plugins (official)
 
 - Microsoft Teams is plugin-only as of 2026.1.15; install `@openclaw/msteams` if you use Teams.
 - Memory (Core) — bundled memory search plugin (enabled by default via `plugins.slots.memory`)
 - Memory (LanceDB) — bundled long-term memory plugin (auto-recall/capture; set `plugins.slots.memory = "memory-lancedb"`)
-- [Voice Call](/plugins/voice-call) — `@openclaw/voice-call`
-- [Zalo Personal](/plugins/zalouser) — `@openclaw/zalouser`
-- [Matrix](/channels/matrix) — `@openclaw/matrix`
-- [Nostr](/channels/nostr) — `@openclaw/nostr`
-- [Zalo](/channels/zalo) — `@openclaw/zalo`
-- [Microsoft Teams](/channels/msteams) — `@openclaw/msteams`
+- [Voice Call](/developers/plugins/voice-call) — `@openclaw/voice-call`
+- [Zalo Personal](/developers/plugins/zalouser) — `@openclaw/zalouser`
+- [Matrix](/admin/channels/matrix) — `@openclaw/matrix`
+- [Nostr](/admin/channels/nostr) — `@openclaw/nostr`
+- [Zalo](/admin/channels/zalo) — `@openclaw/zalo`
+- [Microsoft Teams](/admin/channels/msteams) — `@openclaw/msteams`
 - Google Antigravity OAuth (provider auth) — bundled as `google-antigravity-auth` (disabled by default)
 - Gemini CLI OAuth (provider auth) — bundled as `google-gemini-cli-auth` (disabled by default)
 - Qwen OAuth (provider auth) — bundled as `qwen-portal-auth` (disabled by default)
 - Copilot Proxy (provider auth) — local VS Code Copilot Proxy bridge; distinct from built-in `github-copilot` device login (bundled, disabled by default)
-- [Dream Cycle](/plugins/dream-cycle) — background consolidation engine over the task pipeline; ships in `extensions/dream-cycle`, install from path (disabled by default)
-- [Learning Core](/plugins/learning-core) — skill-proposal pipeline; ships in `extensions/learning-core`, install from path (disabled by default)
+- [Dream Cycle](/developers/plugins/dream-cycle) — background consolidation engine over the task pipeline; ships in `extensions/dream-cycle`, install from path (disabled by default)
+- [Learning Core](/developers/plugins/learning-core) — skill-proposal pipeline; ships in `extensions/learning-core`, install from path (disabled by default)
+- [MCP Client](/developers/plugins/mcp-client) — operator-configured MCP servers (stdio, Streamable HTTP) as policy-checked agent tools with a per-call audit table; bundled as `mcp-client` (disabled by default)
+- [Orca](/developers/plugins/orca) — Orca agent sessions in Control UI v2 and the web client; ships in `extensions/orca` (bundled, disabled by default)
 
 WednesdayAI plugins are **TypeScript modules** loaded at runtime via jiti. **Config
 validation does not execute plugin code**; it uses the plugin manifest and JSON
-Schema instead. See [Plugin manifest](/plugins/manifest).
+Schema instead. See [Plugin manifest](/developers/plugins/manifest).
 
 Plugins can register:
 
@@ -95,7 +97,7 @@ Plugins can register:
 - **Provider runtime hooks** for provider-specific request shaping
 
 Plugins run **in‑process** with the Gateway, so treat them as trusted code.
-Tool authoring guide: [Plugin agent tools](/plugins/agent-tools).
+Tool authoring guide: [Plugin agent tools](/developers/plugins/agent-tools).
 
 ## Runtime and turn identity
 
@@ -141,7 +143,7 @@ export default plugin;
 - `channelConversationId` for the transport conversation/thread
 - `providerConversationId` for the opaque model/provider cache partition
 - `laneId` — the opaque `lane-<hash>` digest, present only for an allowed multi-lane run;
-  `undefined` for single-user and denied resolutions (see [Workspace Lanes](/concepts/workspace-lanes))
+  `undefined` for single-user and denied resolutions (see [Workspace Lanes](/developers/concepts/workspace-lanes))
 - trusted sender fields such as `senderId`, `senderName`, `senderUsername`,
   `senderE164`, `messageProvider`, `canonicalIdentity`, and `senderIsOwner`
 - `identitySource` — provenance of the resolved identity: `"sender"` (resolved
@@ -201,7 +203,7 @@ import type {
   PluginHookChannelContext,
   PluginHookChannelSenderContext,
   PluginHookChannelChatContext,
-} from "openclaw/plugin-sdk";
+} from "wednesdayai/plugin-sdk";
 ```
 
 `PluginHookChannelContext` is the union of `PluginHookChannelSenderContext`
@@ -237,7 +239,7 @@ context.workspaceLane;
 These fields are additive. Existing plugins should treat them as optional and keep their current
 behavior when they are absent. Use `workspaceLane.effectiveWorkspaceDir` for lane-local user state
 and `workspaceLane.personaWorkspaceDir` only for shared persona files. See
-[Workspace Lanes](/concepts/workspace-lanes).
+[Workspace Lanes](/developers/concepts/workspace-lanes).
 
 For per-lane storage partitioning, use `ctx.runtimeIdentity.laneId` rather than the raw
 `context.laneId`. `runtimeIdentity.laneId` is `undefined` for single-user and denied resolutions
@@ -261,7 +263,7 @@ Supported provider-runtime hooks:
   generic params are applied to `streamFn`.
 - `wrapStreamFn(ctx)` returns a stream wrapper after the existing core provider
   wrappers are installed.
-- Transport policy hook types are reserved in the SDK bridge for OpenClaw
+- Transport policy hook types are reserved in the SDK bridge for WednesdayAI
   compatibility, but they are not yet delivered to the HTTP/WebSocket transport
   path. Provider plugins should not rely on transport-policy effects until the
   matching transport wiring is documented.
@@ -277,7 +279,7 @@ Plugins can access selected core helpers via `api.runtime`. For telephony TTS:
 
 ```ts
 const result = await api.runtime.tts.textToSpeechTelephony({
-  text: "Hello from OpenClaw",
+  text: "Hello from WednesdayAI",
   cfg: api.config,
 });
 ```
@@ -301,13 +303,13 @@ const { text } = await api.runtime.stt.transcribeAudioFile({
 
 Notes:
 
-- Uses the media-understanding audio configuration (`tools.media.audio`) and provider fallback order; providers are plugin extensions and must be enabled (`plugins.entries.<vendor>.enabled: true`) or a local CLI (Whisper) must be installed. A config-provided OpenAI-compatible proxy (`models.providers.<id>` with `api: "openai-completions"` or `"openai-responses"`) needs no plugin extension, but voice notes are never auto-detected on it — name a speech-to-text model in `tools.media.audio.models` (see [Config-provided proxy bindings](/nodes/media-understanding#config-provided-proxy-bindings-openai-compatible)).
+- Uses the media-understanding audio configuration (`tools.media.audio`) and provider fallback order; providers are plugin extensions and must be enabled (`plugins.entries.<vendor>.enabled: true`) or a local CLI (Whisper) must be installed. A config-provided OpenAI-compatible proxy (`models.providers.<id>` with `api: "openai-completions"` or `"openai-responses"`) needs no plugin extension, but voice notes are never auto-detected on it — name a speech-to-text model in `tools.media.audio.models` (see [Config-provided proxy bindings](/users/nodes/media-understanding#config-provided-proxy-bindings-openai-compatible)).
 - Returns `{ text: undefined }` when no transcription output is produced (for example skipped/unsupported input, or no provider/CLI available).
 
 ### Identity helpers
 
 Bundled extensions reach the identity core through `api.runtime.identity` — the same link
-operation the gateway's `identity.*` RPCs expose (flows in [Identities](/gateway/identity)).
+operation the gateway's `identity.*` RPCs expose (flows in [Identities](/admin/gateway/identity)).
 Reads are resolved against the live config on every call:
 
 - `api.runtime.identity.resolveCanonicalIdentity({ channel?, senderId? })` returns the
@@ -321,11 +323,29 @@ Reads are resolved against the live config on every call:
   person and returns `{ person, value, changed }`. It refuses `device:` values
   (`identity_link_invalid`; devices have their own operator path, and plugins issue an enrollment
   instead), and a value another person already holds throws `identity_link_conflict`.
-- `await api.runtime.identity.issueUserClientEnrollment({ person })` mints a web-client device
-  bootstrap for an existing person and returns `{ bootstrapToken, expiresAtMs }`; an unknown person
-  throws `identity_unknown`. Deliver the token to the browser as a `#setup=` fragment exactly the
-  way the identity-oidc sign-in flow does: the browser redeems it on first connect and is paired
-  and linked in one step (see [Identities](/gateway/identity#proofs-of-control)).
+- `await api.runtime.identity.issueEnrollment({ person, profile, codeChallenge? })` mints a device
+  bootstrap for an existing person and returns `{ bootstrapToken, expiresAtMs }`. `profile` is
+  `"user-client"` (the web client) or `"wednesdayai-glass-node"` (WednesdayAI Glass); any other value
+  throws. An unknown person throws `identity_unknown`. `codeChallenge` is an optional RFC 7636 S256
+  challenge (43 base64url characters); when set, the device must present the matching verifier as
+  `auth.bootstrapCodeVerifier` to redeem the token (see
+  [Gateway protocol](/admin/gateway/protocol#client-identity)). Deliver the token as a `#setup=`
+  fragment exactly the way the identity-oidc sign-in flow does: the device redeems it on first
+  connect and is paired and linked in one step (see
+  [Identities](/admin/gateway/identity#proofs-of-control)).
+- `await api.runtime.identity.issueUserClientEnrollment({ person })` is deprecated and will be
+  removed after one release; it is `issueEnrollment({ person, profile: "user-client" })`.
+
+### Phone alerts
+
+`await api.runtime.push.alertPerson({ person, kind: "inbox", collapseKey, previewText? })` sends
+one APNs alert to each iOS device linked to `person` (a `session.identityLinks` key with a
+`device:<id>` value) and returns `{ sent }`, the number of devices that accepted it. An unknown
+person, missing APNs credentials, or no registered device returns `{ sent: 0 }`. The kind is
+always `inbox`; plugins cannot send reply or approval alerts. Alerts sharing a `collapseKey`
+replace each other on the device and are rate-limited to one per device every 30 seconds.
+`previewText` is shown only on devices whose owner turned on message previews; other devices see
+"New inbox item". See [iOS alerts](/admin/platforms/ios#alerts).
 
 ### Task pipeline and learning workspace
 
@@ -457,7 +477,7 @@ install step; enable them explicitly after install.
 
 Bundled install records are zero-copy runtime references after reconciliation.
 If a previous install copied a bundled plugin into `~/.openclaw/extensions/<id>`,
-OpenClaw can rewrite that record to `source: "bundled"` and remove the stale
+WednesdayAI can rewrite that record to `source: "bundled"` and remove the stale
 default copy when it is safe to do so. A valid bundled record still participates
 in config validation even if the plugin manifest registry cache was built before
 the bundled source was rediscovered.
@@ -471,21 +491,28 @@ Hardening notes:
   - path ownership is suspicious for non-bundled plugins (POSIX owner is neither current uid nor root).
 - Loaded non-bundled plugins without install/load-path provenance emit a warning so you can pin trust (`plugins.allow`) or install tracking (`plugins.installs`).
 
-Each plugin must include a `openclaw.plugin.json` file in its root. If a path
+Each plugin must include a `wednesdayai.plugin.json` file in its root. If a path
 points at a file, the plugin root is the file's directory and must contain the
 manifest.
+
+The legacy `openclaw.plugin.json` filename still loads (ADR 2057). When a plugin
+root contains both files, `wednesdayai.plugin.json` wins and the loader records an
+info diagnostic naming both files. `wednesdayai doctor` reports installed plugins
+that still ship only the legacy filename as information, and warns when a plugin
+dir holds both manifests with different plugin ids. See
+[Plugin manifest](/developers/plugins/manifest).
 
 If multiple plugins resolve to the same id, the first match in the order above
 wins and lower-precedence copies are ignored.
 
 ### Package packs
 
-A plugin directory may include a `package.json` with `openclaw.extensions`:
+A plugin directory may include a `package.json` with `wednesdayai.extensions`:
 
 ```json
 {
   "name": "my-pack",
-  "openclaw": {
+  "wednesdayai": {
     "extensions": ["./src/safety.ts", "./src/tools.ts"]
   }
 }
@@ -494,14 +521,16 @@ A plugin directory may include a `package.json` with `openclaw.extensions`:
 Each entry becomes a plugin. If the pack lists multiple extensions, the plugin id
 becomes `name/<fileBase>`.
 
+The legacy `openclaw` manifest key and the legacy `openclaw/plugin-sdk` import specifier still load (ADR 2057).
+
 If your plugin imports npm deps, install them in that directory so
 `node_modules` is available (`npm install` / `pnpm install`).
 
-Security guardrail: every `openclaw.extensions` entry must stay inside the plugin
+Security guardrail: every `wednesdayai.extensions` entry must stay inside the plugin
 directory after symlink resolution. Entries that escape the package directory are
 rejected.
 
-Security note: `openclaw plugins install` installs plugin dependencies with
+Security note: `wednesdayai plugins install` installs plugin dependencies with
 `npm install --ignore-scripts` (no lifecycle scripts). Keep plugin dependency
 trees "pure JS/TS" and avoid packages that require `postinstall` builds.
 
@@ -551,15 +580,15 @@ this for you; git fetching stays disabled by default.
 
 ### Channel catalog metadata
 
-Channel plugins can advertise onboarding metadata via `openclaw.channel` and
-install hints via `openclaw.install`. This keeps the core catalog data-free.
+Channel plugins can advertise onboarding metadata via `wednesdayai.channel` and
+install hints via `wednesdayai.install`. This keeps the core catalog data-free.
 
 Example:
 
 ```json
 {
   "name": "@openclaw/nextcloud-talk",
-  "openclaw": {
+  "wednesdayai": {
     "extensions": ["./index.ts"],
     "channel": {
       "id": "nextcloud-talk",
@@ -589,7 +618,7 @@ registry export). Drop a JSON file at one of:
 
 Or point `OPENCLAW_PLUGIN_CATALOG_PATHS` (or `OPENCLAW_MPM_CATALOG_PATHS`) at
 one or more JSON files (comma/semicolon/`PATH`-delimited). Each file should
-contain `{ "entries": [ { "name": "@scope/pkg", "openclaw": { "channel": {...}, "install": {...} } } ] }`.
+contain `{ "entries": [ { "name": "@scope/pkg", "wednesdayai": { "channel": {...}, "install": {...} } } ] }`.
 
 ## Plugin IDs
 
@@ -598,7 +627,7 @@ Default plugin ids:
 - Package packs: `package.json` `name`
 - Standalone file: file base name (`~/.../voice-call.ts` → `voice-call`)
 
-If a plugin exports `id`, OpenClaw uses it but warns when it doesn’t match the
+If a plugin exports `id`, WednesdayAI uses it but warns when it doesn’t match the
 configured id.
 
 ## Config
@@ -659,8 +688,9 @@ Validation rules:
   manifest's `configSchema`.
 - Unknown `channels.<id>` keys are **errors** unless a plugin manifest declares
   the channel id.
-- Plugin config is validated using the JSON Schema embedded in
-  `openclaw.plugin.json` (`configSchema`).
+- Plugin config is validated using the JSON Schema embedded in the plugin manifest
+  (`wednesdayai.plugin.json`; the legacy `openclaw.plugin.json` still loads)
+  (`configSchema`).
 - If a plugin is disabled, its config is preserved and a **warning** is emitted.
 
 ## Plugin slots (exclusive categories)
@@ -673,13 +703,16 @@ Some plugin categories are **exclusive** (only one active at a time). Use
   plugins: {
     slots: {
       memory: "memory-core", // or "none" to disable memory plugins
+      // contextEngine: "my-context-engine", // or "none" to disable context-engine plugins
     },
   },
 }
 ```
 
 If multiple plugins declare `kind: "memory"`, only the selected one loads. Others
-are disabled with diagnostics.
+are disabled with diagnostics. The same exclusivity applies to `kind:
+"context-engine"` plugins through `plugins.slots.contextEngine` (no default:
+unset means the first loaded context-engine plugin wins).
 
 ## Control UI (schema + labels)
 
@@ -741,8 +774,8 @@ If stored integrity metadata changes between updates, WednesdayAI warns and asks
 
 A bare plugin id resolves against the plugin catalog. Catalog-pinned installs are
 compatibility-checked and provenance-verified before anything is installed; see
-[Verified catalog installs](/cli/plugins#verified-catalog-installs) and
-[Compatibility](/plugins/compatibility).
+[Verified catalog installs](/users/cli/plugins#verified-catalog-installs) and
+[Compatibility](/developers/plugins/compatibility).
 
 Plugins may also register their own top-level commands (example: `wednesdayai voicecall`).
 
@@ -762,10 +795,22 @@ Dependency-free bundled plugins may run directly from the global package copy wh
 healthy global bundled plugin should not produce `PLUGIN_DEPS_MISSING` diagnostics just because it
 does not have a managed install record.
 
+A managed copy is also stamped with the WednesdayAI build it came from (`dist/build-info.json`,
+written by `wednesdayai plugins install <id>` and the release rail). When such a copy shadows a
+bundled plugin and its stamp is missing or from a different commit than the installed core, core
+reports a warn `PLUGIN_BUILD_SKEW` diagnostic instead of loading the older copy silently: the
+gateway logs it at startup, `wednesdayai plugins doctor` lists it under `Diagnostics:` with a
+`→ remediation` line, and `wednesdayai doctor` shows a "Plugin build skew" note. Core running
+from TypeScript source has no reference build and never reports the warning; a built checkout
+compares against its own `dist/build-info.json`. Publish plugins from the
+same commit as core — `pnpm release:local-install --publish-dev` is the sanctioned local dev
+path (see [Release](https://docs.wednesdayai.dev/developers/contributing/release)).
+
 ## Kernel contract compatibility
 
-Plugins can declare the kernel contract versions they need in `openclaw.plugin.json`
-(`contracts`). When a plugin needs newer kernel contracts than this host provides:
+Plugins can declare the kernel contract versions they need in `wednesdayai.plugin.json`
+(legacy `openclaw.plugin.json` still loads) (`contracts`). When a plugin needs newer
+kernel contracts than this host provides:
 
 - **Install refuses**: `wednesdayai plugins install` fails with code `version_incompatible` and a
   message like `plugin "<id>" is not compatible with this host: <reason>. Upgrade WednesdayAI and
@@ -783,7 +828,7 @@ retry.` Nothing is installed. A malformed `contracts` field is rejected the same
   version string is not.
 
 Details, the full contract table and the versioning rules: [Versioned kernel
-contracts](/plugins/contracts).
+contracts](/developers/plugins/contracts).
 
 ## Plugin API (overview)
 
@@ -795,7 +840,7 @@ Plugins export either:
 ## Background task passes
 
 Plugins can contribute governed background work to the Gateway
-[task pipeline](/concepts/tasks) through two API methods. Core already registers
+[task pipeline](/developers/concepts/tasks) through two API methods. Core already registers
 `cron-run` and `heartbeat-tick` at boot. Enqueue those ids only when you mean to
 drive the core passes; do not put heartbeat work into `cron_jobs`.
 
@@ -835,10 +880,10 @@ Rules that matter:
 - **Diagnostics:** emit with `taskDiagnostic` / `dreamDiagnostic` from `wednesdayai/plugin-sdk`
   (or `openclaw/plugin-sdk`). Builders are input-shaped (no `ts`/`seq`). Do not cast ad-hoc
   objects. Use live field names `passId` and `attempts`. OTel export:
-  [Task and dream spans](/diagnostics/otel-langfuse#task-and-dream-spans). Recovery ceiling
-  behavior (age stall / attempt exhaust → `dlq`): [Task pipeline](/concepts/tasks#recovery-and-retention).
+  [Task and dream spans](/admin/diagnostics/otel-langfuse#task-and-dream-spans). Recovery ceiling
+  behavior (age stall / attempt exhaust → `dlq`): [Task pipeline](/developers/concepts/tasks#recovery-and-retention).
   Treat `updatedAt` / `startedAt` on a run record as ISO-Z. Do not `Date.parse` a raw
-  SQLite space-format stamp. See [Timestamp conventions](/concepts/tasks#timestamp-conventions).
+  SQLite space-format stamp. See [Timestamp conventions](/developers/concepts/tasks#timestamp-conventions).
 
 ### Successors committed with the completion
 
@@ -876,7 +921,7 @@ run: async (ctx) => {
 
 Record what a run did with the measurement helpers from `wednesdayai/plugin-sdk`. The dispatcher
 commits them with the run's outcome as `pass.metrics` and `pass.phase` rows, which
-`tasks.runEvents` and the [Dreams view](/web/dreams) read:
+`tasks.runEvents` and the [Dreams view](/admin/web/dreams) read:
 
 - `withPassPhase(ctx, name, fn)` times one named phase of the run.
 - `recordPassMetrics(ctx, input)` records the run's metrics: `costSource`, tokens, `costUsd`,
@@ -885,12 +930,12 @@ commits them with the run's outcome as `pass.metrics` and `pass.phase` rows, whi
   `costUsd`) into those metrics fields, so a pass never prices calls itself.
 
 Pass `ctx.signal` to `api.runtime.analysis.run(...)` so a preempted run cancels its model call.
-Details and rules: [Recording pass measurement](/concepts/tasks#recording-pass-measurement).
+Details and rules: [Recording pass measurement](/developers/concepts/tasks#recording-pass-measurement).
 
 The SDK exports the relevant types (`TaskPass`, `TaskPassResult`, `TaskPassSuccessorInput`,
 `PassContext`, `PassStorage`, `RetryPolicy`, `PassMetricsInput`, `PassMetricsV1`, `PassPhaseV1`,
 `PassCostSource`, `taskDiagnostic`, `dreamDiagnostic`, `GuardedFetchOptions`,
-`GuardedFetchResult`) from `wednesdayai/plugin-sdk`. The [Dream Cycle](/plugins/dream-cycle) plugin is the
+`GuardedFetchResult`) from `wednesdayai/plugin-sdk`. The [Dream Cycle](/developers/plugins/dream-cycle) plugin is the
 reference implementation, driven by the `agent_idle` and `task_outcome` hooks (see the hook
 table below).
 
@@ -991,8 +1036,8 @@ Notes:
 
 - Register hooks explicitly via `api.registerHook(...)`.
 - Hook eligibility rules still apply (OS/bins/env/config requirements).
-- Plugin-managed hooks show up in `openclaw hooks list` with `plugin:<id>`.
-- You cannot enable/disable plugin-managed hooks via `openclaw hooks`; enable/disable the plugin instead.
+- Plugin-managed hooks show up in `wednesdayai hooks list` with `plugin:<id>`.
+- You cannot enable/disable plugin-managed hooks via `wednesdayai hooks`; enable/disable the plugin instead.
 
 ### Typed hook registration (api.on)
 
@@ -1022,7 +1067,7 @@ api.on<K extends PluginHookName>(
 
 **`opts.priority`** controls execution order when multiple hooks are registered for the same name. Higher numbers run first. The default is `0`. Use a higher priority when your hook must run before others (for example, a security hook that can block a tool call should use a priority of `100` while a logging hook can stay at `0`).
 
-**`opts.timeoutMs`** overrides the timeout for that registration only. Every hook defaults to 30 seconds. Resolution order: registration `timeoutMs`, then operator `plugins.hookTimeouts.<name>` (or `plugins.hookTimeouts.default`), then the plugin manifest `hookTimeouts` map, then 30 seconds. A timed-out handler is killed and logged; it does not hang the gateway. If you call `api.runtime.analysis.run()` from a hook, budget the hook timeout above the analysis timeout. See [Plugin analysis runtime](/plugins/analysis-runtime).
+**`opts.timeoutMs`** overrides the timeout for that registration only. Every hook defaults to 30 seconds. Resolution order: registration `timeoutMs`, then operator `plugins.hookTimeouts.<name>` (or `plugins.hookTimeouts.default`), then the plugin manifest `hookTimeouts` map, then 30 seconds. A timed-out handler is killed and logged; it does not hang the gateway. If you call `api.runtime.analysis.run()` from a hook, budget the hook timeout above the analysis timeout. See [Plugin analysis runtime](/developers/plugins/analysis-runtime).
 
 ```ts
 // High-priority hook that can block tool calls
@@ -1048,54 +1093,54 @@ api.on(
 
 **`api.on` vs `api.registerHook`.** Use `api.on` when you want compile-time type checking on the event and context shapes — this is the preferred choice for new code. Use `api.registerHook` when you are subscribing to an event key from the HOOK.md internal hook system (e.g. `command:new`, `message:received`) that is not in `PluginHookName`, or when you need to pass a pre-built `HookEntry` object.
 
-Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a `PLUGIN_HOOK_NOT_DISPATCHED` warning — an upstream openclaw hook name is reported as such with its disposition and replacement hook, and the plugin then shows as `degraded` in `wednesdayai plugins list` (see the [hook parity map](/plugins/hook-parity)) — otherwise the warning names the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/plugins/agent-tools)). Hook-name warnings surface as `PLUGIN_HOOK_NOT_DISPATCHED` and the other registration warnings as `PLUGIN_REGISTER_ERROR`, in `wednesdayai plugins doctor`, `wednesdayai plugins status`, and the gateway startup report; the plugin keeps loading.
+Hook names are validated at registration: an `api.on` name that is not a known hook name is ignored with a `PLUGIN_HOOK_NOT_DISPATCHED` warning — an upstream openclaw hook name is reported as such with its disposition and replacement hook, and the plugin then shows as `degraded` in `wednesdayai plugins list` (see the [hook parity map](/developers/plugins/hook-parity)) — otherwise the warning names the nearest valid name, and a `registerHook` event that the typed hook runner dispatches (or that no internal emitter produces) warns too. The same validation covers the rest of the registration API: a `registerHook`, gateway-method, HTTP-route, or service registration with an empty name/id is dropped with a `PLUGIN_REGISTER_ERROR` warning (`... registration missing name` / `... registration missing id`), and tool factories that return a tool outside their declared names — or declare no names and return nothing the run allows — warn once per plugin and outcome (see [Plugin agent tools](/developers/plugins/agent-tools)). Hook-name warnings surface as `PLUGIN_HOOK_NOT_DISPATCHED` and the other registration warnings as `PLUGIN_REGISTER_ERROR`, in `wednesdayai plugins doctor`, `wednesdayai plugins status`, and the gateway startup report; the plugin keeps loading.
 
 Available hook names and their event/context types are defined in `PluginHookHandlerMap` in the plugin SDK types:
 
-| Hook name                  | Event type                              | Returnable result                                                                        |
-| -------------------------- | --------------------------------------- | ---------------------------------------------------------------------------------------- |
-| `before_model_resolve`     | `PluginHookBeforeModelResolveEvent`     | `{ modelOverride?, providerOverride? }`                                                  |
-| `before_prompt_build`      | `PluginHookBeforePromptBuildEvent`      | `{ systemPrompt?, prependContext? }`                                                     |
-| `before_context_send`      | `PluginHookBeforeContextSendEvent`      | `{ messages? }`                                                                          |
-| `before_agent_start`       | `PluginHookBeforeAgentStartEvent`       | model + prompt build result                                                              |
-| `llm_input`                | `PluginHookLlmInputEvent`               | void                                                                                     |
-| `llm_output`               | `PluginHookLlmOutputEvent`              | void                                                                                     |
-| `model_call_ended`         | `PluginHookModelCallEndedEvent`         | void; handlers may update `usage`                                                        |
-| `agent_end`                | `PluginHookAgentEndEvent`               | void                                                                                     |
-| `before_compaction`        | `PluginHookBeforeCompactionEvent`       | void                                                                                     |
-| `after_compaction`         | `PluginHookAfterCompactionEvent`        | void                                                                                     |
-| `before_reset`             | `PluginHookBeforeResetEvent`            | void                                                                                     |
-| `message_received`         | `PluginHookMessageReceivedEvent`        | void                                                                                     |
-| `message_sending`          | `PluginHookMessageSendingEvent`         | `{ content?, cancel? }`                                                                  |
-| `message_sent`             | `PluginHookMessageSentEvent`            | void                                                                                     |
-| `before_tool_call`         | `PluginHookBeforeToolCallEvent`         | `{ params?, block?, blockReason? }`                                                      |
-| `after_tool_call`          | `PluginHookAfterToolCallEvent`          | void                                                                                     |
-| `tool_result_persist`      | `PluginHookToolResultPersistEvent`      | `{ message? }`                                                                           |
-| `before_message_write`     | `PluginHookBeforeMessageWriteEvent`     | `{ block?, message? }`                                                                   |
-| `session_start`            | `PluginHookSessionStartEvent`           | void                                                                                     |
-| `session_end`              | `PluginHookSessionEndEvent`             | void                                                                                     |
-| `subagent_spawning`        | `PluginHookSubagentSpawningEvent`       | `{ status, threadBindingReady? }`                                                        |
-| `subagent_delivery_target` | `PluginHookSubagentDeliveryTargetEvent` | `{ origin? }`                                                                            |
-| `subagent_spawned`         | `PluginHookSubagentSpawnedEvent`        | void                                                                                     |
-| `subagent_ended`           | `PluginHookSubagentEndedEvent`          | void                                                                                     |
-| `gateway_start`            | `PluginHookGatewayStartEvent`           | void                                                                                     |
-| `gateway_stop`             | `PluginHookGatewayStopEvent`            | void                                                                                     |
-| `transform_llm_input`      | `PluginHookTransformLlmInputEvent`      | `{ messages }`                                                                           |
-| `transform_llm_output`     | `PluginHookTransformLlmOutputEvent`     | `{ assistantTexts? }`                                                                    |
-| `storage.afterAppend`      | `PluginHookStorageAfterAppendEvent`     | void                                                                                     |
-| `context.collect`          | `PluginHookContextCollectEvent`         | `PromptContribution` or void                                                             |
-| `context.project`          | `PluginHookContextProjectEvent`         | `{ messages?, projection?, contribution?, failedPluginIds? }` or void                    |
-| `context.prune`            | `PluginHookContextPruneEvent`           | `{ messages?, dropped?, contribution?, compactionHandled?, freezeToolResults? }` or void |
-| `compaction.plan`          | `PluginHookCompactionPlanEvent`         | `{ plan?, messages?, contribution? }` or void                                            |
-| `agent_idle`               | `PluginHookAgentIdleEvent`              | void                                                                                     |
-| `task_outcome`             | `PluginHookTaskOutcomeEvent`            | void                                                                                     |
+| Hook name                  | Event type                              | Returnable result                                                                                 |
+| -------------------------- | --------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `before_model_resolve`     | `PluginHookBeforeModelResolveEvent`     | `{ modelOverride?, providerOverride? }`                                                           |
+| `before_prompt_build`      | `PluginHookBeforePromptBuildEvent`      | `{ systemPrompt?, prependSystemContext?, appendSystemContext?, appendContext?, prependContext? }` |
+| `before_context_send`      | `PluginHookBeforeContextSendEvent`      | `{ messages? }`                                                                                   |
+| `before_agent_start`       | `PluginHookBeforeAgentStartEvent`       | model + prompt build result (same additive fields as `before_prompt_build`)                       |
+| `llm_input`                | `PluginHookLlmInputEvent`               | void                                                                                              |
+| `llm_output`               | `PluginHookLlmOutputEvent`              | void                                                                                              |
+| `model_call_ended`         | `PluginHookModelCallEndedEvent`         | void; handlers may update `usage`                                                                 |
+| `agent_end`                | `PluginHookAgentEndEvent`               | void                                                                                              |
+| `before_compaction`        | `PluginHookBeforeCompactionEvent`       | void                                                                                              |
+| `after_compaction`         | `PluginHookAfterCompactionEvent`        | void                                                                                              |
+| `before_reset`             | `PluginHookBeforeResetEvent`            | void                                                                                              |
+| `message_received`         | `PluginHookMessageReceivedEvent`        | void                                                                                              |
+| `message_sending`          | `PluginHookMessageSendingEvent`         | `{ content?, cancel? }`                                                                           |
+| `message_sent`             | `PluginHookMessageSentEvent`            | void                                                                                              |
+| `before_tool_call`         | `PluginHookBeforeToolCallEvent`         | `{ params?, block?, blockReason? }`                                                               |
+| `after_tool_call`          | `PluginHookAfterToolCallEvent`          | void                                                                                              |
+| `tool_result_persist`      | `PluginHookToolResultPersistEvent`      | `{ message? }`                                                                                    |
+| `before_message_write`     | `PluginHookBeforeMessageWriteEvent`     | `{ block?, message? }`                                                                            |
+| `session_start`            | `PluginHookSessionStartEvent`           | void                                                                                              |
+| `session_end`              | `PluginHookSessionEndEvent`             | void                                                                                              |
+| `subagent_spawning`        | `PluginHookSubagentSpawningEvent`       | `{ status, threadBindingReady? }`                                                                 |
+| `subagent_delivery_target` | `PluginHookSubagentDeliveryTargetEvent` | `{ origin? }`                                                                                     |
+| `subagent_spawned`         | `PluginHookSubagentSpawnedEvent`        | void                                                                                              |
+| `subagent_ended`           | `PluginHookSubagentEndedEvent`          | void                                                                                              |
+| `gateway_start`            | `PluginHookGatewayStartEvent`           | void                                                                                              |
+| `gateway_stop`             | `PluginHookGatewayStopEvent`            | void                                                                                              |
+| `transform_llm_input`      | `PluginHookTransformLlmInputEvent`      | `{ messages }`                                                                                    |
+| `transform_llm_output`     | `PluginHookTransformLlmOutputEvent`     | `{ assistantTexts? }`                                                                             |
+| `storage.afterAppend`      | `PluginHookStorageAfterAppendEvent`     | void                                                                                              |
+| `context.collect`          | `PluginHookContextCollectEvent`         | `PromptContribution` or void                                                                      |
+| `context.project`          | `PluginHookContextProjectEvent`         | `{ messages?, projection?, contribution?, failedPluginIds? }` or void                             |
+| `context.prune`            | `PluginHookContextPruneEvent`           | `{ messages?, dropped?, contribution?, compactionHandled?, freezeToolResults? }` or void          |
+| `compaction.plan`          | `PluginHookCompactionPlanEvent`         | `{ plan?, messages?, contribution? }` or void                                                     |
+| `agent_idle`               | `PluginHookAgentIdleEvent`              | void                                                                                              |
+| `task_outcome`             | `PluginHookTaskOutcomeEvent`            | void                                                                                              |
 
 `agent_idle` fires from the core idle monitor (`tasks.idle` / `tasks.schedule` config) when an
 agent crosses the idle threshold or a schedule window opens; the event carries
 `{ agentId, idleSinceMs, idleForMs, trigger: "idle" | "schedule" }`. `task_outcome` fires from the
 task dispatcher's completion paths and the subagent completion path with
 `{ taskRunId?, agentId?, source: "task" | "subagent" | "session", outcome: "completed" | "failed" | "preempted" | "cancelled", quality?, meta? }`.
-The [Dream Cycle](/plugins/dream-cycle) plugin is the reference consumer of both.
+The [Dream Cycle](/developers/plugins/dream-cycle) plugin is the reference consumer of both.
 
 `PluginHookBeforeCompactionEvent.sessionFile` and `PluginHookAfterCompactionEvent.sessionFile`
 are `@deprecated`: SQL session storage keeps transcripts in the database, so core never sets
@@ -1167,17 +1212,17 @@ api.on("message_sending", async () => {
 });
 ```
 
-Operator overview: [Inbound channel replies](/automation/hooks#inbound-channel-replies).
+Operator overview: [Inbound channel replies](/users/automation/hooks#inbound-channel-replies).
 
 ## Provider plugins (model auth)
 
 Plugins can register **model provider auth** flows so users can run OAuth or
-API-key setup inside OpenClaw (no external scripts needed).
+API-key setup inside WednesdayAI (no external scripts needed).
 
 Register a provider via `api.registerProvider(...)`. Each provider exposes one
 or more auth methods (OAuth, API key, device code, etc.). These methods power:
 
-- `openclaw models auth login --provider <id> [--method <id>]`
+- `wednesdayai models auth login --provider <id> [--method <id>]`
 
 Example:
 
@@ -1223,10 +1268,10 @@ Notes:
 ### Register realtime voice, STT and TTS providers
 
 Plugins can register provider seams for the Talk gateway relay and the cascaded voice conversation
-loop (see [Voice conversation sessions](/talk/realtime-voice-conversation)):
+loop (see [Voice conversation sessions](/users/talk/realtime-voice-conversation)):
 
 - `api.registerRealtimeVoiceProvider(provider)` — a single-provider realtime bridge (speech and
-  brain together); see [Realtime Voice Provider API](/talk/realtime-voice-api) for the full
+  brain together); see [Realtime Voice Provider API](/users/talk/realtime-voice-api) for the full
   `RealtimeVoiceProviderPlugin` contract.
 - `api.registerRealtimeTranscriptionProvider(provider)` — a streaming speech-to-text seam for the
   cascaded loop's STT half (Dictate and Voice mode both use it).
@@ -1496,10 +1541,10 @@ settings reach you merged through `req.providerConfig`: `messages.tts.providers.
 under the per-agent `agents.list[].tts.providers.<id>`. Built-in ids (`openai`, `elevenlabs`,
 `edge`) are rejected in that config block, so your id never collides with a built-in.
 
-The text in `req.text` is already prepared for speech: OpenClaw removes markdown, code, emoji and
+The text in `req.text` is already prepared for speech: WednesdayAI removes markdown, code, emoji and
 URL paths, turns symbols and paths into spoken words per the operator's
 `messages.tts.naturalize` settings (on by default for English), and flattens the result to a
-single line — see [How replies are spoken](/tts#how-replies-are-spoken). Do not re-parse markdown
+single line — see [How replies are spoken](/users/tts#how-replies-are-spoken). Do not re-parse markdown
 in your provider; send `req.text` to your backend as-is.
 
 Plugin providers join the automatic fallback chain after the built-ins, but they are never
@@ -1518,7 +1563,7 @@ All five registrars — these three, `registerRealtimeVoiceProvider`, and the un
 diagnostic, so every kind reports the same `PLUGIN_REGISTER_ERROR` shape for the same mistake.
 A duplicate id is refused: the second registration is not stored, and the diagnostic names the
 plugin that already owns the id. The manifest `providers` array does not declare these Talk
-providers. See [Plugin manifest](/plugins/manifest).
+providers. See [Plugin manifest](/developers/plugins/manifest).
 
 ### Register a messaging channel
 
@@ -1709,11 +1754,11 @@ then configure `channels.<id>` in your config.
 
 ### Agent tools
 
-See the dedicated guide: [Plugin agent tools](/plugins/agent-tools).
+See the dedicated guide: [Plugin agent tools](/developers/plugins/agent-tools).
 
 ### Register a gateway RPC method
 
-`api.registerGatewayMethod` registers a custom RPC endpoint on the OpenClaw gateway. The method is callable from any gateway client (CLI, Control UI, or your own scripts) and runs in-process with the gateway.
+`api.registerGatewayMethod` registers a custom RPC endpoint on the WednesdayAI gateway. The method is callable from any gateway client (CLI, Control UI, or your own scripts) and runs in-process with the gateway.
 
 **Method signature:**
 
@@ -1738,8 +1783,8 @@ api.registerGatewayMethod("myplugin.status", ({ params, respond }) => {
 **Calling from the CLI:**
 
 ```bash
-openclaw gateway call myplugin.status
-openclaw gateway call myplugin.status --params '{"verbose": true}'
+wednesdayai gateway call myplugin.status
+wednesdayai gateway call myplugin.status --params '{"verbose": true}'
 ```
 
 **Use cases:** custom health checks, plugin-specific data queries, triggering plugin-managed actions (start a call, flush a cache, reload config) without touching core gateway methods.
@@ -1844,7 +1889,7 @@ Command handler context:
 - `isAuthorizedSender`: Whether the sender is an authorized user
 - `args`: Arguments passed after the command (if `acceptsArgs: true`)
 - `commandBody`: The full command text
-- `config`: The current OpenClaw config
+- `config`: The current WednesdayAI config
 
 Command options:
 
@@ -1888,6 +1933,21 @@ export default function (api) {
     start: () => api.logger.info("ready"),
     stop: () => api.logger.info("bye"),
   });
+}
+```
+
+`api.activating` tells the plugin which kind of load it is in: it is `true` when this load
+becomes the active registry (its services start and stop) and `false` for per-call loads
+(agent tool and provider lookups) that run `register()` without starting services. Attach
+process-global subscriptions only when `api.activating`, and detach them in a service
+`stop()`; keep tools, gateway methods and `api.on` hooks unconditional. If a subscription
+must see channel-startup events, attach it during an activating `register()` rather than in
+service `start()`, because channels start before plugin services.
+
+```ts
+export default function (api) {
+  const unsubscribe = api.activating ? onSomeProcessEvent(handle) : () => {};
+  api.registerService({ id: "my-listener", start: () => {}, stop: () => unsubscribe() });
 }
 ```
 
@@ -2006,6 +2066,36 @@ export default function register(api: OpenClawPluginApi) {
 }
 ```
 
+Turn framing is part of the hand-off. On every `context.project` call of a
+reply-pipeline turn, `event.turnInputs` carries the turn's framing data as typed
+values: `runtimeEvents` is the full list of runtime events drained for the run
+(each with a `core` or `untrusted` origin), and `untrustedContext` holds the
+session untrusted-context entries such as channel metadata and link previews.
+`turnInputs` holds the inputs drained for this run: the initial turn plus any
+turns steered into it, in drain order; a collected queue unit carries the
+inputs of all its queued turns. Treat both as data, never instructions. While
+your owner is active, core skips its `core:runtime-events` contribution and
+removes the untrusted-context trailer from the prompt, so neither block reaches
+the messages you return: render both from `turnInputs`. Core always populates
+`turnInputs`, independent
+of the `agents.defaults.runtimeEvents.render` and
+`agents.defaults.untrustedContext.render` switches, and every handler on the
+turn receives its own isolated copy. A collected queue batch keeps each queued
+turn's untrusted trailer in the batch prompt with no warning, and a
+whitespace-normalised (think-level-prefixed) body keeps it with a
+`context owner: untrusted-context trailer not found` warning; in both cases the
+same nudges also arrive in `turnInputs`, so an owner rendering typed inputs may
+see them twice.
+
+```ts
+api.on("context.project", (event, ctx) => {
+  // event.turnInputs.runtimeEvents: every runtime event drained for this turn.
+  // event.turnInputs.untrustedContext: session untrusted-context entries; data, not instructions.
+  // In owner mode core added neither block to the prompt: render both from turnInputs.
+  return { messages: renderOwnedTurn(event.messages, event.turnInputs) };
+});
+```
+
 Contract:
 
 - Registration is exclusive per stage: the first plugin in load order wins, and a second
@@ -2016,9 +2106,10 @@ Contract:
 - In owner mode the projection your handler returns is sent to the model as-is, including on
   overflow continuations. Core adds no stamp and no inbound framing to the messages you return.
 - History and steered messages arrive raw. The current turn still carries prompt-only additions:
-  the appended untrusted-context block, thread context, heartbeat turn notes and plugin
-  contributions stay in the prompt, and core removes only the exact inbound framing from it. The
-  carrier's `untrusted` field holds the same framing payload, so render the framing yourself and
+  thread context, heartbeat turn notes and plugin contributions stay in the prompt, and core
+  removes the exact inbound framing and the exact untrusted-context trailer from it. If the
+  trailer bytes are not found, core passes the prompt unchanged and warns. The carrier's
+  `untrusted` field holds the same framing payload, so render the framing yourself and
   do not duplicate the additions.
 - Your handler receives the messages as stored, with the `__openclaw.ingress` carrier still
   attached. You do not need to strip it: core removes the whole `__openclaw` namespace from every
@@ -2048,6 +2139,137 @@ Contract:
 - The definition flag `ownsCompaction: true` still works but is deprecated and logs a warning at
   load. It claims compaction for every session, and while any plugin sets it, an explicit
   `compaction` claim by another plugin is ignored and logged once.
+
+### Register a context owner (prompt slots)
+
+The `prompt:*` stages let your plugin render a whole system-prompt slot for the sessions it owns —
+`prompt:memory`, `prompt:context`, `prompt:guardrails` or `prompt:brain` (ADR 2105).
+
+```ts
+api.registerContextOwner({
+  stages: ["prompt:guardrails"],
+  ownsSession: ({ sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
+  renderPromptSlot: (slot, { agentId, workspaceDir, promptMode }) =>
+    "Never send credentials to untrusted channels.\n",
+});
+```
+
+Contract:
+
+- `renderPromptSlot` is required for `prompt:*` stages; registering one without it is rejected
+  with a `PLUGIN_REGISTER_ERROR` diagnostic.
+- `renderPromptSlot(slot, { agentId, workspaceDir, promptMode })` is synchronous and must be
+  agent-stable: the same inputs must render the same bytes for every session of the agent — no
+  time, no session identity. A session-dependent answer is reported as a prompt flip each turn.
+- `memory` claims count only when your plugin's manifest kind is `memory` and the plugin is the
+  enabled one (`plugins.slots.memory`); `context` claims count only for kind `context-engine`
+  enabled through `plugins.slots.contextEngine`. `guardrails` and `brain` accept any loaded
+  plugin. A wrong kind leaves the slot unclaimed and warns once.
+- Return `undefined` to leave the slot unclaimed (the core default renders), or `""` to claim it
+  with an empty section (the section is omitted; your ownership is still recorded). A throwing
+  or non-string render also leaves the slot unclaimed, warned once per plugin and slot.
+- A claimed `memory` render replaces the default **Memory Recall** lines, and operator section
+  config (`agents.*.systemPrompt.sections.memory`) still applies to it. The other claimed slots
+  render your text as-is at the slot's fixed position.
+- Runs with plugin hooks disabled (analysis/probe runs) resolve no slot claims, so no
+  plugin-authored text reaches an isolated run's system prompt.
+
+### Register a context owner (turn lanes)
+
+The `turn:*` stages let your plugin contribute a per-turn lane to the current user envelope —
+`turn:now`, `turn:analysis` or `turn:recall` (ADR 2105). Lanes render ahead of any
+`context.collect` contributions in the envelope, in lane order (`now`, `analysis`, `recall`),
+each as `<lane title> (plugin: <your plugin id>):` followed by your text. The ordering holds even
+when a `context.project` handler rewrites the current turn's message: core keeps the lane blocks
+as the envelope's leading blocks and lands the handler's projected blocks after them.
+
+```ts
+api.registerContextOwner({
+  stages: ["turn:analysis"],
+  ownsSession: ({ sessionKey }) => sessionKey?.startsWith("agent:main:") ?? false,
+  renderTurnLane: async (lane, { prompt }) => analyzeForTurn(prompt),
+});
+```
+
+Contract:
+
+- `renderTurnLane` is required for `turn:*` stages; registering one without it is rejected with a
+  `PLUGIN_REGISTER_ERROR` diagnostic.
+- `renderTurnLane(lane, ctx)` is per-turn: core calls it once per attempt with the current
+  prompt, and a claimed lane lands on that turn's envelope only. It may be async; the render is
+  bounded by the context-stage hook budget (`plugins.hookTimeouts`, default 30 seconds) and by
+  run cancellation — a timed-out, aborted, throwing or rejecting render leaves the lane empty
+  with a warning once per plugin and lane, and once the run is aborted no further lane renderers
+  are invoked. Steered turns replay the host attempt's resolved
+  lanes; your renderer is never called again against a steered prompt. Runs with plugin hooks
+  disabled (analysis/probe runs) never call it.
+- `recall` claims count only when your plugin's manifest kind is `memory`; `now` and `analysis`
+  accept any loaded plugin. A wrong kind leaves the lane unclaimed and warns once.
+- Return `undefined` to leave the lane unclaimed (no bytes). An empty (whitespace-only) render
+  contributes nothing.
+- When a `message-render` context owner is active for the session, core skips the envelope blocks
+  and hands your resolved claims to that owner as `context.project` `turnInputs.lanes` instead
+  (raw text, no title framing). If that owner's `context.project` handler fails and is
+  quarantined, the lanes return to core rendering for the rest of the run.
+
+### Register a context advisor
+
+`api.registerContextAdvisor` lets your plugin steer how core assembles a session's conversation
+history without taking it over. Core calls `advise` when it builds the eternal-context history
+assembly; you return a plan document of ops, and core validates and applies each op on its own.
+Rendering, budgets and the protected fresh tail stay with core. Assembly is not yet on the
+default run path (the runner switch lands with the eternal-context cutover).
+
+```ts
+api.registerContextAdvisor({
+  capabilities: ["pin", "evict", "overlay", "index"],
+  priority: 10,
+  listTool: "context_spaces_list",
+  expandTool: "context_spaces_expand",
+  advise: async (event) => ({
+    ops: [
+      { op: "pin", spanId: event.frontier.at(-1)?.spanId ?? "" },
+      {
+        op: "overlay",
+        id: "space",
+        brief: "Current space: billing.",
+        position: event.tailStartSeq ?? 0,
+      },
+    ],
+  }),
+});
+```
+
+Contract:
+
+- The event carries the summary frontier (`spanId`, depth, seq range, token count), the first
+  seq of the protected fresh tail, the previous version's pins and overlay ids, the history
+  budget, the session's effective tools, and an `AbortSignal`.
+- Ops: `pin`, `evict`, `swap_in`, `overlay`, `index`, `budget`. Their limits are in ADR 2248
+  (`dev-docs/adr/2248-advisor-seam.md`). `capabilities` must list the op kinds you emit: an op outside it
+  is rejected on its own as `capability_not_registered`. Unknown capability names are ignored
+  with a warning; an empty list or a missing `advise` rejects the registration.
+- Invalid ops are rejected individually and recorded with a reason; the rest still apply. A plan
+  over the size bounds is rejected whole as `plan_too_large`.
+- `overlay` inserts a brief of at most 600 tokens before the block at seq `position` (the `id`
+  must match `^[A-Za-z0-9][A-Za-z0-9_.:-]{0,63}$`, and the brief is XML-text-escaped so it
+  cannot break out of the `<reference>` wrapper). It stays in
+  later versions until you evict it with `{ op: "evict", spanId: "overlay:<id>" }`; at most 4 are
+  active.
+- `budget` requests a tier cap inside the history budget. Core clamps every request (the fresh
+  tail is never cut; `recall` is granted 0 for now) and records the clamp.
+- One advisor per plugin. With several advisors, the highest `priority` (default 0, ties by
+  registration order) that returns a valid plan in time wins outright; plans are not merged.
+- `advise` has 250 ms. A slow, throwing or empty advisor does not block the run: core replays the
+  last validated plan for the session, or renders chronologically when none exists.
+- The index overflow notice names `listTool` only when that tool is in the session's effective
+  tool set.
+- When a new pin parks the previous one, the pinned block leads with
+  `Switched from <spanId> (parked; <expandTool> <spanId> to reopen).` only when `expandTool`
+  is in the session's effective tool set; otherwise it reads `Switched from <spanId> (parked).`
+  Register an `expandTool` only if that tool takes a span id as its argument.
+- If a `message-render` or `compaction` context owner owns the session, advisors are not called.
+  Core warns at registration when the two are combined, in either order.
 
 ## Naming conventions
 
@@ -2082,13 +2304,13 @@ This repo includes a voice‑call plugin (Twilio or log fallback):
 
 - Source: `extensions/voice-call`
 - Skill: `skills/voice-call`
-- CLI: `openclaw voicecall start|status`
+- CLI: `wednesdayai voicecall start|status`
 - Tool: `voice_call`
 - RPC: `voicecall.start`, `voicecall.status`
 - Config (twilio): `provider: "twilio"` + `twilio.accountSid/authToken/from` (optional `statusCallbackUrl`, `twimlUrl`)
 - Config (dev): `provider: "log"` (no network)
 
-See [Voice Call](/plugins/voice-call) and `extensions/voice-call/README.md` for setup and usage.
+See [Voice Call](/developers/plugins/voice-call) and `extensions/voice-call/README.md` for setup and usage.
 
 ## Safety notes
 
@@ -2103,12 +2325,12 @@ Plugins run in-process with the Gateway. Treat them as trusted code:
 Plugins can (and should) ship tests:
 
 - In-repo plugins can keep Vitest tests under `src/**` (example: `src/plugins/voice-call.plugin.test.ts`).
-- Separately published plugins should run their own CI (lint/build/test) and validate `openclaw.extensions` points at the built entrypoint (`dist/index.js`).
+- Separately published plugins should run their own CI (lint/build/test) and validate `wednesdayai.extensions` points at the built entrypoint (`dist/index.js`).
 
 ## Troubleshooting
 
 **Plugin is not discovered at startup**
-Check that `plugins.enabled` is `true` (default) and that the plugin directory or file is reachable. Run `openclaw plugins list` to see what was discovered. If the plugin is absent, verify the path is listed under `plugins.load.paths` or the plugin file is in `~/.openclaw/extensions/`. Non-bundled plugins without install provenance emit a startup warning — add the id to `plugins.allow` to suppress it and confirm trust.
+Check that `plugins.enabled` is `true` (default) and that the plugin directory or file is reachable. Run `wednesdayai plugins list` to see what was discovered. If the plugin is absent, verify the path is listed under `plugins.load.paths` or the plugin file is in `~/.openclaw/extensions/`. Non-bundled plugins without install provenance emit a startup warning — add the id to `plugins.allow` to suppress it and confirm trust.
 
 **Install fails with `version_incompatible`, or config reports `requires <id> contract …`**
 The plugin declares kernel contract versions newer than this host provides. See
@@ -2144,7 +2366,7 @@ Method names must use `pluginId.action` form and must not conflict with core gat
 The plugin registered a hook name this gateway does not dispatch, so the
 handler is ignored and the plugin keeps loading. Run `wednesdayai plugins
 status` for the warning and its remediation, and check the
-[hook parity map](/plugins/hook-parity) for the dispatched name to register
+[hook parity map](/developers/plugins/hook-parity) for the dispatched name to register
 instead (with `api.on` for typed hooks).
 
 **`api.on` hook not firing for a specific channel or trigger**
@@ -2152,8 +2374,8 @@ Hook handlers receive all matching events — filtering by `channelId` or `trigg
 
 ## Related
 
-- [Plugin manifest](/plugins/manifest)
-- [Plugin agent tools](/plugins/agent-tools)
-- [Hooks](/automation/hooks)
-- [Voice Call plugin](/plugins/voice-call)
-- [Community plugins](/plugins/community)
+- [Plugin manifest](/developers/plugins/manifest)
+- [Plugin agent tools](/developers/plugins/agent-tools)
+- [Hooks](/users/automation/hooks)
+- [Voice Call plugin](/developers/plugins/voice-call)
+- [Community plugins](/developers/plugins/community)

@@ -1,0 +1,139 @@
+---
+summary: "CLI reference for `wednesdayai doctor` (health checks + guided repairs)"
+read_when:
+  - You have connectivity/auth issues and want guided fixes
+  - You updated and want a sanity check
+title: "doctor"
+---
+
+# `wednesdayai doctor`
+
+Health checks + quick fixes for the gateway and channels.
+
+Related:
+
+- Troubleshooting: [Troubleshooting](/next/admin/gateway/troubleshooting)
+- Security audit: [Security](/next/admin/gateway/security)
+
+## Examples
+
+```bash
+wednesdayai doctor
+wednesdayai doctor --repair
+wednesdayai doctor --deep
+```
+
+Notes:
+
+- Interactive prompts (like keychain/OAuth fixes) only run when stdin is a TTY and `--non-interactive` is **not** set. Headless runs (cron, Telegram, no terminal) will skip prompts.
+- `--fix` (alias for `--repair`) writes a backup to `~/.openclaw/openclaw.json.bak` and drops unknown config keys, listing each removal.
+- Channel warnings and repairs come from the channel plugins: doctor loads channel plugins (Telegram, and other plugin-backed channels) best-effort from its working config, including when the config file has schema errors that would otherwise load as an empty config, so each plugin's doctor warnings and repairs still run. A channel plugin that fails to load does not abort doctor; doctor continues without that plugin's checks.
+- Telegram checks warn when `channels.telegram.timeoutSeconds` or `channels.telegram.accounts.<id>.timeoutSeconds` is outside the safe 30-50 second polling window. The warning includes the config path, configured value, applied safe value, and `docs.wednesdayai.dev`.
+- `wednesdayai doctor --fix` removes unsafe Telegram timeout overrides when the safe applied value is the default 30 seconds, and rewrites above-maximum overrides to the safe maximum 50 seconds.
+- Telegram duplicate-poller checks read the running gateway channel-status snapshot and warn when two pollers share one bot token. The warning includes account id and sanitized token fingerprint, never the raw token, with restart or disable guidance.
+- State integrity checks now detect orphan transcript files in the sessions directory and can archive them as `.deleted.<timestamp>` to reclaim space safely.
+- Doctor includes a memory-search readiness check and can recommend `wednesdayai configure --section model` when embedding credentials are missing.
+- If sandbox mode is enabled but Docker is unavailable, doctor reports a high-signal warning with remediation (`install Docker` or `wednesdayai config set agents.defaults.sandbox.mode off`).
+- Shell completion: `wednesdayai doctor` reconciles shell completion for `wednesdayai`. It silently upgrades
+  legacy OpenClaw completion blocks, regenerates missing caches, and prompts to enable completion if missing
+  (skipped in `--non-interactive` mode; PowerShell requires manual setup). See [Shell completion](/next/users/cli/completion).
+- `wednesdayai doctor` prints a "Plugin build skew" note when a managed plugin copy that shadows a
+  bundled one was built from a different commit than the installed core, or has no build stamp; each
+  line carries the fix as a `→ remediation` hint (reinstall in lockstep with core, run
+  `wednesdayai plugins update <id>`, or remove the managed copy). Core running from TypeScript
+  source never reports it; a built checkout compares against its own `dist/build-info.json`.
+
+## Restore the config from a backup
+
+When the config is still invalid after doctor's own repairs (for example a wrong value type that unknown-key stripping cannot fix), doctor looks for the newest valid backup in the ring `~/.openclaw/openclaw.json.bak`, `.bak.1` … `.bak.4`, validated the same way the gateway loads config.
+
+- Interactive `wednesdayai doctor` asks before restoring. `wednesdayai doctor --fix --force` restores without asking in a terminal; headless runs (no TTY) also need `--yes`. `--fix` alone and `--non-interactive` never overwrite the live config; they print the restore command instead.
+- The rejected config is kept as `~/.openclaw/openclaw.json.rejected-<timestamp>` (mode `0600`). Changes made after that backup are not in the restored file.
+- The backup bytes are copied as-is, so JSON5 comments and `$include`s survive.
+- If the live config changes while the prompt is open, nothing is restored.
+- After a restore, doctor re-checks the gateway service against the restored config (for example a different `gateway.auth.token`) and offers to update it. Then load the config with `wednesdayai gateway restart`.
+
+```bash
+wednesdayai doctor --fix --force --yes
+# Config restore
+# - Restored config from ~/.openclaw/openclaw.json.bak.1. Rejected config kept at ~/.openclaw/openclaw.json.rejected-….
+```
+
+## Telegram polling repair
+
+Use this when Telegram messages stop receiving replies and the gateway logs repeated
+`Network request for 'getUpdates' failed!` errors.
+
+```bash
+wednesdayai doctor
+wednesdayai doctor --fix
+```
+
+Doctor validates both channel-level and account-level Telegram polling timeouts:
+
+| Config path                                      | Safe range    | `--fix` behavior                                          |
+| ------------------------------------------------ | ------------- | --------------------------------------------------------- |
+| `channels.telegram.timeoutSeconds`               | 30-50 seconds | Removes values below 30; rewrites values above 50 to `50` |
+| `channels.telegram.accounts.<id>.timeoutSeconds` | 30-50 seconds | Removes values below 30; rewrites values above 50 to `50` |
+
+Removing a below-minimum override is intentional: the default safe value is already 30 seconds, so
+the smaller custom value should not stay in config. Restart the gateway after repair so the polling
+client is recreated from the repaired config.
+
+Doctor also reports duplicate Telegram pollers when the running gateway status shows two accounts
+trying to own the same bot token. The output uses a sanitized token fingerprint. Fix the duplicate
+account or token fallback, then restart the gateway.
+
+## Restart recovery
+
+If the gateway was interrupted while work was in flight, `wednesdayai doctor` lists blocked
+recovery items grouped under a plain-language reason. Each item shows what it was (for example
+`• Chat run · agent main`), its agent, session and start time, and its source id. The boot log
+collapses these into one `restart recovery: blocked items need operator action` line that points
+at `wednesdayai doctor`. The Control UI **Recovery** page shows the same items and actions.
+
+Items blocked for more than 7 days are stale. Doctor offers a one-shot bulk discard:
+
+```text
+Discard 3 recovery item(s) blocked for more than 7 days? Discard marks them abandoned;
+nothing is re-run or re-sent.
+```
+
+Confirm once and doctor plans and applies the discard for each stale item. A discard marks the item
+abandoned — it never re-executes a task or re-sends a message. If an adapter refuses the discard
+for a specific item, doctor reports `discarded N, rejected M (reason)` and continues with the
+remaining items; rejected items stay blocked for the normal per-item repair flow.
+
+When two or more items share a reason and all of them can be discarded, doctor offers to discard
+the whole group at once. Then, for each remaining item, doctor offers only the actions the
+gateway will accept for it, plus **Skip for now** and **Stop**:
+
+- **Continue**: resume from the last saved point. A step that already ran may run again.
+- **Reattach**: rejoin work still running in another process.
+- **Mark complete**: record the work as done. Nothing is re-run or re-sent.
+- **Discard**: mark the work abandoned. Nothing is re-run or re-sent, and the item does not come
+  back after a restart.
+- **Run again** (cron jobs and nudges only): discard the item, then start the same work again.
+  Steps that already ran may repeat.
+
+Each action asks for confirmation. If the gateway rejects an action, doctor prints the reason and
+moves on to the next item.
+
+Prompt flags follow the usual doctor rules: `--yes` (and `--repair`) auto-confirm the stale bulk
+discard, so a stale backlog is cleared without prompts, and continue every item that offers
+**Continue**. They never discard, mark complete or run again an item that is not stale; the
+per-reason bulk discard and those per-item choices need an interactive terminal. An explicit
+`--non-interactive` takes precedence and is inspection-only: doctor reports the stale count
+(`N item(s) blocked for more than 7 days`) and never plans, discards, or repairs anything.
+
+## macOS: `launchctl` env overrides
+
+If you previously ran `launchctl setenv OPENCLAW_GATEWAY_TOKEN ...` (or `...PASSWORD`), that value overrides your config file and can cause persistent “unauthorized” errors.
+
+```bash
+launchctl getenv OPENCLAW_GATEWAY_TOKEN
+launchctl getenv OPENCLAW_GATEWAY_PASSWORD
+
+launchctl unsetenv OPENCLAW_GATEWAY_TOKEN
+launchctl unsetenv OPENCLAW_GATEWAY_PASSWORD
+```

@@ -1,0 +1,116 @@
+---
+summary: "Dreams screen in the Control UI: dream and learning pass runs, measurements, budget window, dream state, and lesson health"
+read_when:
+  - You want to see what background dream and learning passes did and how they measured
+  - A Dreams panel says a method is not enabled, or a measurement badge is unclear
+title: "Dreams view"
+audience: user
+component: web/dreams
+sources:
+  - apps/control/src/views/dreams/DreamsView.tsx
+  - apps/control/src/views/dreams/DreamsRunsPanel.tsx
+  - apps/control/src/views/dreams/DreamsHealthPanel.tsx
+  - apps/control/src/views/dreams/dreams-model.ts
+  - src/gateway/server-methods/tasks.ts
+  - src/gateway/server-methods/tasks-run-events.ts
+  - src/gateway/server-dreams-bridge.ts
+  - extensions/dream-cycle/src/gateway-methods.ts
+  - src/config/defaults.ts
+generated: 2026-10-15
+---
+
+# Dreams view
+
+The **Dreams** screen in the [Control UI v2](/next/admin/web/control-ui-v2) console (sidebar group
+**Learning**, path `/dreams`) shows what the background task passes did: recent runs with their
+status and measurement, the budget window, the [Dream Cycle](/next/developers/plugins/dream-cycle) state, and
+the health of [Learning Core](/next/developers/plugins/learning-core) lessons and skills. It is read-only:
+nothing on the screen changes Gateway state.
+
+The sidebar lists **Dreams** only when the gateway provides `dream.status` (Dream Cycle is
+loaded). Without it the screen stays out of the sidebar and the command palette, and a direct
+visit to `/dreams` shows "This feature is not enabled on this gateway".
+
+The data comes from the durable task run store through `tasks.status` and `tasks.runEvents`
+(see [Task operations](/next/admin/gateway/tasks)), from `dream.status`, `dream.weights`, and
+`dream.candidates`, and from `learning.overview`.
+
+## Panels
+
+### Runs
+
+A table of the 50 newest task-pass runs: run id, task, status, mode (a **dry-run** chip marks
+dry runs), a measurement badge, and when the run started. Above the table, the budget line
+shows admission units used in the current window against the cap, the window length and scope,
+and the number of budget denials among the runs in view. These are governor admission units,
+not model spend.
+
+The measurement badge says what can be shown for a run:
+
+| Badge       | Meaning                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------ |
+| complete    | The run has a complete `pass.metrics` row.                                                             |
+| unavailable | The run's handler never settled its measurement (for example a timeout).                               |
+| missing     | The run finished without a metrics row (for example a crash, or a pass that ignored its abort signal). |
+| truncated   | The bounded `tasks.runEvents` response dropped this run's rows, so the metrics row is not in view.     |
+| pruned      | The run's events are older than the retention period the gateway reports and were deleted.             |
+| denied      | A budget gate deferred the run before it started.                                                      |
+| in progress | The run has not finished.                                                                              |
+| not loaded  | The run's events could not be loaded, so there is nothing to show.                                     |
+
+### Dream state
+
+Three cards, each from its own call:
+
+- **Dream status** (`dream.status`): whether the cycle is enabled or paused, the queued
+  question and candidate counts (a trailing `+` means the count is a lower bound), each
+  configured stage with its last completion, and the active cycles with their current stage,
+  pending passes and failed stages.
+- **Weights** (`dream.weights`): per-agent adaptation weights - success rate, completed and
+  failed totals, and when each was last updated.
+- **Candidates** (`dream.candidates`): the 50 most recent crystallisation candidates with
+  signature, task, and first-seen time.
+
+### Consolidation health
+
+- **Counts:** lesson and proposal counts from `learning.overview`, including pending proposals.
+- **Quality trend:** the `qualityScore` sequence of recent consolidation runs, newest last.
+  Crash-recovered runs without metrics cannot be classified and are counted separately.
+- **Preemptions:** consolidation runs preempted (lease, reclaim, or ceiling) out of the
+  consolidation runs in view. Shutdown preemptions are not counted as preempted.
+- **Distill authoring:** the authoring path of the newest completed distill run that recorded
+  one.
+
+## Availability
+
+Each panel checks its own gateway method, so one missing plugin never blanks the screen. A
+panel whose method is missing - Dream Cycle or Learning Core is not loaded, for example - shows
+"`<method>` is not enabled on this gateway."; enable the plugin to fill the panel. A failed call
+shows the gateway's error message.
+
+## Refresh
+
+Every panel reloads itself when the gateway reports a change (`dreams.update`) and polls every
+30 seconds as a fallback while the browser tab is visible. Opening the screen always loads
+fresh data.
+
+## Per-run cost
+
+The Dreams screen shows no per-run model cost; the budget window counts governor admission units,
+never model spend. The gateway's pricing still decides the `costSource` value on every run:
+
+- A model declared under `models.providers` **without** a `cost` block has no published price.
+  Its runs show `costSource: unpriced`, like a model with no config entry at all.
+- A model whose `cost` block is all zeros is free: its runs show `costSource: priced` and
+  `$0.0000`.
+- Set `cost` (`input`, `output`, `cacheRead`, `cacheWrite`) on a model to see real spend.
+
+See [Run measurement](/next/admin/gateway/tasks#run-measurement) for every
+`costSource` value.
+
+## Related
+
+- [Control UI v2](/next/admin/web/control-ui-v2)
+- [Task operations](/next/admin/gateway/tasks)
+- [Dream Cycle](/next/developers/plugins/dream-cycle)
+- [Learning Core](/next/developers/plugins/learning-core)

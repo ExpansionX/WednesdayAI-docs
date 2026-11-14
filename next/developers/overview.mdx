@@ -1,0 +1,100 @@
+---
+title: "Developer overview"
+description: "Extend WednesdayAI: plugins, hooks, channels, tools, providers, and the plugin SDK."
+audience: developer
+---
+
+# Developer overview
+
+WednesdayAI is built to be extended. The core is intentionally lean; new capabilities belong in plugins, hooks, and channel adapters rather than in core.
+
+## Architecture
+
+```text
+Core gateway (src/)
+├── Plugin SDK (src/plugin-sdk/)  ← stable, importable as `wednesdayai/plugin-sdk`
+├── Plugins (loaded in-process)   ← tools, channels, providers, hooks, routes
+└── Standalone hooks (HOOK.md)    ← side-effect automation on coarse events
+```
+
+**Key principle:** everything that can be a plugin, should be. Plugins and hooks interact with the gateway through the stable SDK contract; they do not import from core internals.
+
+## What a plugin can register
+
+A plugin's `register(api)` function can attach any of the following. Each has a dedicated `api.register*` (or `api.on`) method on the `OpenClawPluginApi`:
+
+<CardGroup cols={2}>
+  <Card title="Agent tools" href="/next/developers/agent-tools" icon="wrench">
+    Actions the AI can invoke. `api.registerTool(...)`.
+  </Card>
+  <Card title="Lifecycle hooks" href="/next/developers/hooks" icon="zap">
+    Typed runtime callbacks — transform LLM input/output, gate tools, shape context. `api.on(...)`.
+  </Card>
+  <Card title="Context engine hooks" href="/next/developers/context-engine" icon="layers">
+    Collect, project, and prune per-turn context. `api.on("context.collect", ...)` and friends.
+  </Card>
+  <Card title="Channel adapters" href="/next/developers/channel-adapters" icon="plug">
+    A new messaging platform. `api.registerChannel(...)`.
+  </Card>
+  <Card title="Providers" href="/next/developers/concepts/model-providers" icon="server">
+    Model providers and their auth methods. `api.registerProvider(...)`.
+  </Card>
+  <Card title="HTTP routes + gateway methods" href="/next/developers/sdk" icon="globe">
+    Custom endpoints and RPC methods. `api.registerHttpRoute(...)` / `api.registerGatewayMethod(...)`.
+  </Card>
+  <Card title="Commands" href="/next/developers/sdk" icon="terminal">
+    Chat commands that bypass the LLM, and CLI commands. `api.registerCommand(...)` / `api.registerCli(...)`.
+  </Card>
+  <Card title="Services" href="/next/developers/sdk" icon="gear">
+    Start/stop background services. `api.registerService(...)`.
+  </Card>
+  <Card title="Storage + search providers" href="/next/developers/sdk" icon="database">
+    Session store backends and web-search providers. `api.registerSessionStoreAdapter(...)` / `api.registerWebSearchProvider(...)`.
+  </Card>
+</CardGroup>
+
+Standalone [HOOK.md hooks](/next/developers/hooks#standalone-hooks-hookmd) are a separate, simpler system for side-effect automation on coarse events (`/new`, `/reset`, gateway start).
+
+## `api.runtime`
+
+Plugins reach vetted runtime capabilities through `api.runtime` instead of importing core internals. Highlights:
+
+- `runtime.analysis` — focused plugin-owned LLM analysis ([guide](/next/developers/analysis-runtime))
+- `runtime.signals` — Agent Signals for non-user stimuli ([guide](/next/developers/agent-signals))
+- `runtime.state.resolveStateDir()` — resolve the plugin state directory
+- `runtime.config`, `runtime.media`, `runtime.tts` / `runtime.stt`, `runtime.system`, `runtime.events`, `runtime.logging`
+
+See the [Plugin SDK reference](/next/developers/sdk) for the full surface.
+
+## Plugin discovery and precedence
+
+The gateway scans for plugins in this order, and the **first match for a given id wins** (lower-precedence copies are ignored):
+
+1. **Config paths** — `plugins.load.paths` (file or directory)
+2. **Workspace extensions** — `<workspace>/.openclaw/extensions/`
+3. **Global extensions** — `~/.openclaw/extensions/` (where managed installs live)
+4. **Bundled extensions** — shipped with WednesdayAI, **disabled by default**
+
+Bundled plugins must be enabled explicitly (`openclaw plugins enable <id>`). Plugins installed via `openclaw plugins install` land in the global extensions directory and are enabled by default.
+
+<Warning>
+  Never add the bundled extension path to `plugins.load.paths`. The bundled copy has no
+  runtime dependencies installed; only the managed copy under `~/.openclaw/extensions/` does.
+</Warning>
+
+## Tech stack and getting started
+
+See [Coding style](/next/developers/contributing/coding-style) for the toolchain, and [Contributing](/next/developers/contributing) for setup and the PR workflow. To build a plugin, follow [Your first plugin](/next/developers/plugins/your-first-plugin).
+
+## Design principles
+
+1. **Lean core** — if a capability can live in a plugin, it should.
+2. **Stable contracts** — plugins import from `wednesdayai/plugin-sdk` (alias `openclaw/plugin-sdk`), never core internals.
+3. **No `workspace:*` in `dependencies`** — `npm install --omit=dev` in plugin dirs must work.
+4. **No `any` in SDK exports** — the plugin SDK surface must be fully typed.
+
+Fork-base pinning, package scopes, and naming conventions are covered in [Contributing](/next/developers/contributing).
+
+## Contributing
+
+See [Contributing](/next/developers/contributing) for the full workflow, PR checklist, and maintainer guidelines.

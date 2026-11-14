@@ -1,0 +1,238 @@
+---
+title: "Prompt Caching"
+summary: "Prompt caching knobs, merge order, provider behavior, and tuning patterns"
+read_when:
+  - You want to reduce prompt token costs with cache retention
+  - You need per-agent cache behavior in multi-agent setups
+  - You are tuning heartbeat and cache-ttl pruning together
+---
+
+# Prompt caching
+
+Prompt caching means the model provider can reuse unchanged prompt prefixes (usually system/developer instructions and other stable context) across turns instead of re-processing them every time. The first matching request writes cache tokens (`cacheWrite`), and later matching requests can read them back (`cacheRead`).
+
+Why this matters: lower token cost, faster responses, and more predictable performance for long-running sessions. Without caching, repeated prompts pay the full prompt cost on every turn even when most input did not change.
+
+This page covers all cache-related knobs that affect prompt reuse and token cost.
+
+For Anthropic pricing details, see:
+[https://docs.anthropic.com/docs/build-with-claude/prompt-caching](https://docs.anthropic.com/docs/build-with-claude/prompt-caching)
+
+## Primary knobs
+
+### `cacheRetention` (model and per-agent)
+
+Set cache retention on model params:
+
+```yaml
+agents:
+  defaults:
+    models:
+      "anthropic/claude-opus-4-6":
+        params:
+          cacheRetention: "short" # none | short | long
+```
+
+Per-agent override:
+
+```yaml
+agents:
+  list:
+    - id: "alerts"
+      params:
+        cacheRetention: "none"
+```
+
+Config merge order:
+
+1. `agents.defaults.models["provider/model"].params`
+2. `agents.list[].params` (matching agent id; overrides by key)
+
+### Legacy `cacheControlTtl`
+
+Legacy values are still accepted and mapped:
+
+- `5m` -> `short`
+- `1h` -> `long`
+
+Prefer `cacheRetention` for new config.
+
+### `contextPruning.mode: "cache-ttl"`
+
+Prunes old tool-result context after cache TTL windows so post-idle requests do not re-cache oversized history. The prune round is a sticky per-session decision: once it runs, later requests keep the trimmed view instead of re-caching the full history.
+
+```yaml
+agents:
+  defaults:
+    contextPruning:
+      mode: "cache-ttl"
+      ttl: "1h"
+```
+
+See [Session Pruning](/next/developers/concepts/session-pruning) for full behavior.
+
+### Heartbeat keep-warm
+
+Heartbeat can keep cache windows warm and reduce repeated cache writes after idle gaps.
+
+```yaml
+agents:
+  defaults:
+    heartbeat:
+      every: "55m"
+```
+
+Per-agent heartbeat is supported at `agents.list[].heartbeat`.
+
+## System Prompt Shape
+
+Prompt caching works best when stable shared content appears before volatile content. WednesdayAI keeps identity, generated tool and skill indexes, stable workspace guidance, and stable Project Context before the cache boundary. Runtime details, channel-specific owner context, reply mechanics, heartbeat state, and other per-run context appear after it.
+
+The boundary is controlled by `agents.defaults.systemPrompt.cache.boundary` and can be overridden per agent at `agents.list[].systemPrompt.cache.boundary`:
+
+- `auto` (default): insert the cache boundary between stable and volatile prompt sections, regardless of preset.
+- `off`: render one continuous system prompt without the boundary marker.
+
+When `auto` is active, the assembler inserts the HTML comment `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` between the stable prefix and volatile suffix. Project Context blocks are closed with `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->` when present. Both markers are shared constants consumed by the system-prompt report parser (ADR 0051).
+
+The boundary marker is a structural ordering aid: it groups stable content before volatile content so providers that cache prompt prefixes get longer reusable prefixes. It is not itself a provider cache-control breakpoint.
+
+A `chat.send` request may also carry `turnContext`: it renders as the closing `Turn context (client-provided):` lane of that turn's current user prompt envelope, after the user message. The system prompt never carries it (ADR 2105 PR 6), so a turn that carries a context keeps the same provider-cached system-prompt prefix as the turns around it. One exception exists: if core cannot resolve the turn's current user row in the final provider input (an overflow compaction cut it out of a continuation request, or a `transform_llm_input` hook replaced the messages without their ingress carrier), the context rides that provider request's system-prompt tail instead (the legacy placement) — a rare request that re-bills the prompt suffix once; the transcript and later turns still never see it.
+
+### Upgrade note (marker rename)
+
+Renaming the marker text changes every cached prompt prefix. After upgrading a build that renamed the cache and project-context markers to `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` and `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->`, expect a **one-time cold cache** (extra `cacheWrite` / latency) on the first turn per session and model. No operator config change is required. The `OPENCLAW_*` environment-variable namespace is unchanged. External tools that grepped the old marker strings must update.
+
+Use `agents.defaults.systemPrompt.sections.projectContext.files` for stable, ordered workspace context. Keep high-churn files out of the stable prefix by using `manifest` mode, `runKind` mode, or per-agent overrides for agents that truly need that content inline. A good cache-friendly shape is: stable identity and policy first, compact tool and skill listings next, stable project files next, then volatile runtime/session information.
+
+Use `/context list` to confirm the effective preset, cache boundary, and Project Context file modes for the current session. Use cache trace diagnostics when you need provider-level cache read and write evidence.
+
+### Byte stability across trigger kinds
+
+Section ordering alone is not enough: prefix caching only pays off when the stable prefix is **byte-identical** from turn to turn. WednesdayAI keeps the system prompt byte-stable across trigger kinds within a session — a heartbeat or cron turn that shares a session with user messages renders the same system prompt bytes as a user turn. Heartbeat-specific instructions (such as `HEARTBEAT.md` content in a shared session) travel in the trigger message rather than swapping the system prompt — unless the session's normal bootstrap already injects the file, in which case it is simply left where it is — so scheduled turns do not churn the cached prefix.
+
+Queued runtime events (scheduled trusted content) are rendered as turn-local input after the stable prefix, not as a dynamic `extraSystemPrompt` block. The trusted runtime-event header is core-only and registered in inbound stripping registries, so user text cannot forge gateway provenance. Repeated scheduled turns in one session keep the same system-prompt hash while the model still receives each turn's payload.
+
+Two things can still legitimately change the system prompt within a session:
+
+- A real configuration or workspace change (edited bootstrap files, model or tool changes, new skills).
+- An extension or plugin that injects per-turn dynamic content into the system prompt. Prefer delivering per-turn data as user-role context instead; system-prompt injection should be session-stable.
+
+Every turn computes a hash of the assembled system prompt and compares it with the previous turn in the same session. A change increments the flip counters described below and logs a rate-limited warning (`system prompt hash flipped within session`, at most once per 10 minutes per session) with the before and after hashes and sizes.
+
+## Provider behavior
+
+### Anthropic (direct API)
+
+- `cacheRetention` is supported.
+- With Anthropic API-key auth profiles, WednesdayAI seeds `cacheRetention: "short"` for Anthropic model refs when unset.
+
+### Amazon Bedrock
+
+- Anthropic Claude model refs (`amazon-bedrock/*anthropic.claude*`) support explicit `cacheRetention` pass-through.
+- Non-Anthropic Bedrock models are forced to `cacheRetention: "none"` at runtime.
+
+### OpenRouter Anthropic models
+
+For `openrouter/anthropic/*` model refs, WednesdayAI injects Anthropic `cache_control` on system/developer prompt blocks to improve prompt-cache reuse.
+
+### Other providers
+
+If the provider does not support this cache mode, `cacheRetention` has no effect.
+
+## Tuning patterns
+
+### Mixed traffic (recommended default)
+
+Keep a long-lived baseline on your main agent, disable caching on bursty notifier agents:
+
+```yaml
+agents:
+  defaults:
+    model:
+      primary: "anthropic/claude-opus-4-6"
+    models:
+      "anthropic/claude-opus-4-6":
+        params:
+          cacheRetention: "long"
+  list:
+    - id: "research"
+      default: true
+      heartbeat:
+        every: "55m"
+    - id: "alerts"
+      params:
+        cacheRetention: "none"
+```
+
+### Cost-first baseline
+
+- Set baseline `cacheRetention: "short"`.
+- Enable `contextPruning.mode: "cache-ttl"`.
+- Keep heartbeat below your TTL only for agents that benefit from warm caches.
+
+## Cache diagnostics
+
+WednesdayAI exposes dedicated cache-trace diagnostics for embedded agent runs.
+
+### `diagnostics.cacheTrace` config
+
+```yaml
+diagnostics:
+  cacheTrace:
+    enabled: true
+    filePath: "~/.openclaw/logs/cache-trace.jsonl" # optional
+    includeMessages: false # default true
+    includePrompt: false # default true
+    includeSystem: false # default true
+```
+
+Defaults:
+
+- `filePath`: `$OPENCLAW_STATE_DIR/logs/cache-trace.jsonl`
+- `includeMessages`: `true`
+- `includePrompt`: `true`
+- `includeSystem`: `true`
+
+### Env toggles (one-off debugging)
+
+- `OPENCLAW_CACHE_TRACE=1` enables cache tracing.
+- `OPENCLAW_CACHE_TRACE_FILE=/path/to/cache-trace.jsonl` overrides output path.
+- `OPENCLAW_CACHE_TRACE_MESSAGES=0|1` toggles full message payload capture.
+- `OPENCLAW_CACHE_TRACE_PROMPT=0|1` toggles prompt text capture.
+- `OPENCLAW_CACHE_TRACE_SYSTEM=0|1` toggles system prompt capture.
+
+### What to inspect
+
+- Cache trace events are JSONL and include staged snapshots like `session:loaded`, `prompt:before`, `stream:context`, and `session:after`.
+- Per-turn cache token impact is visible in normal usage surfaces via `cacheRead` and `cacheWrite` (for example `/usage full` and session usage summaries).
+
+### System prompt stability metrics
+
+When the `diagnostics-otel` plugin is enabled, two metrics track whether system prompts stay byte-stable within a session (see [Byte stability across trigger kinds](#byte-stability-across-trigger-kinds)):
+
+| Metric                                     | Type             | Labels                                     | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------ | ---------------- | ------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `openclaw.session.system_prompt_flip`      | counter          | `openclaw.event_type` + `slot`, `owner`    | Incremented each time the assembled system prompt hash changes between consecutive turns of a session. A flip means the prompt changed; the cache impact depends on where the change lands and on provider cache semantics — a change early in the prompt invalidates the cached prefix from that point on. Runs that record the per-slot breakdown (ADR 2105) emit one event per flipped slot with `slot` (slot name) and `owner`; the metric `owner` is normalized slot-aware — `core` or a single `plugin:<id>` for claim slots, the fixed `custom` bucket for the additive `custom.*` slots and any other free-form owner — while the diagnostic event keeps the verbatim owner. A slot that appears or disappears reports an empty hash and 0 chars for the missing side. |
+| `openclaw.session.system_prompt_stability` | observable gauge | `openclaw.stat` = `comparisons` or `flips` | Cumulative counts refreshed on each diagnostic heartbeat. Divide `flips` by `comparisons` for the flip rate; a healthy deployment trends toward zero.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+
+Interpretation:
+
+- **Occasional flips after a config, model, or workspace-file change** are expected — the first turn after the change pays a cold cache, then stability resumes.
+- **A flip on every heartbeat or cron turn** means a scheduled trigger is rendering a different system prompt than user turns. Core heartbeat and cron paths are byte-stable; the usual cause is a plugin or extension injecting per-turn dynamic content into the system prompt. Move that content to user-role context.
+- **A flip on every turn** points at volatile content in the stable prefix (timestamps, random ordering, per-turn scores). Check the warned `prevChars`/`nextChars` sizes in the gateway log to narrow which section changed.
+
+The same comparison emits a `session.system-prompt.flip` diagnostic event, so custom diagnostic consumers can alert on flips without scraping metrics.
+
+## Quick troubleshooting
+
+- High `cacheWrite` on most turns: check for volatile system-prompt inputs and verify model/provider supports your cache settings.
+- No effect from `cacheRetention`: confirm model key matches `agents.defaults.models["provider/model"]`.
+- Bedrock Nova/Mistral requests with cache settings: expected runtime force to `none`.
+
+Related docs:
+
+- [Anthropic](/next/admin/providers/anthropic)
+- [Token Use and Costs](/next/developers/reference/token-use)
+- [Session Pruning](/next/developers/concepts/session-pruning)
+- [Gateway Configuration Reference](/next/admin/gateway/configuration-reference)

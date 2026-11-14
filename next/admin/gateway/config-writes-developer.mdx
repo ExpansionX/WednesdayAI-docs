@@ -1,0 +1,143 @@
+---
+summary: "Gateway config write contract: request-level removal intent, required baseHash, and action policy tokens"
+read_when:
+  - You are calling config.set, config.apply, or config.patch from a gateway client
+  - You are extending the agent gateway tool or tool policy
+  - A write is refused or apply is denied and you need the exact contract
+title: "Config writes (developer)"
+audience: developer
+component: config-write-hardening
+sources:
+  - src/gateway/protocol/schema/config.ts
+  - src/gateway/server-methods/config.ts
+  - src/agents/tools/gateway-tool.ts
+  - src/agents/tools/gateway-tool.action-policy.ts
+  - src/config/io.ts
+generated: 2026-08-13
+---
+
+# Config writes (developer)
+
+Write RPCs share one contract: removal allowance comes from the **request**, never from a payload diff. The agent `gateway` tool keeps `config.apply`, but policy matches action tokens and default-denies whole-document apply.
+
+Operator runbook: [Config writes](/next/admin/gateway/config-writes). This page is the client and tool-policy contract.
+
+## Request shape
+
+`config.set`, `config.apply`, and `config.patch` accept the same write fields (apply/patch also take restart metadata):
+
+```typescript
+type ConfigWriteParams = {
+  raw: string; // JSON5 document
+  baseHash?: string; // required at runtime when the file exists
+  allowTopLevelKeyRemoval?: string[]; // default []
+  sessionKey?: string;
+  note?: string;
+  restartDelayMs?: number;
+  confirmed?: "drain" | "cancel" | "force";
+};
+```
+
+`allowTopLevelKeyRemoval` is optional on the wire. The handler treats a missing or non-array value as `[]`. Only non-empty trimmed strings are kept.
+
+`writeConfigFile` refuses a candidate that drops a top-level key not in that list:
+
+- RPC error `code`: `INVALID_REQUEST`
+- `details.code`: `CONFIG_WRITE_REFUSED` (same code on the thrown `writeConfigFile` error)
+- On-disk bytes unchanged (no tmp rename, no backup rotation)
+- Message names the blocking risks and tells the caller to pass the exact keys
+
+`baseHash` is optional in the TypeBox schema. `requireConfigBaseHash` still requires it whenever the configured config file exists (the default is `~/.openclaw/openclaw.json`):
+
+| Condition                              | RPC error                                                     |
+| -------------------------------------- | ------------------------------------------------------------- |
+| File exists, `baseHash` omitted        | `config base hash required; re-run config.get and retry`      |
+| File exists, hash mismatch             | `config changed since last load; re-run config.get and retry` |
+| File exists, snapshot hash unavailable | `config base hash unavailable; re-run config.get and retry`   |
+| File does not exist                    | `baseHash` not required                                       |
+
+## What not to do
+
+Do not derive allowance from the payload. That is the 2026-08-10 failure mode: the guard always saw exactly the keys the suspect document dropped.
+
+```typescript
+// Do not do this
+await client.request("config.apply", {
+  raw,
+  baseHash,
+  allowTopLevelKeyRemoval: Object.keys(before).filter((k) => !(k in after)),
+});
+```
+
+```typescript
+// Do this instead: name only the keys the operator or UI actually deleted
+await client.request("config.apply", {
+  raw,
+  baseHash,
+  ...(removedTopLevelKeys.length > 0 ? { allowTopLevelKeyRemoval: removedTopLevelKeys } : {}),
+});
+```
+
+Do not auto-fill `baseHash` with a fresh `config.get`. The hash must be the one the caller actually read.
+
+```typescript
+// Do not do this
+const snapshot = await callGateway("config.get", {});
+await callGateway("config.apply", { raw, baseHash: snapshot.hash });
+```
+
+```typescript
+// Do this instead: require the caller-supplied hash
+const baseHash = readStringParam(params, "baseHash", { required: true });
+await callGateway("config.apply", { raw, baseHash });
+```
+
+The shipped agent tool follows the second pattern. It does **not** forward `allowTopLevelKeyRemoval`, so even an opted-in apply cannot drop top-level keys.
+
+## Action policy tokens
+
+```typescript
+const GATEWAY_ACTION_POLICY_TOKENS = {
+  "config.get": "gateway.config_get",
+  "config.schema": "gateway.config_schema",
+  "config.apply": "gateway.config_apply",
+  "config.patch": "gateway.config_patch",
+  restart: "gateway.restart",
+  "update.run": "gateway.update_run",
+} as const;
+
+const DEFAULT_GATEWAY_ACTION_DENY = ["gateway.config_apply"] as const;
+```
+
+Composition, in order:
+
+1. Whole-tool `gateway` must be allowed.
+2. The action token must not be explicitly denied (operator `tools.deny` **or** the default-deny list).
+3. Otherwise the action is allowed.
+
+Exact `gateway` does not glob-match `gateway.config_*`. Re-enable apply with `tools.alsoAllow: ["gateway.config_apply"]`, or with a restrictive `tools.allow` that lists both `gateway` (or a whole-tool glob) and `gateway.config_apply` (or a non-all glob such as `gateway.config_*`). `tools.allow: ["gateway.config_apply"]` alone fails the whole-tool gate.
+
+Bare `*` does **not** override default-deny. `alsoAllow` without an allowlist synthesizes `*` for ordinary tools; that implicit allow-all is filtered out before default-deny is waived.
+
+Denied execute throws `Gateway tool action denied by policy: gateway.config_apply` before any RPC.
+
+`config.set` is a gateway RPC and Control UI path. It is **not** a `GATEWAY_ACTIONS` entry.
+
+## Control UI
+
+The console's config editor diffs the submit document against `snapshot.parsed ?? snapshot.config` (JSON5 in raw mode). It sends `allowTopLevelKeyRemoval` only when that list is non-empty, including on the drain-confirmed retry.
+
+Keep that helper in sync with `src/config/removed-keys.ts` (`$include` is ignored). The UI cannot import the core helper (it pulls `node:fs`).
+
+## Plugins
+
+Do not write `openclaw.json` with raw `fs.writeFileSync`. Use the existing `writeConfigFile` path and pass named `allowTopLevelKeyRemoval` only when your caller explicitly deleted those keys.
+
+These types are core gateway contract, not `openclaw/plugin-sdk` exports.
+
+## Related
+
+- [Config writes](/next/admin/gateway/config-writes)
+- [Tools](/next/users/tools#gateway)
+- ADR 0052 (request-level intent and action policy)
+- `scripts/verify-config-write-hardening.sh`

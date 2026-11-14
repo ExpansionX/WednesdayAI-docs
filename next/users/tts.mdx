@@ -1,0 +1,745 @@
+---
+summary: "Text-to-speech (TTS) for outbound replies"
+read_when:
+  - Enabling text-to-speech for replies
+  - Configuring TTS providers or limits
+  - Using /tts commands
+  - Turning the web client's Read aloud button on or off
+title: "Text-to-Speech"
+---
+
+# Text-to-speech (TTS)
+
+WednesdayAI can convert outbound replies into audio using ElevenLabs, OpenAI, or Edge TTS.
+It works anywhere WednesdayAI can send audio; Telegram gets a round voice-note bubble.
+
+## Supported services
+
+- **ElevenLabs** (primary or fallback provider)
+- **OpenAI** (primary or fallback provider; also used for summaries)
+- **Edge TTS** (primary or fallback provider; built-in client, default when no API keys)
+- **Plugin providers** (primary or fallback provider; registered by plugins such as the bundled
+  Kokoro plugin — see [Custom and local providers](#custom-and-local-providers))
+
+### Edge TTS notes
+
+Edge TTS uses Microsoft Edge's online neural TTS service through a built-in client vendored from
+the `node-edge-tts` library. It's a hosted service (not local), uses Microsoft’s endpoints, and
+does not require an API key. The client exposes speech configuration options and output formats,
+but not all options are supported by the Edge service. citeturn2search0
+
+Because Edge TTS is a public web service without a published SLA or quota, treat it
+as best-effort. If you need guaranteed limits and support, use OpenAI or ElevenLabs.
+Microsoft's Speech REST API documents a 10‑minute audio limit per request; Edge TTS
+does not publish limits, so assume similar or lower limits. citeturn0search3
+
+## Optional keys
+
+If you want OpenAI or ElevenLabs:
+
+- `ELEVENLABS_API_KEY` (or `XI_API_KEY`)
+- `OPENAI_API_KEY`
+
+Edge TTS does **not** require an API key. If no API keys are found, WednesdayAI defaults
+to Edge TTS (unless disabled via `messages.tts.edge.enabled=false`).
+
+If multiple providers are configured, the selected provider is used first and the others are fallback options.
+Auto-summary uses the configured `summaryModel` (or `agents.defaults.model.primary`),
+so that provider must also be authenticated if you enable summaries.
+
+## Service links
+
+- [OpenAI Text-to-Speech guide](https://platform.openai.com/docs/guides/text-to-speech)
+- [OpenAI Audio API reference](https://platform.openai.com/docs/api-reference/audio)
+- [ElevenLabs Text to Speech](https://elevenlabs.io/docs/api-reference/text-to-speech)
+- [ElevenLabs Authentication](https://elevenlabs.io/docs/api-reference/authentication)
+- [node-edge-tts](https://github.com/SchneeHertz/node-edge-tts)
+- [Microsoft Speech output formats](https://learn.microsoft.com/azure/ai-services/speech-service/rest-text-to-speech#audio-outputs)
+
+## Is it enabled by default?
+
+No. Auto‑TTS is **off** by default. Enable it in config with
+`messages.tts.auto` or per session with `/tts always` (alias: `/tts on`).
+
+Edge TTS **is** enabled by default once TTS is on, and is used automatically
+when no OpenAI or ElevenLabs API keys are available.
+
+## Config
+
+TTS config lives under `messages.tts` in `openclaw.json`.
+Full schema is in [Gateway configuration](/next/admin/gateway/configuration).
+
+### Minimal config (enable + provider)
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+      provider: "elevenlabs",
+    },
+  },
+}
+```
+
+### OpenAI primary with ElevenLabs fallback
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+      provider: "openai",
+      summaryModel: "openai/gpt-4.1-mini",
+      modelOverrides: {
+        enabled: true,
+      },
+      openai: {
+        apiKey: "openai_api_key",
+        model: "gpt-4o-mini-tts",
+        voice: "alloy",
+      },
+      elevenlabs: {
+        apiKey: "elevenlabs_api_key",
+        baseUrl: "https://api.elevenlabs.io",
+        voiceId: "voice_id",
+        modelId: "eleven_multilingual_v2",
+        seed: 42,
+        applyTextNormalization: "auto",
+        languageCode: "en",
+        voiceSettings: {
+          stability: 0.5,
+          similarityBoost: 0.75,
+          style: 0.0,
+          useSpeakerBoost: true,
+          speed: 1.0,
+        },
+      },
+    },
+  },
+}
+```
+
+### Edge TTS primary (no API key)
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+      provider: "edge",
+      edge: {
+        enabled: true,
+        voice: "en-US-MichelleNeural",
+        lang: "en-US",
+        outputFormat: "audio-24khz-48kbitrate-mono-mp3",
+        rate: "+10%",
+        pitch: "-5%",
+      },
+    },
+  },
+}
+```
+
+### Disable Edge TTS
+
+```json5
+{
+  messages: {
+    tts: {
+      edge: {
+        enabled: false,
+      },
+    },
+  },
+}
+```
+
+### Custom limits + prefs path
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+      maxTextLength: 4000,
+      timeoutMs: 30000,
+      prefsPath: "~/.openclaw/settings/tts.json",
+    },
+  },
+}
+```
+
+### Only reply with audio after an inbound voice note
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "inbound",
+    },
+  },
+}
+```
+
+### Voice note conversation loop
+
+`voiceNoteLoop` keeps the conversation in voice-note mode after the agent replies. When the user sends a voice note and TTS generates audio, the mode controls what gets delivered back.
+
+- `"disabled"` (default): reply is text only; TTS still applies per `auto` mode.
+- `"enabled"`: when inbound message is a voice note and TTS generates audio, the text is suppressed — only the voice note is delivered back.
+- `"both"`: reply delivers both the voice note and text. On WhatsApp, text is sent as a separate follow-up message (WhatsApp audio messages do not support captions).
+
+Supported channels: Telegram, WhatsApp.
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "inbound",
+      voiceNoteLoop: "enabled",
+    },
+  },
+}
+```
+
+### Disable auto-summary for long replies
+
+```json5
+{
+  messages: {
+    tts: {
+      auto: "always",
+    },
+  },
+}
+```
+
+Then run:
+
+```text
+/tts summary off
+```
+
+### Notes on fields
+
+- `auto`: auto‑TTS mode (`off`, `always`, `inbound`, `tagged`).
+  - `inbound` only sends audio after an inbound voice note.
+  - `tagged` only sends audio when the reply includes `[[tts]]` tags.
+- `enabled`: legacy toggle (doctor migrates this to `auto`).
+- `mode`: `"final"` (default) or `"all"` (includes tool/block replies).
+- `provider`: `"elevenlabs"`, `"openai"`, `"edge"`, or a plugin-registered provider id such as
+  `kokoro` (fallback is automatic).
+- If `provider` is **unset**, WednesdayAI prefers `openai` (if key), then `elevenlabs` (if key),
+  otherwise `edge`. Plugin providers are never auto-selected; set `provider` to use one.
+- `summaryModel`: optional cheap model for auto-summary; defaults to `agents.defaults.model.primary`.
+  - Accepts `provider/model` or a configured model alias.
+- `modelOverrides`: allow the model to emit TTS directives (on by default).
+  - `allowProvider` defaults to `false` (provider switching is opt-in).
+- `maxTextLength`: hard cap for TTS input (chars), measured on the text before speech cleanup. `/tts audio` fails if exceeded. Cleanup can make the spoken text slightly longer (`x >= 5` becomes "x greater than or equal to 5"); that text is still synthesized.
+- `timeoutMs`: request timeout (ms).
+- `prefsPath`: override the local prefs JSON path (provider/limit/summary).
+- `apiKey` values fall back to env vars (`ELEVENLABS_API_KEY`/`XI_API_KEY`, `OPENAI_API_KEY`).
+- `elevenlabs.baseUrl`: override ElevenLabs API base URL.
+- `elevenlabs.modelId`: ElevenLabs model id (default `eleven_multilingual_v2`). For interactive
+  Read aloud, `eleven_flash_v2_5` sounds nearly the same and responds noticeably faster, which
+  matters when the client plays chunks back to back; the batch default stays
+  `eleven_multilingual_v2` for the best quality on one-shot voice notes.
+- `openai.baseUrl`: OpenAI-compatible endpoint for OpenAI TTS (default `https://api.openai.com/v1`).
+  Overridable per agent with `agents.list[].tts.openai.baseUrl`. Replaces the deprecated
+  `OPENAI_TTS_BASE_URL` env var, which is now only used when no config value is set (the gateway
+  logs a one-time deprecation warning when it is the source). A non-default endpoint also relaxes
+  the OpenAI model and voice validators, so a local server can accept model and voice names
+  api.openai.com does not know.
+- `providers`: per-provider settings for plugin-registered speech providers, keyed by provider id
+  (`voice`, `model`, plus provider-specific keys). Built-in ids are rejected here; per-agent
+  override under `agents.list[].tts.providers`. See
+  [Custom and local providers](#custom-and-local-providers).
+- `elevenlabs.voiceSettings`:
+  - `stability`, `similarityBoost`, `style`: `0..1`
+  - `useSpeakerBoost`: `true|false`
+  - `speed`: `0.5..2.0` (1.0 = normal)
+- `elevenlabs.applyTextNormalization`: `auto|on|off`
+- `elevenlabs.languageCode`: 2-letter ISO 639-1 (e.g. `en`, `de`)
+- `elevenlabs.seed`: integer `0..4294967295` (best-effort determinism)
+- `edge.enabled`: allow Edge TTS usage (default `true`; no API key).
+- `edge.voice`: Edge neural voice name (e.g. `en-US-MichelleNeural`).
+- `edge.lang`: language code (e.g. `en-US`).
+- `edge.outputFormat`: Edge output format (e.g. `audio-24khz-48kbitrate-mono-mp3`).
+  - See Microsoft Speech output formats for valid values; not all formats are supported by Edge.
+- `edge.rate` / `edge.pitch` / `edge.volume`: percent strings (e.g. `+10%`, `-5%`).
+- `edge.saveSubtitles`: write JSON subtitles alongside the audio file.
+- `edge.proxy`: proxy URL for Edge TTS requests.
+- `edge.timeoutMs`: request timeout override (ms).
+- `voiceNoteLoop`: voice note conversation loop mode (`"disabled"` | `"enabled"` | `"both"`). Telegram and WhatsApp only. Default `"disabled"`.
+- `readAloud.enabled`: allow chat clients to read replies aloud on demand through the `tts.speak` gateway RPC (web client's **Read aloud** action). Default `true`. Turn off to stop on-demand synthesis spend; auto-TTS and `/tts` are unaffected.
+- `naturalize.enabled`: rewrite reply text into natural spoken English before any TTS provider synthesizes it (default `true`): arrows, comparison operators, slashes, file paths, hashes and identifiers become words or are dropped, and code blocks are announced as omitted. Markdown, code, emoji and URL paths are always removed regardless. Turn off for non-English assistants; override per agent with `agents.list[].tts.naturalize.enabled`. See [How replies are spoken](#how-replies-are-spoken).
+- `naturalize.mode`: `"rules"` (default) uses only the built-in speech rules. `"llm"` also asks a model to rewrite automatic voice replies, read aloud and `/tts` audio for natural phrasing, which adds a model call (cost and latency) per clip and sends the reply text to that model. Live voice (Voice mode, Discord voice, phone calls) always uses rules. Falls back to the rules text if the model fails.
+- `naturalize.model`: model for the naturalize `llm` rewrite, as provider/model or an alias. Defaults to `messages.tts.summaryModel`, then the default agent model. A local model keeps reply text on your machine.
+
+### Per-agent TTS (`agents.list[].tts`)
+
+Any agent entry can carry a `tts` block with the same fields as `messages.tts`
+(voice, provider, model, `readAloud`, ...). It is deep-merged **over** the
+global config, so a per-agent block only needs the fields that differ:
+
+```json5
+{
+  agents: {
+    list: [{ id: "ops", tts: { provider: "elevenlabs", elevenlabs: { voiceId: "voice_id" } } }],
+  },
+}
+```
+
+Per-agent TTS applies to read aloud, auto voice replies, `/tts` commands, and
+the `tts` tool for that agent. A provider pinned with `/tts provider` (stored in
+the prefs file) still wins over any configured provider.
+
+For Discord voice playback there is one more layer: the resolution order is
+`messages.tts` → the route agent's `agents.list[].tts` → `channels.discord.voice.tts`,
+so `voice.tts` still wins for voice channels.
+
+## How replies are spoken
+
+Before any provider synthesizes audio, WednesdayAI prepares the reply text for speech with a
+deterministic cleanup stage. The text on screen is unchanged; only the audio input is cleaned.
+The cleanup has two stages:
+
+**Structural, always on (language-neutral).** Markdown and layout are removed and the result is
+joined into a single line with sentence pauses:
+
+- Headings and emphasis become plain sentences: `## Weather` followed by `It will rain.` is spoken
+  as "Weather. It will rain."
+- Lists become spoken sentences; ordered lists speak their item numbers ("1. Open settings") and
+  task-list checkboxes are dropped.
+- Tables are read row by row: a `| Name | Role |` table becomes "Name: Ada, Role: Admin. Name: Bob,
+  Role: User."
+- Links are spoken by their label text; a bare URL is spoken as its host without `www.`
+  (`https://www.example.com/docs` becomes "example.com").
+- Images, strikethrough text, HTML elements and emoji are dropped. Placeholder tags such as
+  `<your-api-key>` stay as literal text.
+- The output is one line, so providers that truncate input at a newline never lose text.
+
+**English rules (`naturalize.enabled`, default `true`).** Symbols and machine text become words:
+
+| Written                      | Spoken                                          |
+| ---------------------------- | ----------------------------------------------- |
+| `Save -> Done`               | "Save to Done"                                  |
+| `x >= 5`                     | "x greater than or equal to 5"                  |
+| `Settings > Privacy > Clear` | "Settings, then Privacy, then Clear"            |
+| `src/tts/tts.ts`             | "tts.ts"                                        |
+| `TCP/IP`, `input/output`     | "TCP IP", "input or output"                     |
+| `5/month`, `60 km/h`         | "5 per month", "60 kilometres per hour"         |
+| `Tom & Jerry`, `#3`          | "Tom and Jerry", "number 3" (C# keeps its hash) |
+| `~5 minutes`                 | "about 5 minutes"                               |
+| a fenced code block          | "Code example omitted"                          |
+| UUIDs and commit hashes      | dropped                                         |
+
+The rules also turn underscores into spaces, read parentheticals as comma-delimited asides
+(`Restart (after saving) now` becomes "Restart, after saving, now"), and capitalise the first
+letter after a sentence end.
+
+### Turning it off or changing it
+
+`messages.tts.naturalize` controls the pass globally and `agents.list[].tts.naturalize` overrides
+it per agent. `enabled: false` skips only the English rules above: markdown, code, emoji and URL
+paths are still removed, and code blocks are then dropped silently. The switch exists so
+non-English assistants avoid inserted English words like "to" or "or"; a raw `###` or table pipe is
+never worth speaking either way.
+
+### llm mode (opt-in)
+
+`naturalize.mode: "llm"` adds a model rewrite on top of the rules for **batch paths only**:
+automatic voice replies, the web client's Read aloud, and `/tts audio`. Live speech (Voice mode,
+Discord voice, phone calls), the `tts` tool and `tts.convert` always use the rules only, because a
+model call adds cost and latency per clip and sends reply text to that model.
+
+- The model sees the rules-cleaned text, never raw markdown, and the rules run again on its output.
+  If the rewrite fails, is truncated, or is suspiciously shorter than the rules text, WednesdayAI
+  falls back to the rules text and logs a warning (never the text itself).
+- The model is `naturalize.model`, defaulting to `messages.tts.summaryModel`, then the default
+  agent model. A local model keeps reply text on your machine.
+
+### Voice mode
+
+Voice mode cleans the assistant stream with the same rules, clause by clause. Fenced code is
+tracked across the streamed clauses and is not spoken: the block is announced as "Code example
+omitted" (or dropped with the rules off), and prose after a closing fence is spoken.
+
+## Custom and local providers
+
+Plugins can register additional batch TTS providers, so you are not limited to the built-in
+`elevenlabs`, `openai` and `edge`. WednesdayAI ships one bundled plugin provider: **Kokoro**, a
+local text-to-speech server from [Kokoro-FastAPI](https://github.com/remsky/Kokoro-FastAPI). It
+speaks OpenAI-compatible TTS against your own hardware, with no API key.
+
+### Run a Kokoro server
+
+```text
+docker run -p 8880:8880 ghcr.io/remsky/kokoro-fastapi-cpu:latest
+```
+
+A GPU image is available as `ghcr.io/remsky/kokoro-fastapi-gpu`. Confirm the server is up:
+`curl localhost:8880/v1/models` should list the `kokoro` model.
+
+### Enable the plugin and select the provider
+
+```json5
+{
+  plugins: { entries: { kokoro: { enabled: true, config: { voice: "af_heart" } } } },
+  messages: { tts: { provider: "kokoro" } },
+  talk: { provider: "kokoro" },
+  agents: { list: [{ id: "ops", tts: { providers: { kokoro: { voice: "am_adam" } } } }] },
+}
+```
+
+- `plugins.entries.kokoro.enabled`: the plugin is bundled but disabled by default.
+- `plugins.entries.kokoro.config.baseUrl`: Kokoro-FastAPI endpoint (default
+  `http://127.0.0.1:8880/v1`).
+- `plugins.entries.kokoro.config.model`: model id (default `kokoro`).
+- `plugins.entries.kokoro.config.voice`: default voice (default `af_heart`).
+- `messages.tts.provider` / `agents.list[].tts.provider`: set to `kokoro` to make it the primary
+  provider for that scope. Plugin providers never win automatic selection; you must set `provider`.
+- `talk.provider`: makes Kokoro the spoken reply provider for Voice conversation (see below).
+
+Config changes need a gateway restart.
+
+Other plugin providers work the same way: their per-provider settings live under
+`messages.tts.providers.<id>` (and the per-agent override `agents.list[].tts.providers.<id>`),
+with `voice` and `model` as the common keys. Built-in ids are rejected under `providers` — the
+built-ins keep their own blocks (`messages.tts.openai`, `messages.tts.elevenlabs`,
+`messages.tts.edge`).
+
+### Fallback order
+
+When the primary provider fails, the fallback order is: the configured primary, then the built-ins
+(`openai`, `elevenlabs`, `edge`), then the remaining plugin-registered providers. A plugin provider
+can therefore serve as a fallback for OpenAI or ElevenLabs without extra configuration.
+
+### Per-agent voices
+
+The `agents.list[].tts` block gives each agent its own voice, and it applies everywhere the agent
+speaks: Read aloud, voice notes, auto-TTS, the `/tts` commands and the `tts` tool. In the example
+above, the `ops` agent speaks with `am_adam` while every other agent uses the plugin default
+`af_heart`.
+
+Voices can be mixed, passing several through at once — for example `af_bella+af_sky`:
+
+```json5
+{
+  agents: {
+    list: [{ id: "narrator", tts: { providers: { kokoro: { voice: "af_bella+af_sky" } } } }],
+  },
+}
+```
+
+### Voice conversation voice precedence
+
+When Voice conversation (`talk.provider: "kokoro"` in `stt-tts` mode) speaks, the voice resolves in
+this order:
+
+1. The active agent's `agents.list[].tts` voice for the talk provider (`agents.list[].tts.providers.kokoro.voice`).
+2. `talk.providers.kokoro.voiceId` (the global Talk setting, unchanged).
+3. `messages.tts.providers.kokoro.voice` (plugin providers only).
+4. The provider's default voice (the plugin's `config.voice`, `af_heart`).
+
+Selecting an agent in the web client therefore selects its voice; there is no separate voice picker.
+
+<Note>
+Kokoro is speech output only. Voice conversation still needs a streaming speech-to-text provider
+(for example ElevenLabs) — see
+[Voice conversation sessions](/next/users/talk/realtime-voice-conversation) and
+[ElevenLabs streaming voice](/next/admin/providers/elevenlabs).
+</Note>
+
+## Read aloud for chat clients
+
+The web client's **Read aloud** button reads an assistant reply aloud on demand. The client sends
+the reply text to the `tts.speak` gateway RPC, which synthesizes it with the merged TTS config
+above and returns inline audio; `tts.readAloud.status` tells the client whether the button is
+available and what the text limit is. Both RPCs are admitted to the web client's narrow
+`operator.sessions.read`/`operator.sessions.write` scopes (see ADR 0102).
+
+What decides whether the button is available:
+
+- The gate: `messages.tts.readAloud.enabled` (default `true`), with the per-agent override
+  `agents.list[].tts.readAloud.enabled`. Turning the gate off stops on-demand synthesis spend;
+  auto-TTS, `/tts` and the `tts` tool are unaffected.
+- A configured provider. Edge TTS counts when enabled, so the default config works with no API
+  key.
+
+Behavior and limits:
+
+- Read aloud and Voice mode never overlap: while a Voice conversation is active (listening,
+  thinking or speaking), the button is unavailable (`unavailable during Voice mode`), and starting
+  Voice mode stops any playback in progress.
+- The client skips code blocks, tables and raw HTML when it decides what to speak, packs the rest
+  into short chunks — at most 200 characters for the first chunk so playback starts after one
+  short synthesis, 600 for later chunks, each still under `maxTextLength` (default 4096) — and
+  plays them in sequence, synthesizing the next chunk while the current one plays, so a long reply
+  still plays in full.
+- Text longer than `maxTextLength` is refused with `text_too_long`; a synthesized clip larger than
+  16 MiB is refused with `audio_too_large`.
+- There is no rate limit; the gate and `maxTextLength` are the controls.
+- Playback survives a dropped connection: the client retries a transient synthesis failure
+  (socket close, `UNAVAILABLE`, retryable rate limit) up to 2 more times before it shows an
+  error, so nothing gateway-side is needed for a read to continue across a reconnect. A
+  permanent refusal (`readAloud` disabled for the agent) is never retried.
+- TTS config is read when the gateway starts. Restart the gateway after changing any
+  `messages.tts` or `agents.list[].tts` value.
+
+## Model-driven overrides (default on)
+
+By default, the model **can** emit TTS directives for a single reply.
+When `messages.tts.auto` is `tagged`, these directives are required to trigger audio.
+
+When enabled, the model can emit `[[tts:...]]` directives to override the voice
+for a single reply, plus an optional `[[tts:text]]...[[/tts:text]]` block to
+provide expressive tags (laughter, singing cues, etc) that should only appear in
+the audio.
+
+`provider=...` directives are ignored unless `modelOverrides.allowProvider: true`.
+
+Example reply payload:
+
+```text
+Here you go.
+
+[[tts:voiceId=pMsXgVXv3BLzUgSXRplE model=eleven_v3 speed=1.1]]
+[[tts:text]](laughs) Read the song once more.[[/tts:text]]
+```
+
+Available directive keys (when enabled):
+
+- `provider` (`openai` | `elevenlabs` | `edge`, or a registered plugin provider id; requires
+  `allowProvider: true`; ids are matched case-insensitively)
+- `voice` (OpenAI voice) or `voiceId` (ElevenLabs)
+- `model` — routing depends on the key and value: `openai_model=` goes to OpenAI and
+  `elevenlabs_model=` to ElevenLabs. A bare `model=` routes by value: a known OpenAI model id
+  goes to OpenAI, an `eleven_*` model id goes to ElevenLabs; with a custom `openai.baseUrl`, any
+  other id goes to OpenAI (the endpoint decides what it accepts), otherwise to ElevenLabs.
+- `stability`, `similarityBoost`, `style`, `speed`, `useSpeakerBoost`
+- `applyTextNormalization` (`auto|on|off`)
+- `languageCode` (ISO 639-1)
+- `seed`
+
+Directives cannot set plugin-provider voices or models: `voice=` and `voiceId=` only affect the
+OpenAI and ElevenLabs built-ins, and a plugin provider takes its voice and model from
+`messages.tts.providers.<id>` (or the per-agent `agents.list[].tts.providers.<id>`) config. A
+`provider=` directive may still name a plugin provider when `allowProvider` is on.
+
+Disable all model overrides:
+
+```json5
+{
+  messages: {
+    tts: {
+      modelOverrides: {
+        enabled: false,
+      },
+    },
+  },
+}
+```
+
+Optional allowlist (enable provider switching while keeping other knobs configurable):
+
+```json5
+{
+  messages: {
+    tts: {
+      modelOverrides: {
+        enabled: true,
+        allowProvider: true,
+        allowSeed: false,
+      },
+    },
+  },
+}
+```
+
+## Per-user preferences
+
+Slash commands write local overrides to `prefsPath` (default:
+`~/.openclaw/settings/tts.json`, override with `OPENCLAW_TTS_PREFS` or
+`messages.tts.prefsPath`).
+
+Stored fields:
+
+- `enabled`
+- `provider`
+- `maxLength` (summary threshold; default 1500 chars)
+- `summarize` (default `true`)
+
+These override `messages.tts.*` for that host.
+
+## Output formats (fixed)
+
+- **Telegram**: Opus voice note (`opus_48000_64` from ElevenLabs, `opus` from OpenAI).
+  - 48kHz / 64kbps is a good voice-note tradeoff and required for the round bubble.
+- **Other channels**: MP3 (`mp3_44100_128` from ElevenLabs, `mp3` from OpenAI).
+  - 44.1kHz / 128kbps is the default balance for speech clarity.
+- **Edge TTS**: uses `edge.outputFormat` (default `audio-24khz-48kbitrate-mono-mp3`).
+  - The Edge client accepts an `outputFormat`, but not all formats are available
+    from the Edge service. citeturn2search0
+  - Output format values follow Microsoft Speech output formats (including Ogg/WebM Opus). citeturn1search0
+  - Telegram `sendVoice` accepts OGG/MP3/M4A; use OpenAI/ElevenLabs if you need
+    guaranteed Opus voice notes. citeturn1search1
+  - If the configured Edge output format fails, WednesdayAI retries with MP3.
+
+OpenAI/ElevenLabs formats are fixed; Telegram expects Opus for voice-note UX.
+
+## Auto-TTS behavior
+
+When enabled, WednesdayAI:
+
+- skips TTS if the reply already contains media or a `MEDIA:` directive.
+- skips very short replies (< 10 chars).
+- summarizes long replies when enabled using `agents.defaults.model.primary` (or `summaryModel`).
+- attaches the generated audio to the reply.
+
+If the reply exceeds `maxLength` and summary is off (or no API key for the
+summary model), audio
+is skipped and the normal text reply is sent.
+
+## Flow diagram
+
+```text
+Reply -> TTS enabled?
+  no  -> send text
+  yes -> has media / MEDIA: / short?
+          yes -> send text
+          no  -> length > limit?
+                   no  -> TTS -> attach audio
+                   yes -> summary enabled?
+                            no  -> send text
+                            yes -> summarize (summaryModel or agents.defaults.model.primary)
+                                      -> TTS -> attach audio
+```
+
+## Slash command usage
+
+There is a single command: `/tts`.
+See [Slash commands](/next/users/tools/slash-commands) for enablement details.
+
+Discord note: `/tts` is a built-in Discord command, so WednesdayAI registers
+`/voice` as the native command there. Text `/tts ...` still works.
+
+```text
+/tts off
+/tts always
+/tts inbound
+/tts tagged
+/tts status
+/tts provider openai
+/tts limit 2000
+/tts summary off
+/tts audio Hello from WednesdayAI
+```
+
+Notes:
+
+- Commands require an authorized sender (allowlist/owner rules still apply).
+- `commands.text` or native command registration must be enabled.
+- `off|always|inbound|tagged` are per‑session toggles (`/tts on` is an alias for `/tts always`).
+- `limit` and `summary` are stored in local prefs, not the main config.
+- `/tts provider` accepts a built-in id or a plugin-registered provider id (for example
+  `/tts provider kokoro`); `/tts provider` with no argument lists every provider with its
+  configured state.
+- `/tts audio` generates a one-off audio reply (does not toggle TTS on).
+
+## Agent tool
+
+The `tts` tool converts text to speech and returns a `MEDIA:` path. When the
+result is Telegram-compatible, the tool includes `[[audio_as_voice]]` so
+Telegram sends a voice bubble.
+
+## Gateway RPC
+
+Gateway methods:
+
+- `tts.status`
+- `tts.enable`
+- `tts.disable`
+- `tts.convert`
+- `tts.setProvider`
+- `tts.providers`
+- `tts.speak` (on-demand read aloud, inline audio)
+- `tts.readAloud.status` (whether read aloud is available)
+
+## Troubleshooting
+
+**The web client's Read aloud button is unavailable or fails**
+
+Check, in order: `messages.tts.readAloud.enabled` is `true` (or that agent's
+`agents.list[].tts.readAloud.enabled` does not override it to `false`); a provider is configured
+(Edge TTS with `messages.tts.edge.enabled` at its `true` default counts). Turning read aloud off
+does not affect auto-TTS, `/tts` or the `tts` tool. A request whose text exceeds
+`messages.tts.maxTextLength` fails with `text_too_long`, and a clip larger than 16 MiB fails with
+`audio_too_large`. Config changes need a gateway restart.
+
+**Read aloud sounds different from the configured provider, or is slow**
+
+When a configured provider fails, the gateway falls back to the next one and logs a warning naming
+which provider served the request: `tts.speak: served by <provider> after N failed provider(s) in
+<latency>ms: <provider>: <error>…`. The error text is redacted of credentials, so it is safe to
+paste into support requests; the failing provider's error says what to fix.
+
+**The voice reads symbols like "dash greater than", "slash" or "hash hash"**
+
+The naturalize pass is off where it should be on. Check `messages.tts.naturalize.enabled` is
+`true` (the default) and that the agent speaking does not override it to `false` with
+`agents.list[].tts.naturalize.enabled`. Config changes need a gateway restart. Code blocks are
+still removed with the pass off, so a voice that reads code back is a separate symptom: check
+whether the clip came from a streaming Voice mode engine, which speaks its own model output and
+does not run this pass.
+
+**The assistant is non-English and the voice inserts English words**
+
+Turn the English rules off for that agent with `agents.list[].tts.naturalize.enabled: false` (or
+globally with `messages.tts.naturalize.enabled: false`). The structural cleanup keeps running —
+markdown, code, emoji and URL paths are still removed — only the English word substitutions stop,
+so code blocks are dropped silently instead of being announced as omitted.
+
+**`naturalize.mode: "llm"` produces no rewritten phrasing**
+
+Check `messages.tts.naturalize.mode` is `"llm"`, that the mode only affects automatic voice
+replies, Read aloud and `/tts audio` (live speech and the `tts` tool never use it), and that
+`naturalize.model` (defaulting to `messages.tts.summaryModel`, then the default agent model)
+resolves to a model the gateway can authenticate. When the model call fails or its rewrite looks
+wrong, WednesdayAI silently falls back to the rules text and logs a warning in the gateway logs — the
+warning never contains the reply text.
+
+**TTS is enabled but no audio is sent — only text arrives**
+Check that `messages.tts.auto` is set to `"always"`, `"inbound"`, or `"tagged"` (not `"off"`). The `/tts status` command shows the active mode for the current session. Also confirm at least one provider is available: ElevenLabs or OpenAI API key in config or env vars, or Edge TTS enabled (`messages.tts.edge.enabled` defaults to `true`). Replies shorter than 10 characters and replies that already contain media are always sent as text.
+
+**Audio is generated but Telegram doesn't show it as a round voice bubble**
+Telegram requires Opus-encoded OGG for voice notes. WednesdayAI uses `opus` output from OpenAI and `opus_48000_64` from ElevenLabs automatically. Edge TTS uses the `edge.outputFormat` you configure; set it to an Ogg/WebM Opus format if you need guaranteed voice bubbles, or switch to OpenAI or ElevenLabs for Telegram.
+
+**Edge TTS fails with a connection error**
+Edge TTS connects to Microsoft's online endpoints and has no published SLA. Transient failures are expected; WednesdayAI retries with MP3 on format errors. For reliable production use, configure OpenAI or ElevenLabs as the primary provider and let Edge TTS serve as a fallback only.
+
+**`voiceNoteLoop: "enabled"` shows text replies instead of audio-only**
+`voiceNoteLoop` only suppresses text when (1) the inbound message was a voice note and (2) TTS successfully generated audio. If TTS fails (API error, text too long, no provider), the text reply is sent as a fallback. Check the gateway logs for TTS errors. Also verify `messages.tts.auto` is `"inbound"` or `"always"` — `"tagged"` mode requires a `[[tts]]` tag in the reply to trigger audio.
+
+## Related
+
+- [Kokoro (local TTS)](/next/admin/providers/kokoro)
+- [ElevenLabs streaming voice](/next/admin/providers/elevenlabs)
+- [Slash commands](/next/users/tools/slash-commands)
+- [Gateway configuration](/next/admin/gateway/configuration)
+- [Agent loop](/next/developers/concepts/agent-loop)
+
+<Note>
+This page covers `messages.tts`: one-shot, whole-utterance audio attached to an outbound chat
+reply. It is a separate system from the live voice conversation behind the
+`/v2/client` web client's Dictate and Voice mode controls, which uses `talk.conversation`/
+`talk.providers.<id>` instead — see
+[Voice conversation sessions](/next/users/talk/realtime-voice-conversation) and
+[ElevenLabs streaming voice](/next/admin/providers/elevenlabs). The two keep separate ElevenLabs config even
+when both point at the same vendor: cascaded Voice mode reads `talk.providers.<id>`, not
+`messages.tts.elevenlabs`, and an unset cascaded Voice model falls back to `eleven_flash_v2_5`
+rather than this page's `eleven_multilingual_v2`. The `realtime` Voice engine likewise reads its
+own Talk provider credentials — for example `talk.providers["openai-realtime"].apiKey` (falling
+back to plugin defaults and `OPENAI_API_KEY`) — but it does not read `messages.tts` either.
+</Note>

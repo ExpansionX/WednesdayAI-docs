@@ -15,9 +15,9 @@ Subcommands in this page live under `wednesdayai gateway …`.
 
 Related docs:
 
-- [/gateway/bonjour](/gateway/bonjour)
-- [/gateway/discovery](/gateway/discovery)
-- [/gateway/configuration](/gateway/configuration)
+- [/gateway/bonjour](/admin/gateway/bonjour)
+- [/gateway/discovery](/admin/gateway/discovery)
+- [/gateway/configuration](/admin/gateway/configuration)
 
 ## Run the Gateway
 
@@ -59,6 +59,25 @@ Notes:
 - `--compact`: alias for `--ws-log compact`.
 - `--raw-stream`: log raw model stream events to jsonl.
 - `--raw-stream-path <path>`: raw stream jsonl path.
+- `--role <roles>`: deployment role(s): `all` (default), `gateway`, `runner`, `scheduler`, `channels`; comma-separated. Also read from `OPENCLAW_GATEWAY_ROLE`; the flag wins. See [Deployment roles](#deployment-roles).
+
+### Deployment roles
+
+One binary can run as several cooperating processes on one Postgres database. With no `--role` (or `--role all`) the Gateway runs everything in one process, exactly as before. A split deployment typically runs one `gateway,scheduler,channels` process and a pool of `runner` processes:
+
+```bash
+openclaw gateway run --role gateway,scheduler,channels
+openclaw gateway run --role runner
+```
+
+- `gateway` serves HTTP/WebSocket clients; `runner` executes queued agent turns and task work; `scheduler` runs cron, heartbeat and other singletons (one leader at a time, the others stand by); `channels` runs chat channels.
+- `scheduler` and `channels` must be combined with `gateway`. `all` cannot be combined with other roles.
+- Any role other than `all` requires `session.storage.backend: "postgres"` and `tasks.enabled`; the Gateway refuses to start otherwise.
+- Give each role its own `OPENCLAW_STATE_DIR`; a state directory used by one role set refuses another. Turn-executing roles (`gateway`, `channels`, `runner`) must share the same agent workspace.
+- A process without `gateway` serves only `/health`, `/healthz`, `/ready` and `/readyz` on its port; every other path and every WebSocket upgrade gets 404. In a split deployment `/readyz` adds `roles` and, for scheduler processes, `standby`.
+- An `all` Gateway and a split deployment refuse to share one database.
+
+Design: ADR 0112 (`dev-docs/adr/0112-deployment-roles.md`) and ADR 1168 (`dev-docs/adr/1168-postgres-multi-writer-mechanism.md`).
 
 ## Query a running Gateway
 
@@ -214,7 +233,7 @@ When launchd or systemd starts the gateway and it refuses to start (invalid conf
 `gateway discover` scans for Gateway beacons (`_openclaw-gw._tcp`).
 
 - Multicast DNS-SD: `local.`
-- Unicast DNS-SD (Wide-Area Bonjour): choose a domain (example: `openclaw.internal.`) and set up split DNS + a DNS server; see [/gateway/bonjour](/gateway/bonjour)
+- Unicast DNS-SD (Wide-Area Bonjour): choose a domain (example: `openclaw.internal.`) and set up split DNS + a DNS server; see [/gateway/bonjour](/admin/gateway/bonjour)
 
 Only gateways with Bonjour discovery enabled (default) advertise the beacon.
 

@@ -1,0 +1,471 @@
+---
+summary: "The default WednesdayAI operator console (Control UI v2), served at the gateway root, a standalone server, or a container"
+read_when:
+  - You want to use or host the default operator console at the gateway root
+  - You want to host the operator console on its own origin, a container, or a CDN
+  - Sign-in to Control UI v2 says the origin is not allowed or the device needs approval
+  - The gateway refuses to start over a console basePath collision
+  - The console shows a configuration error before sign-in
+title: "Control UI v2"
+description: "Use, deploy and sign in to the WednesdayAI Control UI v2 operator console."
+audience: admin
+component: control-ui-v2
+sources:
+  - apps/control/src/app/routes.ts
+  - apps/control/src/app/SignIn.tsx
+  - apps/control/src/app/sign-in-errors.ts
+  - apps/control/src/app/url-credential.ts
+  - apps/control/src/config/runtime-config.ts
+  - src/control-ui-v2/runtime-config.ts
+  - src/control-ui-v2/serve.ts
+  - src/gateway/control-ui-v2-route.ts
+  - src/config/gateway-spa-mounts.ts
+  - apps/control/Dockerfile
+generated: 2026-10-15
+---
+
+# Control UI v2
+
+Control UI v2 is the WednesdayAI operator console and the **default console**: the gateway serves
+it at the root (`/`). It covers the full operator surface, grouped in the sidebar as **Monitor**,
+**Configure**, **Fleet** and **Learning** (see [What the pages show](#what-the-pages-show)), plus
+a command palette (⌘K or Ctrl+K) and light and dark themes. When an allowlisted plugin
+contributes console UI, a **Plugins** group appears with its pages (see
+[Plugin pages and panels](#plugin-pages-and-panels)).
+
+Like the [web client](/next/admin/web/user-client), the console is a **static bundle**. It contains no gateway
+address and no credentials: everything environment-specific arrives at runtime from a small
+`config.json` served next to `index.html`. One build serves every deployment.
+
+## Choose a deployment
+
+| Shape              | Use when                                     | How                                                    |
+| ------------------ | -------------------------------------------- | ------------------------------------------------------ |
+| Gateway route      | Single origin, one process                   | `gateway.controlUiV2.enabled`                          |
+| Standalone server  | You want the console on its own port or host | `wednesdayai web serve-control`                        |
+| Container          | You deploy images                            | `apps/control/Dockerfile`                              |
+| Static host or CDN | You already run object storage or a CDN      | Upload `apps/control/dist` plus your own `config.json` |
+
+A published install ships the built console at `<install>/dist/control-ui-v2`; the gateway route
+and `web serve-control` use it by default. From a source checkout, build it first:
+
+```bash
+pnpm control:build:packaged    # writes dist/control-ui-v2 (the packaged location)
+pnpm control:build             # writes apps/control/dist (for a CDN or your own host)
+```
+
+## Gateway route
+
+The gateway serves the console itself, **on by default**: the v2 console owns the gateway root
+(`/`). To pin it to a sub-path instead, set `basePath`.
+
+```json5
+{
+  gateway: {
+    controlUiV2: {
+      enabled: true, // default; set to false to serve no operator console
+      // basePath: "/",  // default: the gateway root
+      // root: "/srv/wednesdayai-control",  // optional: defaults to the packaged bundle
+    },
+  },
+}
+```
+
+Restart the gateway, then open `http://127.0.0.1:18789/` (or your gateway's own address); with an
+explicit `basePath`, open that path instead.
+
+- `config.json` is generated per request: the console connects back to the origin it was loaded
+  from, and links to the web client this gateway serves.
+- `basePath` must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes,
+  whitespace or control characters, `.` or `..` segments, and query or fragment characters are all
+  rejected when the config loads. It also may not equal, contain, or be contained by another active
+  console mount (`gateway.webClient.basePath`); a collision is rejected when the config loads,
+  naming both keys.
+- With no `root`, a missing packaged bundle answers `503` naming `pnpm control:build:packaged`, and
+  the gateway logs a warning at startup. A broken explicit `root` answers `503` with that reason.
+- The classic console is removed: `gateway.controlUi` no longer carries `enabled`, `basePath` or
+  `root`. A config that still sets them is rewritten when it loads (the keys are dropped, and the
+  gateway persists the rewrite; `openclaw doctor --fix` applies it too). Behaviour change from the
+  classic-console release: a config that pinned the old classic console to the root (its removed
+  `basePath` set to `"/"`) now gets the v2 console at the root instead of v2 standing down to
+  `/v2/control`.
+- Otherwise v2 takes the root unless an enabled `gateway.webClient` explicitly claims `/`, in
+  which case v2 mounts at `/v2/control`.
+- `gateway.controlUiV2.enabled: false` turns the v2 console off; the gateway then serves no
+  operator console (`gateway.controlUi` remains only the admission policy).
+- Bookmarks to `/v2/control/...` are not redirected: with v2 at the root, the request falls
+  through to the root console, which opens **Overview**. Update saved links.
+
+## Standalone server
+
+```bash
+wednesdayai web serve-control \
+  --port 8788 \
+  --gateway-url wss://gateway.example.com
+```
+
+This starts **no gateway** and keeps no state, so instances can run behind a load balancer. Flags win
+over environment variables, which win over defaults.
+
+| Flag                  | Environment variable              | Default         | Meaning                                  |
+| --------------------- | --------------------------------- | --------------- | ---------------------------------------- |
+| `--root <dir>`        | `OPENCLAW_CONTROL_V2_ROOT`        | packaged bundle | Directory holding the built console      |
+| `--gateway-url <url>` | `OPENCLAW_CONTROL_V2_GATEWAY_URL` | required        | Absolute `ws://` or `wss://` gateway URL |
+| `--port <port>`       | `OPENCLAW_CONTROL_V2_PORT`        | `8788`          | TCP port                                 |
+| `--host <host>`       | `OPENCLAW_CONTROL_V2_HOST`        | `127.0.0.1`     | Bind host                                |
+| `--base-path <path>`  | `OPENCLAW_CONTROL_V2_BASE_PATH`   | `/`             | Public path the console is mounted under |
+| `--client-url <url>`  | `OPENCLAW_CONTROL_V2_CLIENT_URL`  | unset           | "Client" link in the sidebar             |
+
+Links must be absolute `http(s)` URLs or paths starting with a single `/`. Anything unusable - a
+missing gateway URL, a bad link, a bundle with no `index.html`, a port that is not an integer from
+0 to 65535 - exits non-zero before the socket binds, naming the flag and its environment variable.
+`GET /healthz` answers
+`200 {"status":"ok","service":"openclaw-control-ui-v2"}`.
+
+## Container
+
+Build from the **repository root**; `apps/control/Dockerfile.dockerignore` limits the context.
+
+```bash
+docker build -f apps/control/Dockerfile -t wednesdayai-control-ui-v2 .
+
+docker run --rm -p 8788:8788 \
+  -e OPENCLAW_CONTROL_V2_GATEWAY_URL=wss://gateway.example.com \
+  wednesdayai-control-ui-v2
+```
+
+The image holds only the static files and a dependency-free Node server: no secrets, no state, an
+unprivileged user, port `8788`, and a `HEALTHCHECK` against `/healthz`. The gateway URL is not baked
+in; supply it (and any other variable from the table above) at run time.
+
+## Sign in
+
+Paste the **gateway token** (or switch to **Password**) and select **Connect**. The browser creates
+a device identity and the gateway mints a device token for it; later visits reconnect with that
+device token and never show the sign-in screen. Select **Sign out** to forget the device token.
+
+The token or password is held in memory only for the connection attempt - it is never written to
+browser storage. Only the device identity, the device token and the theme are stored, under the
+`openclaw.control-v2.` prefix.
+
+`wednesdayai dashboard` opens the console with the gateway token in the URL fragment
+(`…/#token=<token>`; the macOS app passes `?token=`). The console takes the token from either spot,
+signs in with it only when it has no connected device token, and immediately strips `token` and
+`password` from the address bar - the credential is never written to browser storage, and a
+password in a URL is never used. A stored device token wins: the console reconnects with it and
+discards the URL token.
+
+### Origins
+
+The console connects as the `openclaw-control-ui` client, whose admission and auth policy is
+`gateway.controlUi`. Opened from a loopback address (`127.0.0.1`,
+`localhost`) it needs no configuration. Any other origin - including the gateway's own address
+when the console is opened by host name - must be listed in `gateway.controlUi.allowedOrigins`:
+
+```json5
+{ gateway: { controlUi: { allowedOrigins: ["https://control.example.com"] } } }
+```
+
+If it is missing, sign-in shows: "This console's origin (`https://control.example.com`) is not
+allowed. Add it to gateway.controlUi.allowedOrigins on the gateway."
+
+The gateway also enforces the allowlist at startup. On a non-loopback bind with the console
+enabled, a config that leaves `gateway.controlUi.allowedOrigins` empty is refused.
+Onboarding and gateway startup seed `http://localhost:<port>` and `http://127.0.0.1:<port>` (plus
+the custom bind host for `bind: "custom"`) when nothing is configured, so a startup refusal usually
+means the list was emptied or the bind changed outside onboarding. Setting
+`gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback: true` skips the requirement at the
+documented security cost.
+
+### HTTPS
+
+Device identity uses WebCrypto, which browsers allow only in a secure context: HTTPS, or
+`http://localhost` / `http://127.0.0.1`. On a plain `http://` LAN address the console shows "Open the
+console over HTTPS or on localhost; browser device identity needs a secure context." and does not
+connect. Serve it over HTTPS and point the gateway URL at `wss://`.
+
+### Device approval
+
+If the gateway requires approval for a new device, sign-in says so. Approve it on the gateway host,
+then select **Connect** again:
+
+```bash
+wednesdayai devices list
+wednesdayai devices approve <requestId>
+```
+
+Notes:
+
+- Local connections (`127.0.0.1`) are auto-approved.
+- Remote connections (LAN, Tailnet, etc.) require explicit approval.
+- Each browser profile generates a unique device ID, so switching browsers or clearing browser
+  data requires re-pairing.
+- Turns sent from the console are identified by that device as `device:<deviceId>`. Assistants
+  with [workspace lanes](/next/developers/concepts/workspace-lanes#linking-gateway-devices) keep a private
+  workspace per person, so the device must be linked to a person with
+  `wednesdayai devices link <deviceId> --identity <key>`; an unlinked device gets a denial message
+  naming the `device:<deviceId>` value. The console's **Nodes & devices** page can also link or
+  unlink a paired device. See [Identities](/next/admin/gateway/identity).
+- Revoke a device with `wednesdayai devices revoke --device <id> --role <role>`; see
+  [Devices CLI](/next/users/cli/devices) for token rotation and revocation.
+
+### Insecure HTTP
+
+The console signs in only from a secure context (see [HTTPS](#https)). On plain `http://` to a LAN
+or Tailnet IP it shows the secure-context message and never offers the credential form, whatever
+the gateway config says. To reach a remote gateway, use HTTPS ([Tailscale Serve](#tailscale-access)
+or a TLS reverse proxy), or tunnel to loopback so the browser sees `http://localhost`:
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 <gateway-host>
+```
+
+Then open `http://localhost:18789/`.
+
+Two gateway-side flags relax admission for clients that connect as `openclaw-control-ui`. Neither
+makes the console usable over plain HTTP:
+
+- `gateway.controlUi.allowInsecureAuth: true` accepts token or password auth from a non-secure
+  origin. It does not bypass device identity or pairing checks.
+- `gateway.controlUi.dangerouslyDisableDeviceAuth: true` (break-glass only) disables device
+  identity checks and is a severe security downgrade; revert quickly after emergency use.
+  Connections under this flag are treated as device-less (any presented device block is
+  ignored), so assistants with
+  [workspace lanes](/next/developers/concepts/workspace-lanes#linking-gateway-devices) deny them.
+
+### Tailscale access
+
+Keep the gateway on loopback and let Tailscale Serve proxy it with HTTPS:
+
+```bash
+openclaw gateway --tailscale serve
+```
+
+Open:
+
+- `https://<magicdns>/` (or your configured `gateway.controlUiV2.basePath`)
+
+By default, console and WebSocket requests over Serve can authenticate via Tailscale identity
+headers (`tailscale-user-login`) when `gateway.auth.allowTailscale` is `true`. The gateway
+verifies the identity by resolving the `x-forwarded-for` address with `tailscale whois` and
+matching it to the header, and only accepts these when the request hits loopback with Tailscale's
+`x-forwarded-*` headers. Set `gateway.auth.allowTailscale: false` (or force
+`gateway.auth.mode: "password"`) if you want to require a token/password even for Serve traffic.
+Tokenless Serve auth assumes the gateway host is trusted. If untrusted local code may run on that
+host, require token/password auth.
+
+For other remote setups, see [Tailscale](/next/admin/gateway/tailscale) and
+[Remote access](/next/admin/gateway/remote).
+
+## config.json
+
+All fields are public; never put a token here. Unknown keys are rejected: the console shows a
+configuration error instead of connecting anywhere.
+
+| Field           | Required | Meaning                                                                                           |
+| --------------- | -------- | ------------------------------------------------------------------------------------------------- |
+| `schemaVersion` | yes      | Must be `1`                                                                                       |
+| `gatewayUrl`    | yes      | Absolute `ws://` or `wss://` gateway URL, no query or fragment                                    |
+| `clientId`      | yes      | Must be `openclaw-control-ui`                                                                     |
+| `basePath`      | yes      | Public path the console is served under, with a trailing slash                                    |
+| `links`         | no       | Sidebar links: `client` (URL or `/path`). A legacy `classicConsole` value is accepted and ignored |
+
+```json
+{
+  "schemaVersion": 1,
+  "gatewayUrl": "wss://gateway.example.com",
+  "clientId": "openclaw-control-ui",
+  "basePath": "/"
+}
+```
+
+## What the pages show
+
+The sidebar groups the screens into five sections: **Monitor**, **Configure**, **Fleet**,
+**Learning** and **Plugins**. Screens whose gateway RPC is missing - Storage, Recovery, Learning
+and Dreams - stay out of the sidebar and the command palette, and a direct URL shows "This feature
+is not enabled on this gateway" instead.
+
+### Monitor
+
+- **Overview**: gateway connection and version, channel accounts connected, active runs, spend for
+  today, 7 days or 30 days, upcoming automations, nodes, pending approvals and restart-recovery
+  items that need a decision. The stat captions link to Channels, Sessions, the running runs,
+  Usage and Recovery.
+- **Sessions**: every session with its channel, model, context use (flagged at 80%) and last
+  activity. The list refreshes itself when a session is created, changed or finishes a run; once
+  you have loaded more than 200 rows it stops refreshing itself so it keeps your place (use
+  **Refresh**). Filter by agent with `?agent=<id>` (the Agents page links here). Select a session
+  to open the Session inspector next to the list, with three tabs:
+  - **Overview**: channel, model, tokens, last activity, links to the owning agent and the parent
+    session, a **View runs** link, and plugin panels contributed by allowlisted plugins.
+  - **Transcript**: the session's messages, newest last, with collapsed thinking, tool calls and
+    tool results. **Load older** pages back. On a gateway that supports it, Load older carries on
+    into the chat's earlier sessions (before a `/new`, `/reset` or an idle or daily reset), and a
+    **New session** divider marks where each one starts. A link to one message or one run
+    highlights it; the console looks back at most 1,000 messages. Each message from a run links
+    to that run.
+  - **Usage**: spend, tokens, messages, tool calls, errors and p95 latency for the session, with
+    per-model and per-tool tables. Messages without a price are counted, because spend is then a
+    lower bound.
+- **Runs**: agent turns and task runs, filtered by Queued, Running, Needs attention, Failed or
+  Done. Select a run for its details and timeline, abort a running turn, decide an interrupted
+  run, or answer an approval that belongs to it. The run inspector links to the agent, the session
+  and the run's messages in the transcript. Filtered to one session or agent (`?session=`,
+  `?agent=`), the list shows that scope's 100 most recent runs. Queued and task runs, and finished
+  runs in the session or agent filter, need SQLite or Postgres session storage
+  (`session.storage.backend`); without it the filter lists only runs still in progress. When the
+  last gateway restart left items that need a decision, a notice above the table links to
+  Recovery.
+  - **Context**: for an agent turn that finished, the inspector shows the model that answered
+    and any fallbacks tried before it, token counts, the stop reason and the error kind. It
+    breaks the prompt down into system prompt, workspace files, skills, tools, each plugin's
+    injected context and messages, with each part's share of the total. It also lists the
+    injected workspace files (flagged Truncated or Missing) and the tool and skill names. File
+    names are basenames, and a tool or skill name that is not identifier-shaped is shown as a
+    hash, because names may come from skill frontmatter or bootstrap hooks.
+  - The gateway stores sizes, counts and names only, never prompt text, file contents or file
+    paths. The context needs SQLite or Postgres session storage. Runs recorded before this
+    feature, ACP and subagent runs, and heartbeat, nudge and announce turns show "No context was
+    recorded for this run.".
+- **Recovery**: work the last gateway restart left behind, filtered by **Needs action** (blocked
+  items) or **All this boot**. Each row names the work (for example "Chat run · agent main"), its
+  agent, what triggered it and why it is blocked. Select an item for its session, run, cron job
+  and a short preview, links to the session, its runs, the automation and the agent, and the
+  item's action history with who acted. The inspector offers only the actions the gateway will
+  accept for that item: **Continue**, **Reattach**, **Mark complete**, **Discard** (marks the work
+  abandoned; nothing is re-run or re-sent, and it does not come back after a restart) and, for
+  cron jobs and nudges, **Run again** (Discard, then start the same work again). Every action asks
+  for confirmation first. **Discard all N like this** discards every blocked item that shares the
+  selected item's reason. Needs the `doctor.recovery.inspect` method; plan and apply need admin
+  scope.
+- **Usage**: spend and tokens for the range, a daily token chart, the ten sessions that spent the
+  most (USD; a row opens the session's Usage tab), and spend by agent, model and channel with the
+  most-used tools. Rankings cover only the 1,000 most recent sessions in the range, so an older
+  session with higher spend can be missing. Refreshes every 60 seconds.
+- **Logs**: the gateway file log, following new lines every 2 seconds while the tab is visible,
+  with a minimum-level filter, a text filter and Pause.
+- **Debug**: JSON snapshots of gateway status, health, the last heartbeat and available models,
+  the security-audit summary with the read-only event log, and a manual RPC box (calls run with
+  this console's operator scopes).
+
+Pages refresh when the gateway reports a change (sessions, runs, automations, dreams, pairing
+requests) and poll as a fallback only while the browser tab is visible. A hidden tab stops polling
+and event refreshes, and catches up once when shown again; opening a page or reconnecting still
+reads once. Overview, Sessions, Runs and Usage, and the Session
+inspector's Transcript and Usage tabs, show when their data was last updated, with a **Stale**
+badge when the last refresh failed.
+
+### Configure
+
+- **Agents**: per-agent identity header, config editing, workspace files, the tool catalog with
+  profile and per-tool overrides, per-agent skills, channel and cron panels, and a nudge dialog.
+  The identity header shows the agent's avatar image when the identity carries one: the gateway
+  pre-resolves workspace-relative avatar paths and serves them unauthenticated at
+  `/__openclaw__/avatar/<agentId>` (GET/HEAD only, at most 2 MiB), and `agent.identity.get`
+  returns that resolved URL.
+  The header links to the agent's sessions and runs, and the open tab is kept in the URL
+  (`?tab=`). Agents configured in an
+  [`agents.teams`](/next/admin/gateway/configuration-reference#agentsteams) entry are grouped under their
+  team's name with a **lead** badge on the lead and an **internal** badge on `userFacing: false`
+  agents; the selected agent shows its team and role and links to its teammates, and its detail
+  subtitle shows its `description`.
+- **Automations**: cron jobs - schedule, payload (system event, agent turn or wake-gate check),
+  delivery and failure alerting; create, edit, clone, run now, enable or disable; run history with
+  a link to each run's session.
+  The job inspector shows **Created by: …** for the connection that created the job (no line on
+  older jobs).
+- **Channels**: one card per gateway channel with probe, per-account rows and logout; WhatsApp QR
+  login, the Telegram fleet panel, the Nostr profile editor and the Microsoft 365 inbox sign-in
+  panel (starts the device-code sign-in; shown when the gateway offers
+  `inbox.ms365.signin.status`); per-channel config through the schema form.
+- **Skills**: workspace, built-in and installed skills with eligibility at a glance; enable or
+  disable a skill, set its API key, or install one.
+- **Settings**: the gateway config as a schema-driven form or a raw JSON5 editor, with a base-hash
+  guard against concurrent edits, save or save-and-restart (a drain confirmation when runs are
+  active), and a package or git update.
+
+### Fleet
+
+- **Nodes & devices**: fleet nodes and pending node or device pairing approvals, device tokens
+  (rotate, revoke, remove), linking a paired device to an identity (person) or unlinking it, and
+  exec-approval allowlists for the gateway or a node. Create identities with
+  `wednesdayai identity add <name>`.
+- **Instances**: live presence of the running WednesdayAI instances.
+- **Storage** (needs `sessions.storage.status`): session storage status, legacy JSONL import
+  progress, storage validation, backups on SQLite, and retrying failed imports.
+
+### Learning
+
+- **Learning** (needs `learning.overview`): lesson proposals with inspect, approve, reject or
+  quarantine (single or bulk), and the lesson index with search. Click a lesson to open its
+  detail: the judge's rationale, the model and prompt version that wrote it, the quoted messages
+  with their sender and a link that opens the session's transcript at the quoted message, the
+  revision history, and the skill proposals built from it. Active lessons can be edited, endorsed
+  or retired (approvals scope).
+- **Dreams** (needs `dream.status`): dream state, weights and lesson candidates, health, and
+  dream and learning run budgets.
+
+Two surfaces deliberately live outside the console. Chat with the assistant happens in the
+[web client](/next/admin/web/user-client) (`/v2/client/` by default; the sidebar's **Client** link opens the
+one this gateway serves). Talk existed only in the removed classic console and was deleted with
+it; the web client's Dictate and Voice mode buttons are a separate feature (see
+[Using the web client](/next/admin/web/using-the-web-client#dictate-and-voice)).
+
+Approvals requested before the console connected are not listed; the bell counts the ones that
+arrived since.
+
+## Plugin pages and panels
+
+Trusted plugins can extend the console with their own browser code (ADR 0113). The operator opts
+in per plugin with `gateway.controlUiV2.pluginUi.allow` (default none); an allowlisted plugin
+whose manifest declares `controlUi.entry` can then add:
+
+- **Pages** in a **Plugins** sidebar group and the command palette. Each page is its own route
+  (`?plugin=<id>&page=<pageId>`), titled with the page label the plugin registered.
+- **Session panels** in the Session inspector, receiving the inspected session key.
+- **Run panels** at the end of the Run inspector, receiving the session and run ids.
+
+Plugin UI loads only when the console is served by the gateway origin; on a standalone or
+cross-origin deployment the console reports the gateway origin it would need instead of loading
+plugin modules. Plugin code runs with the signed-in operator's gateway authority, so allow only
+plugins you trust. Each plugin loads in isolation: a plugin that fails to load or activate is
+reported per plugin in **Debug** (with its failure message) and never breaks the rest of the
+console.
+
+Developers build these modules against the SDK subpath `wednesdayai/plugin-sdk/control-ui`; see
+[Control UI plugins](/next/developers/plugins/control-ui). After updating a plugin, reload the tab: loaded plugin
+modules stay cached for the life of the page.
+
+## Troubleshooting
+
+**"Configuration error" screen before sign-in.** The `config.json` served next to the bundle is
+missing or invalid; nothing connected. The detail line names the problem and shows the expected
+shape. Fix the file (see [config.json](#configjson)): unknown keys, a `schemaVersion` other than
+`1`, a `gatewayUrl` that is not an absolute `ws://`/`wss://` URL, a `clientId` other than
+`openclaw-control-ui`, or a bad `basePath` or `links` value all produce this screen. Reload after
+fixing it.
+
+**Sign-in says the origin is not allowed.** The browser origin is missing from
+`gateway.controlUi.allowedOrigins` on the gateway. Add the exact origin shown in the message and
+restart the gateway; see [Origins](#origins).
+
+**The gateway refuses to start, naming `gateway.controlUiV2.basePath` (or `web serve-control`
+exits naming `--base-path`).** The base path is not a single-slash path - a missing leading `/`, a
+`//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, or a query or
+fragment - or it collides with another active SPA mount. Choose a distinct single-slash path; the
+gateway validates it when the config loads, and the standalone server before it binds.
+
+**Sign-in asks for pairing approval.** The gateway requires approval for this new browser device.
+The console shows "This device needs pairing approval from the gateway host. Approve it there, then
+click Connect again." Approve it on the gateway host and select **Connect** again; see
+[Device approval](#device-approval).
+
+**Sign-in says "Open the console over HTTPS or on localhost; browser device identity needs a secure
+context."** The page is not in a secure context, so the browser blocks device identity. See
+[HTTPS](#https).
+
+**The route answers `503` naming a build command or a bundle directory.** The console bundle is
+missing or broken: for the gateway route, run `pnpm control:build:packaged` or set
+`gateway.controlUiV2.root` to a built `apps/control/dist`; for the standalone server, point `--root`
+at a directory containing `index.html`.

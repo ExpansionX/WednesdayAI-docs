@@ -72,8 +72,8 @@ generated: 2026-10-27
 
 `apps/web` is the end-user web client (client id `openclaw-user-client`). Its view layer is a small
 native React component layer under `apps/web/src/ui/`, styled over the shared
-[Brand tokens](/reference/brand-tokens). This page is the contract for changing it. For hosting and
-configuration see [Web client hosting](/web/user-client).
+[Brand tokens](/developers/reference/brand-tokens). This page is the contract for changing it. For hosting and
+configuration see [Web client hosting](/admin/web/user-client).
 
 ## Layout
 
@@ -95,11 +95,12 @@ bell), `Thread`, `TypingIndicator`,
 breakpoint at 860px, sidebar open and collapsed state) so `AppShell` supplies data, not chrome. The
 assistant and chat controls client-chat-v3 P2 made live (model, Think, assistant picker, queue,
 reply, rename) are covered under [Chat controls and hooks](#chat-controls-and-hooks).
-`MarkdownRenderer` renders streaming content through `useDeferredValue` and memoises the parsed
-markdown subtree on the deferred string (`MarkdownBody`), so each streamed delta parses the
-markdown exactly once and the urgent pass reuses the previous parse - composer interactions stay
-responsive while a long reply streams. Keep that shape when touching the renderer: a memo miss on
-the urgent pass costs a second synchronous parse per delta.
+`MarkdownRenderer` memoises the parsed markdown subtree on the content string (`MarkdownBody`), so
+each streamed delta parses the markdown once and re-renders of unchanged rows skip the parse.
+Streaming content renders urgently, not through `useDeferredValue`. A deferred prose pass can
+still be rendering when the next frame's tool-step chip commits, which would show the chip before
+the sentence it interrupts (#2014). Keep prose and chip commits in frame order when touching the
+renderer.
 
 ## Styling conventions
 
@@ -159,11 +160,16 @@ The contract:
   transcription provider and the gate on, Voice additionally needs a configured streaming speech
   provider.
 - The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `finding` for controls that wait on a tracked finding rather
-  than a phase: Calendar, Memory and Add extension cite `"F1, GitHub #634"`, and the P2 retags (message
+  than a phase: Calendar and Memory cite `"F1, GitHub #634"` (their fallback while no chat UI
+  plugin provides those panels), Add extension cites the extension marketplace item
+  `"F1, GitHub #1331"`, and the P2 retags (message
   feedback, message regenerate, account-menu settings, account-menu keyboard shortcuts, composer
   search) each cite their own finding (`"F-2026-09-29-1x, GitHub #69x"`, ADR 0085 M9); the
   `finding` tooltip wording is fixed, so it reads "coming with the extension panel SDK" whichever
-  finding it cites. Use `reason` for capability-driven unavailability that is not roadmap work:
+  finding it cites. Memory and Calendar render as live sidebar buttons instead when a chat UI
+  plugin registers those slots; the DisabledControl is the fallback while no plugin is
+  allowlisted (see [Chat UI plugins](/developers/plugins/chat-ui)). Use `reason` for capability-driven
+  unavailability that is not roadmap work:
   the `reason` text is rendered verbatim after the label, so it names why this connection cannot
   use the control — Dictate and Voice mode pass `"unavailable on this gateway"` when `talk.catalog`
   does not offer them, Read aloud passes the same reason strings when the gateway gate is off or
@@ -253,23 +259,25 @@ render until the turn lands from history.
 The UI says **chat**; the code says **session**. The gateway's `sessions.*` rows are what the user
 sees as chats.
 
-| User-facing                  | Code                                                                                                                                                                                                                                            |
-| ---------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Session, Sessions            | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                                                                                                   |
-| Open a session               | `sessions.direct {agentId?}` → `{key}`; picking an assistant calls it; a first send with no active session resolves it too                                                                                                                      |
-| Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                                                                                                            |
-| Switch chat locked           | `navigationLockReason` / `onNavigationBlocked` / `onNavigationLockChanged` (`web-client-runtime.ts`); notice `chat-switch-blocked` while Dictate or Voice is live                                                                               |
-| Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                                                                                                                |
-| Source tag on a row          | the row's stored channel (`row.actor?.channel ?? row.channel`) mapped in `providers/gateway-mappers.ts` (`sourceTag`)                                                                                                                           |
-| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `assistant-picker-option`                                                                                                                               |
-| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                                                                                                                 |
-| Mobile header session key    | `TopBar` (`top-bar-session-key`): the active session key shows under the model menu on mobile only (≤ 860px header buttons are icon-only; `cl-tb-btn__label` stays readable by assistive tech); the title (and rename) render on desktop widths |
-| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimum / collapsed / full`                                                                                                                            |
-| Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                                                                                                     |
-| Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                                                                                                    |
-| Picked assistants            | `SessionListRuntime.selectAgent` records `pickedAgentIds` (session-only); `Sidebar` always lists them past the activity window                                                                                                                  |
-| Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                                                                                                   |
-| This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`                                                                                        |
+| User-facing                  | Code                                                                                                                                                                                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Session, Sessions            | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                                                                                                                |
+| Open a session               | `sessions.direct {agentId?}` → `{key}`; picking an assistant calls it; a first send with no active session resolves it too                                                                                                                                   |
+| Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                                                                                                                         |
+| Switch chat locked           | `navigationLockReason` / `onNavigationBlocked` / `onNavigationLockChanged` (`web-client-runtime.ts`); notice `chat-switch-blocked` while Dictate or Voice is live                                                                                            |
+| Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                                                                                                                             |
+| Source tag on a row          | the row's stored channel (`row.actor?.channel ?? row.channel`) mapped in `providers/gateway-mappers.ts` (`sourceTag`)                                                                                                                                        |
+| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `assistant-picker-option`                                                                                                                                            |
+| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                                                                                                                              |
+| Mobile header session key    | `TopBar` (`top-bar-session-key`): the active session key shows under the model menu on mobile only (≤ 860px header buttons are icon-only; `cl-tb-btn__label` stays readable by assistive tech); the title (and rename) render on desktop widths              |
+| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimum / collapsed / full`                                                                                                                                         |
+| Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                                                                                                                  |
+| Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                                                                                                                 |
+| Picked assistants            | `SessionListRuntime.selectAgent` records `pickedAgentIds` (session-only); `Sidebar` always lists them past the activity window                                                                                                                               |
+| Assistant order              | `ui/assistant-order.ts`: `sortAssistants` (`RECENT_ASSISTANT_WINDOW_MS` 24 h, `Intl.Collator` base sensitivity, id fallback), `useAssistantOrder` freezes the order; `SessionListState.assistantOrderEpoch`                                                  |
+| Inbox                        | Sidebar entry `sidebar-inbox` (badge `sidebar-inbox-unread`) is the only entry point; `AppShell.openInboxPanel` opens `InboxPanel` in the shared right-panel slot and `inbox-panel-close` closes it; hidden unless hello-ok advertises the `inbox.v1` family |
+| Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                                                                                                                |
+| This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`                                                                                                     |
 
 Do not reintroduce "Space" or "Spaces" in UI copy or identifiers; that word is reserved for a
 possible external Spaces extension, and the brand e2e asserts the rendered page contains neither. Session keys
@@ -301,7 +309,7 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   this client owns into a tool row in the reply (`useChatStore.appendToolStep`); a start frame's
   optional `verb`/`detail` (redacted, length-capped display strings resolved from the shared
   tool-display spec; the wire contract is the `chat.activity` bullet in
-  [Protocol](/gateway/protocol#assistant-ui-surfaces)) are stored with the row and never cleared
+  [Protocol](/admin/gateway/protocol#assistant-ui-surfaces)) are stored with the row and never cleared
   by a later frame of the same call, and `ToolDisplay` renders them as the live chip's label —
   for a call with no stored arguments yet, full mode shows the same title/verb/detail line
   instead of an invented `{}` dump. `onRunResumed`
@@ -676,6 +684,14 @@ Contracts worth keeping when you change them:
   assistants' activity. `selectAgent` also records the id in `pickedAgentIds`, a session-only
   list that is never written to preferences; the `Sidebar` always lists picked assistants past
   the activity cutoff, whatever the current filter, and only a reload clears the record.
+  The default **Recent** sort (`assistantSort: "newest"`) lists assistants whose activity falls
+  within `RECENT_ASSISTANT_WINDOW_MS` (24 h) newest first, then everyone else alphabetically
+  (case-insensitive, locale-aware, id as the last tie-break); equal timestamps sort by name.
+  `useAssistantOrder` freezes the rendered order: `sessions.changed` refetches update the map
+  without moving rows. It re-sorts on the first loaded page, a window `focus`, a
+  `visibilitychange` to visible, the resume refetch landing (`refetchForResume` bumps
+  `assistantOrderEpoch`), and a sort or activity-window menu change. Between re-sorts, newcomers
+  append at the bottom and removed rows drop without moving the rest.
 - **Assistant navigation.** Clicking an assistant scopes Sessions and opens that assistant's
   dmScope direct session (`sessions.direct { agentId }`). The resolved key becomes the remembered
   session that startup restore reopens. Re-clicking while already on that key re-affirms the filter
@@ -855,24 +871,37 @@ continues it.
 no-op, request rejections (for example Low Power Mode) are swallowed, and the lock re-acquires on
 `visibilitychange` when the page becomes visible again.
 
-`useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error` and
-`captions: { user, assistant }`. Voice does not fill the composer. Toggle starts or stops the
-session; `thinking` counts as on. A start rejection is swallowed here; the seam's `error` status
-is what the button shows.
+`useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error`,
+`captions: { user, assistant }`, and `engine: "stt-tts" | "realtime"` (the voice engine the
+gateway resolved). Toggle starts or stops the session; `thinking` counts as on. A start rejection
+is swallowed here; the seam's `error` status is what the button shows.
 
-While Voice is `listening`, `thinking` or `speaking`, the Composer renders `VoiceCaptions`
+**Cascaded stt-tts turns render as chat turns.** The gateway opens an agent run for each spoken
+utterance and the client registers that run as its own, so when the turn starts the spoken words
+become a normal user row in the thread and the reply streams as a normal assistant bubble - no
+browser `chat.send` is issued for a voice turn. Until then the live user transcript previews
+inside the composer textarea with Dictate's read-only preview styling: a display-only composition
+over the untouched draft, never written to the draft or its storage, cleared when the turn starts
+and the user row commits. stt-tts renders no caption box, and reply text never echoes into the
+composer. Turning Voice off mid-reply stops the microphone and the speech, but the agent run
+still finishes: the full reply persists to the chat exactly once and appears in the thread. A
+reload or disconnect mid-reply keeps the heard prefix plus an `[interrupted]` marker instead.
+
+With `engine: "realtime"`, while Voice is `listening`, `thinking` or `speaking`, the Composer
+renders `VoiceCaptions`
 (`ui/VoiceCaptions.tsx`, `data-testid="voice-captions"`, `aria-live="polite"`) above the input
 row: an orb `cl-voice-orb` with a `--listening`, `--thinking` or `--speaking` modifier (its pulse
 stops under `prefers-reduced-motion`), the status label, and two caption lines,
-`cl-voice-caption--user` and `cl-voice-caption--assistant`. The caption region
-(`cl-voice-captions__scroll`) is height-capped at `min(45vh, 18rem)` and scrolls instead of
-growing the composer; its `column-reverse` layout pins the scroll origin to the newest line, so
-an active conversation stays in view without yanking a reader who scrolled up. The user caption
-is replaced by each
+`cl-voice-caption--user` and `cl-voice-caption--assistant` (rendered only while its text is
+non-empty). The caption region
+(`cl-voice-captions__scroll`) is height-capped against the shell canvas
+(`--shell-canvas-height`), not the layout viewport, so a shrunken keyboard canvas still leaves
+the thread a scrollable floor; it scrolls instead of growing the composer, and its
+`column-reverse` layout pins the scroll origin to the newest line, so an active conversation
+stays in view without yanking a reader who scrolled up. The user caption is replaced by each
 `transcript.delta`/`transcript.done`; the assistant caption is cleared on `turn.started` and
-appended from `output.text.delta` (cascaded deltas are trimmed clauses joined with a single
-space; realtime deltas are raw increments concatenated verbatim). `tool.call` sets `thinking`. On
-`transcript.persisted` the
+appended from `output.text.delta` (realtime deltas are raw increments concatenated verbatim).
+`tool.call` sets `thinking`. On `transcript.persisted` the
 runtime re-reads the active chat, so the persisted turns appear in the thread without a reload.
 
 While either feature is live, switching chats is locked. The runtime derives the lock
@@ -917,7 +946,7 @@ when the drop happens while start is still in flight. Do not wait on `talk.sessi
 RPC blocks until the socket is ready again. Dictate stops capture the same way, without waiting
 for a transcript that can no longer arrive.
 
-Frame shapes are in [Talk sessions](/gateway/protocol#talk-sessions).
+Frame shapes are in [Talk sessions](/admin/gateway/protocol#talk-sessions).
 
 ## Composer paste, rich copy and attachment prep
 
@@ -994,7 +1023,7 @@ byte reservation, and returns a possibly re-encoded `File`:
 
 The Read aloud action on assistant messages speaks that reply through the gateway's per-agent TTS
 config (`messages.tts` merged with `agents.list[].tts`; ADR 0102, wire shapes in
-[TTS read aloud](/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
+[TTS read aloud](/admin/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
 owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
 `ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, paused, phase, error, toggle, pause, resume, stop}`
 value. `AssistantMessage` takes it as `readAloud` plus `readAloudKeys` from `Thread`: the reply
@@ -1148,7 +1177,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
 - `AppShell`'s `useReplyNotifications` owns unread state per browser or installed app: a chat is
   unread when an assistant reply arrived after this device last had the chat open. Detection is
   durable — it compares the session row's `lastReplyAt` (see
-  [Gateway protocol](/gateway/protocol#sessions-list-sorting-agent-activity-and-visibility))
+  [Gateway protocol](/admin/gateway/protocol#sessions-list-sorting-agent-activity-and-visibility))
   against a per-device read cursor, and the state survives a reload. It publishes the unread keys
   to the store (`setUnreadSessions` on `unreadBySession`, rendered as the static
   `sidebar-session-unread` dot, `aria-label="New reply"`) and clears a chat when it is activated,
@@ -1210,8 +1239,8 @@ new Notification(`${name} replied`, { body: reply.text });
 
 The client connects with only `operator.sessions.read` and `operator.sessions.write`, and the
 gateway admits a fixed method and event set for them (listed under
-[narrow scope method allowlist](/gateway/protocol#narrow-scope-method-allowlist) and
-[event allowlist](/gateway/protocol#narrow-scope-event-allowlist); ADR 0077 records the decision; the
+[narrow scope method allowlist](/admin/gateway/protocol#narrow-scope-method-allowlist) and
+[event allowlist](/admin/gateway/protocol#narrow-scope-event-allowlist); ADR 0077 records the decision; the
 sources of truth are `NARROW_SESSION_READ_METHODS` and `NARROW_SESSION_WRITE_METHODS` in
 `src/gateway/method-scopes.ts` and `NARROW_SESSION_EVENT_ALLOWLIST` in
 `src/gateway/server-broadcast.ts`).
@@ -1245,11 +1274,11 @@ Unit tests under `apps/web/src/**` (`pnpm test:web`) prove components in jsdom. 
 scrolling, fonts, `color-scheme` or gateway frames. For a behaviour change, also drive the built
 bundle in real Chromium against a real gateway using the harness in
 `test/helpers/user-client-web-harness.ts`; see
-[Testing](/help/testing#web-client-and-brand-e2e-suites) for the suites and their caveats.
+[Testing](/users/help/testing#web-client-and-brand-e2e-suites) for the suites and their caveats.
 
 ## Related
 
-- [Brand tokens](/reference/brand-tokens) - the shared tokens and fonts under `client.css`
-- [Web client hosting](/web/user-client) - deployment, origins, `config.json`
-- [Using the web client](/web/using-the-web-client) - what users see
-- [Gateway protocol](/gateway/protocol) - client identity and scopes
+- [Brand tokens](/developers/reference/brand-tokens) - the shared tokens and fonts under `client.css`
+- [Web client hosting](/admin/web/user-client) - deployment, origins, `config.json`
+- [Using the web client](/admin/web/using-the-web-client) - what users see
+- [Gateway protocol](/admin/gateway/protocol) - client identity and scopes

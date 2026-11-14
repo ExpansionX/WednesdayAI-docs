@@ -1,0 +1,83 @@
+---
+summary: "CLI reference for `wednesdayai storage` (where each config domain's runtime data is stored)"
+read_when:
+  - You want to see which backend each config domain uses
+  - You are moving runtime data from json to sqlite or postgres
+  - You are debugging config domain storage validation errors
+title: "storage"
+---
+
+# `wednesdayai storage`
+
+Show where runtime data in each config domain is stored.
+
+Config domains are the groups of runtime data the Gateway manages: `identity`, `pairing`,
+`approvals`, `agents`, `channel-accounts`, `credentials`, and `preferences`. Each domain has a
+backend (`json`, `sqlite` or `postgres`). In this release every core domain is JSON-only: data
+stays at today's JSON locations, and any SQL backend lives in the session database. Configure
+backends with `storage.backend` and `storage.domains.<id>.backend` in `openclaw.json`.
+
+## `wednesdayai storage status`
+
+Show the resolved backend and JSON source for each config domain.
+
+```bash
+wednesdayai storage status
+wednesdayai storage status --json
+```
+
+Table columns:
+
+| Column        | Meaning                                                       |
+| ------------- | ------------------------------------------------------------- |
+| `Domain`      | Config domain id (registry order)                             |
+| `Backend`     | The backend the domain resolves to (json, sqlite or postgres) |
+| `Writable`    | `yes` or `no`                                                 |
+| `Available`   | Backends the domain ships, joined with `", "`                 |
+| `JSON source` | Where the domain's data lives today (its JSON location)       |
+
+With `--json`, the same data prints as JSON:
+
+```json
+{
+  "domains": [
+    {
+      "domain": "identity",
+      "kind": "json",
+      "writable": true,
+      "backends": ["json"],
+      "jsonSource": "openclaw.json session.identityLinks"
+    }
+  ]
+}
+```
+
+Notes:
+
+- Every core domain resolves to `json` with `writable: true` by default.
+- `storage.backend: "sqlite"` or `"postgres"` must match `session.storage.backend`; otherwise the
+  command fails. Domains that do not ship the selected backend stay on `json`, and the
+  Gateway logs their ids at startup.
+- `writable: no` only appears for cluster deployment roles (roles other than `all`), where
+  JSON-backed config domains run read-only.
+- Per-domain revision and import marker columns arrive with domain stores in a later release.
+
+## Errors
+
+`storage status` exits `1` and prints the first error when config domain storage cannot resolve:
+
+- `storage.domains.<key>: unknown config domain; expected one of identity, pairing, approvals, agents, channel-accounts, credentials, preferences`:
+  an unknown id under `storage.domains` (config validation reports this line).
+- `storage domain "<id>" has no <backend> backend in this release`:
+  `storage.domains.<id>.backend` names a backend the domain does not ship. In this release every
+  domain ships `json` only, so any SQL override fails this way.
+- `storage.backend is "<x>" but session storage is "<y>"; config domains live in the session database`:
+  the default backend disagrees with `session.storage.backend`.
+- `storage domain "<id>" is "<x>" but session storage is "<y>"; config domains live in the session database`:
+  a per-domain SQL override disagrees with `session.storage.backend`.
+
+Related:
+
+- Configuration overview: [Configuration](/admin/gateway/configuration)
+- Field reference: [Configuration Reference](/admin/gateway/configuration-reference)
+- Session storage backends: [Session storage](/developers/concepts/session#session-storage)

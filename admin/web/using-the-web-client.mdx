@@ -22,6 +22,7 @@ read_when:
   - You want to install the web client to your device's home screen
   - You want to know what the bell in the top bar counts, or why a chat shows an unread dot
   - Your assistant sends a form, a choice list, a table, a chart or a progress bar
+  - You want to triage mail in the Inbox panel, or know why the Inbox is empty
   - You want to fill in a form, submit it, or find it again in the Canvas panel
   - You want to know why a picture shows as a link instead of an image
 title: "Using the web client"
@@ -78,12 +79,23 @@ sources:
   - apps/web/src/providers/unread-state.ts
   - apps/web/src/providers/attention-runtime.ts
   - apps/web/src/app/use-reply-notifications.ts
+  - apps/web/src/app/use-host-bridge.ts
+  - apps/web/src/app/use-composer-attach-request.ts
   - apps/web/src/app/shell-viewport.ts
   - apps/web/src/ui/TypingIndicator.tsx
   - apps/web/src/ui/EmptyState.tsx
   - apps/web/src/state/chat.ts
   - apps/web/index.html
   - apps/web/public/manifest.webmanifest
+  - apps/web/src/ui/inbox/InboxPanel.tsx
+  - apps/web/src/ui/inbox/InboxQueue.tsx
+  - apps/web/src/ui/inbox/InboxRail.tsx
+  - apps/web/src/ui/inbox/InboxActionBar.tsx
+  - apps/web/src/ui/inbox/InboxExplorer.tsx
+  - apps/web/src/ui/inbox/InboxFolders.tsx
+  - apps/web/src/ui/inbox/InboxEmptyState.tsx
+  - apps/web/src/ui/inbox/inbox-shared.ts
+  - apps/web/src/state/inbox.ts
 generated: 2026-11-02
 ---
 
@@ -286,7 +298,7 @@ offline** means the connection is down; it comes back on its own once you are co
 thinking or speaking); the button comes back when Voice mode is off. **Read aloud — unavailable on
 this gateway** means the person who manages WednesdayAI has turned the feature off, or has not
 configured a voice for your assistant to speak with. Ask them to enable it; see
-[Text-to-speech](/tts) for the setting.
+[Text-to-speech](/users/tts) for the setting.
 
 If reading fails, a short message appears beside the button: **Read aloud is turned off for this
 assistant.**, **Couldn't play the audio in this browser.**, or **Couldn't read aloud:** followed by
@@ -637,7 +649,14 @@ and an image that still cannot be made small enough is rejected like any other o
 Images are described automatically when the chat's model cannot see images. A file that is empty
 or larger than 50 MB, or a message with more than 32 files, is rejected before anything is sent,
 with a message under the message box explaining why. The **+** button is dimmed while a file is
-uploading or a reply is being written.
+uploading or a reply is being written. Attached files belong to the chat you attached them in:
+opening another chat before you send removes them (and cancels any upload still running), so a
+file never goes to a different assistant by accident.
+
+Inside the WednesdayAI app, files you share to the app from another app (for example a photo from
+your gallery) appear in the message box as attachment cards, already uploaded and ready to send
+with your next message. The 32-file limit counts them too; a file over the limit is named in a
+message under the message box.
 
 ### See older messages
 
@@ -721,10 +740,14 @@ even once its chats fall outside the window; that memory is kept for the page yo
 reload returns the list to the ordinary rules. The assistant for the chat
 you currently have open also stays visible when you have not selected a filter.
 
-Use **Sort assistants** to choose **Newest**, **Oldest**, **Name A-Z** or **Name Z-A**. Newest and
-oldest use each assistant's most recently updated eligible chat, not its oldest chat. Internal
-conversations contribute only when **Show internal** is on. The activity window narrows the
-assistant list, not the age of chats shown after you select an assistant.
+Use **Sort assistants** to choose **Recent**, **Name A-Z** or **Name Z-A**. **Recent** lists
+assistants with a chat updated in the last 24 hours first, most recent first, then everyone else
+alphabetically; assistants updated at the same moment are also listed alphabetically. The list
+holds still while you use it and re-sorts when the page loads, when you come back to the window
+or tab, or when you change a sort or activity-window choice. An assistant that newly appears is
+added at the bottom until then. Recent uses each assistant's most recently updated eligible chat.
+Internal conversations contribute only when **Show internal** is on. The activity window narrows
+the assistant list, not the age of chats shown after you select an assistant.
 
 Select an assistant to highlight it, show its chats and open your conversation with that
 assistant: the same one your direct messages on other channels use when the gateway links them.
@@ -839,6 +862,11 @@ this site in the browser's settings. On browsers without desktop notification su
 mobile browsers - the menu shows **Not supported in this browser**; there, the bell, the sidebar
 dots and the title count are the notification.
 
+Inside the WednesdayAI app, which shows this web client in its own window, notifications come
+from the app instead of the browser. Choosing **On** asks for no browser permission; the app shows
+the notification (your phone or computer may ask once whether the app may notify you), and
+selecting it opens that chat. The app also follows the chat you have open.
+
 Coming back to a tab you left in the background also catches the open chat up: messages that
 arrived elsewhere are fetched and shown without a reload.
 
@@ -942,6 +970,90 @@ without a record of which reply each message belongs to.
 If a reply fails partway, the text already written stays and the error appears below it. The error
 keeps its place when later replies arrive; it is not kept after you reload the page.
 
+## Read and triage your inbox
+
+The **Inbox** brings mail and messages from your connected accounts (for example Gmail or
+Microsoft 365) into one list, so you can deal with what needs you without opening each app. Your
+assistant reads the same inbox and handles what it can; the Inbox shows you the rest.
+
+The **Inbox** entry appears in the sidebar only when your WednesdayAI setup has an inbox. Its
+number counts the messages still unread in your own accounts.
+
+<Steps>
+  <Step title="Open the Inbox">
+    Select **Inbox** in the sidebar. The Inbox opens beside your chat, showing the queue: the
+    messages that need you.
+  </Step>
+  <Step title="Work through what needs you">
+    Each card is one conversation that needs you. Use the buttons on the card to deal with it.
+    The card leaves the queue once nothing in it needs you any more.
+  </Step>
+  <Step title="Look for something specific">
+    Select **Explorer (legacy)** at the top of the Inbox to browse every conversation by account
+    and folder. Select **Queue** to go back.
+  </Step>
+</Steps>
+
+### The queue
+
+On the left, **Needs you** shows the same number as the sidebar: your unread messages. Below it,
+one row per account you own (for example `gmail · you@example.com`) shows that account's unread
+messages; select a row to open that account in the explorer.
+
+A conversation needs you when one of its messages is unread, when your assistant flagged a message
+for your attention (the card shows the flag, for example `financial`), or when your assistant could
+not decide what kind of message it is (the card shows `Unclear`). If nothing does, the queue says
+**Nothing needs you.** Messages your assistant already dealt with are collected under **Handled by
+agent**, closed by default, with their count; select it to see them.
+
+### Act on a message
+
+A card shows only the buttons that message's account supports:
+
+| Button                     | What it does                                                                    |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| **Mark read**              | Marks the message read in its own account, for example in Gmail.                |
+| **Mark unread**            | Marks a read message unread again.                                              |
+| **Archive**                | Archives the message in its own account. It stays findable in the explorer.     |
+| **Label**                  | Type or pick a label, then select **Apply**.                                    |
+| **Reply (needs approval)** | Write your reply, then select **Send**. The reply goes out only after approval. |
+
+There is no delete button: the Inbox never erases a message.
+
+While an action is running, the other action buttons are dimmed. If the action is refused, for
+example because a reply was not approved, the reason appears next to the buttons and your reply
+text stays in the box so you can try again.
+
+### Browse with the explorer
+
+**Explorer (legacy)** lists every conversation, newest first:
+
+- The tabs along the top pick an account type: **All**, or one tab per source such as `gmail`.
+- The folders pick which conversations to list:
+  - **Inbox**: everything not archived.
+  - **Unread**: conversations with a message still unread in its own account.
+  - **Review**: messages your assistant flagged for your attention or could not classify (`Unclear`).
+  - **All incl. archived**: also archived conversations.
+  - **All incl. deleted**: also messages deleted in their own account. They are marked **deleted
+    at source**.
+- Under **Labels**, select a label to show only conversations with that label; select it again
+  to show all.
+- Select a conversation to read it. Each message shows whether you **Received** or **Sent** it,
+  with the same buttons as in the queue.
+- Select **Load older** at the end of the list to fetch earlier conversations.
+
+### When the Inbox is empty
+
+An empty Inbox says why it is empty and what fixes it:
+
+| What you see                              | Why                                                                                          | What to do                                                                                                                                                                                                                                                   |
+| ----------------------------------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **This device isn't linked to a person.** | WednesdayAI does not know who uses this browser, so it cannot tell which accounts are yours. | Send the person who manages WednesdayAI the command shown on the screen. It includes this browser's device id: `wednesdayai devices link <deviceId> --identity <name>`.                                                                                      |
+| **No inbox accounts are bound to you.**   | WednesdayAI knows who you are, but no connected account is marked as yours.                  | Ask the person who manages WednesdayAI to run `wednesdayai inbox owners bind <your name> <source:accountId>` (`wednesdayai inbox owners list` shows the accounts).                                                                                           |
+| **No inbox sources are connected.**       | No mail or message account is connected yet.                                                 | Ask the person who manages WednesdayAI to connect one.                                                                                                                                                                                                       |
+| **Sources connected, nothing here yet.**  | Your accounts are connected but no message has arrived or been fetched yet.                  | For Gmail, Microsoft 365, BlueBubbles or WhatsApp, the person who manages WednesdayAI can fetch existing messages with the command shown. If Microsoft 365 is signed out, they sign it in from the Control UI. Other sources fill up as new messages arrive. |
+| **Couldn't load the inbox.**              | The Inbox could not reach WednesdayAI.                                                       | Select **Retry**. If it keeps failing, see [The page shows a connection error](#the-page-shows-a-connection-error-and-never-loads-chat).                                                                                                                     |
+
 ## Screens with images
 
 Replies can contain images, and the web client is careful about which ones it loads:
@@ -979,21 +1091,22 @@ dimmed. Hover over one (or focus it with the keyboard) to see what it is waiting
 does nothing and sends nothing to your assistant. (**Think** can also be dimmed, but for a
 different reason: see [Choose a model and Think](#choose-a-model-and-think).)
 
-| Where            | Controls                                    |
-| ---------------- | ------------------------------------------- |
-| Sidebar          | **Calendar**, **Memory**, **Add extension** |
-| Account menu     | **Settings**, **Keyboard shortcuts**        |
-| Under each reply | **Feedback**, **Regenerate**                |
+| Where            | Controls                             |
+| ---------------- | ------------------------------------ |
+| Sidebar          | **Add extension**                    |
+| Account menu     | **Settings**, **Keyboard shortcuts** |
+| Under each reply | **Feedback**, **Regenerate**         |
 
 **Canvas** in the top bar is not on this list: it opens the Canvas panel. If it is dimmed instead,
 the tooltip reads **Canvas — Assistant UI is off** - the person who manages WednesdayAI has not
 turned assistant screens on yet; see
 [Forms and other assistant screens](#forms-and-other-assistant-screens).
 
-The tooltips for **Calendar**,
-**Memory**, **Add extension**, **Settings**, **Keyboard shortcuts**, **Feedback** and
-**Regenerate** read "coming with the extension panel SDK" followed by a
-tracked issue number.
+**Memory** and **Calendar** are not on this list either: they turn on when the person who manages
+WednesdayAI allowlists a chat UI plugin that provides them - see
+[Chat UI plugins](/developers/plugins/chat-ui). Until then they stay dimmed, and their tooltips read
+"coming with the extension panel SDK" followed by a tracked issue number, just like the tooltips
+for **Add extension**, **Settings**, **Keyboard shortcuts**, **Feedback** and **Regenerate**.
 
 **Dictate** and **Voice mode**, the microphone and wave buttons beside the send arrow, are not on
 this list — see [Dictate and voice](#dictate-and-voice). Either can still be dimmed when the
@@ -1024,7 +1137,7 @@ unsent messages this browser kept on the device.
 
 The same menu has **Linked accounts**, which shows who this browser is signed in as and lets you
 link your chat accounts (Telegram, Slack, Discord and friends) by entering a `/link` code - see
-[Identities](/gateway/identity).
+[Identities](/admin/gateway/identity).
 
 ## Troubleshooting
 
@@ -1229,7 +1342,7 @@ models or replies may not produce reasoning even when that switch is on.
 
 The web client saves these choices in this browser. If it cannot read saved choices, it starts
 with the defaults: reasoning hidden, tools shown in **Minimum** form, assistants from the last
-**4 hours**, assistants sorted by **Newest**, sessions sorted by **Newest**, internal sessions
+**4 hours**, assistants sorted by **Recent**, sessions sorted by **Newest**, internal sessions
 hidden, and no assistant filter. If it cannot save a change, your choice still works while the page is
 open, but a reload may restore an older saved choice or a default. You can still navigate and
 chat. Check your browser's privacy or storage settings if you want your choices remembered.
@@ -1242,5 +1355,5 @@ address you tried.
 
 ## Related
 
-- [Web client hosting](/web/user-client) - for the person setting this up
-- [Pairing QR and setup codes](/cli/qr) - for the person who creates your setup code
+- [Web client hosting](/admin/web/user-client) - for the person setting this up
+- [Pairing QR and setup codes](/users/cli/qr) - for the person who creates your setup code

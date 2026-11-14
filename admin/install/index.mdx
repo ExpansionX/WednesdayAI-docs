@@ -1,0 +1,252 @@
+---
+summary: "Install WednesdayAI — installer script, npm/pnpm, from source, Docker, and more"
+read_when:
+  - You need an install method other than the Getting Started quickstart
+  - You want to deploy to a cloud platform
+  - You need to update, migrate, or uninstall
+title: "Install"
+---
+
+# Install
+
+Already followed [Getting Started](/users/start/getting-started)? You're all set — this page is for alternative install methods, platform-specific instructions, and maintenance.
+
+## System requirements
+
+- **[Node 24+](/admin/install/node)** (the [installer script](#install-methods) will install it if missing)
+- macOS, Linux, or Windows
+- `pnpm` only if you build from source
+
+<Note>
+On Windows, we strongly recommend running WednesdayAI under [WSL2](https://learn.microsoft.com/en-us/windows/wsl/install).
+</Note>
+
+## Install methods
+
+<Tip>
+The **installer script** is the recommended way to install WednesdayAI. It handles Node detection, installation, and onboarding in one step.
+</Tip>
+
+<Warning>
+For VPS/cloud hosts, avoid third-party "1-click" marketplace images when possible. Prefer a clean base OS image (for example Ubuntu LTS), then install WednesdayAI yourself with the installer script.
+</Warning>
+
+<AccordionGroup>
+  <Accordion title="Installer script" icon="rocket" defaultOpen>
+    Downloads the CLI, installs it globally via npm, and launches the onboarding wizard.
+
+    <Tabs>
+      <Tab title="macOS / Linux / WSL2">
+        ```bash
+        curl -fsSL https://wednesdayai.dev/install.sh | bash
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        iwr -useb https://wednesdayai.dev/install.ps1 | iex
+        ```
+      </Tab>
+    </Tabs>
+
+    That's it — the script handles Node detection, installation, and onboarding.
+
+    To skip onboarding and just install the binary:
+
+    <Tabs>
+      <Tab title="macOS / Linux / WSL2">
+        ```bash
+        curl -fsSL https://wednesdayai.dev/install.sh | bash -s -- --no-onboard
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        & ([scriptblock]::Create((iwr -useb https://wednesdayai.dev/install.ps1))) -NoOnboard
+        ```
+      </Tab>
+    </Tabs>
+
+    For all flags, env vars, and CI/automation options, see [Installer internals](/admin/install/installer).
+
+    The hosted installers are served from the published npm tarball. The canonical origin is the
+    pinned, versioned CDN path:
+
+    <Tabs>
+      <Tab title="macOS / Linux / WSL2">
+        ```bash
+        curl -fsSL https://unpkg.com/wednesdayai@<version>/scripts/install.sh | bash -s -- --version <version>
+        ```
+      </Tab>
+      <Tab title="Windows (PowerShell)">
+        ```powershell
+        & ([scriptblock]::Create((iwr -useb https://unpkg.com/wednesdayai@<version>/scripts/install.ps1))) -Tag <version>
+        ```
+      </Tab>
+    </Tabs>
+
+    The URL pins the installer script; `--version` / `-Tag` pins the `wednesdayai` package it installs
+    (both default to `latest`).
+
+    `https://unpkg.com/wednesdayai@latest/scripts/install.sh` is an optional moving alias that
+    always resolves to the newest release; the hosted `install.sh` URL follows it.
+
+  </Accordion>
+
+  <Accordion title="npm / pnpm" icon="package">
+    If you already have Node 24+ and prefer to manage the install yourself:
+
+    <Tabs>
+      <Tab title="npm">
+        ```bash
+        npm install -g wednesdayai@latest --allow-scripts=node-llama-cpp,@google/genai,protobufjs,koffi
+        wednesdayai onboard --install-daemon
+        ```
+
+        <Accordion title="npm install-scripts warnings?">
+          npm 11.16+ warns when install scripts run without an allowlist, and npm 12 blocks them
+          outright. `--allow-scripts=<list>` names exactly the packages whose install scripts we
+          trust; with the list shown above the install is warning-free on npm 12 (tested with
+          `npx npm@12 install -g`).
+
+          - npm ≤ 11.15: no allowlist mechanism — omit the flag.
+          - npm 11.16: install works, but prints a warning unless the flag is present.
+          - npm 12: install scripts are blocked unless the flag is present.
+          - `npm approve-scripts` only works for project installs; it has no effect on global
+            installs.
+        </Accordion>
+
+        <Accordion title="sharp build errors?">
+          If you have libvips installed globally (common on macOS via Homebrew) and `sharp` fails, force prebuilt binaries:
+
+          ```bash
+          SHARP_IGNORE_GLOBAL_LIBVIPS=1 npm install -g wednesdayai@latest
+          ```
+
+          If you see `sharp: Please add node-gyp to your dependencies`, either install build tooling (macOS: Xcode CLT + `npm install -g node-gyp`) or use the env var above.
+        </Accordion>
+      </Tab>
+      <Tab title="pnpm">
+        ```bash
+        pnpm add -g wednesdayai@latest
+        pnpm approve-builds -g        # approve openclaw, node-llama-cpp, sharp, etc.
+        wednesdayai onboard --install-daemon
+        ```
+
+        <Note>
+        pnpm requires explicit approval for packages with build scripts. After the first install shows the "Ignored build scripts" warning, run `pnpm approve-builds -g` and select the listed packages.
+        </Note>
+      </Tab>
+    </Tabs>
+
+  </Accordion>
+
+  <Accordion title="From source" icon="github">
+    For contributors or anyone who wants to run from a local checkout.
+
+    <Steps>
+      <Step title="Clone and build">
+        Clone the [WednesdayAI repo](https://github.com/ExpansionX/WednesdayAI-core) and build:
+
+        ```bash
+        git clone https://github.com/ExpansionX/WednesdayAI-core.git
+        cd WednesdayAI-core
+        pnpm install
+        pnpm build
+        pnpm control:build:packaged
+        ```
+      </Step>
+      <Step title="Install the CLI from a tarball">
+        Build a local npm tarball and install that copy globally:
+
+        ```bash
+        npm pack
+        npm install -g ./wednesdayai-*.tgz --allow-scripts=node-llama-cpp,@google/genai,protobufjs,koffi
+        rm ./wednesdayai-*.tgz
+        ```
+
+        The package exposes both `wednesdayai` and the compatibility `openclaw` command.
+      </Step>
+      <Step title="Run onboarding">
+        ```bash
+        wednesdayai onboard --install-daemon
+        ```
+      </Step>
+    </Steps>
+
+    For deeper development workflows, see [Setup](/users/start/setup).
+
+  </Accordion>
+</AccordionGroup>
+
+## Other install methods
+
+<CardGroup cols={2}>
+  <Card title="Docker" href="/admin/install/docker" icon="container">
+    Containerized or headless deployments.
+  </Card>
+  <Card title="Podman" href="/admin/install/podman" icon="container">
+    Rootless container: run `setup-podman.sh` once, then the launch script.
+  </Card>
+  <Card title="Nix" href="/admin/install/nix" icon="snowflake">
+    Declarative install via Nix.
+  </Card>
+  <Card title="Ansible" href="/admin/install/ansible" icon="server">
+    Automated fleet provisioning.
+  </Card>
+</CardGroup>
+
+## After install
+
+Verify everything is working:
+
+```bash
+wednesdayai doctor         # check for config issues
+wednesdayai status         # gateway status
+wednesdayai dashboard      # open the browser UI
+```
+
+If you need custom runtime paths, use:
+
+- `OPENCLAW_HOME` for home-directory based internal paths
+- `OPENCLAW_STATE_DIR` for mutable state location
+- `OPENCLAW_CONFIG_PATH` for config file location
+
+See [Environment vars](/users/help/environment) for precedence and full details.
+
+## Troubleshooting: `openclaw` not found
+
+<Accordion title="PATH diagnosis and fix">
+  Quick diagnosis:
+
+```bash
+node -v
+npm -v
+npm prefix -g
+echo "$PATH"
+```
+
+If `$(npm prefix -g)/bin` (macOS/Linux) or `$(npm prefix -g)` (Windows) is **not** in your `$PATH`, your shell can't find global npm binaries (including `wednesdayai` and the compatibility `openclaw` command).
+
+Fix — add it to your shell startup file (`~/.zshrc` or `~/.bashrc`):
+
+```bash
+export PATH="$(npm prefix -g)/bin:$PATH"
+```
+
+On Windows, add the output of `npm prefix -g` to your PATH.
+
+Then open a new terminal (or `rehash` in zsh / `hash -r` in bash).
+</Accordion>
+
+## Update / uninstall
+
+<CardGroup cols={3}>
+  <Card title="Updating" href="/admin/install/updating" icon="refresh-cw">
+    Keep WednesdayAI up to date.
+  </Card>
+  <Card title="Migrating" href="/admin/install/migrating" icon="arrow-right">
+    Move to a new machine.
+  </Card>
+  <Card title="Uninstall" href="/admin/install/uninstall" icon="trash-2">
+    Remove WednesdayAI completely.
+  </Card>
+</CardGroup>

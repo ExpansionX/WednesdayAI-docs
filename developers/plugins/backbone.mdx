@@ -1,53 +1,59 @@
 ---
-title: "Backbone"
-sidebarTitle: "Backbone message bus"
-description: "The backbone message and task bus — the BusMessage envelope, durable work class, fail-closed plugin authorization, and the dispatchers that consume work."
-audience: developer
+summary: "Cognitive substrate backbone — Tier 1 message bus, envelope, authorization, and durability"
+read_when:
+  - You are building a plugin that publishes events or enqueues durable work
+  - You need to understand the BusMessage envelope and mandatory identity fields
+  - You are configuring OTEL metrics or diagnostics for backbone authz or event-loop lag
+  - You want to understand the two delivery classes (events vs work)
+  - You are operating a gateway and need to know about bus_work_items / bus_work_claims tables
+title: "Cognitive Substrate Backbone"
+audience: developer, admin
+component: backbone
+sources:
+  - src/backbone/envelope.ts
+  - src/backbone/backbone.ts
+  - src/backbone/in-process-backbone.ts
+  - src/backbone/bus-work-backend.ts
+  - src/backbone/bus-work-dispatcher.ts
+  - src/backbone/authz.ts
+  - src/backbone/scoped-plugin-api.ts
+  - src/backbone/reconciler.ts
+  - src/backbone/channel-publish.ts
+  - src/backbone/worker-pool.ts
+  - src/backbone/outbound-delivery.ts
+  - src/plugin-sdk/index.ts
+  - src/infra/diagnostic-events.ts
+  - extensions/diagnostics-otel/src/service.ts
+  - src/config/sessions/ctx-schema.ts
+generated: 2026-07-04
+sidebarTitle: Backbone message bus
+description: The backbone message and task bus — the BusMessage envelope,
+  durable work class, fail-closed plugin authorization, and the dispatchers that
+  consume work.
 doc-schema-version: 1
 ---
 
-# Backbone
+# Cognitive Substrate Backbone
 
-The backbone is WednesdayAI's Tier 1 message and task bus. It unifies two previously separate mechanisms — in-process diagnostic events and the gateway broadcast — plus a durable work queue, under one typed envelope (`BusMessage`) with mandatory privacy and access identity. Plugins do not talk to a raw broker; they talk to a grants-enforced scoped API built on the backbone.
+The backbone is WednesdayAI's Tier 1 message bus — a thin typed contract unifying event fan-out and durable work delivery under one envelope with mandatory privacy and access identity. It generalizes three previously separate mechanisms (diagnostic-events, server-broadcast, and the storage-outbox) without becoming a fourth spine.
 
-The backbone distinguishes two delivery classes:
+## Two delivery classes
 
-| Class     | Transport                  | Durability                                   | Delivery              | Use for                                                       |
-| --------- | -------------------------- | -------------------------------------------- | --------------------- | ------------------------------------------------------------- |
-| `event`   | In-process fan-out         | Volatile (best-effort, at-most-once)         | All matching subscribers | Diagnostic events, gateway broadcasts, channel messages    |
-| `work`    | `ctx_bus_work_items` table | Durable (at-least-once, idempotent, retrying) | Single consumer per item, via claim/ack | Outbound delivery, session-lifecycle fan-out, background tasks |
+The backbone distinguishes two delivery classes, each with different semantics:
 
-Events are fire-and-forget: a throwing handler is isolated and the event is dropped — it never crashes the process and never retries. Work is transmit-and-acknowledge: a claimed work item must be acked (success) or nacked (failure, scheduled retry per the retry policy).
+| Class     | Transport                      | Durability                                   | Replay               | Consumers                     | Use for                                                       |
+| --------- | ------------------------------ | -------------------------------------------- | -------------------- | ----------------------------- | ------------------------------------------------------------- |
+| **event** | In-process fan-out             | Volatile (best-effort, at-most-once)         | No replay in v1      | Multiple subscribers          | Diagnostic events, gateway broadcasts, channel messages       |
+| **work**  | Sibling `bus_work_items` table | Durable (at-least-once + idempotent + retry) | Yes (claim/ack/nack) | Single consumer per work item | Outbound delivery, session-lifecycle fan-out, background jobs |
 
-Everything in this page is exported from `openclaw/plugin-sdk`.
+Events are fire-and-forget: handler errors are caught and the event is dropped (never crashes the process). Work is transmit-and-acknowledge: a claimed work item must be acked (success) or nacked (failure → retry with exponential backoff).
 
-## Envelope
+## The BusMessage envelope
 
-Every message on the backbone — event or work — is a `BusMessage<TPayload>`. The envelope is the single wire format for both delivery classes:
+Every message on the backbone — event or work — is a `BusMessage<TPayload>`. The envelope is the single wire format for both delivery classes.
 
-```typescript
-import type { BusMessage } from "openclaw/plugin-sdk";
-
-type BusMessage<TPayload = unknown> = {
-  id: string;               // UUID, or your idempotency key when you pass `id`
-  schemaVersion: number;    // currently 1
-  topic: string;            // e.g. "channel.message", "agent.turn"
-  class: "event" | "work";
-  ts: number;
-  source: string;
-  correlationId?: string;   // tracing identity (runId/turnId)
-  causationId?: string;     // id of the message that caused this one
-  payload: TPayload;
-  accessContext: AccessContext;
-  privacyContext: PrivacyContext; // non-empty array of scope tags
-  saliency?: 1 | 2 | 3 | 4 | 5;  // clamped to 1..5
-};
-```
-
-Construct envelopes with `createEvent` / `createWork`, never as object literals — the constructors are fail-closed on identity:
-
-```typescript
-import { createEvent, createWork } from "openclaw/plugin-sdk";
+```ts
+import { createEvent, createWork } from "wednesdayai/plugin-sdk";
 
 const event = createEvent({
   topic: "channel.message",
@@ -58,413 +64,306 @@ const event = createEvent({
 });
 
 const work = createWork({
-  id: "my-plugin:report-42", // work id = idempotency key; duplicates are rejected
-  topic: "reports.generate",
-  source: "my-plugin",
-  payload: { reportId: 42 },
-  privacyContext: ["tenant:t1"],
-  accessContext: { actorId: "user-1", tenantId: "t1" },
+  topic: "channel.outbound",
+  source: "outbound-delivery:telegram",
+  payload: { channel: "telegram", recipientId: "123", sessionId: "s1" },
+  privacyContext: ["tenant:t1", "lane:l1"],
+  accessContext: { actorId: "user-1", tenantId: "t1", laneId: "l1" },
+  id: "telegram:123:s1:1", // optional explicit id = idempotency key
 });
 ```
 
-Construction throws when:
+The legacy `openclaw/plugin-sdk` specifier still loads (ADR 2057).
 
-- `privacyContext` is missing, not an array, or empty.
-- `accessContext` is not routable — it must carry `actorId` + `tenantId` (both non-empty), or a non-empty `laneId`, or a `system` brand (`"core"` / `"legacy"`).
-- `saliency` is clamped: values outside 1..5 are floored/ceilinged; `NaN`/`Infinity` become `undefined`.
+### Mandatory identity fields
 
-For work-class messages, the optional `id` is the idempotency key: the durable backend rejects a second enqueue with the same id (unique index on `idempotency_key`). Omit it and a random UUID is generated — fine for events, wrong for work you want deduplicated.
+The envelope is fail-closed on identity. Both `privacyContext` and `accessContext` are **required** and enforced at construction time:
 
-**What not to do:**
+- **`privacyContext: NonEmptyArray<string>`** — a non-empty array of privacy scope tags (e.g. `["tenant:t1", "lane:l1"]`). An empty array is rejected.
+- **`accessContext: AccessContext`** — must be routable: either `actorId` + `tenantId`, or `laneId`, or a `system` brand (`"core"` / `"legacy"`). A bare `{}` is rejected.
 
-```typescript
-// ❌ hand-rolled envelope — bypasses fail-closed identity validation
-const bad: BusMessage = {
-  id: crypto.randomUUID(),
-  schemaVersion: 1,
-  topic: "reports.generate",
-  class: "work",
-  ts: Date.now(),
-  source: "my-plugin",
-  payload: {},
-  privacyContext: [],                    // accepted by the type, rejected by nothing
-  accessContext: {} as AccessContext,    // unroutable — silently undeliverable
-};
+These fields are not decorative — they are the basis for fail-closed authorization (see below).
 
-// ❌ random ids for work you need deduplicated
-const work = createWork({ topic: "reports.generate", /* no id */ ... });
-await scopedApi.enqueue(work); // enqueueing twice = two work items
-```
+### Optional fields
 
-## Backbone interface
+- `id?: string` — when omitted, a UUID is generated. For work class, set this to your idempotency key to get deduplication.
+- `correlationId?: string` — reuse shipped runId/turnId identity for tracing.
+- `causationId?: string` — links a message to the message that caused it.
+- `saliency?: number` — clamped to 1..5; NaN/Infinity → undefined.
 
-`Backbone` is the transport-agnostic contract. The in-process implementation ships today; a concrete external broker would implement the same type.
+## The Backbone interface
 
-```typescript
-import type { Backbone, BackboneWorkClaim, Unsubscribe } from "openclaw/plugin-sdk";
+The `Backbone` type is the transport-agnostic contract. In 0a, only the in-process implementation ships; a concrete broker (NATS/Redis Streams/Postgres LISTEN) is deferred.
 
-type Backbone = {
+```ts
+export type Backbone = {
   publish(message: BusMessage): void;
   subscribe<TPayload = unknown>(
     topic: string,
-    handler: (message: BusMessage<TPayload>) => void | Promise<void>,
+    handler: BackboneSubscribeHandler<TPayload>,
   ): Unsubscribe;
   enqueue(work: BusMessage): Promise<void>;
   claim<TPayload = unknown>(
     topic: string,
     consumerId: string,
     leaseMs: number,
-    workId?: string,
   ): Promise<BackboneWorkClaim<TPayload> | null>;
   ack(workId: string): Promise<void>;
   nack(workId: string, error?: string, retryAt?: number): Promise<void>;
-  release?(workId: string): Promise<void>; // optional — feature-detect with `backbone.release?.(id)`
-};
-
-type BackboneWorkClaim<TPayload = unknown> = {
-  id: string;
-  message: BusMessage<TPayload>;
-  attempts: number;
-  leaseUntil: number; // epoch ms
 };
 ```
 
-- `publish` is **synchronous** and returns `void` — events fan out to matching subscribers immediately, on the caller's stack.
-- `subscribe` takes a topic glob: an exact topic (`"channel.message"`) or a trailing-wildcard (`"channel.*"` matches `channel` and every `channel.<sub>` topic). No other wildcard shapes exist.
-- `claim` leases one pending work item for `consumerId`. When `workId` is passed, the claim is targeted: it returns only that exact pending/claimable item (or `null`) — used to claim a just-published turn without racing other consumers.
-- `release` is optional (event-only backbones do not implement the work class at all). It returns a claimed item to pending without recording failure or burning an attempt.
+- `publish` fans out an event to in-process subscribers. Also bridges to `emitDiagnosticEvent` (for `diagnostic.*` topics) and the gateway broadcaster (if wired).
+- `subscribe` registers a handler for a topic glob (e.g. `"channel.*"`, `"memory.lesson"`). Returns an unsubscribe function.
+- `enqueue` durably persists a work item to the `bus_work_items` table.
+- `claim` leases a pending work item for a consumer. Returns `null` if no work is available.
+- `ack` marks a work item as processed (idempotent).
+- `nack` marks a work item as failed and schedules a retry.
 
-## In-process backbone
+### Creating a backbone instance
 
-`createInProcessBackbone` implements the event class only. `createProductionBackbone` wraps it and delegates the work class to a `BusWorkBackend`:
+```ts
+import { createInProcessBackbone, createProductionBackbone } from "wednesdayai/plugin-sdk";
 
-```typescript
-import {
-  createInProcessBackbone,
-  createProductionBackbone,
-} from "openclaw/plugin-sdk";
-
-// Events-only (no durable work):
+// Events-only backbone (no durable work):
 const backbone = createInProcessBackbone({
-  broadcastToGateway: gatewayBroadcaster, // optional: also fan out to WS clients
+  broadcastToGateway: gatewayBroadcaster, // optional: bridge to WS clients
 });
-backbone.dispose(); // unsubscribes the diagnostic-events bridge listener
 
-// Events + durable work:
+// Production backbone (events + durable work):
 const prodBackbone = createProductionBackbone({
-  busWork: busWorkBackend, // SQLite or Postgres backend from the storage runtime
+  busWork: sqliteBusWorkBackend, // or postgresBusWorkBackend
   broadcastToGateway: gatewayBroadcaster,
 });
+
+// Clean up (unsubscribes the diagnostic-events bridge listener):
+backbone.dispose();
 ```
 
-Behavior to rely on:
+## Durable work: BusWorkBackend and dispatcher
 
-- **Subscriber error isolation.** A handler that throws synchronously, or returns a rejected promise, is logged and dropped. One bad subscriber never crashes the publisher or blocks other subscribers. Handlers may be sync or async.
-- **Diagnostic bridge.** Publishing to a `diagnostic.*` topic also forwards to the legacy diagnostic-events seam (echo-suppressed to prevent double delivery). Legacy `onDiagnosticEvent` emissions are likewise surfaced to backbone subscribers as `diagnostic.<type>` events.
-- **Gateway bridge.** When `broadcastToGateway` is wired, every publish also calls the gateway broadcaster with `(topic, payload)`; broadcaster errors are isolated and logged.
-- **Work methods throw.** On the events-only backbone, `enqueue`/`claim`/`ack`/`nack` throw `"InProcessBackbone does not implement work class — use BusWorkDispatcher + BusWorkBackend"`.
+Work-class messages are persisted to sibling `bus_work_items` and `bus_work_claims` tables inside the existing `StorageRuntime` (not an extension of the storage-outbox). Both SQLite and Postgres backends are implemented.
 
-**What not to do:**
+### BusWorkBackend interface
 
-```typescript
-const backbone = createInProcessBackbone();
-
-// ❌ enqueue on the events-only backbone — always throws
-await backbone.enqueue(createWork({ ... }));
-
-// ❌ assuming a slow subscriber delays or breaks your publish
-backbone.publish(event); // returns immediately; slow handlers run detached
-```
-
-## Bus work backend
-
-`BusWorkBackend` is the durable persistence contract for the work class. Both SQLite and Postgres implementations live in the session storage runtime; the backend is wired in as the runtime's `busWork` member.
-
-```typescript
-// Contract shape — the concrete SQLite/Postgres backends come from the session
-// storage runtime; this type is not part of the plugin-SDK surface.
-interface BusWorkBackend {
-  enqueue(message: BusMessage, opts?: { retryPolicy?: RetryPolicy }): Promise<void>;
-  claim(
-    topic: string,
-    consumerId: string,
-    leaseMs: number,
-    workId?: string,
-  ): Promise<BusWorkClaimResult | null>;
-  ack(
-    workId: string,
-    result: { ok: true } | { ok: false; error: string },
-    opts?: { now?: Date },
-  ): Promise<void>;
-  release(workId: string): Promise<void>;
+```ts
+export interface BusWorkBackend {
+  enqueue(message: BusMessage): Promise<void>;
+  claim(topic: string, consumerId: string, leaseMs: number): Promise<BusWorkClaimResult | null>;
+  ack(workId: string, result: { ok: true } | { ok: false; error: string }): Promise<void>;
   lease(workId: string, owner: string, leaseUntil: Date): Promise<void>;
 }
-
-interface BusWorkClaimResult {
-  id: string;
-  message: BusMessage;
-  attempts: number;
-  leaseUntil: Date;
-  retryPolicy: RetryPolicy | null;
-}
 ```
 
-Delivery guarantees:
+The backend is wired into `SessionStorageRuntime.busWork` alongside the existing `outbox?: StorageOutboxBackend` slot. The storage-outbox is untouched (byte-for-byte).
 
-- **At-least-once with idempotent enqueue.** The `ctx_bus_work_items.idempotency_key` column carries a unique index — a duplicate enqueue of the same work id is a no-op.
-- **Single consumer per item.** Postgres claims with `FOR UPDATE SKIP LOCKED`; SQLite serializes claims inside `BEGIN IMMEDIATE`. A `claimed` row whose `lease_until` has expired becomes reclaimable — a crashed consumer does not strand work forever.
-- **Retries.** A nack (or an ack with `{ ok: false, error }`) records the failure, increments `attempts`, and schedules the next attempt per the retry policy. You can attach a policy at enqueue time via `opts.retryPolicy`; persisted policies that drifted outside schema bounds are rejected on read, not honored.
+### BusWorkDispatcher
 
-## Bus work dispatcher
+The dispatcher is the work-class equivalent of `StorageOutboxDispatcher` — a claim/process/ack loop with concurrency, batching, timeout, and retry. It does not poll on its own; the caller drives `dispatchOnce()`.
 
-`createBusWorkDispatcher` is a claim/process/ack loop for one topic. It does not poll on its own — the caller drives `dispatchOnce()` (for example from a timer):
-
-```typescript
-import { createBusWorkDispatcher } from "openclaw/plugin-sdk";
+```ts
+import { createBusWorkDispatcher } from "wednesdayai/plugin-sdk";
 
 const dispatcher = createBusWorkDispatcher({
   backend: busWorkBackend,
-  topic: "reports.generate",
-  consumerId: "my-plugin:report-worker",
+  topic: "channel.outbound",
+  consumerId: "outbound-delivery",
   handler: async (work) => {
-    await generateReport(work.message.payload);
+    // Process the work item...
     return { ok: true };
   },
+  concurrency: 4,
+  batchSize: 25,
+  hookTimeoutMs: 30_000,
 });
 
-await dispatcher.dispatchOnce(); // claim + process up to batchSize items
-await dispatcher.stop();         // drain in-flight work (bounded by stopTimeoutMs)
+await dispatcher.dispatchOnce();
+await dispatcher.stop();
 ```
 
-Options and defaults:
+### Exactly-once semantics
 
-| Option           | Default     | Effect                                                                                       |
-| ---------------- | ----------- | -------------------------------------------------------------------------------------------- |
-| `concurrency`    | `4`         | Parallel claims per inner batch                                                              |
-| `batchSize`      | `25`         | Max items claimed per `dispatchOnce`                                                         |
-| `hookTimeoutMs`  | `30_000`    | Per-item handler timeout; exceeding it nacks the item                                        |
-| `pollIntervalMs` | `1000`      | Accepted but unused — the caller owns polling cadence                                          |
-| `stopTimeoutMs`  | `5000`      | Drain timeout for `stop()`                                                                   |
-| (derived)        | `hookTimeoutMs + 5000` | Claim lease (`leaseMs`) — always 5 s longer than the handler timeout so a live handler never loses its lease to the timer |
+- **SQLite**: SELECT-then-INSERT inside `BEGIN IMMEDIATE`. No `ON CONFLICT` (the index is non-unique). Exactly-once is enforced at the claim layer via a `(work_id, consumer_id)` subquery in the ready-row SELECT.
+- **Postgres**: `ON CONFLICT (idempotency_key) DO NOTHING` (full-unique index) + `FOR UPDATE SKIP LOCKED` on claim. The claims side-table tracks per-consumer claim state.
+- **Lease recovery**: both backends recover expired leases — a `claimed` row whose `lease_until` has passed is eligible for re-claim (mirrors the storage-outbox's lease-recovery guard).
 
-A handler that throws or resolves `{ ok: false, error }` is nacked with the error string. Handlers run async and do not block each other, but they do share the event loop — see [Worker pool](#worker-pool) for CPU-heavy payloads.
+### Claim ID encoding
 
-<Note>
-Per [ADR 0050](https://github.com/ExpansionX/WednesdayAI-core/blob/main/dev-docs/adr/0050-backbone-sdk-exports-are-plugin-surface-not-dead-code.md), `createBusWorkDispatcher` and `createSessionReconciler` are deliberate plugin-SDK surface: the gateway wires its own dispatch path, so "no core caller" is their designed state, not dead code. Use them freely from plugins.
-</Note>
+Claim IDs are encoded as `${workId}|${consumerId}|ct:${claimToken}` via `formatTaskClaimHandle` / `parseTaskClaimHandle`, with a fresh claim token per claim. The row's `lease_owner` is `<backend>:<gatewayInstanceId>:<consumerId>:<claimToken>`, and ack, nack, release and renew compare the full owner. A handle from an earlier claim whose lease expired therefore cannot settle a later claim of the same item, in the same process or in another gateway process. The encoding is internal to the backend; consumers treat the claim ID as an opaque string.
 
-**What not to do:**
+## Fail-closed authorization
 
-```typescript
-// ❌ handler must return the result object, not throw, for expected failures
-handler: async (work) => {
-  await deliver(work.message.payload); // throws on transient failure → nacked anyway,
-                                       // but the error string is less controlled
-},
+The backbone enforces **symmetric fail-closed authorization** across both delivery classes (events + work) and both directions (consume + produce). This is the core security invariant.
 
-// ❌ setting hookTimeoutMs below your worst-case handler time
-//    → items get nacked mid-flight while still running and retry as duplicates
-```
+### PluginBackboneGrants
 
-## Authorization (authz)
+A plugin's grants are declared in its manifest and constructed by the plugin loader (the loader binds `source` / `consumerId` to the manifest identity — plugins cannot self-assert).
 
-The backbone enforces symmetric, fail-closed authorization across both delivery classes and both directions. A plugin's grants are declared by the plugin loader from its manifest — plugins cannot self-assert grants.
-
-```typescript
-import type { PluginBackboneGrants } from "openclaw/plugin-sdk";
-
-interface PluginBackboneGrants {
+```ts
+export interface PluginBackboneGrants {
   pluginId: string;
-  consumeScopes: string[];  // privacyContext scopes this plugin may read
-  produceScopes: string[];  // privacyContext scopes this plugin may write
-  consumeTopics: string[];  // topic globs this plugin may subscribe to / claim
-  produceTopics: string[];  // topic globs this plugin may publish / enqueue
-  consumeAccess?: {
+  consumeScopes: string[];   // privacyContext scopes this plugin may read
+  produceScopes: string[];   // privacyContext scopes this plugin may write
+  consumeTopics: string[];   // topic globs this plugin may subscribe to / claim
+  produceTopics: string[];   // topic globs this plugin may publish / enqueue
+  consumeAccess?: {           // accessContext allow-sets for consume
     tenants?: string[];
     lanes?: string[];
     actors?: string[];
     system?: ("core" | "legacy")[];
   };
-  produceAccess?: { /* same shape for produce */ };
+  produceAccess?: { ... };    // same shape for produce
 }
 ```
 
-The rules, all fail-closed:
+### Authorization rules
 
-- **Every** scope in the message's `privacyContext` must be granted (all-of, not any-of). An empty `privacyContext` never passes.
-- The topic must match a granted glob (exact, or trailing `.*`).
-- Each `accessContext` dimension present on the message must be allowed by the grant set. A grant of `undefined` for a dimension is deny-all for it; `["*"]` is allow-any; otherwise the value must be listed. A non-routable `accessContext` (no actor+tenant, no lane, no system brand) is rejected outright.
-- System topics (`agent.turn`, `channel.outbound`, ...) are default-deny: nothing is granted unless the manifest explicitly grants it.
+- **Every** privacyContext scope must be in the granted set (not "any", but "all").
+- A grant entry matches a scope exactly, or as `<namespace>:*`, which matches any non-empty value in that namespace. `["tenant:t1", "lane:*"]` therefore covers every current and future lane of tenant `t1`, while `lane:*` does not match `laneX:l1`. Neither `tenant:t1` on its own nor a bare `*` implies lanes — a bare `*` is a literal scope. Pair `lane:*` with `consumeAccess.lanes: ["*"]`, since privacyContext and accessContext are gated separately.
+- The topic must match a granted glob (exact match OR `prefix.*`).
+- The accessContext must fall within the granted access allow-sets for each dimension.
+- System/channel/delivery topics (`channel.message`, `reply.deliver`, `agent.turn`, ...) are **default-deny** unless explicitly granted.
 
-Violations throw `AuthorizationError` (exported from the SDK) carrying `pluginId`, a machine-readable `reason`, and the offending `topic`.
+Core (not plugins) is the only current producer of `agent.turn`. Isolated cron
+`agentTurn` jobs enqueue that topic; the in-process agent-turn runner claims,
+executes, and acks. Plugins must not enqueue `agent.turn` unless the manifest
+explicitly grants that produce topic. See [Agent-turn runner](/developers/plugins/agent-turn-runner).
 
-## Scoped plugin API
+- Empty `privacyContext` is rejected (does not pass vacuously).
+- Non-routable `accessContext` (`{}` with no actor+tenant, no lane, no system brand) is rejected.
 
-Plugins never touch a raw `Backbone`. The loader constructs a `ScopedBackboneApi` around it that enforces grants on every call:
+### ScopedBackboneApi
 
-```typescript
-import type { ScopedBackboneApi } from "openclaw/plugin-sdk";
+Plugins never interact with the raw `Backbone` directly. The loader constructs a `ScopedBackboneApi` that enforces grants on every call:
 
-interface ScopedBackboneApi {
-  publish(event: BusMessage): void;
-  subscribe(topicGlob: string, handler: BackboneSubscribeHandler): Unsubscribe;
-  enqueue(work: BusMessage): Promise<void>;
-  claim(
-    topicGlob: string,
-    leaseMs: number,
-  ): Promise<{ id: string; message: BusMessage; attempts: number; leaseUntil: number } | null>;
-  claimSessionWork(
-    topicGlob: string,
-    leaseMs: number,
-  ): Promise<{ id: string; message: BusMessage; attempts: number; leaseUntil: number } | null>;
-  ack(workId: string): Promise<void>;
-  nack(workId: string, error: string): Promise<void>;
-}
-```
-
-You can also build one directly (for tests or standalone tooling) with `createScopedBackboneApi({ backbone, grants })`. What the wrapper enforces:
-
-- `publish` rejects messages whose `class` is not `"event"`; `enqueue` rejects anything not `"work"`.
-- Every outgoing message is restamped `source: "plugin:<pluginId>"` — a plugin cannot impersonate another source.
-- `subscribe` checks the glob against `consumeTopics`, then re-checks **every delivered message** against full consume grants; unauthorized deliveries are dropped, not delivered.
-- `claim` nacks and returns `null` for claimed work that fails consume authz (out-of-scope work is never delivered to your handler).
-- `ack`/`nack` only accept claim ids returned by **this** scoped API's `claim()`/`claimSessionWork()` — enforced by an internal owned-claims set.
-
-```typescript
-import { createScopedBackboneApi } from "openclaw/plugin-sdk";
+```ts
+import { createScopedBackboneApi } from "wednesdayai/plugin-sdk";
 
 const api = createScopedBackboneApi({
-  backbone: prodBackbone,
+  backbone: productionBackbone,
   grants: {
     pluginId: "my-plugin",
-    consumeScopes: ["tenant:t1"],
+    consumeScopes: ["tenant:t1", "lane:l1"],
     produceScopes: ["tenant:t1"],
-    consumeTopics: ["reports.*"],
-    produceTopics: ["reports.generate"],
+    consumeTopics: ["channel.*"],
+    produceTopics: ["memory.lesson"],
   },
 });
 
-const claim = await api.claim("reports.generate", 30_000);
+// publish enforces: class=="event", topic in produceTopics, scopes in produceScopes
+api.publish(event);
+
+// subscribe enforces: topicGlob in consumeTopics, then re-checks each delivered message
+const unsub = api.subscribe("channel.*", (msg) => { ... });
+
+// claim enforces: topicGlob in consumeTopics, message in consumeScopes, claim owned by this plugin
+const claim = await api.claim("channel.outbound", 30_000);
 if (claim) {
-  try {
-    await handle(claim.message.payload);
-    await api.ack(claim.id);
-  } catch (err) {
-    await api.nack(claim.id, err instanceof Error ? err.message : String(err));
-  }
+  await api.ack(claim.id);   // only claims returned by THIS api's claim() can be acked
 }
+
+// enqueue enforces: class=="work", topic in produceTopics, scopes in produceScopes
+await api.enqueue(work);
 ```
 
-**What not to do:**
+#### Consumer-id binding
 
-```typescript
-// ❌ acking a claim id your plugin never claimed — throws AuthorizationError
-await api.ack("12345|some-other-plugin");
+`ack` and `nack` only accept claim IDs that were returned by **this** scoped API's `claim()` or `claimSessionWork()` — a plugin cannot ack/nack another plugin's claims. This is enforced via an internal `ownedClaims: Set<string>`.
 
-// ❌ fire-and-forget ack while still processing
-void api.ack(claim.id); // if the process dies before real completion, the work is lost
-                        // (ack closes the item permanently)
+### Security alerts
 
-// ❌ relying on subscribe alone for authorization-sensitive filtering
-//    the wrapper re-checks grants per message; do not cache payloads across scopes
-```
+Rejected operations emit a `backbone.authz.rejected` diagnostic event with the plugin ID, reason, and topic. This is wired into the OTEL exporter as `openclaw.backbone.authz.rejected` counter.
 
-## Reconciler
+## Session-lifecycle reconciler
 
-`createSessionReconciler` fans out session-lifecycle work (for example "session started" → notify every consumer) under a shared idempotency key, so a direct-pull path and the backbone fan-out path never double-deliver:
+The reconciler fans out session-lifecycle work (e.g. "session started" → notify all consumers) with a shared idempotency key so the 0s direct-pull path and the 0a backbone fan-out path never double-deliver.
 
-```typescript
-import { createSessionReconciler } from "openclaw/plugin-sdk";
+```ts
+import { createSessionReconciler } from "wednesdayai/plugin-sdk";
 
 const reconciler = createSessionReconciler({
   scopedApi,
   busWork: busWorkBackend,
-  consumerId: "my-plugin:session-lifecycle",
+  consumerId: "session-lifecycle",
 });
 
-// Canonical key: `${consumerId}:${sessionId}:${effectKind}:${schemaVersion}`
+// Canonical key: (consumerId:sessionId:effectKind:schemaVersion)
 const key = reconciler.canonicalIdempotencyKey("sess-1", "session-started");
 
-// No-op if already materialized (in-process fast path + durable unique index)
+// fanOutSessionWork is a no-op if already materialized (zero double-delivery)
 await reconciler.fanOutSessionWork("sess-1", "session-started", {
   topic: "session.lifecycle",
-  source: "my-plugin",
+  source: "reconciler",
   payload: { sessionId: "sess-1" },
   privacyContext: ["tenant:t1"],
-  accessContext: { actorId: "user-1", tenantId: "t1" },
+  accessContext: { system: "core" },
 });
 ```
 
-The work message's `id` **is** the canonical key — one identity for both the dedupe check and the durable row. The in-memory `materialized` set is a fast-path cutover seam; the durable proof is the unique `bus_work_items.idempotency_key` index, which holds across processes and restarts.
+The in-memory `materialized` Set is a fast-path cutover seam; the **durable** proof of materialization is the `bus_work_items.idempotency_key` column (unique index rejects duplicate enqueues).
 
-## Channel publish
+## Channel message publishing
 
-Core publishes all channel traffic (user and assistant messages) as `channel.message` events. `publishChannelMessage` builds the envelope and publishes it in one step:
+Core publishes all channel traffic (user + assistant) as `channel.message` events with mandatory privacy/access context. The `publishChannelMessage` function constructs the envelope and publishes it through the backbone. The identity argument is fail-closed: `sessionId`, `sessionKey`, `tenantId` and `actorId` are all required.
 
-```typescript
-import { publishChannelMessage } from "openclaw/plugin-sdk";
+```ts
+import { publishChannelMessage } from "wednesdayai/plugin-sdk";
 
 await publishChannelMessage(
   backbone,
-  { role: "user", text: "hello", messageId: "msg-42" }, // messageId optional → envelope id
   {
-    sessionId: "sess-1",
+    role: "user",
+    text: "hello",
+  },
+  {
+    sessionId: "0f1b7c54-9a21-4a1d-8d5e-2b6c7a8d9e01",
+    sessionKey: "agent:main:main",
     tenantId: "t1",
-    actorId: "user-1",   // required, non-empty
-    laneId: "l1",        // optional; adds a `lane:l1` privacy scope
-    auditId: "audit-1",  // optional
+    actorId: "user-1",
+    laneId: "l1",
   },
 );
 ```
 
-The identity must be routable: `sessionId`, `tenantId`, and `actorId` are required non-empty strings, or the call throws. The resulting privacy context is `["tenant:<tenantId>", "lane:<laneId>"?]`.
+The delivered `BusMessage.payload` is a `ChannelMessagePayload` (exported from
+`wednesdayai/plugin-sdk`) with four fields: `role`, `text`, `sessionId` and `sessionKey`.
+`payload.sessionId` is the per-reset session id — it changes whenever the session resets.
+`payload.sessionKey` is the stable key that addresses the conversation's durable state across
+resets, so a consumer that keeps per-session state keys on `sessionKey`, never on `sessionId`.
+Treat `sessionKey` as opaque: never derive the channel, account, peer, group or user from its
+text (ADR 0081).
 
-`enumerateChannelEmitPaths()` returns a static audit of all 13 channel adapter send paths (telegram, discord, slack, signal, imessage, web, line, matrix, msteams, zalo, zalouser, voice-call, bluebubbles). Every path is currently whitelisted — routing the adapters themselves through `publishChannelMessage` is a separate migration workstream; the audit function documents the gap.
+The `enumerateChannelEmitPaths()` function statically audits all channel adapter send paths. In 0a, all adapters are whitelisted (migration to route through `publishChannelMessage` is a separate workstream). The audit function is the gap documentation — it enumerates every path that should eventually set privacy/access context.
 
-## Worker pool
+## WorkerPool / cooperative-yield
 
-`createWorkerPool` runs CPU-heavy handlers without blocking the event loop. It uses cooperative yielding (`setImmediate`, falling back to `setTimeout(0)`) — not worker threads:
+The `WorkerPool` is an SDK utility for running CPU-heavy handlers without blocking the event loop. It uses cooperative yielding (`setImmediate` / `setTimeout(0)`) rather than worker threads.
 
-```typescript
-import { createWorkerPool } from "openclaw/plugin-sdk";
+```ts
+import { createWorkerPool } from "wednesdayai/plugin-sdk";
 
 const pool = createWorkerPool({
   maxConcurrent: 4,
-  lagThresholdMs: 100,        // emit gateway.event_loop_lag when a slice exceeds this
-  poolId: "my-plugin:pool",   // optional, defaults to worker-pool-<uuid>
+  lagThresholdMs: 100, // emit gateway.event_loop_lag if a slice exceeds this
+  poolId: "my-pool",
 });
 
 await pool.run(async () => {
-  for (const item of items) {
-    crunch(item);
-    await pool.yield(); // cooperative yield between slices
-  }
+  // CPU-heavy work...
+  await pool.yield(); // cooperative yield to let other tasks run
 });
 
-await pool.close(); // rejects new run() calls, drains queue + active tasks
+await pool.close(); // drains queue + active tasks
 ```
 
-When a task's wall-clock slice exceeds `lagThresholdMs`, the pool emits a `gateway.event_loop_lag` diagnostic event (`{ lagMs, thresholdMs, poolId }`) — visible in the OTEL exporter as the `openclaw.gateway.event_loop_lag` counter.
+When a task's wall-clock slice exceeds `lagThresholdMs`, a `gateway.event_loop_lag` diagnostic event is emitted with the lag duration, threshold, and pool ID.
 
-**What not to do:**
+## Outbound delivery durability
 
-```typescript
-// ❌ long CPU loop without yields — blocks every subscriber, timer, and WS client
-await pool.run(() => {
-  for (const item of tenThousandItems) crunch(item); // one giant slice, no awaits
-});
+Outbound channel delivery is routed through the backbone's durable work class (not the storage-outbox). This addresses BACKLOG `F-2026-06-15-*`.
 
-// ❌ using the pool for parallelism expectations it does not provide
-//    maxConcurrent caps queued tasks; it does not create threads — a single
-//    CPU-bound fn still occupies its slice fully until it awaits
-```
-
-## Outbound delivery
-
-Outbound channel sends are durable work, not events. `enqueueOutboundDelivery` builds and enqueues a `channel.outbound` work item:
-
-```typescript
-import { enqueueOutboundDelivery } from "openclaw/plugin-sdk";
+```ts
+import { enqueueOutboundDelivery } from "wednesdayai/plugin-sdk";
 
 await enqueueOutboundDelivery(backbone, {
   channel: "telegram",
@@ -475,104 +374,45 @@ await enqueueOutboundDelivery(backbone, {
   laneId: "l1",
   actorId: "user-1",
   auditId: "audit-1",
-  idempotencyKey: "telegram:chat:123:sess-1:1", // required — becomes the work id
+  idempotencyKey: "telegram:chat:123:sess-1:1",
 });
 ```
 
-Every field is required, and `idempotencyKey` becomes the work message's `id`, so re-enqueueing the same delivery is a no-op. The source is stamped `outbound-delivery:<channel>`. A consumer that claims `channel.outbound` work and acks after the adapter send succeeds gets at-least-once delivery with deduplicated enqueues.
-
-## Task dispatcher
-
-`createTaskDispatcher` is the core-side dispatch loop for registered task passes (`TaskPass` — plugin-registered background task handlers). Plugins normally register passes and let the gateway dispatch; the dispatcher itself is core machinery, documented here because its semantics bound what a pass can expect:
-
-```typescript
-import type { TaskPass, PassContext } from "openclaw/plugin-sdk";
-
-interface TaskPass {
-  id: string;
-  stage?: string;
-  priority: number;                          // lower runs first; ties keep registration order
-  scope: "global" | "agent" | "lane";
-  costClass: "deterministic" | "llm";
-  timeoutMs?: number;    // default 30_000; may exceed the 35 s claim lease (heartbeat renews)
-  retryPolicy?: RetryPolicy;
-  run(ctx: PassContext): Promise<void>;
-  rollback?(ctx: PassContext & { evidencePointer?: string }): Promise<void>;
-}
-
-interface PassContext {
-  signal: AbortSignal;
-  taskRunId: string;
-  mode: "normal" | "dry_run";
-  payload: Record<string, unknown>; // parsed work payload ({} when unparseable)
-  storage: PassStorage;              // task-run store only — passes never see the raw bus or budget ledger
-  log: SubsystemLogger;
-  emitDiagnostic: (event: DiagnosticEventInput) => void;
-}
-```
-
-Behavior a pass author relies on:
-
-- **Claim + co-commit run rows.** Work is claimed per pass topic `task.<passId>` through the task-run store, which writes the run row and the claim in one transaction.
-- **Preemption ceiling.** A pass can be preempted (aborted via `ctx.signal`) when higher-priority work needs the slot. At `preemptionCount === preemptionCeiling` the run is deferred for one hour (counter bumps past the ceiling); at `>= 2 × ceiling` it terminates with `preempted_ceiling`. A pass that ignores `ctx.signal` still runs to completion — abort is cooperative.
-- **Budget governance is defer-not-fail.** If the budget governor denies or errors, the work is deferred without burning an attempt: 60 s on a governor error, the governor's `retryAtMs` on a window deny, one hour on a ceiling deny.
-- **Timeouts abort cooperatively.** On timeout the dispatcher aborts the pass's `AbortController` and marks the run failed; a pass should watch `ctx.signal`.
-- **Retries** follow the pass's `RetryPolicy` (`{ maxAttempts 1–50, backoff "fixed"|"exponential", baseMs 100–3_600_000, maxMs 100–86_400_000 }`; default `{ maxAttempts: 5, backoff: "exponential", baseMs: 1000, maxMs: 300_000 }`, exponential delay `baseMs × 2^(attempts−1)` capped at `maxMs`).
-
-**What not to do:**
-
-```typescript
-// ❌ ignoring ctx.signal in a long pass
-async run(ctx) {
-  await longOperation(); // never checks ctx.signal → preemption/timeout cannot stop it,
-                         // and a timed-out item becomes re-claimable while this still runs
-}
-
-// ❌ synchronous blocking I/O at the top of run()
-async run(ctx) {
-  const cfg = fs.readFileSync("./state.json", "utf8"); // blocks the event loop for every
-                                                       // concurrent pass and subscriber
-}
-```
+The idempotency key format is `channel:recipientId:sessionId:seq` — distinct from the reconciler's `(consumerId:sessionId:effectKind:schemaVersion)` key.
 
 ## For administrators
 
-The backbone is internal infrastructure: no dedicated CLI commands, no new environment variables. It is configured entirely through session storage and the `tasks.*` config block.
+### Database tables
 
-### Storage backend and tables
+The backbone adds two sibling tables to the context schema (alongside `ctx_storage_outbox`, which is untouched):
 
-Durable work requires a session storage backend that provides bus work: SQLite (`ctx-sqlite`) or Postgres (`ctx-postgres`) under `session.storage`. With backends that do not provide it (for example `jsonl-fs`), agent turns fall back to an in-process loopback queue and the gateway logs a warning — durable backbone features are unavailable in that mode.
+- **`ctx_bus_work_items`** — the durable work queue. Columns: `work_id`, `idempotency_key` (unique), `topic`, `source`, `payload` (JSONB/TEXT), `privacy_context`, `access_context`, `correlation_id`, `causation_id`, `schema_version`, `status` (`pending` / `claimed` / `processed` / `failed`), `attempts`, `available_at`, `lease_owner`, `lease_until`, `last_error`, `created_at`, `updated_at`.
+- **`ctx_bus_work_claims`** — per-consumer claim side-table. Columns: `claim_id`, `work_id`, `consumer_id`, `lane_id`, `tenant_id`, `lease_owner`, `lease_until`, `status` (`pending` / `claimed` / `processed` / `failed`), `attempt_count`, `last_error`, `schema_version`, `processed_at`, `created_at`, `updated_at`.
 
-The context schema gains two sibling tables (alongside the untouched `ctx_storage_outbox`):
+Both tables follow the configured storage backend (SQLite for local/jsonl-fs, Postgres for hosted). There is no degraded in-process-only path for work class — a durable backend is required.
 
-- **`ctx_bus_work_items`** — the durable queue: `work_id`, `idempotency_key` (unique index), `topic`, `source`, `payload`, `privacy_context`, `access_context`, `correlation_id`, `causation_id`, `schema_version`, `status` (`pending` / `claimed` / `failed` / `processed` / `dlq`), `attempts`, `available_at`, `lease_owner`, `lease_until`, `last_error`, `retry_policy`, timestamps.
-- **`ctx_bus_work_claims`** — per-consumer claim side table: `claim_id`, `work_id`, `consumer_id`, `lane_id`, `tenant_id`, `lease_owner`, `lease_until`, `status`, `attempt_count`, `last_error`, timestamps.
+### OTEL metrics
 
-Supporting indexes: ready-row lookup on `(status, available_at)`, unique idempotency on `ctx_bus_work_items.idempotency_key`, and consumer scan on `ctx_bus_work_claims (consumer_id, status)`. Tables are created by the normal context-schema migration at gateway startup.
+The backbone adds two OTEL counters to the `diagnostics-otel` extension:
 
-### Task dispatch settings
+| Metric                             | Type    | Description                                                                                                      |
+| ---------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------- |
+| `openclaw.gateway.event_loop_lag`  | Counter | Incremented when a WorkerPool task slice exceeds `lagThresholdMs`. Tags: `poolId`.                               |
+| `openclaw.backbone.authz.rejected` | Counter | Incremented when a backbone authorization check fails (produce or consume). Tags: `pluginId`, `reason`, `topic`. |
 
-```json5
-{
-  tasks: {
-    dispatchConcurrency: 1, // max concurrent task dispatches (default 1, range 1-16)
-    preemptionCeiling: 3,   // max preemptions before deferral (default 3, range 1-100)
-  },
-}
-```
+### Diagnostic events
 
-- `tasks.dispatchConcurrency` — raise only after measuring real contention; each concurrent slot claims and runs one pass at a time.
-- `tasks.preemptionCeiling` — at this count a preempted task defers for one hour; at twice this count it terminates as `preempted_ceiling`. Lower values protect budget-constrained environments.
+Two new diagnostic event variants are added to the closed `DiagnosticEventPayload` union:
 
-Both keys, and the storage backend choice, take effect only after a gateway restart (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+- `gateway.event_loop_lag` — `{ lagMs, thresholdMs, poolId }` — emitted by WorkerPool.
+- `backbone.authz.rejected` — `{ pluginId, reason, topic? }` — emitted by ScopedBackboneApi on authz failure.
 
-### Observability
+Both are exported by the OTEL extension. If you have a custom `onDiagnosticEvent` listener with an exhaustiveness guard, add a `case` for these variants.
 
-Two OTEL counters ship with the `diagnostics-otel` extension:
+### No new environment variables
 
-| Metric                             | Type    | Raised when                                                             |
-| ---------------------------------- | ------- | ----------------------------------------------------------------------- |
-| `openclaw.gateway.event_loop_lag`  | Counter | A worker-pool slice exceeds `lagThresholdMs`. Tags: `poolId`.           |
-| `openclaw.backbone.authz.rejected` | Counter | A backbone authorization check fails. Tags: `pluginId`, `reason`, `topic`. |
+The backbone does not introduce any new environment variables. It uses the existing `OPENCLAW_*` configuration and the configured session storage runtime.
 
-A rising `backbone.authz.rejected` count for a plugin means its manifest grants do not match what it is producing or consuming — check the `reason` tag (`topic`, `privacyContext`, `accessContext.*`) against the plugin's declared grants.
+### No new CLI commands
+
+The backbone is an internal infrastructure layer. There are no user-facing CLI commands in 0a. Plugin authors interact with it through the Plugin SDK.

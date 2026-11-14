@@ -1,0 +1,345 @@
+---
+summary: "Symptom first troubleshooting hub for WednesdayAI"
+read_when:
+  - WednesdayAI is not working and you need the fastest path to a fix
+  - You want a triage flow before diving into deep runbooks
+title: "Troubleshooting"
+---
+
+# Troubleshooting
+
+If you only have 2 minutes, use this page as a triage front door.
+
+## First 60 seconds
+
+Run this exact ladder in order:
+
+```bash
+wednesdayai status
+wednesdayai status --all
+wednesdayai gateway probe
+wednesdayai gateway status
+wednesdayai doctor
+wednesdayai channels status --probe
+wednesdayai logs --follow
+```
+
+Good output in one line:
+
+- `wednesdayai status` → shows configured channels and no obvious auth errors.
+- `wednesdayai status --all` → full report is present and shareable.
+- `wednesdayai gateway probe` → expected gateway target is reachable.
+- `wednesdayai gateway status` → `Runtime: running` and `RPC probe: ok`.
+- `wednesdayai doctor` → no blocking config/service errors.
+- `wednesdayai channels status --probe` → channels report `connected` or `ready`.
+- `wednesdayai logs --follow` → steady activity, no repeating fatal errors.
+
+## Anthropic long context 429
+
+If you see:
+`HTTP 429: rate_limit_error: Extra usage is required for long context requests`,
+go to [/gateway/troubleshooting#anthropic-429-extra-usage-required-for-long-context](/next/admin/gateway/troubleshooting#anthropic-429-extra-usage-required-for-long-context).
+
+## Plugin install fails with missing openclaw extensions
+
+If install fails with `package.json missing openclaw.extensions`, the plugin package
+is using an old shape that WednesdayAI no longer accepts.
+
+Fix in the plugin package:
+
+1. Add `openclaw.extensions` to `package.json`.
+2. Point entries at built runtime files (usually `./dist/index.js`).
+3. Republish the plugin and run `wednesdayai plugins install <npm-spec>` again.
+
+Example:
+
+```json
+{
+  "name": "@openclaw/my-plugin",
+  "version": "1.2.3",
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  }
+}
+```
+
+Reference: [/tools/plugin#distribution-npm](/next/users/tools/plugin#distribution-npm)
+
+## Logs say plugin not found for a bundled plugin
+
+Use this when logs show a warning like
+`plugin not found: telegram -- run: wednesdayai plugins install telegram`, but
+the channel or plugin still appears to work. A bundled plugin is one that ships
+with WednesdayAI, so you usually do not need to install another copy.
+
+Check what the gateway actually loaded:
+
+```bash
+wednesdayai plugins info <id>
+wednesdayai plugins list --verbose
+wednesdayai logs --follow
+```
+
+If `plugins info` shows `Origin: bundled` and `Status: loaded`, the plugin is
+loading from the copy shipped with WednesdayAI. You should not need to install a
+second copy under `~/.openclaw/extensions`, and you should not add the bundled
+source path to `plugins.load.paths`.
+
+Fix options:
+
+1. Restart the gateway so WednesdayAI can refresh stale bundled plugin records.
+2. Run `wednesdayai plugins update <id>` if the plugin has an old copied-bundled
+   record.
+3. Remove old plugin references from your config only if you no longer want
+   that plugin.
+
+If the plugin is not listed or does not show `Origin: bundled`, treat the warning
+as real and install or remove the referenced plugin id.
+
+Reference: [/tools/plugin#gateway-logs-say-plugin-not-found-for-a-bundled-plugin-that-still-loads](/next/users/tools/plugin#gateway-logs-say-plugin-not-found-for-a-bundled-plugin-that-still-loads)
+
+## Plugin hook never fires
+
+Use this when a plugin should react to an event (for example a tool call or a
+new session) but nothing happens, and the gateway startup log or
+`wednesdayai plugins status` shows a `PLUGIN_HOOK_NOT_DISPATCHED` warning.
+
+That warning means the plugin registered a hook name this gateway does not
+dispatch, so the handler is ignored while the plugin keeps loading. Run
+`wednesdayai plugins status` to see the warning and its remediation. The
+[hook parity map](/next/developers/plugins/hook-parity) lists which hook names work here and
+which WednesdayAI hook replaces an upstream openclaw name. The plugin shows as
+`degraded` in `wednesdayai plugins list`.
+
+## Decision tree
+
+```mermaid
+flowchart TD
+  A[WednesdayAI is not working] --> B{What breaks first}
+  B --> C[No replies]
+  B --> D[Dashboard or Control UI will not connect]
+  B --> E[Gateway will not start or service not running]
+  B --> F[Channel connects but messages do not flow]
+  B --> G[Cron or heartbeat did not fire or did not deliver]
+  B --> H[Node is paired but camera canvas screen exec fails]
+  B --> I[Browser tool fails]
+
+  C --> C1[/No replies section/]
+  D --> D1[/Control UI section/]
+  E --> E1[/Gateway section/]
+  F --> F1[/Channel flow section/]
+  G --> G1[/Automation section/]
+  H --> H1[/Node tools section/]
+  I --> I1[/Browser section/]
+```
+
+<AccordionGroup>
+  <Accordion title="No replies">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai channels status --probe
+    wednesdayai pairing list --channel <channel> [--account <id>]
+    wednesdayai logs --follow
+    ```
+
+    Good output looks like:
+
+    - `Runtime: running`
+    - `RPC probe: ok`
+    - Your channel shows connected/ready in `channels status --probe`
+    - Sender appears approved (or DM policy is open/allowlist)
+
+    Common log signatures:
+
+    - `drop guild message (mention required` → mention gating blocked the message in Discord.
+    - `pairing request` → sender is unapproved and waiting for DM pairing approval.
+    - `blocked` / `allowlist` in channel logs → sender, room, or group is filtered.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#no-replies](/next/admin/gateway/troubleshooting#no-replies)
+    - [/channels/troubleshooting](/next/admin/channels/troubleshooting)
+    - [/channels/pairing](/next/admin/channels/pairing)
+
+  </Accordion>
+
+  <Accordion title="Dashboard or Control UI will not connect">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai logs --follow
+    wednesdayai doctor
+    wednesdayai channels status --probe
+    ```
+
+    Good output looks like:
+
+    - `Dashboard: http://...` is shown in `wednesdayai gateway status`
+    - `RPC probe: ok`
+    - No auth loop in logs
+
+    Common log signatures:
+
+    - `device identity required` → HTTP/non-secure context cannot complete device auth.
+    - `unauthorized` / reconnect loop → wrong token/password or auth mode mismatch.
+    - `gateway connect failed:` → UI is targeting the wrong URL/port or unreachable gateway.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#dashboard-control-ui-connectivity](/next/admin/gateway/troubleshooting#dashboard-control-ui-connectivity)
+    - [/web/control-ui-v2](/next/admin/web/control-ui-v2)
+    - [/gateway/authentication](/next/admin/gateway/authentication)
+
+  </Accordion>
+
+  <Accordion title="Gateway will not start or service installed but not running">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai logs --follow
+    wednesdayai doctor
+    wednesdayai channels status --probe
+    ```
+
+    Good output looks like:
+
+    - `Service: ... (loaded)`
+    - `Runtime: running`
+    - `RPC probe: ok`
+
+    Common log signatures:
+
+    - `Gateway start blocked: set gateway.mode=local` → gateway mode is unset/remote.
+    - `refusing to bind gateway ... without auth` → non-loopback bind without token/password.
+    - `another gateway instance is already listening` or `EADDRINUSE` → port already taken.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#gateway-service-not-running](/next/admin/gateway/troubleshooting#gateway-service-not-running)
+    - [/gateway/background-process](/next/admin/gateway/background-process)
+    - [/gateway/configuration](/next/admin/gateway/configuration)
+
+  </Accordion>
+
+  <Accordion title="Channel connects but messages do not flow">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai logs --follow
+    wednesdayai doctor
+    wednesdayai channels status --probe
+    ```
+
+    Good output looks like:
+
+    - Channel transport is connected.
+    - Pairing/allowlist checks pass.
+    - Mentions are detected where required.
+
+    Common log signatures:
+
+    - `mention required` → group mention gating blocked processing.
+    - `pairing` / `pending` → DM sender is not approved yet.
+    - `not_in_channel`, `missing_scope`, `Forbidden`, `401/403` → channel permission token issue.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#channel-connected-messages-not-flowing](/next/admin/gateway/troubleshooting#channel-connected-messages-not-flowing)
+    - [/channels/troubleshooting](/next/admin/channels/troubleshooting)
+
+  </Accordion>
+
+  <Accordion title="Cron or heartbeat did not fire or did not deliver">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai cron status
+    wednesdayai cron list
+    wednesdayai cron runs --id <jobId> --limit 20
+    wednesdayai logs --follow
+    ```
+
+    Good output looks like:
+
+    - `cron.status` shows enabled with a next wake.
+    - `cron runs` shows recent `ok` entries.
+    - Heartbeat is enabled and not outside active hours.
+
+    Common log signatures:
+
+    - `cron: scheduler disabled; jobs will not run automatically` → cron is disabled.
+    - `[cron] failed to start` with `out of range for type integer` → the Gateway
+      could not write job times into Postgres. Restart after upgrading so those
+      columns become 64-bit. Scheduled reminders stay silent until that restart.
+    - `heartbeat skipped` with `reason=quiet-hours` → outside configured active hours.
+    - `requests-in-flight` → main lane busy; heartbeat wake was deferred.
+    - `unknown accountId` → heartbeat delivery target account does not exist.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#cron-and-heartbeat-delivery](/next/admin/gateway/troubleshooting#cron-and-heartbeat-delivery)
+    - [/automation/troubleshooting](/next/users/automation/troubleshooting)
+    - [/gateway/heartbeat](/next/admin/gateway/heartbeat)
+
+  </Accordion>
+
+  <Accordion title="Node is paired but tool fails camera canvas screen exec">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai nodes status
+    wednesdayai nodes describe --node <idOrNameOrIp>
+    wednesdayai logs --follow
+    ```
+
+    Good output looks like:
+
+    - Node is listed as connected and paired for role `node`.
+    - Capability exists for the command you are invoking.
+    - Permission state is granted for the tool.
+
+    Common log signatures:
+
+    - `NODE_BACKGROUND_UNAVAILABLE` → bring node app to foreground.
+    - `*_PERMISSION_REQUIRED` → OS permission was denied/missing.
+    - `SYSTEM_RUN_DENIED: approval required` → exec approval is pending.
+    - `SYSTEM_RUN_DENIED: allowlist miss` → command not on exec allowlist.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#node-paired-tool-fails](/next/admin/gateway/troubleshooting#node-paired-tool-fails)
+    - [/nodes/troubleshooting](/next/users/nodes/troubleshooting)
+    - [/tools/exec-approvals](/next/users/tools/exec-approvals)
+
+  </Accordion>
+
+  <Accordion title="Browser tool fails">
+    ```bash
+    wednesdayai status
+    wednesdayai gateway status
+    wednesdayai browser status
+    wednesdayai logs --follow
+    wednesdayai doctor
+    ```
+
+    Good output looks like:
+
+    - Browser status shows `running: true` and a chosen browser/profile.
+    - `openclaw` profile starts or `chrome` relay has an attached tab.
+
+    Common log signatures:
+
+    - `Failed to start Chrome CDP on port` → local browser launch failed.
+    - `browser.executablePath not found` → configured binary path is wrong.
+    - `Chrome extension relay is running, but no tab is connected` → extension not attached.
+    - `Browser attachOnly is enabled ... not reachable` → attach-only profile has no live CDP target.
+
+    Deep pages:
+
+    - [/gateway/troubleshooting#browser-tool-fails](/next/admin/gateway/troubleshooting#browser-tool-fails)
+    - [/tools/browser-linux-troubleshooting](/next/users/tools/browser-linux-troubleshooting)
+    - [/tools/chrome-extension](/next/users/tools/chrome-extension)
+
+  </Accordion>
+</AccordionGroup>

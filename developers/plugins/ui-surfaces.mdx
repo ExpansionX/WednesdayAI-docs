@@ -22,15 +22,15 @@ The bundled `ui-surfaces` plugin (ADR 0106) gives the WednesdayAI web chat its a
 UI: the `show_ui` agent tool, the plugin-owned store behind the `chat.surfaces.list|get|pin`
 gateway methods, and the `UiSurfaceProvider` seam core reads. It is off by default (ADR 0034);
 enablement, the per-agent `tools.deny` opt-out and what end users see are covered from the
-operator side in [Web client hosting](/web/user-client#assistant-ui-and-canvas).
+operator side in [Web client hosting](/admin/web/user-client#assistant-ui-and-canvas).
 
 Everything the agent can put on screen is declarative JSON validated by the private
 `ui-contract` package (`validateSurface`) before anything is stored. The schemas, the component
-catalog and the budget constants are re-exported from `openclaw/plugin-sdk` (alias
-`wednesdayai/plugin-sdk`), so the plugin imports core only through the SDK:
+catalog and the budget constants are re-exported from `wednesdayai/plugin-sdk` (legacy alias
+`openclaw/plugin-sdk`), so the plugin imports core only through the SDK:
 
 ```ts
-import type { UiSurfaceProvider } from "openclaw/plugin-sdk";
+import type { UiSurfaceProvider } from "wednesdayai/plugin-sdk";
 ```
 
 ## The provider seam
@@ -85,12 +85,36 @@ The tool factory receives the `OpenClawPluginToolContext` and returns `null` - o
 unless all of these hold:
 
 - the plugin is enabled;
-- `ctx.clientCaps` (the originating connection's advertised caps) contains `"ui-surfaces"`;
+- `ctx.clientCaps` (the advertised caps of the connection that started the run with `chat.send` or
+  `agent`) contains `"ui-surfaces"`;
 - `ctx.sessionId` is present.
 
 Otherwise the run's model never sees the tool. `tools.deny: ["show_ui"]` applies as usual on top.
 A rejection is `isError: true` with text `show_ui rejected: <rule>: <detail>` and stores nothing;
 every cap is a refusal, never a prune.
+
+### Render profiles
+
+`ctx.clientRenderProfile` carries the originating connection's `renderProfile` connect field.
+With `"hud"` (a glasses display), the surface is still stored, so its actions bind through
+`chat.send` `uiAction` as usual, but the tool result is degraded:
+
+- `content` is the title and the visible text of each node in render order (`text`, `label`,
+  `value`), whitespace-collapsed, each line cut to 48 characters, at most four lines; when more
+  remain, the fourth line is `…`. Button labels are not lines. A `Table` adds a header line of its
+  column labels and one line per row, cells in column order joined by `|` (a blank cell shows as
+  `-`; an all-blank row is skipped).
+- `details` is `{ ui: {surfaceId, revision}, renderProfile: "hud", hud: { lines, actions } }`,
+  where `actions` holds the first two submit buttons as `{ id, label }`. `openUrl` buttons are
+  dropped.
+
+Tool events normally drop `result` unless the session's `verboseLevel` is `full`. A
+`tool-events` connection that declared `renderProfile: "hud"` still receives this HUD slice
+(`content` plus `details.{ui, renderProfile, hud}`, nothing else) at any verbose level; other
+connections and channel output are unchanged.
+
+`"full"`, `"compact"` and an absent profile return the normal result; `"compact"` has no reduced
+form yet. `chat.surfaces.get` and `chat.surfaces.list` are unchanged for every profile.
 
 ## Storage
 

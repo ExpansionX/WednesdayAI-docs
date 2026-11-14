@@ -1,0 +1,197 @@
+---
+audience: admin
+component: session-consumer-claims
+sources:
+  - src/config/sessions/storage-config.ts
+  - src/config/sessions/session-consumer-claim-reconciler.ts
+  - src/config/sessions/session-consumer-claim-sweep.ts
+  - src/config/sessions/ctx-postgres.ts
+  - src/config/sessions/ctx-sqlite-worker.ts
+  - src/gateway/server.impl.ts
+  - src/gateway/server-methods/sessions.ts
+  - src/gateway/session-consumer-claim-sweep.ts
+  - src/config/types.base.ts
+  - src/plugins/registry.ts
+  - src/plugins/loader.ts
+  - src/commands/sessions-claims-status.ts
+  - extensions/learning-core/openclaw.plugin.json
+generated: 2026-08-18
+---
+
+# Session Consumer Claims: Operator Guide
+
+Session consumer claims give registered plugins a durable, retryable handoff for work owed on
+ended sessions: each ended session materializes claim rows per consumer, with retries, leases, and
+a dead-letter queue. This page covers configuration, monitoring, and
+operational behaviour.
+
+## Configuration
+
+Consumer-claim settings live under `session.storage.consumerClaims` in
+`openclaw.json`:
+
+```json
+{
+  "session": {
+    "storage": {
+      "consumerClaims": {
+        "sweepCadenceMs": 60000,
+        "maxAttempts": 5,
+        "leaseMs": 30000,
+        "retryBaseMs": 1000
+      }
+    }
+  }
+}
+```
+
+| Key              | Default        | Description                                                                      |
+| ---------------- | -------------- | -------------------------------------------------------------------------------- |
+| `sweepCadenceMs` | `60000` (1min) | Reconciler sweep interval. The sweep materializes claim rows for ended sessions. |
+| `maxAttempts`    | `5`            | DLQ threshold. After this many failed attempts, a claim is dead-lettered.        |
+| `leaseMs`        | `30000` (30s)  | Claim lease duration. Expired leases are reaped and claims reset to pending.     |
+| `retryBaseMs`    | `1000` (1s)    | Exponential backoff base for retry scheduling.                                   |
+
+All keys are optional; omitting the `consumerClaims` block uses the defaults above.
+
+## Backend requirements
+
+| Backend  | Claims supported | Notes                                                      |
+| -------- | ---------------- | ---------------------------------------------------------- |
+| SQLite   | Yes              | Default backend. No extra setup.                           |
+| Postgres | Yes              | Uses `FOR UPDATE SKIP LOCKED` for concurrent claim safety. |
+
+## Operational behaviour
+
+### Reconciler sweep + lease reaper
+
+The gateway runs a single timer on `sweepCadenceMs` that performs two operations per
+tick:
+
+1. **Reconciler sweep** — for each registered consumer, reads one row per
+   `session_id` of the consumer's agent past the consumer's watermark, keyset-paged on
+   `(updated_at, session_id)` as an index range (200 rows per page, at most 10 pages per
+   consumer lane per tick). It derives the lane from `session_key` and materializes a
+   claim row only for a session that has **ended**: it can no longer receive turns under
+   its session reset policy. That is when a newer `session_id` supersedes it on the same
+   key (`/new`, a reset), or when it is past the daily reset boundary or idle reset
+   window of **every** reset policy in the config (`session.reset`, each `resetByType`
+   and `resetByChannel` override, `idleMinutes`), as session init judges it. The longest
+   window wins for every session, whatever channel it uses, because any channel can
+   deliver the next turn. For example, with `session.reset` idle 60 minutes and
+   `resetByChannel.slack` idle 7 days, a telegram session is claimed after 7 days idle
+   unless a new session replaces it first. With the default policy (a daily reset at
+   04:00, no idle reset) a live session is claimed after the next 04:00, however long it
+   idles before that.
+   Tombstones, and sessions whose key was deleted after them, are never claimed. The
+   watermark advances over every handled row, but stays just below the oldest session
+   that is still live, so that session is re-read until it ends, and at least 5 minutes
+   behind the clock. Rows that share a millisecond are never skipped: a tick that
+   reaches its page cap finishes the current millisecond before it stops.
+
+   A session's `updated_at` never decreases, so a re-save with an older timestamp cannot
+   hide it below the watermark. If turns land on a session after it was claimed (a
+   caller that names the session id explicitly bypasses the reset policy), the next time
+   it has ended the sweep materializes a follow-up **claim segment** that covers only
+   those turns. Claims are idempotent on
+   `(session_id, consumer_id, effect_kind, schema_version, segment)`, and each claim's
+   transcript reads only its own segment, so no turn is captured twice.
+
+2. **Lease reaper** — resets expired leases. Claims with `attempt_count` under
+   `maxAttempts` return to `pending` for retry; claims at or over the budget
+   transition to `dlq` and emit a `dlq_terminal` diagnostic (once, at the transition,
+   guarded by row count to prevent duplicates on stale leases).
+
+Every configured agent (`agents.list`) is served. Consumer ids are agent-qualified
+(`<agent>:<plugin>:<effectKind>`), so each agent keeps its own watermark, and a
+plugin's `claimSessionWork` claims across the agents in rotation. When the session
+storage runtime has no agent ID, the sweep warns once and returns early.
+
+A plugin that is disabled (watermark `enabled = 0`) still has its owed work
+preserved: the sweep keeps materializing claims for it, so re-enabling the
+consumer resumes from its watermark.
+
+### Diagnostic events
+
+The system emits diagnostic events:
+
+- `dlq_terminal` — a claim reached `maxAttempts` and was dead-lettered by the
+  lease reaper. Emitted **once at the DLQ transition**, so a surviving DLQ claim
+  does not produce repeated events. Guarded by row count
+  to prevent duplicate events when the update is a no-op (stale lease).
+- `skipped_backlog` — emitted on a sweep that observes a consumer's watermark
+  transition from disabled to enabled. The count is the number of sessions the
+  consumer skipped while it was disabled (sessions updated after the watermark's
+  last-processed position, bounded to one page — the count is a lower bound when
+  the backlog exceeds a page). Payload: `consumerId` and `count`; no `sessionId`.
+
+Subscribe to `dlq_terminal` via `onDiagnosticEvent` or the diagnostics-otel extension;
+`skipped_backlog` is read from the ring buffer via `sessions.claims.status` `recentEvents`.
+
+## Operational observability
+
+### Gateway RPC: `sessions.claims.status`
+
+The gateway exposes `sessions.claims.status` as a server method. It returns:
+
+- **consumers** — per-consumer status: consumer ID, agent ID, effect kind, and one entry per
+  lane with the watermark `since`, `enabled` flag, and counts by claim status (`pending`,
+  `claimed`, `processing`, `dlq`).
+- **stalledLeases** — claims with expired leases still in `claimed`/`processing` state, with
+  claim ID, consumer, session, and the lease deadline.
+- **lastSweepTs** — timestamp of the last reconciler sweep tick.
+- **recentEvents** — last N diagnostic events from the in-memory ring buffer (currently
+  `skipped_backlog` events; see the limitations below).
+
+Passing `--agent <id>` (or an `agentId` RPC param) filters the consumers list to that agent.
+
+### CLI: `wednesdayai sessions claims status`
+
+```bash
+wednesdayai sessions claims status
+wednesdayai sessions claims status --agent work
+wednesdayai sessions claims status --json
+```
+
+See `docs/cli/sessions.md` for full CLI reference.
+
+### Learning-core consumer
+
+The `extensions/learning-core` plugin declares `sessionConsumers` in its
+manifest and processes the `session.end` effect via the `onSessionWorkAvailable`
+hook. It reads transcripts from the durable conversation store (not volatile
+in-memory event messages), then calls `claimSessionWork()` → `processAgentEndFromClaim()`
+→ `ackSessionWork()`.
+
+On a processing failure the plugin logs a `warn` with the real error (message,
+error code, claim and session IDs) **before** acknowledging the claim as failed —
+so a failing ack can never mask the underlying error. Retryable failures are
+rescheduled with exponential backoff and dead-lettered after `maxAttempts`; the
+terminal error is then visible in the claim row's `last_error`.
+
+A hook warning repeating on every sweep tick (every `sweepCadenceMs`) for the same
+claim means the **ack itself** is failing, not the processing: the claim is never
+marked, its lease expires, and the lease reaper resets it for another attempt.
+Inspect the gateway log for the ack-layer error (a store/SQL failure, not a
+plugin-processing one) and check `session_consumer_claims.last_error` once the
+claim lands in `dlq`.
+
+### Reconciliation
+
+The gateway sweep now reconciles watermarks against the active plugin registry on
+every tick. Watermarks belonging to unregistered consumers are **purged** (via
+`purgeConsumer`) so a removed plugin's cursor does not linger. The purge gate uses manifest-declared consumer IDs (not load-filtered
+active consumers) to avoid purging watermarks when a plugin transiently fails to
+load.
+
+## Known limitations
+
+- `setEnabled(false)` for registered-but-disabled consumers is a placeholder
+  until a disabled-state signal is carried in the registry.
+- `skipped_backlog` diagnostics go to the gateway's in-memory diagnostic ring buffer and are
+  surfaced by `sessions.claims.status` `recentEvents`; `dlq_terminal` diagnostics are emitted
+  through the global event system only, so they appear in logs and diagnostics exports but are
+  not surfaced by `sessions.claims.status`.
+- `consumerClaims.retryBaseMs` is resolved from config but not yet wired through
+  to the claim store's retry-delay scheduling (uses a hardcoded backoff).
+  `leaseMs` and `maxAttempts` are wired through (`src/gateway/server.impl.ts`).

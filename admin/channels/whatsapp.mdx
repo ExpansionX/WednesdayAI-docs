@@ -25,16 +25,26 @@ The install copies WhatsApp into `~/.openclaw/extensions/whatsapp` and installs 
 dependencies there. Do not run `npm install` inside the global WednesdayAI package directory.
 The gateway will emit a `PLUGIN_DEPS_MISSING` warning at boot until the managed copy has its
 dependencies.
+
+The install also stamps the managed copy with the WednesdayAI build it came from
+(`dist/build-info.json`). After a WednesdayAI upgrade, a managed copy built from a different
+commit than the installed core (or one that predates build stamping) reports a
+`PLUGIN_BUILD_SKEW` warning instead of loading silently: the gateway logs it at startup,
+`wednesdayai plugins list` shows the plugin as degraded, and `wednesdayai plugins doctor` and
+`wednesdayai doctor` print it with a `→ remediation` line. Follow the remediation: reinstall
+in lockstep with core (`pnpm release:local-install` in a WednesdayAI-core checkout at the
+commit core reports) or run `wednesdayai plugins update whatsapp` once a matching release is
+published.
 </Note>
 
 <CardGroup cols={3}>
-  <Card title="Pairing" icon="link" href="/channels/pairing">
+  <Card title="Pairing" icon="link" href="/admin/channels/pairing">
     Default DM policy is pairing for unknown senders.
   </Card>
-  <Card title="Channel troubleshooting" icon="wrench" href="/channels/troubleshooting">
+  <Card title="Channel troubleshooting" icon="wrench" href="/admin/channels/troubleshooting">
     Cross-channel diagnostics and repair playbooks.
   </Card>
-  <Card title="Gateway configuration" icon="settings" href="/gateway/configuration">
+  <Card title="Gateway configuration" icon="settings" href="/admin/gateway/configuration">
     Full channel config patterns and examples.
   </Card>
 </CardGroup>
@@ -62,13 +72,13 @@ dependencies.
   <Step title="Link WhatsApp (QR)">
 
 ```bash
-openclaw channels login --channel whatsapp
+wednesdayai channels login --channel whatsapp
 ```
 
     For a specific account:
 
 ```bash
-openclaw channels login --channel whatsapp --account work
+wednesdayai channels login --channel whatsapp --account work
 ```
 
   </Step>
@@ -76,7 +86,7 @@ openclaw channels login --channel whatsapp --account work
   <Step title="Start the gateway">
 
 ```bash
-openclaw gateway run
+wednesdayai gateway run
 ```
 
   </Step>
@@ -84,8 +94,8 @@ openclaw gateway run
   <Step title="Approve first pairing request (if using pairing mode)">
 
 ```bash
-openclaw pairing list whatsapp
-openclaw pairing approve whatsapp <CODE>
+wednesdayai pairing list whatsapp
+wednesdayai pairing approve whatsapp <CODE>
 ```
 
     Pairing requests expire after 1 hour. Pending requests are capped at 3 per channel.
@@ -103,7 +113,7 @@ WednesdayAI recommends running WhatsApp on a separate number when possible. (The
   <Accordion title="Dedicated number (recommended)">
     This is the cleanest operational mode:
 
-    - separate WhatsApp identity for OpenClaw
+    - separate WhatsApp identity for WednesdayAI
     - clearer DM allowlists and routing boundaries
     - lower chance of self-chat confusion
 
@@ -329,6 +339,11 @@ When the linked self number is also present in `allowFrom`, WhatsApp self-chat s
 
     Self-chat turns skip read receipts even when globally enabled.
 
+    Inbox exception: when the whatsapp-web inbox source is enabled (see
+    [Inbox ingestion](#inbox-ingestion-whatsapp-web-source)), read receipts are
+    suppressed for history appends and group messages so the bot never wipes the phone's
+    unread state; DMs that pass access control keep their auto receipts.
+
   </Accordion>
 </AccordionGroup>
 
@@ -417,12 +432,76 @@ Behavior notes:
   </Accordion>
 
   <Accordion title="Logout behavior">
-    `openclaw channels logout --channel whatsapp [--account <id>]` clears WhatsApp auth state for that account.
+    `wednesdayai channels logout --channel whatsapp [--account <id>]` clears WhatsApp auth state for that account.
 
     Logout closes active QR sockets and stops gateway listeners that share the selected account's canonical auth directory, refuses to clear credentials if another socket owner holds the lock, drains queued credential writes, then deletes Baileys auth JSON files from the configured auth directory. Symlinked auth directories are refused rather than followed; symlinked Baileys auth fragments inside a real auth directory are unlinked without touching their targets. In legacy shared auth directories, unrelated JSON state is preserved and only known Baileys fragments are removed; `oauth.json` is preserved.
 
   </Accordion>
 </AccordionGroup>
+
+## Inbox ingestion (whatsapp-web source)
+
+The inbox plugin can store every chat on the linked account as a `whatsapp-web` inbox
+source. It is opt-in and disabled by default:
+
+```json5
+{
+  inbox: {
+    sources: {
+      "whatsapp-web": { enabled: true },
+    },
+  },
+  plugins: {
+    entries: {
+      inbox: {
+        grants: {
+          inbox: { actions: ["mark-read", "reply"] },
+        },
+      },
+    },
+  },
+}
+```
+
+Restart the gateway for the change to take effect.
+
+Behaviour:
+
+- Every non-status message on the linked account — DMs and groups, live messages and
+  history batches — is ingested into the inbox store; inbox ingestion is governed by its
+  own enablement, not by the channel's `dmPolicy`/`groupPolicy`.
+- `reply` and `mark-read` are default-deny; list them under the grants above. `reply`
+  always asks for operator approval first, and honours the channel's outbound `allowFrom`
+  policy — replying to a DM outside `allowFrom` fails with the channel's error. Group
+  replies go to the group, never to the individual participant.
+- `mark-read` sends a WhatsApp read receipt for that message on the phone and marks the
+  inbox row read.
+- Read receipts the bot would normally send for history appends and group messages are
+  suppressed while the source is enabled, so the phone's own unread state is not wiped;
+  when the phone marks a chat read, the inbox mirrors that as a chat-level read mark.
+- Read state only moves forward: a message WhatsApp re-delivers after you read it stays
+  read in the inbox, and marking a chat unread on the phone is not mirrored.
+- Full history: `channels.whatsapp.syncFullHistory: true` (default `false`) requests the
+  account's full message history at the next QR re-link — it has no effect until you
+  re-link.
+
+Backfill older history on demand:
+
+```bash
+openclaw inbox backfill --source whatsapp [--account <id>] [--since <iso>] [--all]
+```
+
+This walks each stored chat backwards from its oldest stored message via on-demand
+history on the phone (see [Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill)); a chat the phone
+cannot serve is skipped for that run. Chats whose oldest stored message predates the inbox
+feed are walked from a message key rebuilt from the stored row. `--source whatsapp-web` is
+an alias.
+
+If the account has no stored chats yet, backfill exits with one guidance line instead of a
+stack trace: on-demand history anchors on the oldest stored message per chat, so live traffic
+or pairing-time history must land first. Send or receive one WhatsApp message on the account
+and retry; if none arrive, run `wednesdayai plugins doctor` to check for a WhatsApp plugin
+built from a different commit than core.
 
 ## Disabling without removing config
 
@@ -459,8 +538,8 @@ Restart the gateway for the change to take effect.
     Fix:
 
     ```bash
-    openclaw channels login --channel whatsapp
-    openclaw channels status
+    wednesdayai channels login --channel whatsapp
+    wednesdayai channels status
     ```
 
   </Accordion>
@@ -471,13 +550,34 @@ Restart the gateway for the change to take effect.
     Fix:
 
     ```bash
-    openclaw doctor
-    openclaw logs --follow
+    wednesdayai doctor
+    wednesdayai logs --follow
     ```
 
     If needed, re-link with `channels login`.
 
     If the gateway is already running for the account, use the gateway login flow when available. A direct CLI login against the same auth directory will refuse to start while another openclaw process owns the socket lock.
+
+  </Accordion>
+
+  <Accordion title="WhatsApp revoked the session (401 logged out)">
+    Symptom: the gateway logs
+    `WhatsApp account "<id>" was logged out by WhatsApp (401); cleared its stale session.
+    Relink with ...` once, and the account stops instead of reconnect-looping.
+    `wednesdayai channels status` then reports
+    ``not linked; run `wednesdayai channels login --channel whatsapp --account <id>` ``.
+
+    This is not a restart bug: WhatsApp invalidated the stored session, WednesdayAI clears the
+    dead credentials exactly once, and the gateway records the account as not configured rather
+    than retrying with them forever.
+
+    Fix: relink the account (stop the gateway first if `channels login` reports the socket lock
+    is held):
+
+    ```bash
+    wednesdayai channels login --channel whatsapp --account <id>
+    wednesdayai channels status
+    ```
 
   </Accordion>
 
@@ -508,7 +608,7 @@ Restart the gateway for the change to take effect.
 
 Primary reference:
 
-- [Configuration reference - WhatsApp](/gateway/configuration-reference#whatsapp)
+- [Configuration reference - WhatsApp](/admin/gateway/configuration-reference#whatsapp)
 
 High-signal WhatsApp fields:
 
@@ -516,6 +616,7 @@ High-signal WhatsApp fields:
 - delivery: `textChunkLimit`, `chunkMode`, `chunkNewlinePacking`, `mediaMaxMb`, `sendReadReceipts`, `ackReaction`
 - delivery target: `defaultTo`
 - message behavior: `debounceMs`, `messagePrefix`, `selfChatMode`
+- history: `syncFullHistory`
 - multi-account: `accounts.<id>.enabled`, `accounts.<id>.authDir`, account-level overrides
 - operations: `configWrites`, `debounceMs`, `web.enabled`, `web.heartbeatSeconds`, `web.reconnect.*`
 - session behavior: `session.dmScope`, `historyLimit`, `dmHistoryLimit`, `dms.<id>.historyLimit`
@@ -525,7 +626,7 @@ High-signal WhatsApp fields:
 
 ## Related
 
-- [Pairing](/channels/pairing)
-- [Channel routing](/channels/channel-routing)
-- [Multi-agent routing](/concepts/multi-agent)
-- [Troubleshooting](/channels/troubleshooting)
+- [Pairing](/admin/channels/pairing)
+- [Channel routing](/admin/channels/channel-routing)
+- [Multi-agent routing](/developers/concepts/multi-agent)
+- [Troubleshooting](/admin/channels/troubleshooting)

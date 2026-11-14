@@ -1,0 +1,630 @@
+---
+summary: "Configuration overview: common tasks, quick setup, and links to the full reference"
+read_when:
+  - Setting up WednesdayAI for the first time
+  - Looking for common configuration patterns
+  - Navigating to specific config sections
+title: "Configuration"
+---
+
+# Configuration
+
+WednesdayAI reads an optional <Tooltip tip="JSON5 supports comments and trailing commas">**JSON5**</Tooltip> config from `~/.openclaw/openclaw.json`.
+
+If the file is missing, WednesdayAI uses safe defaults. Common reasons to add a config:
+
+- Connect channels and control who can message the bot
+- Set models, tools, sandboxing, or automation (cron, hooks)
+- Tune sessions, media, networking, or UI
+
+See the [full reference](/next/admin/gateway/configuration-reference) for every available field.
+
+<Tip>
+**New to configuration?** Start with `wednesdayai onboard` for interactive setup, or check out the [Configuration Examples](/next/admin/gateway/configuration-examples) guide for complete copy-paste configs.
+</Tip>
+
+## Minimal config
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  agents: { defaults: { workspace: "~/.openclaw/workspace" } },
+  channels: { whatsapp: { allowFrom: ["+15555550123"] } },
+}
+```
+
+## Editing config
+
+<Tabs>
+  <Tab title="Interactive wizard">
+    ```bash
+    wednesdayai onboard       # full setup wizard
+    wednesdayai configure     # config wizard
+    ```
+  </Tab>
+  <Tab title="CLI (one-liners)">
+    ```bash
+    wednesdayai config get agents.defaults.workspace
+    wednesdayai config set agents.defaults.heartbeat.every "2h"
+    wednesdayai config unset tools.web.search.apiKey
+    ```
+  </Tab>
+  <Tab title="Control UI">
+    Open [http://127.0.0.1:18789](http://127.0.0.1:18789) and use the **Settings** screen (**Configure → Settings**).
+    The console renders a form from the config schema, with a **Raw JSON5** editor as an escape hatch.
+  </Tab>
+  <Tab title="Direct edit">
+    Edit `~/.openclaw/openclaw.json` directly. The Gateway watches the file and applies changes automatically (see [hot reload](#config-hot-reload)).
+  </Tab>
+</Tabs>
+
+## Strict validation
+
+<Warning>
+WednesdayAI only accepts configurations that fully match the schema. Unknown keys, malformed types, or invalid values cause the Gateway to **refuse to start**. The only root-level exception is `$schema` (string), so editors can attach JSON Schema metadata.
+</Warning>
+
+When validation fails:
+
+- The Gateway does not boot
+- Only diagnostic commands work (`wednesdayai doctor`, `wednesdayai logs`, `wednesdayai health`, `wednesdayai status`)
+- Run `wednesdayai doctor` to see exact issues
+- Run `wednesdayai doctor --fix` (or `--yes`) to apply repairs
+
+## Common tasks
+
+<AccordionGroup>
+  <Accordion title="Set up a channel (WhatsApp, Telegram, Discord, etc.)">
+    Each channel has its own config section under `channels.<provider>`. See the dedicated channel page for setup steps:
+
+    - [WhatsApp](/next/admin/channels/whatsapp) — `channels.whatsapp`
+    - [Telegram](/next/admin/channels/telegram) — `channels.telegram`
+    - [Discord](/next/admin/channels/discord) — `channels.discord`
+    - [Slack](/next/admin/channels/slack) — `channels.slack`
+    - [Signal](/next/admin/channels/signal) — `channels.signal`
+    - [iMessage](/next/admin/channels/imessage) — `channels.imessage`
+    - [Google Chat](/next/admin/channels/googlechat) — `channels.googlechat`
+    - [Mattermost](/next/admin/channels/mattermost) — `channels.mattermost`
+    - [MS Teams](/next/admin/channels/msteams) — `channels.msteams`
+
+    All channels share the same DM policy pattern:
+
+    ```json5
+    {
+      channels: {
+        telegram: {
+          enabled: true,
+          botToken: "123:abc",
+          dmPolicy: "pairing",   // pairing | allowlist | open | disabled
+          allowFrom: ["tg:123"], // only for allowlist/open
+        },
+      },
+    }
+    ```
+
+  </Accordion>
+
+  <Accordion title="Choose and configure models">
+    Set the primary model and optional fallbacks:
+
+    ```json5
+    {
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-sonnet-4-5",
+            fallbacks: ["openai/gpt-5.2"],
+          },
+          models: {
+            "anthropic/claude-sonnet-4-5": { alias: "Sonnet" },
+            "openai/gpt-5.2": { alias: "GPT" },
+          },
+        },
+      },
+    }
+    ```
+
+    - `agents.defaults.models` defines the model catalog and acts as the allowlist for `/model`.
+    - Model refs use `provider/model` format (e.g. `anthropic/claude-opus-4-6`).
+    - `agents.defaults.imageMaxDimensionPx` controls transcript/tool image downscaling (default `1200`); lower values usually reduce vision-token usage on screenshot-heavy runs.
+    - See [Models CLI](/next/developers/concepts/models) for switching models in chat and [Model Failover](/next/developers/concepts/model-failover) for auth rotation and fallback behavior.
+    - For custom/self-hosted providers, see [Custom providers](/next/admin/gateway/configuration-reference#custom-providers-and-base-urls) in the reference.
+
+  </Accordion>
+
+  <Accordion title="Control who can message the bot">
+    DM access is controlled per channel via `dmPolicy`:
+
+    - `"pairing"` (default): unknown senders get a one-time pairing code to approve
+    - `"allowlist"`: only senders in `allowFrom` (or the paired allow store)
+    - `"open"`: allow all inbound DMs (requires `allowFrom: ["*"]`)
+    - `"disabled"`: ignore all DMs
+
+    For groups, use `groupPolicy` + `groupAllowFrom` or channel-specific allowlists.
+
+    See the [full reference](/next/admin/gateway/configuration-reference#dm-and-group-access) for per-channel details.
+
+  </Accordion>
+
+  <Accordion title="Set up group chat mention gating">
+    Group messages default to **require mention**. Configure patterns per agent:
+
+    ```json5
+    {
+      agents: {
+        list: [
+          {
+            id: "main",
+            groupChat: {
+              mentionPatterns: ["@openclaw", "openclaw"],
+            },
+          },
+        ],
+      },
+      channels: {
+        whatsapp: {
+          groups: { "*": { requireMention: true } },
+        },
+      },
+    }
+    ```
+
+    - **Metadata mentions**: native @-mentions (WhatsApp tap-to-mention, Telegram @bot, etc.)
+    - **Text patterns**: regex patterns in `mentionPatterns`
+    - See [full reference](/next/admin/gateway/configuration-reference#group-chat-mention-gating) for per-channel overrides and self-chat mode.
+
+  </Accordion>
+
+  <Accordion title="Configure sessions and resets">
+    Sessions control conversation continuity and isolation:
+
+    ```json5
+    {
+      session: {
+        dmScope: "per-channel-peer",  // recommended for multi-user
+        threadBindings: {
+          enabled: true,
+          idleHours: 24,
+          maxAgeHours: 0,
+        },
+        reset: {
+          mode: "daily",
+          atHour: 4,
+          idleMinutes: 120,
+        },
+      },
+    }
+    ```
+
+    - `dmScope`: `main` (shared) | `per-peer` | `per-channel-peer` | `per-account-channel-peer`
+    - `threadBindings`: global defaults for thread-bound session routing (Discord supports `/focus`, `/unfocus`, `/agents`, `/session idle`, and `/session max-age`).
+    - See [Session Management](/next/developers/concepts/session) for scoping, identity links, and send policy.
+    - See [full reference](/next/admin/gateway/configuration-reference#session) for all fields.
+
+  </Accordion>
+
+  <Accordion title="Configure session storage backend">
+    By default, sessions and conversation history are stored in a local SQLite database at
+    `<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`). SQL session storage is the only
+    session storage: `backend` selects SQLite (default) or Postgres, and there is no JSONL backend
+    or file fallback. Override the SQLite path or switch to Postgres:
+
+    ```json5
+    {
+      session: {
+        storage: {
+          backend: "sqlite", // sqlite (default) | postgres
+          sqlitePath: "/var/lib/openclaw/sessions.db", // optional override; defaults to <state-dir>/sessions.db
+          migration: { validateOnStart: true },
+        },
+      },
+    }
+    ```
+
+    ```json5
+    {
+      session: {
+        storage: {
+          backend: "postgres",
+          databaseUrl: "${SESSION_DATABASE_URL}",
+          cache: "redis",
+          redisUrl: "${REDIS_URL}",
+          migration: { validateOnStart: true },
+        },
+      },
+    }
+    ```
+
+    Key behaviors:
+
+    - `backend: "sqlite"` (default) stores everything in one SQLite database with WAL durability;
+      `backend: "postgres"` stores it in Postgres. `cache: "redis"` (Postgres only) adds a
+      write-through hot cache that is never authoritative — the database always wins.
+    - Legacy file-backend keys (`session.storage.backend: "fs-jsonl"`, `session.storage.mode`,
+      `session.storage.fallbackToJsonlOnError`) are retired: configs that still set them are
+      migrated automatically on load and the gateway logs the change at start. Existing JSONL
+      history is imported automatically (see
+      [Session Management / Upgrading from JSON session files](/next/developers/concepts/session#upgrading-from-json-session-files)).
+    - `migration.validateOnStart`: when `true`, the gateway validates schema and data integrity at
+      startup before serving.
+    - The gateway converges the database schema on every startup: tables and indexes are created
+      with `IF NOT EXISTS`, and columns added in newer versions are added idempotently — PostgreSQL
+      emits `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, while SQLite checks `PRAGMA table_info` and
+      issues a plain `ALTER TABLE ... ADD COLUMN` when the column is missing. Convergence is
+      additive only; existing columns and data are never dropped, renamed, or re-typed, and no
+      manual SQL is required.
+    - SQLite options under `storage.sqlite`: `wal`, `busyTimeoutMs`, `walAutocheckpointPages`.
+    - Redis options under `storage.redis`: `keyPrefix`, `ttlSeconds`.
+    - `session.storage.recovery.startupProbeTimeoutMs` (default `600s`) bounds how long the gateway
+      waits for session storage to open at startup before exiting. A failed or timed-out start is
+      fatal (the process exits with the cause and the service manager restarts it); the gateway
+      never serves a degraded file view.
+    - Exactly one process owns the database at a time (the gateway, or one CLI command when no
+      gateway runs). CLI storage commands go over the gateway RPC while it runs.
+
+    See [Session Management / Session storage](/next/developers/concepts/session#session-storage) for ownership,
+    backups, and the legacy upgrade path.
+
+  </Accordion>
+
+  <Accordion title="Enable sandboxing">
+    Run agent sessions in isolated Docker containers:
+
+    ```json5
+    {
+      agents: {
+        defaults: {
+          sandbox: {
+            mode: "non-main",  // off | non-main | all
+            scope: "agent",    // session | agent | shared
+          },
+        },
+      },
+    }
+    ```
+
+    Build the image first: `scripts/sandbox-setup.sh`
+
+    See [Sandboxing](/next/admin/gateway/sandboxing) for the full guide and [full reference](/next/admin/gateway/configuration-reference#sandbox) for all options.
+
+  </Accordion>
+
+  <Accordion title="Set up heartbeat (periodic check-ins)">
+    ```json5
+    {
+      agents: {
+        defaults: {
+          heartbeat: {
+            every: "30m",
+            target: "last",
+          },
+        },
+      },
+    }
+    ```
+
+    - `every`: duration string (`30m`, `2h`). Set `0m` to disable.
+    - `target`: `last` | `whatsapp` | `telegram` | `discord` | `webchat` | `none`
+    - `directPolicy`: `allow` (default) or `block` for DM-style heartbeat targets
+    - See [Heartbeat](/next/admin/gateway/heartbeat) for the full guide.
+
+  </Accordion>
+
+  <Accordion title="Configure cron jobs">
+    ```json5
+    {
+      cron: {
+        enabled: true,
+        maxConcurrentRuns: 2,
+        sessionRetention: "24h",
+        runLog: {
+          maxBytes: "2mb",
+          keepLines: 2000,
+        },
+      },
+    }
+    ```
+
+    - `sessionRetention`: tombstone completed isolated run session index rows from the session store (default `24h`; set `false` to disable).
+    - `runLog`: prune `cron/runs/<jobId>.jsonl` by size and retained lines.
+    - See [Cron jobs](/next/users/automation/cron-jobs) for feature overview and CLI examples.
+
+  </Accordion>
+
+  <Accordion title="Set up webhooks (hooks)">
+    Enable HTTP webhook endpoints on the Gateway:
+
+    ```json5
+    {
+      hooks: {
+        enabled: true,
+        token: "shared-secret",
+        path: "/hooks",
+        defaultSessionKey: "hook:ingress",
+        allowRequestSessionKey: false,
+        allowedSessionKeyPrefixes: ["hook:"],
+        mappings: [
+          {
+            match: { path: "gmail" },
+            action: "agent",
+            agentId: "main",
+            deliver: true,
+          },
+        ],
+      },
+    }
+    ```
+
+    Security note:
+    - Treat all hook/webhook payload content as untrusted input.
+    - Keep unsafe-content bypass flags disabled (`hooks.gmail.allowUnsafeExternalContent`, `hooks.mappings[].allowUnsafeExternalContent`) unless doing tightly scoped debugging.
+    - For hook-driven agents, prefer strong modern model tiers and strict tool policy (for example messaging-only plus sandboxing where possible).
+
+    See [full reference](/next/admin/gateway/configuration-reference#hooks) for all mapping options and Gmail integration.
+
+  </Accordion>
+
+  <Accordion title="Configure multi-agent routing">
+    Run multiple isolated agents with separate workspaces and sessions:
+
+    ```json5
+    {
+      agents: {
+        list: [
+          { id: "home", default: true, workspace: "~/.openclaw/workspace-home" },
+          { id: "work", workspace: "~/.openclaw/workspace-work" },
+        ],
+      },
+      bindings: [
+        { agentId: "home", match: { channel: "whatsapp", accountId: "personal" } },
+        { agentId: "work", match: { channel: "whatsapp", accountId: "biz" } },
+      ],
+    }
+    ```
+
+    See [Multi-Agent](/next/developers/concepts/multi-agent) and [full reference](/next/admin/gateway/configuration-reference#multi-agent-routing) for binding rules and per-agent access profiles.
+
+  </Accordion>
+
+  <Accordion title="Split config into multiple files ($include)">
+    Use `$include` to organize large configs:
+
+    ```json5
+    // ~/.openclaw/openclaw.json
+    {
+      gateway: { port: 18789 },
+      agents: { $include: "./agents.json5" },
+      broadcast: {
+        $include: ["./clients/a.json5", "./clients/b.json5"],
+      },
+    }
+    ```
+
+    - **Single file**: replaces the containing object
+    - **Array of files**: deep-merged in order (later wins)
+    - **Sibling keys**: merged after includes (override included values)
+    - **Nested includes**: supported up to 10 levels deep
+    - **Relative paths**: resolved relative to the including file
+    - **Error handling**: clear errors for missing files, parse errors, and circular includes
+
+  </Accordion>
+</AccordionGroup>
+
+## Config hot reload
+
+The Gateway watches `~/.openclaw/openclaw.json` and applies changes automatically — no manual restart needed for most settings.
+
+### Reload modes
+
+| Mode                   | Behavior                                                                                |
+| ---------------------- | --------------------------------------------------------------------------------------- |
+| **`hybrid`** (default) | Hot-applies safe changes instantly. Automatically restarts for critical ones.           |
+| **`hot`**              | Hot-applies safe changes only. Logs a warning when a restart is needed — you handle it. |
+| **`restart`**          | Restarts the Gateway on any config change, safe or not.                                 |
+| **`off`**              | Disables file watching. Changes take effect on the next manual restart.                 |
+
+```json5
+{
+  gateway: {
+    reload: { mode: "hybrid", debounceMs: 300 },
+  },
+}
+```
+
+### What hot-applies vs what needs a restart
+
+Most fields hot-apply without downtime. In `hybrid` mode, restart-required changes are handled automatically.
+
+| Category            | Fields                                                               | Restart needed? |
+| ------------------- | -------------------------------------------------------------------- | --------------- |
+| Channels            | `channels.*`, `web` (WhatsApp) — all built-in and extension channels | No              |
+| Agent & models      | `agent`, `agents`, `models`, `routing`                               | No              |
+| Automation          | `hooks`, `cron`, `agent.heartbeat`                                   | No              |
+| Sessions & messages | `session`, `messages`                                                | No              |
+| Tools & media       | `tools`, `browser`, `skills`, `audio`, `talk`                        | No              |
+| UI & misc           | `ui`, `logging`, `identity`, `bindings`                              | No              |
+| Inbox               | `inbox.owners` (account ↔ person bindings)                           | No              |
+| Gateway server      | `gateway.*` (port, bind, auth, tailscale, TLS, HTTP)                 | **Yes**         |
+| Infrastructure      | `discovery`, `canvasHost`, `plugins`                                 | **Yes**         |
+| Storage             | `storage` (config domain backends)                                   | **Yes**         |
+
+<Note>
+`gateway.reload` and `gateway.remote` are exceptions — changing them does **not** trigger a restart.
+</Note>
+
+<Note>
+**`inbox.owners` is a no-op reload, not a hot-apply.** Changing it never restarts the gateway,
+but the running gateway keeps the bindings it loaded at startup: bind accounts with
+`wednesdayai inbox owners bind` (the authoritative row applies immediately and the config seed
+is kept in sync); a hand edit of `openclaw.json` applies at the next gateway start.
+</Note>
+
+<Note>
+**Per-agent entries are an exception to the `agents` row.** `agents.defaults.heartbeat` and
+`agents.defaults.model` are applied in process (they trigger a `restart-heartbeat` action), but
+edits under `agents.list[]` — including `agents.list[].heartbeat.*` — collapse to the single
+`agents.list` path, which is treated as a no-op. They are neither applied in process nor flagged
+as needing a restart, so the heartbeat runner keeps its startup snapshot. Restart the gateway
+after editing a per-agent heartbeat.
+</Note>
+
+## Config RPC (programmatic updates)
+
+<Note>
+Control-plane write RPCs (`config.apply`, `config.patch`, `update.run`) are rate-limited to **3 requests per 60 seconds** per `deviceId+clientIp`. When limited, the RPC returns `UNAVAILABLE` with `retryAfterMs`.
+</Note>
+
+<AccordionGroup>
+  <Accordion title="config.apply (full replace)">
+    Validates + writes the full config and restarts the Gateway in one step.
+
+    <Warning>
+    `config.apply` replaces the **entire config**. Use `config.patch` for partial updates, or `wednesdayai config set` for single keys. A document that drops top-level keys without listing them in `allowTopLevelKeyRemoval` is refused (`INVALID_REQUEST`, `details.code: CONFIG_WRITE_REFUSED`) and the on-disk file is left unchanged. Agents cannot call `config.apply` unless you opt in. See [Config writes](/next/admin/gateway/config-writes).
+    </Warning>
+
+    Params:
+
+    - `raw` (string) — JSON5 payload for the entire config
+    - `baseHash` (optional) — config hash from `config.get` (required when config exists)
+    - `allowTopLevelKeyRemoval` (optional string[]) — top-level keys this write may delete; omitted means none. Payload diffs do not grant removals.
+    - `sessionKey` (optional) — session key for the post-restart wake-up ping
+    - `note` (optional) — note for the restart sentinel
+    - `restartDelayMs` (optional) — delay before restart (default 2000)
+
+    Restart requests are coalesced while one is already pending/in-flight, and a 30-second cooldown applies between restart cycles.
+
+    ```bash
+    wednesdayai gateway call config.get --params '{}'  # capture payload.hash
+    wednesdayai gateway call config.apply --params '{
+      "raw": "{ agents: { defaults: { workspace: \"~/.openclaw/workspace\" } } }",
+      "baseHash": "<hash>",
+      "sessionKey": "agent:main:whatsapp:dm:+15555550123"
+    }'
+    ```
+
+  </Accordion>
+
+  <Accordion title="config.patch (partial update)">
+    Merges a partial update into the existing config (JSON merge patch semantics):
+
+    - Objects merge recursively
+    - `null` deletes a key
+    - Arrays replace
+
+    Params:
+
+    - `raw` (string) — JSON5 with just the keys to change
+    - `baseHash` (required) — config hash from `config.get`
+    - `allowTopLevelKeyRemoval` (optional string[]) — same as `config.apply`; required only if the patch removes a top-level key (for example `null` at the top level)
+    - `sessionKey`, `note`, `restartDelayMs` — same as `config.apply`
+
+    Restart behavior matches `config.apply`: coalesced pending restarts plus a 30-second cooldown between restart cycles.
+
+    ```bash
+    wednesdayai gateway call config.patch --params '{
+      "raw": "{ channels: { telegram: { groups: { \"*\": { requireMention: false } } } } }",
+      "baseHash": "<hash>"
+    }'
+    ```
+
+  </Accordion>
+</AccordionGroup>
+
+## Environment variables
+
+WednesdayAI reads env vars from the parent process plus:
+
+- `.env` from the current working directory (if present)
+- `~/.openclaw/.env` (global fallback)
+
+Neither file overrides existing env vars. You can also set inline env vars in config:
+
+```json5
+{
+  env: {
+    OPENROUTER_API_KEY: "sk-or-...",
+    vars: { GROQ_API_KEY: "gsk-..." },
+  },
+}
+```
+
+<Accordion title="Shell env import (optional)">
+  If enabled and expected keys aren't set, WednesdayAI runs your login shell and imports only the missing keys:
+
+```json5
+{
+  env: {
+    shellEnv: { enabled: true, timeoutMs: 15000 },
+  },
+}
+```
+
+Env var equivalent: `OPENCLAW_LOAD_SHELL_ENV=1`
+</Accordion>
+
+<Accordion title="Env var substitution in config values">
+  Reference env vars in any config string value with `${VAR_NAME}`:
+
+```json5
+{
+  gateway: { auth: { token: "${OPENCLAW_GATEWAY_TOKEN}" } },
+  models: { providers: { custom: { apiKey: "${CUSTOM_API_KEY}" } } },
+}
+```
+
+Rules:
+
+- Only uppercase names matched: `[A-Z_][A-Z0-9_]*`
+- Missing/empty vars throw an error at load time
+- Escape with `$${VAR}` for literal output
+- Works inside `$include` files
+- Inline substitution: `"${BASE}/v1"` → `"https://api.example.com/v1"`
+
+</Accordion>
+
+<Accordion title="Secret refs (env, file, exec)">
+  For fields that support SecretRef objects, you can use:
+
+```json5
+{
+  models: {
+    providers: {
+      openai: { apiKey: { source: "env", provider: "default", id: "OPENAI_API_KEY" } },
+    },
+  },
+  skills: {
+    entries: {
+      "nano-banana-pro": {
+        apiKey: {
+          source: "file",
+          provider: "filemain",
+          id: "/skills/entries/nano-banana-pro/apiKey",
+        },
+      },
+    },
+  },
+  channels: {
+    googlechat: {
+      serviceAccountRef: {
+        source: "exec",
+        provider: "vault",
+        id: "channels/googlechat/serviceAccount",
+      },
+    },
+  },
+}
+```
+
+SecretRef details (including `secrets.providers` for `env`/`file`/`exec`) are in [Secrets Management](/next/admin/gateway/secrets).
+Supported credential paths are listed in [SecretRef Credential Surface](/next/developers/reference/secretref-credential-surface).
+</Accordion>
+
+See [Environment](/next/users/help/environment) for full precedence and sources.
+
+## Full reference
+
+For the complete field-by-field reference, see **[Configuration Reference](/next/admin/gateway/configuration-reference)**.
+
+---
+
+_Related: [Configuration Examples](/next/admin/gateway/configuration-examples) · [Configuration Reference](/next/admin/gateway/configuration-reference) · [Config writes](/next/admin/gateway/config-writes) · [Doctor](/next/admin/gateway/doctor)_

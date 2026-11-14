@@ -1,0 +1,201 @@
+---
+summary: "mcp-client plugin: connect operator-configured MCP servers and expose their tools to agents with policy checks and a per-call audit trail"
+read_when:
+  - You want agents to call tools on an MCP server through the gateway instead of the mcporter CLI
+  - You need to filter, allow or deny MCP tool calls, or read the MCP call audit table
+title: "MCP Client"
+---
+
+# MCP Client plugin
+
+`mcp-client` is a bundled, disabled-by-default extension that connects MCP servers you configure
+and exposes each server tool to agents as a regular tool. Every call passes the canonical
+`mcp-operation` policy check (deny-first, ADR 0307) and writes exactly one redacted audit row to a
+plugin-owned `mcp_call_events` table on SQLite or Postgres.
+
+Two transports are supported: `stdio` (the gateway spawns the server process) and
+`streamable-http` (the gateway calls a Streamable HTTP endpoint). There is no SSE transport and no
+OAuth; remote servers authenticate with static headers whose values come from secret references,
+never from plaintext config.
+
+## What it does
+
+- At gateway start, the plugin service connects every enabled configured server and lists its
+  tools. A server that fails to connect or answer `tools/list` within 10 seconds logs a warning
+  and is skipped; one bad server never blocks the others.
+- Each listed tool becomes an agent tool named `<serverId>__<tool>` (for example
+  `linear__create_issue`), so the normal `tools.allow` / `tools.deny` pipeline can filter it.
+- When an agent calls a tool, the plugin evaluates the `mcp-operation` policy request. On allow it
+  calls the server, on deny it refuses without contacting the server, and either way it writes one
+  audit row.
+- Tools appear on gateway turns only after the service has started. A server config change takes
+  effect when the gateway restarts the plugin service; a running turn is never interrupted.
+
+## Enable the plugin
+
+```bash
+wednesdayai plugins enable mcp-client
+```
+
+Restart the gateway afterwards. The extension is not enabled by default.
+
+## Configuration
+
+Servers live under `plugins.entries["mcp-client"].config.servers`. Keys are server ids matching
+`^[a-z0-9][a-z0-9_-]{0,29}$`; tools are named after them.
+
+```json5
+{
+  plugins: {
+    entries: {
+      "mcp-client": {
+        enabled: true,
+        config: {
+          servers: {
+            // stdio: the gateway spawns the command
+            files: {
+              transport: "stdio",
+              command: "npx",
+              args: ["-y", "@modelcontextprotocol/server-filesystem", "/srv/shared"],
+              env: { FILES_ROOT: "${FILES_ROOT}" },
+              // timeoutMs: 30000, // default
+              // enabled: true,   // default
+            },
+            // streamable-http: the gateway calls the endpoint
+            linear: {
+              transport: "streamable-http",
+              url: "https://mcp.linear.app/mcp",
+              headers: {
+                // value must be a SecretRef object; the env var holds the full header value
+                Authorization: { source: "env", provider: "default", id: "LINEAR_MCP_AUTH" },
+              },
+              timeoutMs: 60000,
+            },
+          },
+          // storage: { backend: "postgres", schema: "plugin_mcp_client" },
+        },
+      },
+    },
+  },
+}
+```
+
+Per server:
+
+| Key                      | Applies to      | Meaning                                                                                                                                                                                                                                                                                                                                                                                            |
+| ------------------------ | --------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `transport`              | both            | required, `stdio` or `streamable-http`                                                                                                                                                                                                                                                                                                                                                             |
+| `command`, `args`, `cwd` | stdio           | spawn target. `command` is required and must be non-empty. `args` defaults to `[]`                                                                                                                                                                                                                                                                                                                 |
+| `env`                    | stdio           | extra environment variables for the server process. Values may use `${ENV_VAR}` references. The gateway's own environment is never inherited: the child gets a sanitized base environment plus your overrides, and unsafe keys (`NODE_OPTIONS`, `LD_PRELOAD`, ...) are dropped with a warning naming them                                                                                          |
+| `url`                    | streamable-http | required. Must be `http:` or `https:`                                                                                                                                                                                                                                                                                                                                                              |
+| `headers`                | streamable-http | request headers. **Every value must be a SecretRef object** `{ source, provider, id }` resolved from `secrets.providers` at connect time; a plaintext string is rejected when the config loads, because a pasted token would sit verbatim in `openclaw.json`. The env var holds the full header value, for example `Bearer slf_...`. Header values never appear in logs, errors or the audit table |
+| `timeoutMs`              | both            | per-call timeout in milliseconds, 1000 to 600000, default 30000                                                                                                                                                                                                                                                                                                                                    |
+| `enabled`                | both            | default `true`. Set `false` to keep the entry without connecting                                                                                                                                                                                                                                                                                                                                   |
+
+`stdio` and `streamable-http` fields are mutually exclusive: a `stdio` server refuses `url` and
+`headers`, and a `streamable-http` server refuses `command`, `args`, `env` and `cwd`.
+
+Stdio servers only start when the gateway runs in role `all` (a home lab or single host). Any
+other deployment role refuses them with a warning, because a spawned child process is host-local
+and cannot be reproduced across replicas. The stderr of a stdio server is never copied into logs.
+
+## Tool names and filtering
+
+A tool is named `<serverId>__<safeTool>`. `safeTool` replaces every character outside
+`[A-Za-z0-9_-]` with `_`, and the full name is capped at 64 characters. If two tools would get the
+same name (compared case-insensitively), the later one gets a `-2`, `-3`, ... suffix. Names are
+stable: they are assigned in config order and do not change when a server is relisted.
+
+Filter with the ordinary tool policy knobs, on the full tool name, on the plugin id, or on the
+plugin group:
+
+```json5
+{
+  tools: {
+    deny: ["linear__delete_issue"], // one tool
+    allow: ["linear__*"], // everything on one server
+    // deny: ["mcp-client"],          // the whole plugin
+  },
+}
+```
+
+Filtering happens before the call: a denied tool is hidden from the model.
+
+## Policies
+
+Beyond tool filtering, every call is checked against the ADR 0307 policy engine. Policies come
+from `~/.openclaw/exec-approvals.json` (v2). Without any policy the default is **allow**, because
+you configured the server. `deny` wins over `ask` and `allow`; `ask` is treated as deny with the
+reason `mcp_approval_unavailable`, because there is no interactive approval UI in this release.
+
+```json
+{
+  "version": 2,
+  "policies": [
+    {
+      "id": "deny-linear-destructive",
+      "effect": "deny",
+      "source": "user",
+      "namespace": "mcp",
+      "match": { "mcpServerId": "linear", "mcpToolName": "delete_issue" }
+    }
+  ]
+}
+```
+
+`match` accepts `mcpServerId`, `mcpToolName` and `operationClass` (`read`, `write` or
+`destructive`, derived from the server's tool annotations: `destructiveHint` means `destructive`,
+otherwise `readOnlyHint` means `read`, everything else is `write`). Every decision, allow or deny,
+also lands in the exec audit log.
+
+`operationClass` is what the server _says_ about its tools; nothing verifies it. For a server you
+do not fully trust, write policies on `mcpServerId` and `mcpToolName` rather than on
+`operationClass`.
+
+## The audit table
+
+Exactly one row is written per tool call, whatever the outcome. Columns: `event_id` (primary key),
+`created_at_ms`, `agent_id`, `session_key`, `session_id`, `run_id`, `turn_id`, `tool_call_id`,
+`server_id`, `transport`, `tool_name` (the raw name, not the display name), `operation_class`,
+`decision`, `policy_effect`, `policy_id`, `reason`, `outcome` (`ok`, `tool_error`, `denied` or
+`failed`), `error_code`, `latency_ms`, `args_summary_json`, `result_summary_json` and
+`policy_request_json`.
+
+Argument and result values are never stored. Each summary carries a sha256 over the canonical
+JSON, the byte size, and the argument key names plus their JSON types. `policy_request_json`
+stores the full canonical policy request, so an audit row explains exactly what was evaluated.
+
+Where the table lives:
+
+| Backend          | Location                                                                                                                |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------------- |
+| SQLite (default) | table `plugin_mcp_client_mcp_call_events` in the `mcp-client` domain file, `<stateDir>/learning/mcp-client/learning.db` |
+| Postgres         | table `plugin_mcp_client.mcp_call_events`                                                                               |
+
+Override the SQLite file with `config.storage.sqlitePath`, or select Postgres with
+`config.storage.backend: "postgres"` (plus `databaseUrl` and `schema` overrides). If the store
+cannot be opened or migrated at startup, the plugin logs
+`call audit store unavailable; MCP tools disabled` and exposes no MCP tools: a call that cannot be
+audited does not happen.
+
+## Limits
+
+- No OAuth and no per-user tokens: remote servers authenticate with SecretRef headers only.
+  OAuth for remote servers and per-user credentials are later work.
+- No SSE transport; Streamable HTTP only.
+- No interactive approvals: `ask` policies deny the call.
+- Stdio servers are refused outside deployment role `all`.
+- ACP clients cannot supply MCP servers; they are ignored with a log line naming the reason.
+- No SSRF guard on `url`: operator config is trusted. Guards arrive together with user-owned
+  servers.
+- No rate limits or metering yet.
+- Tools appear only on gateway turns after the plugin service has started.
+- A corrupt or malformed `exec-approvals.json` denies every MCP call (reason
+  `mcp_policy_unavailable`) instead of silently dropping your deny policies; a missing file means
+  no policies.
+- `url` must not embed credentials (`https://user:pass@...` is rejected); use SecretRef headers.
+- Server-supplied tool metadata is treated as untrusted: descriptions are stripped of control
+  characters and capped at 2048 characters, and tools with names over 256 characters or input
+  schemas over 64 KiB are skipped with a warning.
+- If a server's connection drops, its tools stay listed and the next call reconnects once; a failed
+  reconnect is recorded as a `failed` call.

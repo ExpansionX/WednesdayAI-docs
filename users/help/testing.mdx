@@ -16,7 +16,7 @@ This doc is the live, Docker and provider test kit:
 - What each suite covers (and what it deliberately does _not_ cover)
 - How live tests discover credentials and select models/providers
 
-Policy, thresholds, "which suite should I run?" and adding regressions live in [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing). Lanes and worker settings live in [Tests](/reference/test).
+Policy, thresholds, "which suite should I run?" and adding regressions live in [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing). Lanes and worker settings live in [Tests](/developers/reference/test).
 
 ## Build prerequisite
 
@@ -58,7 +58,7 @@ Think of the suites as “increasing realism” (and increasing flakiness/cost):
 
 ### Unit / integration (default `pnpm test`)
 
-- Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/reference/test).
+- Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/developers/reference/test).
 - Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, the gateway-browser-client suite under `packages/gateway-browser-client/src/**`, and the host-bridge suite under `packages/host-bridge/src/**`
 - Scope:
   - Pure unit tests
@@ -130,21 +130,26 @@ packaged bundle without a browser). They are part of the e2e lane and need
 `USER_CLIENT_RPC_ALLOWLIST` (`test/helpers/user-client-web-allowlist.ts`), which derives from the
 gateway's narrow-session method tables; never hand-list methods (ADR 2428).
 
-| File                                                 | Covers                                                                                                                                                                                                                                                                                                  |
-| ---------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `test/user-client-web-brand.e2e.test.ts`             | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                      |
-| `test/user-client-web-session-lifecycle.e2e.test.ts` | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                  |
-| `test/user-client-web-reskin-fixes.e2e.test.ts`      | Thread scrolling the real scroller (bottom on open, follows appends, keeps position on load-older), markdown styling under `.prose`, `color-scheme` following the theme, the composer's live and disabled controls, a long thread kept in the scroller, and quiet token-styled buttons across themes    |
-| `test/user-client-web-attachments.e2e.test.ts`       | HTTP attachment uploads against a real gateway: a 12 MB PDF sent by `uploadId` with visible progress, cancelling an in-flight upload from the chip, and a 12,000-character paste staged as `pasted-text.txt` (ADR 1330, #1340)                                                                          |
-| `test/user-client-web-voice-recovery.e2e.test.ts`    | Voice mode's dead-capture watchdog: a take whose microphone stops sending audio ends visibly with the mic-silent message within seconds, and the next tap starts listening again (#1938)                                                                                                                |
-| `test/user-client-web-archive.e2e.test.ts`           | Archiving a chat on one client hides it from a second client and unarchiving restores it (ADR 0083 amendment)                                                                                                                                                                                           |
-| `test/web-client-packaging.e2e.test.ts`              | The packaged web bundle built by `scripts/build-web-app.mjs --app web`: self-hosted brand fonts, no Vite manifest shipped, the initial JS fitting `apps/web/bundle-budget.json` (#1145), and gateway serving at the default mount path                                                                  |
-| `test/control-ui-v2-packaging.e2e.test.ts`           | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default root mount                                                                                 |
-| `test/control-ui-v2.e2e.test.ts`                     | The console in real Chromium: gateway-hosted sign-in with a seeded session and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
+| File                                                   | Covers                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/user-client-web-brand.e2e.test.ts`               | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                      |
+| `test/user-client-web-session-lifecycle.e2e.test.ts`   | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                  |
+| `test/user-client-web-assistant-order.e2e.test.ts`     | The header has no Inbox button and the sidebar Inbox entry opens and closes the Inbox; assistants listed recent-first then alphabetical, frozen while the window stays focused, and re-sorted on window focus and tab return                                                                            |
+| `test/user-client-web-reskin-fixes.e2e.test.ts`        | Thread scrolling the real scroller (bottom on open, follows appends, keeps position on load-older), markdown styling under `.prose`, `color-scheme` following the theme, the composer's live and disabled controls, a long thread kept in the scroller, and quiet token-styled buttons across themes    |
+| `test/user-client-web-attachments.e2e.test.ts`         | HTTP attachment uploads against a real gateway: a 12 MB PDF sent by `uploadId` with visible progress, cancelling an in-flight upload from the chip, and a 12,000-character paste staged as `pasted-text.txt` (ADR 1330, #1340)                                                                          |
+| `test/user-client-web-voice-recovery.e2e.test.ts`      | Voice mode's dead-capture watchdog: a take whose microphone stops sending audio ends visibly with the mic-silent message within seconds, and the next tap starts listening again (#1938)                                                                                                                |
+| `test/user-client-web-voice-thread.e2e.test.ts`        | Cascaded voice turns landing in the thread: the spoken words preview in the composer until the gateway starts the turn, then become a user row with the reply streaming as an assistant bubble; the reply persists exactly once with the voice run id despite a 3 s TTS lag and survives a reload       |
+| `test/user-client-web-voice-toggle-off.e2e.test.ts`    | Turning Voice off mid-reply: the mic and speech stop with no `turn.cancelled`, the reply still finishes and persists in full without `[interrupted]`, a `transcript.persisted` carrying the turn id arrives, and the thread is unchanged after a reload                                                 |
+| `test/user-client-web-voice-layout.e2e.test.ts`        | Voice layout floors: at a 480 px keyboard canvas the realtime captions box stays capped against the shell canvas while the thread keeps a 120 px scrollport with a 10-line draft, and composer growth re-pins a following reader without moving one who scrolled up                                     |
+| `test/user-client-web-voice-reload-scroll.e2e.test.ts` | Scrolling after a reload that follows voice turns: desktop wheel and phone touch gestures scroll the thread up and hold position, scrolling down returns to the bottom, and the scrollport stays hit-testable beneath the composer                                                                      |
+| `test/user-client-web-archive.e2e.test.ts`             | Archiving a chat on one client hides it from a second client and unarchiving restores it (ADR 0083 amendment)                                                                                                                                                                                           |
+| `test/web-client-packaging.e2e.test.ts`                | The packaged web bundle built by `scripts/build-web-app.mjs --app web`: self-hosted brand fonts, no Vite manifest shipped, the initial JS fitting `apps/web/bundle-budget.json` (#1145), and gateway serving at the default mount path                                                                  |
+| `test/control-ui-v2-packaging.e2e.test.ts`             | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default root mount                                                                                 |
+| `test/control-ui-v2.e2e.test.ts`                       | The console in real Chromium: gateway-hosted sign-in with a seeded session and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
 
 The unit-level guard `test/brand-tokens-contrast.test.ts` (contrast ratios and `color-scheme` per
 theme) runs in the normal `pnpm test` lane and needs no browser. See
-[Brand tokens](/reference/brand-tokens) for what each guard pins.
+[Brand tokens](/developers/reference/brand-tokens) for what each guard pins.
 
 <Warning>
 Running a whole e2e file that boots many in-process gateways one after another can fail roughly 40%
@@ -212,7 +217,7 @@ If a filtered run also fails, treat it as a real failure.
 - Optional target overrides:
   - `OPENCLAW_ANDROID_NODE_ID` or `OPENCLAW_ANDROID_NODE_NAME`.
   - `OPENCLAW_ANDROID_GATEWAY_URL` / `OPENCLAW_ANDROID_GATEWAY_TOKEN` / `OPENCLAW_ANDROID_GATEWAY_PASSWORD`.
-- Full Android setup details: [Android App](/platforms/android)
+- Full Android setup details: [Android App](/admin/platforms/android)
 
 ## Live: web client deploy verification
 
@@ -525,7 +530,7 @@ We already have a few CI-safe tests that behave like “agent reliability evals�
 - Mock tool-calling through the real gateway + agent loop (`src/gateway/gateway.test.ts`).
 - End-to-end wizard flows that validate session wiring and config effects (`src/gateway/gateway.test.ts`).
 
-What’s still missing for skills (see [Skills](/tools/skills)):
+What’s still missing for skills (see [Skills](/users/tools/skills)):
 
 - **Decisioning:** when skills are listed in the prompt, does the agent pick the right skill (or avoid irrelevant ones)?
 - **Compliance:** does the agent read `SKILL.md` before use and follow required steps/args?

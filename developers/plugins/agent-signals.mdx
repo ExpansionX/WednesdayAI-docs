@@ -58,7 +58,7 @@ api.runtime.signals.nudge(input);
 coordination seam (`requestAuthorizedNudge`) and, when allowed, enqueues one durable `agent.turn`
 with `kind=nudge` on the target agent's main session. Use it when your plugin has done a cheap
 check and found something worth the persona's attention. Do not hand-build a `heartbeat`-mode
-`publish()` call for this. See [Agent coordination](/concepts/agent-coordination) for the model,
+`publish()` call for this. See [Agent coordination](/developers/concepts/agent-coordination) for the model,
 grants, and dedupe semantics.
 
 ```ts
@@ -138,11 +138,25 @@ grant hint (`Grant it with plugins.entries.<id>.grants.agentTurn.agents.`), not 
 `{ ok: false }` result, and nothing is enqueued. The same denial emits the
 `backbone.authz.rejected` diagnostic event.
 
-The CLI ([`openclaw agent nudge`](/cli/agent-nudge)) goes through the same authorized seam with
+**Manifest-declared defaults (bundled plugins only).** A bundled plugin may ship a default
+grant in its `wednesdayai.plugin.json` (or legacy `openclaw.plugin.json`):
+
+```json
+{
+  "grants": { "agentTurn": { "agents": ["main"] } }
+}
+```
+
+The default is used only when `plugins.entries.<id>.grants.agentTurn.agents` is unset — the
+operator key always wins, and an explicit empty list revokes the default. Third-party
+(non-bundled) plugins cannot self-grant: a manifest `grants` field on a non-bundled origin is
+ignored.
+
+The CLI ([`wednesdayai agent nudge`](/users/cli/agent-nudge)) goes through the same authorized seam with
 the operator principal. Cron and the heartbeat wake-gate are different: they are trusted internal
 producers on the legacy `requestNudge` path, so they need no grant, are fire-and-forget, and do
 not report the refusal reasons above — see
-[Heartbeat](/gateway/heartbeat#nudge-wake-the-main-persona). The equivalent agent-side tool is
+[Heartbeat](/admin/gateway/heartbeat#nudge-wake-the-main-persona). The equivalent agent-side tool is
 `agents_nudge` (gated by `tools.agentToAgent` plus the cross-agent
 `tools.sessions.visibility="all"` bar, with the default sandbox clamp).
 
@@ -241,6 +255,8 @@ api.runtime.signals.publish({
 - Runs in `<sessionKey>:background` — a new session created fresh (`forceNew`) with cleared delivery context. The isolated turn has no implicit route back to any user channel.
 - `disableMessageTool: true` and `requireExplicitMessageTarget: true` are always set. The turn cannot message the user directly.
 - `disablePluginHooks: true` prevents recursive background/analysis spawning through prompt hooks.
+  It also skips prompt-slot claims and turn-lane resolution, so no plugin-authored text reaches
+  the isolated turn's prompt.
 
 ### Tool allowlist
 

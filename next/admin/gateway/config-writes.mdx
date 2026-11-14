@@ -1,0 +1,174 @@
+---
+summary: "Harden live config writes: named top-level removals, honest CAS, and default-deny whole-document apply"
+read_when:
+  - A config write was refused with CONFIG_WRITE_REFUSED
+  - You need to allow or deny agent config.apply without disabling the gateway tool
+  - You are calling config.set, config.apply, or config.patch from the CLI or Control UI
+title: "Config writes"
+audience: admin
+component: config-write-hardening
+sources:
+  - src/gateway/protocol/schema/config.ts
+  - src/gateway/server-methods/config.ts
+  - src/config/io.ts
+  - src/agents/tools/gateway-tool.action-policy.ts
+  - src/config/env-preserve.ts
+  - src/gateway/server.impl.ts
+generated: 2026-08-13
+sidebarTitle: Config writes
+description: "How the gateway writes openclaw.json: write methods, baseHash
+  concurrency, the top-level removal guard, backups, audit trail, and hot-reload
+  vs restart."
+---
+
+# Config writes
+
+WednesdayAI refuses a config write that would drop top-level keys you did not name. Agents can still patch settings. Whole-document replace stays available, but it is **denied by default**.
+
+This page covers operator writes (`config.set` / `config.apply` / `config.patch`), tool policy, and secret-preserving startup writes. It does not replace the [field reference](/next/admin/gateway/configuration-reference). Chat-facing behavior is in [Changing settings](/next/developers/concepts/config-changes-user). Gateway client authors should read [Config writes (developer)](/next/admin/gateway/config-writes-developer).
+
+## Quickstart
+
+Preferred path for a small change: merge a patch. Capture `hash` from `config.get`, then call `config.patch`.
+
+```bash
+wednesdayai gateway call config.get --params '{}'
+wednesdayai gateway call config.patch --params '{
+  "raw": "{ logging: { level: \"info\" } }",
+  "baseHash": "<hash>"
+}'
+```
+
+Expected: the gateway validates, writes `~/.openclaw/openclaw.json`, and restarts. Unnamed top-level keys stay on disk.
+
+<Warning>
+`config.apply` replaces the entire file. Agents cannot call it unless you opt in. A partial document without `allowTopLevelKeyRemoval` is refused (`INVALID_REQUEST`, `details.code: CONFIG_WRITE_REFUSED`) and the on-disk file is left unchanged.
+</Warning>
+
+## Named top-level removals
+
+`allowTopLevelKeyRemoval` default: omitted (treated as `[]`).
+
+Write RPCs `config.set`, `config.apply`, and `config.patch` accept an optional string array. Only keys listed there may disappear from the top level of `~/.openclaw/openclaw.json`. The gateway does **not** infer intent from the payload.
+
+```json5
+{
+  raw: '{ agents: { defaults: { workspace: "~/.openclaw/workspace" } } }',
+  baseHash: "<hash>",
+  allowTopLevelKeyRemoval: ["channels"],
+}
+```
+
+| Situation                                                  | Result                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Payload drops `channels` and the request lists `channels`  | Write proceeds                                                                 |
+| Payload drops `channels` and the array is empty or omitted | `INVALID_REQUEST` (`details.code: CONFIG_WRITE_REFUSED`); file bytes unchanged |
+| Nested edit only (no top-level key removed)                | No allowance needed                                                            |
+
+First-party removers already name the key for you:
+
+- Control UI Save / Save & restart (form and Raw JSON5)
+- `wednesdayai config unset <topLevelKey>`
+- Chat `/config unset <topLevelKey>`
+
+This change takes effect immediately on the next write. No gateway restart is required for the guard itself. `config.apply` and `config.patch` still restart the gateway after a successful write.
+
+## Optimistic concurrency (`baseHash`)
+
+`baseHash` default: omitted in the schema; **required at runtime** when a config file already exists.
+
+1. Call `config.get` and read `payload.hash`.
+2. Pass that value as `baseHash` on `config.set`, `config.apply`, or `config.patch`.
+3. If the file changed since that read, the RPC returns `INVALID_REQUEST` (`config changed since last load; re-run config.get and retry`).
+
+The agent `gateway` tool does not fetch a hash for you. Missing `baseHash` fails closed.
+
+## Default-deny whole-document apply
+
+`gateway.config_apply` default: **denied** for non-sandbox agents.
+
+The `gateway` tool stays available. Reads, `config.patch`, restart, and `update.run` are not default-denied. Prefer `tools.alsoAllow: ["gateway.config_apply"]`. A restrictive `tools.allow` must include `gateway` (or a whole-tool glob) plus `gateway.config_apply`. Bare `*` does **not** re-enable apply.
+
+```json5
+{
+  tools: {
+    alsoAllow: ["gateway.config_apply"],
+  },
+}
+```
+
+Per-agent:
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "main",
+        tools: {
+          alsoAllow: ["gateway.config_apply"],
+        },
+      },
+    ],
+  },
+}
+```
+
+Deny still wins. `tools.deny: ["gateway.config_apply"]` keeps apply blocked even if `alsoAllow` lists it.
+
+This change takes effect immediately (hot-reload).
+
+<Warning>
+Allowing `gateway.config_apply` still cannot drop unnamed top-level keys. The agent tool does not send `allowTopLevelKeyRemoval`, so a truncating apply is refused even after you opt in.
+</Warning>
+
+## Secret-preserving writes
+
+Startup writes (activation migration, bundled reconcile, Control UI origin seed) restore object-form SecretRefs (`source: "env" | "file" | "exec"`) and `${VAR}` string refs. An ephemeral runtime gateway auth token generated for this process is stripped before persist.
+
+After those writes, `~/.openclaw/openclaw.json` still contains refs, not resolved plaintext. Persist a token on purpose with `wednesdayai config set gateway.auth.mode token` and `wednesdayai config set gateway.auth.token <token>`.
+
+See [Secrets management](/next/admin/gateway/secrets).
+
+## Rate limits
+
+Control-plane write RPCs (`config.apply`, `config.patch`, `update.run`) are limited to **3 requests per 60 seconds** per `deviceId+clientIp`. When limited, the RPC returns `UNAVAILABLE` with `retryAfterMs`.
+
+## Troubleshooting
+
+**Write returns `INVALID_REQUEST` with `details.code: CONFIG_WRITE_REFUSED`**
+
+The payload dropped one or more top-level keys that the request did not name. The on-disk file is unchanged. Either keep those keys in the document, or list them in `allowTopLevelKeyRemoval`. Gateway log: `Config write refused: <path> (...)`.
+
+**Agent says apply is denied (`Gateway tool action denied by policy: gateway.config_apply`)**
+
+Expected on a default install. Use `config.patch` for surgical edits, or add `tools.alsoAllow: ["gateway.config_apply"]` if you truly need whole-document replace. Do not set `tools.allow: ["gateway.config_apply"]` alone — the whole `gateway` tool must stay allowed.
+
+**`config base hash required` or `config changed since last load`**
+
+Re-run `config.get` and retry with the new `hash`. Do not omit `baseHash` when a config file exists.
+
+**Older build already truncated the file**
+
+Run `wednesdayai doctor`: when the config is invalid it offers to restore the newest valid backup ([details](/next/users/cli/doctor#restore-the-config-from-a-backup)). Or restore `~/.openclaw/openclaw.json.bak` by hand, then restart:
+
+```bash
+systemctl --user restart wednesdayai-gateway   # Linux
+wednesdayai gateway restart --deep          # macOS
+```
+
+Prove the live guard with an isolated temp config (never points at the real file):
+
+```bash
+bash scripts/verify-config-write-hardening.sh --bin "node $PWD/openclaw.mjs"
+```
+
+## Related
+
+- [Configuration](/next/admin/gateway/configuration) (task-oriented setup and RPC examples)
+- [Configuration reference](/next/admin/gateway/configuration-reference) (`tools.allow` / `tools.alsoAllow`)
+- [Tools](/next/users/tools) (gateway tool actions)
+- [Security](/next/admin/gateway/security#control-plane-tools-risk)
+- [Config writes (developer)](/next/admin/gateway/config-writes-developer)
+- [Changing settings](/next/developers/concepts/config-changes-user)
+- [Control UI v2](/next/admin/web/control-ui-v2)

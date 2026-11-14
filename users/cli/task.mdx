@@ -1,0 +1,88 @@
+---
+summary: "CLI reference for `wednesdayai task` (inspect task runs, reset budgets, dry-run and rollback)"
+read_when:
+  - You want to see what background task passes have run and their outcomes
+  - You need to reset a task budget or replay a task safely
+audience: user
+component: task-pipeline
+sources:
+  - src/commands/tasks.ts
+  - src/gateway/server-methods/tasks.ts
+  - src/backbone/task-recovery.ts
+generated: "2026-08-20"
+title: "task"
+---
+
+# `wednesdayai task`
+
+Inspect and manage the Gateway task pipeline: background task passes that run through the
+work queue with durable run records, budgets, and preemption. See
+[Task pipeline](/developers/concepts/tasks) for how it works and
+[Task operations](/admin/gateway/tasks) for operator configuration.
+
+All subcommands talk to the running Gateway.
+
+## Status
+
+```bash
+wednesdayai task status
+wednesdayai task status --task cron-run --limit 20
+wednesdayai task status --task heartbeat-tick --json
+```
+
+Shows recent task runs (id, task, status, attempts, budget denials) plus a budget snapshot
+for the selected scope. Options:
+
+- `--task <id>` filter by task id
+- `--limit <n>` maximum runs to show (default 50)
+- `--json` machine-readable output
+
+Run statuses include `pending`, `running`, `retrying`, `completed`, `failed`, `dlq`,
+`preempted`, `deferred`, `preempted_ceiling`, `rolled_back`, and `cancelled`. Unknown status
+filters are rejected rather than returning an empty list.
+
+The `--json` output includes two further fields per run: `stage` (the pass's declared stage
+label, when set) and `triggerSource` — `boot` for the gateway's own boot-time enqueue,
+`task-dispatcher` for ordinary enqueues, `cron` for `cron-run`, `heartbeat` for
+`heartbeat-tick`, or the trigger named by the enqueuing plugin (the idle monitor
+path produces `idle` / `schedule`; see [Dream Cycle](/developers/plugins/dream-cycle)).
+
+## After the Gateway restarts
+
+The Gateway is the always-on service that runs WednesdayAI. If it restarts while a
+background job was in progress, that job is picked up again instead of being thrown
+away. A job is only parked (status `dlq`) when it has already used its retry budget
+or has been stuck retrying for about 25 minutes. If a job you expected never
+finished, ask an administrator to check `wednesdayai task status`.
+
+## Budget reset
+
+```bash
+wednesdayai task budget reset --scope global
+wednesdayai task budget reset --scope lane --key <laneKey>
+```
+
+Writes a reset marker that re-opens the budget window for the scope (`run`, `tenant`, `lane`,
+or `global`; non-global scopes require `--key`). The reset is audited (actor, timestamp,
+reset count). It does not clear per-run denial counters.
+
+## Dry run
+
+```bash
+wednesdayai task run --dry-run <taskId>
+```
+
+Enqueues the task in `dry_run` mode: the pass executes with the same claims and run records
+but records a `dry_run` audit event and no budget entries. Each invocation enqueues a new
+dry run. Repeating the command does not reuse a previous dry-run record.
+
+## Rollback
+
+```bash
+wednesdayai task rollback <runId>
+```
+
+Invokes the task pass's rollback handler for a terminal run, then marks the run
+`rolled_back` with an audit event. Rollback is idempotent: repeating the command for an
+already rolled-back run is a no-op, and a concurrent second call is rejected while the first
+is in progress. Tasks that do not implement rollback return `rollback_unsupported`.

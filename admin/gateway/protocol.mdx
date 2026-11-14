@@ -175,6 +175,12 @@ Common scopes:
 - `operator.approvals`
 - `operator.pairing`
 
+`operator.talk.secrets` admits no method on its own. `talk.config` with `includeSecrets: true`
+returns the unredacted talk config (provider API keys) only to a connection holding
+`operator.talk.secrets` or `operator.admin`; anything else is refused with
+`missing scope: operator.talk.secrets`. Setup-code pairing grants it (see the client profile table
+below).
+
 Narrow session scopes, for bounded chat clients (ADR 0077):
 
 - `operator.sessions.read`
@@ -208,7 +214,7 @@ read or write groups later are refused until they are allowlisted.
 - `operator.sessions.read`: `health`, `status`, `models.list`, `models.authStatus`, `agents.list`,
   `agent.identity.get`, `sessions.list`, `sessions.describe`, `sessions.compaction.list`,
   `sessions.resolve`, `sessions.subscribe`, `sessions.direct`, `chat.history`,
-  `identity.self`, `chat.surfaces.list`,
+  `identity.self`, `device.self`, `chat.surfaces.list`,
   `chat.surfaces.get`, `sessions.runs.list`,
   `sessions.runs.get`, `sessions.runs.events`, `tasks.runs.list`, `tasks.runs.get`,
   `tasks.runs.events`, `talk.catalog`, `tts.readAloud.status`. `talk.catalog` joined the list with
@@ -221,7 +227,9 @@ read or write groups later are refused until they are allowlisted.
   admission is unconditional; the methods report the plugin's state rather than the absence of the
   capability. See [Assistant UI surfaces](#assistant-ui-surfaces). `identity.self` joined with
   ADR 0116 (identity binding at enrollment): it reads the calling browser's own person and links;
-  the device id comes from the verified connection, never the request body.
+  the device id comes from the verified connection, never the request body. `device.self` joined
+  with ADR 2242 (app device integration): it reads the caller's own device group only. See
+  [Device companions and device.self](#device-companions-and-deviceself).
 - `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
@@ -286,13 +294,18 @@ an archived session archived. `sessions.list` rows project `archived: true` for 
 (see [sessions.list sorting, agent activity, and visibility](#sessionslist-sorting-agent-activity-and-visibility));
 there is no server-side filter for it, clients filter.
 
+A narrow connection never receives the admin-only session fields: the `sessions.patch` echo and
+every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `execSecurity`,
+`execAsk`, `sendPolicy`, `spawnedBy`, `spawnDepth`, `elevatedLevel`, `verboseLevel`,
+`responseUsage` and `groupActivation`. Write and admin connections receive them unchanged.
+
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
 is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods above are the only
 `talk.*` methods allowlisted; every other `talk.*` method (`talk.realtime.*`, `talk.config`,
 `talk.mode`, `talk.metrics`) stays refused with `missing scope: operator.read` or
 `missing scope: operator.write`. Behaviour of the admitted methods is in
-[Voice conversation sessions](/talk/realtime-voice-conversation); the frames are under
+[Voice conversation sessions](/users/talk/realtime-voice-conversation); the frames are under
 [Talk sessions](#talk-sessions).
 
 #### Narrow scope event allowlist
@@ -325,7 +338,7 @@ connection on a gateway.
 
 Assistant-composed inline UI (ADR 0106) travels the same chat and session methods, with one new
 event and a small method family. Everything lives behind the bundled `ui-surfaces` plugin
-([docs/plugins/ui-surfaces.md](/plugins/ui-surfaces)); when the plugin is off, `chat.surfaces.list`
+([docs/plugins/ui-surfaces.md](/developers/plugins/ui-surfaces)); when the plugin is off, `chat.surfaces.list`
 answers `enabled: false` and the methods never surface a `show_ui` output;
 `chat.surfaces.get` and `chat.surfaces.pin` answer `UNAVAILABLE` with
 `details.reason: "ui-surfaces-disabled"`.
@@ -372,6 +385,11 @@ answers `enabled: false` and the methods never surface a `show_ui` output;
   included. It is broadcast ordered with the session's `chat` frames and is
   droppable under backpressure rather than blocking the turn. `turnSeq` follows the rule under
   [Chat event transcript positions](#chat-event-transcript-positions).
+- `connect.params.renderProfile` (optional, `"full"` | `"compact"` | `"hud"`) declares how much UI
+  the client can show. With `"hud"`, a `show_ui` tool result is plain text of at most four lines
+  plus at most two submit actions (see [ui-surfaces plugin](/developers/plugins/ui-surfaces#render-profiles)).
+  `"full"`, `"compact"` and an omitted field all get the unchanged result. Any other value refuses
+  the connect with `INVALID_REQUEST`.
 
 ### Client identity
 
@@ -387,7 +405,17 @@ at pairing time:
 | `openclaw-even-g2-node`  | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.talk.secrets`, `operator.write` |
 | `openclaw-mentra-node`   | `operator`         | `operator.read`, `operator.write`                                                |
 | `openclaw-user-client`   | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
-| `wednesdayai-glass-node` | `node`, `operator` | `operator.read`, `operator.write`                                                |
+| `wednesdayai-glass-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.write`                          |
+
+`operator.approvals` on a `wednesdayai-glass-node` connection without `operator.admin` covers only
+exec approvals whose session actor is the app's own linked person (ADR 2242 D5). Such a connection
+receives no `exec.approval.requested`/`exec.approval.resolved` event for any other approval,
+including one with no session or an unowned session, or any approval when its device is not linked
+to a person. `exec.approval.resolve` and `exec.approval.waitDecision` answer for a hidden approval
+exactly as for a missing one. The `learning.*` approval methods are refused with
+`missing scope: operator.admin`. A device paired as `wednesdayai-glass-node` stays bound to that
+client id: a reconnect declaring another id is refused with `details.reason = "metadata-upgrade"`
+until an administrator approves the new pairing request.
 
 Rules that apply to bootstrap redemption:
 
@@ -397,8 +425,20 @@ Rules that apply to bootstrap redemption:
   consumed nor device-bound by the refusal. The human-readable `error.message` and the websocket
   close reason state the setup-code cause ("setup code was issued for a different client profile"),
   not a shared-token cause; every other bootstrap reason (`bootstrap_token_invalid`,
-  `bootstrap_token_expired`, `bootstrap_token_consumed`, `bootstrap_token_device_mismatch`) names
-  the setup code the same way.
+  `bootstrap_token_expired`, `bootstrap_token_consumed`, `bootstrap_token_device_mismatch`,
+  `bootstrap_code_verifier_invalid`, `bootstrap_device_owned`) names the setup code the same way.
+- **Code-verifier binding.** A setup code minted with an RFC 7636 S256 challenge (native sign-in,
+  see [Identity OIDC](/developers/plugins/identity-oidc#native-apps)) is redeemable only when the connect also
+  sends `auth.bootstrapCodeVerifier`, the 43–128 character verifier whose SHA-256 base64url digest
+  equals the stored challenge. A missing, malformed or wrong verifier is refused with
+  `details.code = bootstrap_code_verifier_invalid` before the token is bound to the device, so an
+  app that intercepted the redirect cannot pair with the code. Setup codes minted without a
+  challenge ignore the field.
+- **No rebinding.** A token whose identity differs from the owner on the redeeming device's
+  pairing record is refused with `details.code = bootstrap_device_owned`. The token stays bound to
+  that device but is not consumed; log the device out or remove it, then pair again with a new
+  setup code. An owner write that loses a race to another person's after this check refuses the
+  connect the same way (that token is already consumed); the winning owner stays.
 - **No widening.** The minted device token is approved for exactly the profile's scopes. A later
   connect requesting anything outside that set is refused; `details.code` is
   `AUTH_DEVICE_TOKEN_MISMATCH` with the additive `details.deviceTokenReason = "scope-mismatch"`.
@@ -407,6 +447,14 @@ Rules that apply to bootstrap redemption:
   already admitted by `none`, `tailscale` or `trusted-proxy` auth or a shared secret, so a client
   pairing through Tailscale Serve still gets the full profile silently. If redemption fails there,
   the earlier admission stands and the connect proceeds as it would without the token.
+- **Device tokens under ambient auth.** Under `none`, `trusted-proxy` or Tailscale identity auth, a
+  connect that presents `auth.deviceToken` has it verified exactly as under `token` mode. A
+  revoked, unknown or over-scoped token is refused with `AUTH_DEVICE_TOKEN_MISMATCH` (plus
+  `details.deviceTokenReason`), and the client should drop the token and reconnect. A valid token
+  connects under the ambient admission. A connect that presents `auth.deviceToken` without a
+  `device` block is refused the same way (`deviceTokenReason: "device-identity-required"`), since
+  there is no identity to bind the token to. `auth.token` is not treated as a device credential
+  there.
 
 `openclaw-mentra-node` pairs the WednesdayAI miniapp for MentraOS display glasses
 ([apps/mentra-glass](https://github.com/ExpansionX/WednesdayAI-apps/tree/main/apps/mentra-glass)).
@@ -418,20 +466,21 @@ Tokens minted by this bootstrap profile carry no node role and none of `operator
 identity metadata, not an authorization ceiling, and an administrator-approved pairing request
 can still grant the device more. One scan pairs the glasses: the setup code is single-use,
 redemption approves the pairing silently, and later reconnects authenticate with the minted
-operator device token. Setup and device management: [MentraOS Glasses](/platforms/mentra-glass).
+operator device token. Setup and device management: [MentraOS Glasses](/admin/platforms/mentra-glass).
 
 `openclaw-even-g2-node` pairs the third-party Even G2 node client. It connects as both
 roles: a node socket (role `node`, no scopes, `canvas` capability) that answers the `glass.*` HUD
-command family granted by device family `glasses` (`glass.hud.show`, `glass.hud.dismiss`,
+command family granted by device family `glasses`, a deprecated alias of the `accessory:g2` cap (`glass.hud.show`, `glass.hud.dismiss`,
 `glass.app.open`, `glass.state.get`), and an operator socket with `operator.read` +
 `operator.write`. It also pulls plugin glance widgets via `glance.widgets.list`.
 
 `wednesdayai-glass-node` pairs WednesdayAI Glass (ADR 0107) as both roles. The node socket is role
 `node` with no scopes, `canvas` capability, and answers the `glass.*` family (`glass.hud.show`,
-`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`) granted by device family `glasses`. The
-operator socket has `operator.read` + `operator.write` and pulls `glance.widgets.list`. Its profile
-mints only those two scopes, so setup codes for other client ids, including the default
-`openclaw qr` code, cannot be redeemed by it.
+`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`, plus declared `glass.tool.*`) granted by
+the `accessory:g2` cap; device family `glasses` remains a deprecated alias for one release. The
+operator socket has `operator.read`, `operator.write` and own-person `operator.approvals`, and pulls
+`glance.widgets.list`. Its profile mints exactly those three scopes, so setup codes for other client
+ids, including the default `wednesdayai qr` code, cannot be redeemed by it.
 
 `openclaw-user-client` carries two further admission rules:
 
@@ -467,6 +516,55 @@ Nodes declare capability claims at connect time:
 
 The Gateway treats these as **claims** and enforces server-side allowlists.
 
+### Command descriptors (node)
+
+A node may describe its commands with an optional `commandSpecs` array next to `commands`
+(ADR 2242 D3). Each entry is a `NodeCommandSpec`:
+
+```json
+{
+  "name": "device.status",
+  "description": "Battery and connectivity",
+  "inputSchema": { "type": "object", "properties": {} },
+  "timeoutMs": 5000,
+  "proactive": false
+}
+```
+
+- `name` must be in `commands` after the Gateway applies the node command allowlist. A descriptor
+  never widens that policy; a spec for any other name is ignored.
+- `inputSchema` is a JSON Schema whose top-level `type` is `object`. It uses the provider-safe
+  subset: no `anyOf`, `oneOf`, `allOf`, or `format` keyword, and no property named `format`, at any
+  depth. Each schema is capped at 8 KiB of JSON.
+- `description` is capped at 1024 characters; it becomes model-visible tool text.
+- `timeoutMs` (positive integer) and `proactive` (boolean) are optional; other values are ignored.
+- The Gateway reads at most the first 64 entries (valid or not) and keeps the first spec for a
+  duplicated name.
+
+An invalid spec is dropped with a logged reason (subsystem `gateway/nodes`). It never rejects the
+connection. To replace the whole set while connected, the node sends
+`node.event` with `event: "node.commands.changed"` and `payload: { "commandSpecs": [...] }`. This
+never changes the node's `commands`, and it applies only from the connection that currently owns
+the node session; an event from a superseded connection of the same node is ignored.
+
+Each described command becomes an agent device tool for the person the node is linked to (see
+[Device tools](/users/tools#device-tools)). Every `node.invoke` of a described command, from a device
+tool or any other caller, passes these Gateway checks before the node receives
+`node.invoke.request`; a refusal fails the call with `UNAVAILABLE` and a `<CODE>: <message>` text
+naming the limit:
+
+| Check         | Limit                                        | Code                  |
+| ------------- | -------------------------------------------- | --------------------- |
+| Params size   | 64 KiB of JSON                               | `PAYLOAD_TOO_LARGE`   |
+| Params schema | must validate against `inputSchema`          | `INVALID_PARAMS`      |
+| Call rate     | 30 per minute per node and command (sliding) | `RATE_LIMITED`        |
+| Concurrency   | 4 calls in flight per node                   | `CONCURRENCY_LIMITED` |
+| Result size   | 256 KiB (success payload or error object)    | `RESULT_TOO_LARGE`    |
+
+The wait for the node is the smallest of the caller's `timeoutMs`, the descriptor's `timeoutMs`,
+and 30000 ms. Missing `params` are validated and forwarded as `{}`. Commands without a descriptor
+keep the `node.invoke` behaviour below.
+
 ### `node.invoke`
 
 `node.invoke` runs a command on a connected node (used by the nodes CLI, `exec` with `host=node`,
@@ -475,6 +573,21 @@ and operators). Params: `nodeId`, `command`, optional `params`, optional `timeou
 the default is 30000 ms (clamped to the Node timer max). The timeout travels to the node in
 `node.invoke.request`; a result that arrives after the gateway stopped waiting is dropped and
 logged as `late invoke result dropped` at warn level.
+
+`node.invoke.request` may carry an optional `run` (`NodeInvokeRunContext`, gateway contract 3.13)
+naming the agent run behind the call:
+
+```json
+{ "runId": "run-123", "userInitiated": true }
+```
+
+The Gateway sets it only for calls from its own agent [device tools](/users/tools#device-tools), from the
+run it is executing; `node.invoke` params cannot carry it (a `run` field is rejected with
+`INVALID_REQUEST`), so no RPC caller can claim a user-initiated run. `userInitiated` is `true` when
+a user message started the run and `false` for cron, heartbeat, and other background runs, so a
+node can apply its own limits to proactive use without inferring the turn from `chat.activity`
+events. Requests from the CLI, operators, and `exec` omit it. It carries no session key or
+identity.
 
 ## Presence
 
@@ -495,7 +608,7 @@ logged as `late invoke result dropped` at warn level.
   person in `session.identityLinks` (`device:<deviceId>`). `optIn: false` or a disconnect clears
   it, with no TTL, so the app republishes on connect. Turns whose session actor is that person
   get a "Device context (untrusted metadata)" block; see
-  [Session history hygiene](/concepts/session-history-hygiene#device-context-provenance).
+  [Session history hygiene](/developers/concepts/session-history-hygiene#device-context-provenance).
 
 ### Operator helper methods
 
@@ -518,7 +631,7 @@ logged as `late invoke result dropped` at warn level.
   operator request
   with the same `dedupeKey` is admitted once and different requesters never collide. Plugin and
   agent callers use the same seam with their own requester-scoped keys; see
-  [Agent coordination](/concepts/agent-coordination#dedupe). A refusal surfaces as
+  [Agent coordination](/developers/concepts/agent-coordination#dedupe). A refusal surfaces as
   `INVALID_REQUEST` with the reason (`empty-text`, `unknown-agent`, `self-target`,
   `session-agent-mismatch`, `depth-exceeded`) as the message, except the two backpressure
   outcomes: `enqueue-failed` answers `UNAVAILABLE`, and `rejected-overflow` — the target session
@@ -579,10 +692,10 @@ logged as `late invoke result dropped` at warn level.
 - Operators may call `sessions.storage.import` (`operator.admin`) with `{retryFailed?}` to run the
   legacy import sweep to completion now and get `{ "ok": true, "status": <LegacyImportStatus> }`.
   A source that has burned its five automatic attempts is retried only when `retryFailed` is true;
-  the `openclaw session-storage import` command always sets it for its run (an operator-invoked
+  the `wednesdayai session-storage import` command always sets it for its run (an operator-invoked
   pass retries capped sources by design — there is no separate CLI flag).
 - Operators may call `sessions.storage.validate` (`operator.admin`) with no params to run the
-  schema/integrity validation the `openclaw session-storage validate` CLI uses against the
+  schema/integrity validation the `wednesdayai session-storage validate` CLI uses against the
   configured storage: `{ "ok": boolean, "backend": "...", "checks": [{ "name", "ok", "detail?" }] }`.
 - Operators may call `sessions.storage.backup` (`operator.admin`) with `{path?}` to write one
   online SQLite backup (`VACUUM INTO` on a separate read-only connection; appends never wait).
@@ -591,7 +704,7 @@ logged as `late invoke result dropped` at warn level.
   Postgres storage rejects this method — use `pg_dump` there.
 - Operators may call `sessions.maintenance.run` (`operator.admin`) with
   `{ task: "cleanup" | "backfill" | "drop-legacy-archive", agent?, allAgents?, dryRun?, enforce?, activeKey?, batchSize? }`.
-  `cleanup` runs the same retention core as `openclaw sessions cleanup` (`--enforce` maps to
+  `cleanup` runs the same retention core as `wednesdayai sessions cleanup` (`--enforce` maps to
   `enforce: true`) and answers `summaries`; `backfill` and `drop-legacy-archive` answer `counts`.
   `dryRun: true` never mutates.
 - Operators may call `memory.index` (`operator.admin`) with `{agentId?, force?}` to run the memory
@@ -795,7 +908,7 @@ logged as `late invoke result dropped` at warn level.
   added are described below.
 - Operators may call the three `doctor.recovery.*` methods to inspect and repair the
   restart-recovery journal (behaviour and reason codes in
-  [Restart recovery](/gateway/restart-recovery)). `doctor.recovery.inspect` (`operator.read`, no
+  [Restart recovery](/admin/gateway/restart-recovery)). `doctor.recovery.inspect` (`operator.read`, no
   params) answers `{ "available": true, "snapshot", "items", "historyItems", "actions",
 "incidents", "storage" }`, or `{ "available": false, "reason": "<code>" }` while the control
   plane or its journal is not serving. `items` is the current epoch's actionable inventory and
@@ -882,7 +995,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   `resolveAllowedModelRef` check `sessions.patch` uses, before the session is created, and applied
   to the new session; `agents.defaults.models` bounds the allowed set the same way it bounds
   `sessions.patch` (see
-  [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor)). A refusal
+  [Configuration reference](/admin/gateway/configuration-reference#agentslistidentitycolor)). A refusal
   writes nothing and returns `INVALID_REQUEST`: an unknown agent, an `agentId` that differs from the
   parent's agent, a parent session that does not exist, an empty, over-long or already-used `label`
   (`label already in use: <label>`), or an unresolvable or disallowed `model` (`invalid model: ...`,
@@ -920,7 +1033,10 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 - `chat.history` messages also carry `__openclaw.runId` when the stored entry recorded the run that
   wrote it. For a run a client started, it equals the `idempotencyKey` of that client's `chat.send`
   or `sessions.steer` (mode `queue`), so a client can pair its own turn with the stored row even
-  when the stored text differs, and group every row of one reply. Entries without a stored run id
+  when the stored text differs, and group every row of one reply. Cascaded voice rows carry it
+  too: the `stt-tts` assistant rows and the cancelled-fragment user rows record the talk turn id,
+  so a client can pair a `transcript.persisted`/`turn.started` turnId with the stored row. Entries
+  without a stored run id
   (written before the field existed) omit the key. An oversized message's placeholder keeps it,
   and is marked `__openclaw.truncated: true` with `reason: "oversized"`. When an oversized tool
   message's bare call identities exceed the per-message cap, one stored entry returns as several
@@ -1070,7 +1186,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
     `INVALID_REQUEST`, even for a message the fast paths would have answered.
   - Rate limit: its own control-plane bucket of 3 calls per 60 seconds per `deviceId+clientIp`,
     independent of the shared budget for `config.apply`, `config.patch` and `update.run` (see
-    [Config writes](/gateway/config-writes)), and not configurable. A call is counted as soon as it
+    [Config writes](/admin/gateway/config-writes)), and not configurable. A call is counted as soon as it
     passes authorization, before validation and before the fast paths above, so one that answers
     `{ title: null }` without a model call still uses budget. The next call in the window is
     refused with `UNAVAILABLE`, `retryable: true`, `retryAfterMs` and
@@ -1079,7 +1195,7 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
 - `agents.list` (`operator.read`; narrow-admitted) rows gain `identity.color` when the agent sets
   `agents.list[].identity.color` in config: one of `indigo`, `violet`, `pink`, `rose`, `amber`,
   `lime`, `teal` or `sky` (see
-  [Configuration reference](/gateway/configuration-reference#agentslistidentitycolor)). The key is
+  [Configuration reference](/admin/gateway/configuration-reference#agentslistidentitycolor)). The key is
   absent when no colour is configured, and the web client then derives a stable colour from the
   agent id. `agent.identity.get` does not carry it. Rows also carry the ADR 0121 fields:
   `description` (the trimmed `agents.list[].description`, absent when unset), `userFacing`
@@ -1251,6 +1367,23 @@ reconstructing it from arrival order:
 - For a run remapped to a client-supplied run id, the gateway stamps the recorded seq of the
   client id when it has one and falls back to the source run id otherwise.
 
+### Chat run origin
+
+`chat` events (`delta`, `final`, `error`, `aborted`) of a run started from a device carry optional
+`origin: { deviceId, clientId }`: the `device.id` and `client.id` of the connection that started
+the run with `chat.send`, `sessions.steer`, a talk session turn or `agent`, or of the node that sent
+`voice.transcript`. A client compares
+`origin.deviceId` with its own device id to recognise replies to its own turns. The field is absent
+when the starting connection presented no device identity, and for runs the gateway started itself
+(heartbeat, cron, channel inbound). A replayed idempotency key never re-tags a run.
+
+A `role: "node"` connection receives `chat`, `chat.activity` and `agent` events only for sessions
+it subscribed to with `node.event` `chat.subscribe`; the operator broadcast of those events never
+reaches it. Subscriptions match on the canonical session key, so subscribing to `main` delivers
+frames whose `sessionKey` is `agent:main:main`. A `chat.subscribe` naming a session the node may not
+see (another person's, or any person's for a node with no linked person) is answered
+`INVALID_REQUEST` with `details.reason: "session_not_found"` and subscribes nothing.
+
 ### The chat error event
 
 A dispatched turn that fails without an assistant reply ends with a `chat` broadcast event
@@ -1382,7 +1515,7 @@ to a linked identity is rejected before the run starts:
 Read `details.reason` with `gatewayErrorReason(err)` (`src/gateway/client.ts`) instead of matching
 the message text. The CLI `agent` command treats this marker as final and does not fall back to an
 embedded run. The device sender, lane keys, and the denial behavior of every path are documented
-in [Workspace Lanes](/concepts/workspace-lanes).
+in [Workspace Lanes](/developers/concepts/workspace-lanes).
 
 ## Talk sessions
 
@@ -1465,7 +1598,12 @@ decreases within the session (unlike `stt-tts` per-turn offsets).
 
 `appendAudio` is `INVALID_REQUEST` when the base64 text is longer than 512 KiB, is not canonical
 base64, or decodes to an odd byte count (PCM16 samples are 2 bytes). `close` answers before the
-drain emits terminal events for `transcription` and `stt-tts` sessions. A session-bound realtime
+drain emits terminal events for `transcription` and `stt-tts` sessions. On an `stt-tts` session
+an explicit `close` detaches the active turn: no `turn.cancelled` and no `[interrupted]` write.
+Speech stops, the agent run finishes, its full reply is written once when the run ends, and
+`transcript.persisted` follows the write (it may arrive after `session.closed`, whose reason
+stays `completed`). A chat delete or reset cancels the active turn instead, and a client socket
+drop still cancels with reason `cancelled`. A session-bound realtime
 session's `close` resolves after its drain: the session retires and audio stops at once, but
 transcript admission stays open while the commit queue settles (bounded by the 3 s user-settle
 window plus a 2 s commit grace), then the provider closes and the RPC resolves.
@@ -1508,9 +1646,15 @@ Canonical names, in order: `session.started`, `session.ready`, `session.closed`,
 `transcript.delta` `payload.text` is the cumulative text of the in-progress segment. Replace the
 stored caption; do not append.
 
-`transcript.persisted` (realtime sessions) is `{role: "user" | "assistant"}` with no `turnId`. It
-arrives after that utterance was written to the session; reload the thread on it. It never
-carries the text.
+`transcript.persisted` arrives after that utterance was written to the session; reload the thread
+on it. It never carries the text. A realtime frame is `{role: "user" | "assistant"}` with no
+`turnId`. Cascaded `stt-tts` sessions also emit the event, for the assistant write only, as
+`{turnId, payload: {role: "assistant"}}` where `turnId` matches that turn's `turn.started`. It is
+the completion barrier for that turn's assistant write: it follows a natural finish, an
+explicit-close detach (the run's full reply), or a cancelled turn's heard-prefix write, including
+a cancel that heard nothing, which writes no row and still announces. It is not sent when the
+write throws, nor for a turn cancelled while still queued (only the user's fragment is written),
+and it may arrive after `session.closed`.
 
 `output.audio.started`, `output.audio.delta`, and `output.audio.done` carry `markName` and
 `kind` (`"speech"`, `"filler"`, or `"ack"`). `output.audio.delta` also carries `audioBase64`,
@@ -1521,18 +1665,21 @@ continues the in-flight speech stream. `output.audio.cleared` is `{markName, rea
 `turn.started` and `turn.ended` have an empty payload. `turn.ended` means the TTS stream drained.
 It does not mean the session entry or the transcript has been written. Those writes land after
 the event and are not awaited, so a disk write cannot block the next turn. Wait for the `chat`
-final event, or poll `chat.history`, before reading the turn back. A confirmed barge-in persists
+final event, or poll `chat.history`, before reading the turn back; a voice turn's
+`transcript.persisted` marks the same completion. A confirmed barge-in persists
 only the heard prefix plus an `[interrupted]` marker; zero heard characters append no assistant
-message. On the JSONL backend the rewrite truncates the file and writes the loaded transcript
-back, so earlier entries stay.
+message, and that turn's `transcript.persisted` still follows. On the JSONL backend the rewrite
+truncates the file and writes the loaded transcript back, so earlier entries stay.
 
 `turn.cancelled` payload is `{reason}`. Reasons you must handle include `client-cancelled` (the
 cancel RPC), `agent-error` (the agent run failed to start; the turn is cancelled rather than left
 open), `tts-stall` (the speech stream sat silent for 30 seconds after `end()`, or a `ready` or
 backpressure promise stayed unsettled that long; audio that is still arriving resets that wait;
 waiting on the model is not a stall), `tts-error`, `barge-in`, `turn-resumed`, and the session
-close reasons below when they cancel the active turn (`session-closed` when the close reason was
-`completed`).
+close reasons below when they cancel the active turn. `session-closed` now comes only from relay
+expiry (the session TTL or the prune sweep), where the close reason is `completed`; an explicit
+`talk.session.close` detaches the active turn instead of cancelling it, and a socket drop cancels
+with reason `cancelled`.
 
 `session.ready` is emitted once: for `stt-tts`, when the first STT connect succeeds (including
 the one allowed reconnect after an initial connect failure); for a realtime session, when the
@@ -1686,14 +1833,77 @@ configured; it reports gate state only, never a secret. A handler failure is `UN
   Control UI can omit it **only** when `gateway.controlUi.dangerouslyDisableDeviceAuth`
   is enabled for break-glass use.
 - All connections must sign the server-provided `connect.challenge` nonce.
-- Device-to-person identity links are operator-managed over `session.identityLinks`:
-  `device.identity.link` (`{deviceId, identity}` → `{deviceId, identity, changed}`) and
-  `device.identity.unlink` (`{deviceId}` → `{deviceId, unlinkedFrom}`) both require
-  `operator.admin`, because linking grants a person's identity. `device.pair.list` items carry the
-  linked `identity` key, and `device.pair.remove` also unlinks the removed device (`unlinkedFrom`
-  in the response). The paired-device methods themselves stay `operator.pairing`; link and unlink
-  from the CLI with `openclaw devices link` / `openclaw devices unlink` (see
-  [devices](/cli/devices)).
+- A device's person is `ownerPerson` on its pairing record, managed by operators:
+  `device.identity.link` (`{deviceId}` + `{identity}` → `{deviceId, identity, changed}`) and
+  `device.identity.unlink` (`{deviceId}` → `{deviceId, unlinkedFrom, deregistered}`) both require
+  `operator.admin`, because linking grants a person's identity. The owner is set once, in one
+  pairing-store transaction; the same person again answers `changed: false`. Device ids match
+  case-insensitively (responses carry the canonical lowercase id). Only deregistration clears an
+  owner: unlinking a paired device is the same as `device.pair.remove` (record, tokens and owner
+  removed in one transaction; `deregistered: true`), and both answer before the device's
+  connections close, so a caller removing its own device still gets its response.
+  `device.pair.list` and `device.pair.approve` items (`operator.pairing`) carry the stored owner as
+  `ownerPerson` and, while it is still a configured person, as `identity`; `device.pair.remove`
+  reports it in `unlinkedFrom`. Re-pair
+  approvals keep the owner. The paired-device methods themselves stay `operator.pairing`; link and
+  unlink from the CLI with `wednesdayai devices link` / `wednesdayai devices unlink` (see
+  [devices](/users/cli/devices)).
+  `session.identityLinks` holds channel identities only: `device:` values there confer nothing,
+  are moved onto their records (a device listed under several people goes to the first) and
+  stripped at gateway startup, and
+  `identity.link` / `identity.unlink` refuse them. `config.set`, `config.patch` and `config.apply`
+  refuse a write that adds one with `details.code = DEVICE_LINK_VALUE_REFUSED` (plus
+  `details.deviceId`).
+
+  Device-link refusals carry `details.reason`:
+
+  | Situation                                                     | `error.code`      | `details`                                                               | Message                                                            |
+  | ------------------------------------------------------------- | ----------------- | ----------------------------------------------------------------------- | ------------------------------------------------------------------ |
+  | Linking a device another person owns (`device.identity.link`) | `INVALID_REQUEST` | `{ reason: "identity_link_conflict" }`                                  | names the owner and `devices remove`                               |
+  | Linking a node-only device (role `node` without `operator`)   | `INVALID_REQUEST` | `{ reason: "identity_link_invalid", code: "DEVICE_LINK_NODE_REFUSED" }` | `<deviceId> is a node; nodes have no person and cannot be linked.` |
+  | Linking a device that is not paired                           | `INVALID_REQUEST` | `{ reason: "identity_link_invalid" }`                                   | `unknown deviceId`                                                 |
+
+- Before a handshake registers its socket, it re-checks in the session database that the
+  device's record still exists with the owner and role token it saw (bounded by the handshake
+  deadline). Every deregistration (remove, unlink, logout, prune, supersede) first revokes the
+  device's connections, so one committing after the re-check is refused at registration or closes
+  the socket. A device admitted through pairing whose record vanished before its token was issued
+  is refused too. Refusals carry `details.code = device_deregistered` (or close the socket with
+  `device revoked`); a re-check read that fails closes it with code 1011. A client
+  whose device token is rejected drops only its local token; the gateway's record and owner are
+  untouched.
+
+- Paired records carry lifecycle fields: `device.pair.list` items add `firstRegisteredAtMs` (set
+  once, kept across re-pairing), `lastActiveAtMs` (latest of last activity, token use, approval and
+  registration), `connected`, `stale` (inactive longer than `gateway.devices.staleAfterDays`, never
+  while connected) and `supersedes` (ids of older records this enrolment replaces). `node.list`
+  paired entries add `firstRegisteredAtMs`, `lastActiveAtMs` and `stale`.
+- `device.pair.prune` (`operator.pairing`), params `{stale?, superseded?, dryRun?}`: at least one of
+  `stale` or `superseded` must be `true`. It revokes every token of each selected record, archives
+  it in the session database pairing archive tables (token secrets dropped), removes it, and
+  unlinks its identity. Connected records are never selected and are
+  listed under `skippedConnected`. Response:
+  `{dryRun, staleAfterDays, devices: [{deviceId, displayName?, reason, supersededBy?, firstRegisteredAtMs, lastActiveAtMs, revokedRoles, unlinkedFrom}], nodes: [{nodeId, displayName?, firstRegisteredAtMs, lastActiveAtMs}], skippedConnected}`.
+  `dryRun: true` writes nothing.
+- `device.bootstrap.issue` (`operator.admin`): issue a bootstrap enrolment token for a setup code.
+  Params `{profile: {roles, scopes}, identity?, codeChallenge?}`; result
+  `{token, setupId, expiresAtMs}`. `wednesdayai qr` calls this method when a gateway owns storage and
+  issues the token locally from the session database otherwise.
+- Re-enrolment supersede (ADR 0116 D8 pattern): when a bootstrap redemption bound to a person
+  pairs a new device whose `client.id` and `client.modelIdentifier` match older, disconnected
+  records linked to the same person, `hello-ok.auth.supersedeCandidates` lists them
+  (`[{deviceId, displayName?, firstRegisteredAtMs, lastActiveAtMs}]`) and the new record's
+  `supersedes` flags them for operators. The person confirms with `device.supersede`
+  (`operator.write`), params `{deviceId}` → `{deviceId, supersededBy, unlinkedFrom}`, called from
+  the new device. It fails `INVALID_REQUEST` with `details.reason` `device_identity_required`,
+  `device_unpaired`, `identity_unlinked` or `not_supersedable` (never naming another person's
+  device). Clients that send no `modelIdentifier` never receive candidates.
+  Only a strictly later registration (`firstRegisteredAtMs`) supersedes, so two records never
+  replace each other; re-pairing a device clears every other record's flag on it. The ownership
+  check of `device.supersede` is re-run by the store's revision-checked archive transaction, so a
+  device deregistered (or re-paired) meanwhile fails `not_supersedable`. The archived record keeps
+  its owner. `device.pair.prune {superseded}` never archives a record whose replacement it is also
+  archiving.
 
 ### Device auth migration diagnostics
 
@@ -1721,11 +1931,51 @@ Migration target:
 - Legacy `v2` signatures remain accepted for compatibility, but paired-device
   metadata pinning still controls command policy on reconnect.
 
+### Device companions and device.self
+
+ADR 2242 D1 lets a signed-in WednesdayAI app device hand the person's browser a credential tied to
+itself. Both methods take `{}` and read the device id from the verified connection.
+
+| Method                   | Scope            | Narrow admission         | Result                          |
+| ------------------------ | ---------------- | ------------------------ | ------------------------------- |
+| `device.companion.issue` | `operator.write` | never                    | `{bootstrapToken, expiresAtMs}` |
+| `device.self`            | `operator.read`  | `operator.sessions.read` | `{self, linked}`                |
+
+- `device.companion.issue` answers only a device enrolled by an app-profile bootstrap
+  (`wednesdayai-glass-node`; renaming the client id on a later connect does not count), connected
+  as that client, with a live operator token and a linked person. It mints an
+  `openclaw-user-client` setup code for that person; the redeemed device records
+  `companionOf: <app deviceId>`. Refusals carry `error.details.reason`:
+  `device_companion_forbidden` (not a signed-in app device) or `device_companion_person_required`
+  (no linked person).
+- `device.self` returns the caller as `self` (`relation: "self"`) and, in `linked`, its app device
+  (`relation: "primary"`) or its companions (`relation: "companion"`), only when they are linked to
+  the caller's own person. Each entry carries `deviceId`, `online` (a live node connection), sorted
+  `caps` and `commands` from that connection, optional `clientId`, `displayName`, `platform`,
+  `deviceFamily`, and `glassState` (`{payload, receivedAtMs}`, the last successful
+  `glass.state.get` result on the live connection).
+- Removing, revoking a token of, re-linking (`device.identity.link`), unlinking
+  (`device.identity.unlink`, or `identity.unlink device:<id>`), logging out, re-bootstrapping or
+  archiving (`device.pair.prune`, `device.supersede`) the app device removes its companions, their
+  pending setup codes and their person links. Removing, revoking, re-bootstrapping and archiving
+  the app revoke every companion credential in the same pairing-store write; the rows and person
+  links are cleaned up right after. A refused re-link
+  removes nothing. If the cleanup fails, the admin methods answer `UNAVAILABLE` and a retry
+  repeats it; until then the revoked companion stays listed. Removing a companion alone leaves the
+  app intact. `device.identity.link` refuses to move a companion to another person
+  (`device_companion_person_mismatch`).
+- A companion connects (under every auth mode) and passes a device-token check (`/v2/uploads`)
+  only while its own credential is unrevoked, its app is paired with a live operator token, and
+  both are linked to the person the companion was issued for. A revoked companion credential is
+  re-minted only by a fresh companion setup code. Open sockets are not closed by revocation; the
+  companion is refused on its next connect.
+- `openclaw devices list` shows a companion as `<name> (companion of <app name>)`.
+
 ## Identity RPCs
 
 ADR 0116 binds people to their linked accounts at enrollment. The CLI, the web client and every
 other client talk to the same seven `identity.*` methods; the flows they serve are in
-[Identities](/gateway/identity). Linking grants a person's identity, so only `operator.admin` binds
+[Identities](/admin/gateway/identity). Linking grants a person's identity, so only `operator.admin` binds
 or unbinds a value.
 
 | Method                | Scope            | Narrow admission          | Serves                                                                                      |

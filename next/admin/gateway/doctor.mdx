@@ -1,0 +1,546 @@
+---
+summary: "Doctor command: health checks, config migrations, and repair steps"
+read_when:
+  - Adding or modifying doctor migrations
+  - Introducing breaking config changes
+title: "Doctor"
+---
+
+# Doctor
+
+`wednesdayai doctor` is the repair + migration tool for WednesdayAI. It fixes stale
+config/state, checks health, and provides actionable repair steps.
+
+## Quick start
+
+```bash
+wednesdayai doctor
+```
+
+### Headless / automation
+
+```bash
+wednesdayai doctor --yes
+```
+
+Accept defaults without prompting (including restart/service/sandbox repair steps when applicable).
+
+```bash
+wednesdayai doctor --repair
+```
+
+Apply recommended repairs without prompting (repairs + restarts where safe).
+
+```bash
+wednesdayai doctor --repair --force
+```
+
+Apply aggressive repairs too (overwrites custom supervisor configs).
+
+```bash
+wednesdayai doctor --non-interactive
+```
+
+Run without prompts and only apply safe migrations (config normalization + on-disk state moves). Skips restart/service/sandbox actions that require human confirmation.
+Legacy state migrations run automatically when detected.
+
+```bash
+wednesdayai doctor --deep
+```
+
+Scan system services for extra gateway installs (launchd/systemd/schtasks).
+
+If you want to review changes before writing, open the config file first:
+
+```bash
+cat ~/.openclaw/openclaw.json
+```
+
+## What it does (summary)
+
+- Optional pre-flight update for git installs (interactive only).
+- UI protocol freshness check (rebuilds Control UI when the protocol schema is newer).
+- Health check + restart prompt.
+- Skills status summary (eligible/missing/blocked).
+- Config normalization for legacy values.
+- OpenCode Zen provider override warnings (`models.providers.opencode`).
+- Legacy on-disk state migration (sessions/agent dir/WhatsApp auth).
+- State integrity and permissions checks (sessions, transcripts, state dir).
+- Config file permission checks (chmod 600) when running locally.
+- Model auth health: checks OAuth expiry, can refresh expiring tokens, and reports auth-profile cooldown/disabled states.
+- Media capability check: warns when no enabled media-understanding provider covers image/audio/video. A config-provided OpenAI-compatible proxy (`models.providers.<id>`) is never auto-detected for voice notes, so the warning names the proxy and the `tools.media.audio.models` fix.
+- Extra workspace dir detection (`~/openclaw`).
+- Sandbox image repair when sandboxing is enabled.
+- Legacy service migration and extra gateway detection.
+- Gateway runtime checks (service installed but not running; cached launchd label).
+- Channel status warnings (probed from the running gateway).
+- Supervisor config audit (launchd/systemd/schtasks) with optional repair.
+- Gateway runtime best-practice checks (Node vs Bun, version-manager paths).
+- Gateway port collision diagnostics (default `18789`).
+- Security warnings for open DM policies.
+- Gateway auth warnings when no `gateway.auth.token` is set (local mode; offers token generation).
+- systemd linger check on Linux.
+- Source install checks (pnpm workspace mismatch, missing UI assets, missing tsx binary).
+- Writes updated config + wizard metadata.
+- Config restore from the newest valid `openclaw.json.bak*` when repairs cannot make the config valid (aggressive repair: prompt, or `--fix --force`). See [CLI doctor](/next/users/cli/doctor#restore-the-config-from-a-backup).
+
+## Detailed behavior and rationale
+
+### 0) Optional update (git installs)
+
+If this is a git checkout and doctor is running interactively, it offers to
+update (fetch/rebase/build) before running doctor.
+
+### 1) Config normalization
+
+If the config contains legacy value shapes (for example `messages.ackReaction`
+without a channel-specific override), doctor normalizes them into the current
+schema.
+
+### 2) Legacy config key migrations
+
+When the config contains deprecated keys, other commands refuse to run and ask
+you to run `wednesdayai doctor`.
+
+Doctor will:
+
+- Explain which legacy keys were found.
+- Show the migration it applied.
+- Rewrite `~/.openclaw/openclaw.json` with the updated schema.
+
+The Gateway also auto-runs doctor migrations on startup when it detects a
+legacy config format, so stale configs are repaired without manual intervention.
+
+Current migrations:
+
+- `routing.allowFrom` → `channels.whatsapp.allowFrom`
+- `routing.groupChat.requireMention` → `channels.whatsapp/telegram/imessage.groups."*".requireMention`
+- `routing.groupChat.historyLimit` → `messages.groupChat.historyLimit`
+- `routing.groupChat.mentionPatterns` → `messages.groupChat.mentionPatterns`
+- `routing.queue` → `messages.queue`
+- `routing.bindings` → top-level `bindings`
+- `routing.agents`/`routing.defaultAgentId` → `agents.list` + `agents.list[].default`
+- `routing.agentToAgent` → `tools.agentToAgent`
+- `routing.transcribeAudio` → `tools.media.audio.models`
+- `bindings[].match.accountID` → `bindings[].match.accountId`
+- For channels with named `accounts` but missing `accounts.default`, move account-scoped top-level single-account channel values into `channels.<channel>.accounts.default` when present
+- `identity` → `agents.list[].identity`
+- `agent.*` → `agents.defaults` + `tools.*` (tools/elevated/exec/sandbox/subagents)
+- `agent.model`/`allowedModels`/`modelAliases`/`modelFallbacks`/`imageModelFallbacks`
+  → `agents.defaults.models` + `agents.defaults.model.primary/fallbacks` + `agents.defaults.imageModel.primary/fallbacks`
+- `browser.ssrfPolicy.allowPrivateNetwork` → `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork`
+
+Keys that lost their only consumer are removed rather than migrated.
+`session.storage.consumerClaims.progressWindowMs` and
+`session.storage.consumerClaims.maxRetentionBackstopMs` only fed the removed automatic history
+pruning (ADR 0098). `gateway.restartResilience.mode` and
+`gateway.restartResilience.forceMarksRecovery` never changed restart behaviour: the drain is
+bounded solely by `gateway.restartResilience.drainTimeoutMs`, which is unchanged, and a restart
+always marks still-running runs interrupted so they can be recovered. Doctor deletes each one and
+logs one message per key, for example:
+`Removed session.storage.consumerClaims.progressWindowMs: it applied to automatic history
+pruning, which was removed (auto-migrated on load).` The gateway applies the same removal in
+memory when a legacy config loads, so a retired key never blocks startup.
+
+### 2b) OpenCode Zen provider overrides
+
+If you’ve added `models.providers.opencode` (or `opencode-zen`) manually, it
+overrides the built-in OpenCode Zen catalog from `@earendil-works/pi-ai`. That can
+force every model onto a single API or zero out costs. Doctor warns so you can
+remove the override and restore per-model API routing + costs.
+
+### 3) Legacy state migrations (disk layout)
+
+Doctor can migrate older on-disk layouts into the current structure:
+
+- Sessions store + transcripts:
+  - from `~/.openclaw/sessions/` to `~/.openclaw/agents/<agentId>/sessions/`
+- Agent dir:
+  - from `~/.openclaw/agent/` to `~/.openclaw/agents/<agentId>/agent/`
+- WhatsApp auth state (Baileys):
+  - from legacy `~/.openclaw/credentials/*.json` (except `oauth.json`)
+  - to `~/.openclaw/credentials/whatsapp/<accountId>/...` (default account id: `default`)
+
+These migrations are best-effort and idempotent; doctor will emit warnings when
+it leaves any legacy folders behind as backups. The Gateway/CLI also auto-migrates
+the legacy sessions + agent dir on startup so history/auth/models land in the
+per-agent path without a manual doctor run. WhatsApp auth is intentionally only
+migrated via `wednesdayai doctor`.
+
+### 4) State integrity checks (session persistence, routing, and safety)
+
+The state directory is the operational brainstem. If it vanishes, you lose
+sessions, credentials, logs, and config (unless you have backups elsewhere).
+
+Doctor checks:
+
+- **State dir missing**: warns about catastrophic state loss, prompts to recreate
+  the directory, and reminds you that it cannot recover missing data.
+- **State dir permissions**: verifies writability; offers to repair permissions
+  (and emits a `chown` hint when owner/group mismatch is detected).
+- **macOS cloud-synced state dir**: warns when state resolves under iCloud Drive
+  (`~/Library/Mobile Documents/com~apple~CloudDocs/...`) or
+  `~/Library/CloudStorage/...` because sync-backed paths can cause slower I/O
+  and lock/sync races.
+- **Linux SD or eMMC state dir**: warns when state resolves to an `mmcblk*`
+  mount source, because SD or eMMC-backed random I/O can be slower and wear
+  faster under session and credential writes.
+- **Session dirs missing**: `sessions/` and the session store directory are
+  required to persist history and avoid `ENOENT` crashes.
+- **Transcript mismatch**: warns when recent session entries have missing
+  transcript files.
+- **Main session “1-line JSONL”**: flags when the main transcript has only one
+  line (history is not accumulating).
+- **Multiple state dirs**: warns when multiple `~/.openclaw` folders exist across
+  home directories or when `OPENCLAW_STATE_DIR` points elsewhere (history can
+  split between installs).
+- **Remote mode reminder**: if `gateway.mode=remote`, doctor reminds you to run
+  it on the remote host (the state lives there).
+- **Config file permissions**: warns if `~/.openclaw/openclaw.json` is
+  group/world readable and offers to tighten to `600`.
+
+### 5) Model auth health (OAuth expiry)
+
+Doctor inspects OAuth profiles in the auth store, warns when tokens are
+expiring/expired, and can refresh them when safe. If the Anthropic Claude Code
+profile is stale, it suggests running `claude setup-token` (or pasting a setup-token).
+Refresh prompts only appear when running interactively (TTY); `--non-interactive`
+skips refresh attempts.
+
+Doctor also reports auth profiles that are temporarily unusable due to:
+
+- short cooldowns (rate limits/timeouts/auth failures)
+- longer disables (billing/credit failures)
+
+### 6) Hooks model validation
+
+If `hooks.gmail.model` is set, doctor validates the model reference against the
+catalog and allowlist and warns when it won’t resolve or is disallowed.
+
+### 7) Sandbox image repair
+
+When sandboxing is enabled, doctor checks Docker images and offers to build or
+switch to legacy names if the current image is missing.
+
+### 8) Gateway service migrations and cleanup hints
+
+Doctor detects legacy gateway services (launchd/systemd/schtasks) and
+offers to remove them and install the WednesdayAI service using the current gateway
+port. It can also scan for extra gateway-like services and print cleanup hints.
+Profile-named WednesdayAI gateway services are considered first-class and are not
+flagged as "extra."
+
+### 9) Security warnings
+
+Doctor emits warnings when a provider is open to DMs without an allowlist, or
+when a policy is configured in a dangerous way.
+
+### 10) systemd linger (Linux)
+
+If running as a systemd user service, doctor ensures lingering is enabled so the
+gateway stays alive after logout.
+
+### 11) Skills status
+
+Doctor prints a quick summary of eligible/missing/blocked skills for the current
+workspace.
+
+### 12) Gateway auth checks (local token)
+
+Doctor warns when `gateway.auth` is missing on a local gateway and offers to
+generate a token. Use `wednesdayai doctor --generate-gateway-token` to force token
+creation in automation.
+
+### 13) Gateway health check + restart
+
+Doctor runs a health check and offers to restart the gateway when it looks
+unhealthy.
+
+### 14) Channel status warnings
+
+If the gateway is healthy, doctor runs a channel status probe and reports
+warnings with suggested fixes.
+
+### 15) Supervisor config audit + repair
+
+Doctor checks the installed supervisor config (launchd/systemd/schtasks) for
+missing or outdated defaults (e.g., systemd network-online dependencies and
+restart delay). When it finds a mismatch, it recommends an update and can
+rewrite the service file/task to the current defaults.
+
+Notes:
+
+- `wednesdayai doctor` prompts before rewriting supervisor config.
+- `wednesdayai doctor --yes` accepts the default repair prompts.
+- `wednesdayai doctor --repair` applies recommended fixes without prompts.
+- `wednesdayai doctor --repair --force` overwrites custom supervisor configs.
+- You can always force a full rewrite via `wednesdayai gateway install --force`.
+
+Since this release the generated systemd unit uses `KillMode=mixed`: systemd sends `SIGTERM`
+to the gateway only, and once it exits, `SIGKILL`s any child process still left in the unit's
+cgroup. Units written by earlier releases used `KillMode=process`, which left gateway children
+(MCP servers, CLI backends) running after every stop and restart. Existing installs pick up the
+change with `wednesdayai gateway install --force`, `wednesdayai update`, or `wednesdayai doctor`
+(accept the repair); a bare `systemctl --user restart wednesdayai-gateway` does not rewrite the unit.
+The previous unit is kept as `wednesdayai-gateway.service.bak`. A `KillMode=` line in a drop-in
+overrides the unit, and reinstalling does not touch drop-ins. Doctor reads the drop-ins beside the
+unit (`~/.config/systemd/user/wednesdayai-gateway.service.d/*.conf`) and names the one that
+overrides it; for drop-ins in other systemd search paths, `systemctl --user show -p KillMode
+wednesdayai-gateway` reports the effective value. The gateway still gets its 20-second stop window
+for in-flight work; a child still running when the gateway exits is killed mid-task, where
+`KillMode=process` left it running with no gateway to receive its result.
+
+### 16) Gateway runtime + port diagnostics
+
+Doctor inspects the service runtime (PID, last exit status) and warns when the
+service is installed but not actually running. It also checks for port collisions
+on the gateway port (default `18789`) and reports likely causes (gateway already
+running, SSH tunnel).
+
+### 17) Gateway runtime best practices
+
+Doctor warns when the gateway service runs on Bun or a version-managed Node path
+(`nvm`, `fnm`, `volta`, `asdf`, etc.). WhatsApp + Telegram channels require Node,
+and version-manager paths can break after upgrades because the service does not
+load your shell init. Doctor offers to migrate to a system Node install when
+available (Homebrew/apt/choco).
+
+### 18) Config write + wizard metadata
+
+Doctor persists any config changes and stamps wizard metadata to record the
+doctor run.
+
+### 19) Workspace tips (backup + memory system)
+
+Doctor suggests a workspace memory system when missing and prints a backup tip
+if the workspace is not already under git.
+
+See [/concepts/agent-workspace](/next/developers/concepts/agent-workspace) for a full guide to
+workspace structure and git backup (recommended private GitHub or GitLab).
+
+## Migrating from openclaw-gateway
+
+Service names moved from `openclaw` to `wednesdayai`. New installs use the
+LaunchAgent label `ai.wednesdayai.gateway`, the systemd unit
+`wednesdayai-gateway.service`, and the Windows task `WednesdayAI Gateway`.
+Hosts installed before the rename keep running under the legacy names
+`openclaw-gateway` (systemd), `ai.openclaw.gateway` (launchd), and
+`OpenClaw Gateway` (Windows scheduled task), including profile variants
+(`ai.openclaw.<profile>`, `openclaw-gateway-<profile>.service`,
+`OpenClaw Gateway (<profile>)`).
+
+### Migrate
+
+Run one of:
+
+```bash
+wednesdayai doctor --fix
+wednesdayai gateway install
+```
+
+Both migrate on Linux and macOS. `wednesdayai gateway install` does this on
+its own — no `--force` needed: when the loaded unit resolves to a legacy name,
+the installer prints a `Migrating <old> to <new>` line and installs the new
+unit instead of reporting "already installed". (`--force` keeps its separate
+meaning: rewrite a unit that is already current.)
+
+On Windows, migration is report-only in this stage: doctor and
+`wednesdayai gateway install` print the manual steps and keep the legacy task
+running (see the Windows manual-migration steps below). The legacy task keeps
+working until you follow those steps.
+
+When doctor or the installer finds a legacy unit, the migration:
+
+1. Copies the legacy unit or plist to the new name. Only the name, the description, and the
+   identity environment entries change; your command line, environment, log paths, and systemd
+   drop-ins carry over unchanged.
+2. Disables and stops the old unit.
+3. Starts the new unit and checks that it is still running after a few seconds.
+4. If the new unit does not stay up, removes it and restarts the old unit.
+5. Retires the old unit file (launchd moves the plist to the Trash).
+
+New unit files and plists are written to a unique temporary name first, given the legacy unit's
+file permissions, and only then renamed into place; a failure removes the staged copy.
+
+Only one migration runs at a time per host. The lock file sits next to the unit files
+(`~/.config/systemd/user/` or `~/Library/LaunchAgents/`).
+
+#### When migration is refused
+
+Migration refuses, and changes nothing, when it cannot carry the legacy service over safely.
+Examples:
+
+- any backslash in the unit or a drop-in, including line continuations and escapes;
+- an identity variable (`OPENCLAW_SYSTEMD_UNIT`, `OPENCLAW_LAUNCHD_LABEL`,
+  `OPENCLAW_WINDOWS_TASK_NAME`) set anywhere other than its own plain `Environment=KEY=VALUE` line,
+  including in an `EnvironmentFile=`;
+- a symlinked drop-in that names the old unit or points into its drop-in directory;
+- an existing `wednesdayai-gateway.service.d/` directory without the unit;
+- a plist with CDATA, numeric character references, attributes on its elements, or a `Label` that
+  does not match its file name;
+- systemd drop-ins outside the legacy unit's adjacent `openclaw-gateway.service.d/` directory:
+  the clone carries only the adjacent directory, so a drop-in anywhere else would be lost. Move
+  the drop-ins into the adjacent directory (or remove them) and rerun;
+- an `EnvironmentFile=` entry the identity check cannot read faithfully: glob characters, a `%`
+  specifier, several filenames in one directive, a relative path, a file that does not exist or
+  cannot be read (for example `EACCES`), or a symlink that resolves into the legacy drop-in
+  directory.
+
+Doctor prints `legacy unit kept: <name> — Migration refused: <reason>`. The legacy unit keeps
+running and every `wednesdayai gateway` command still finds it.
+
+An identity override pinned to a legacy name (`OPENCLAW_SYSTEMD_UNIT`, `OPENCLAW_LAUNCHD_LABEL`,
+or `OPENCLAW_WINDOWS_TASK_NAME` set to the legacy name) is reported, not acted on: doctor does not
+migrate, reinstall or repair the service through the pin, because repairing through it would
+overwrite the legacy definition with generated defaults. Unset the override and rerun to migrate,
+or pass `--force` to go through the pin anyway.
+
+The install also refuses when it is started from inside a unit or agent it would cut over — for
+example, through the gateway's host-exec tool: stopping the legacy unit boots out the process
+running the install before the replacement is up, leaving the gateway down. On Linux the check
+reads `/proc/self/cgroup`; on macOS it reads `XPC_SERVICE_NAME`. The probes fail closed: an
+unreadable `/proc/self/cgroup`, or a `systemctl --user show -p DropInPaths` probe that fails or
+returns unbalanced quotes, refuses the migration too. The remedy is the same: run
+`wednesdayai doctor --fix` from a login shell, not from the gateway.
+
+The guard covers only units being retired. Refreshing an already-current service from inside the
+gateway itself still works: `wednesdayai gateway install` on the current
+`wednesdayai-gateway.service` or `ai.wednesdayai.gateway` label rewrites the unit in place
+(systemd) or lets launchd respawn the caller from the new plist (KeepAlive). The residual risk on
+the macOS self-update path is tracked in issue #2411. A pinned legacy label is guarded on that
+path too: with `OPENCLAW_LAUNCHD_LABEL` set to a legacy name, installing from inside that agent is
+refused, because bootout would remove the job from launchd and nothing respawns the caller.
+
+A refusal can also come from a lock left behind by a crashed migration. Doctor prints the exact
+`rm` command for that lock file. Check that no other `wednesdayai` install or doctor is running
+before removing it.
+
+To migrate by hand on Linux:
+
+```bash
+systemctl --user cat openclaw-gateway.service   # review the unit and drop-ins
+cp ~/.config/systemd/user/openclaw-gateway.service ~/.config/systemd/user/wednesdayai-gateway.service
+# edit the copy: rename references to openclaw-gateway, and remove OPENCLAW_SYSTEMD_UNIT /
+# OPENCLAW_LAUNCHD_LABEL / OPENCLAW_WINDOWS_TASK_NAME assignments; copy any drop-in dir too
+systemctl --user daemon-reload
+systemctl --user disable --now openclaw-gateway.service
+systemctl --user enable --now wednesdayai-gateway.service
+systemctl --user is-active wednesdayai-gateway.service
+rm ~/.config/systemd/user/openclaw-gateway.service && systemctl --user daemon-reload
+```
+
+To migrate by hand on macOS:
+
+```bash
+cp ~/Library/LaunchAgents/ai.openclaw.gateway.plist ~/Library/LaunchAgents/ai.wednesdayai.gateway.plist
+# edit the copy: set Label to ai.wednesdayai.gateway and remove the identity overrides above
+launchctl bootout gui/$UID/ai.openclaw.gateway
+launchctl disable gui/$UID/ai.openclaw.gateway
+launchctl bootstrap gui/$UID ~/Library/LaunchAgents/ai.wednesdayai.gateway.plist
+launchctl print gui/$UID/ai.wednesdayai.gateway
+mv ~/Library/LaunchAgents/ai.openclaw.gateway.plist ~/.Trash/
+```
+
+### Before you migrate
+
+Until a host migrates, `wednesdayai gateway status`, `wednesdayai gateway
+restart`, `wednesdayai gateway stop`, and `wednesdayai gateway uninstall`
+still find the legacy unit, so day-to-day gateway commands keep working
+without a migration. `wednesdayai gateway status` prints a note naming the
+legacy service and pointing at `doctor --fix` until the host is migrated.
+
+Environment overrides always win over both the new and the legacy names:
+`OPENCLAW_LAUNCHD_LABEL`, `OPENCLAW_SYSTEMD_UNIT`, and
+`OPENCLAW_WINDOWS_TASK_NAME`.
+
+An override pinned to a legacy name also changes what doctor does with the existing service: it
+reports the pin and does not reinstall or repair the service through it, because repairing would
+overwrite the legacy definition with generated defaults. Unset the override and rerun to migrate,
+or pass `--force` to go through the pin anyway.
+
+### Verify per platform
+
+Linux (systemd user unit):
+
+```bash
+systemctl --user is-active wednesdayai-gateway.service
+journalctl --user -u wednesdayai-gateway -n 50 --no-pager
+# after a successful migration this lists no units:
+systemctl --user list-unit-files 'openclaw-gateway*'
+```
+
+macOS (launchd):
+
+```bash
+launchctl print gui/$UID/ai.wednesdayai.gateway
+# after a successful migration this reports the label is not found:
+launchctl print gui/$UID/ai.openclaw.gateway
+```
+
+Windows (Scheduled Task, from PowerShell):
+
+```powershell
+schtasks /Query /TN "WednesdayAI Gateway" /V /FO LIST
+# after a successful migration this reports the task does not exist:
+schtasks /Query /TN "OpenClaw Gateway"
+```
+
+### Windows: manual migration
+
+Automatic migration is report-only on Windows in this stage: the scheduled-task
+definition (triggers, principal, run level), localized `schtasks` output, and
+the shared task script cannot be carried exactly by the automatic cutover.
+Doctor and `wednesdayai gateway install` print these steps and leave the legacy
+task running; it keeps working through installed-name resolution until you
+migrate. From PowerShell:
+
+1. Export the legacy task definition:
+
+   ```powershell
+   schtasks /Query /TN "OpenClaw Gateway" /XML > gw.xml
+   ```
+
+2. Create the new task from the same definition:
+
+   ```powershell
+   schtasks /Create /TN "WednesdayAI Gateway" /XML gw.xml
+   ```
+
+3. Disable and stop the legacy task:
+
+   ```powershell
+   schtasks /Change /TN "OpenClaw Gateway" /DISABLE
+   schtasks /End /TN "OpenClaw Gateway"
+   ```
+
+4. Start the new task:
+
+   ```powershell
+   schtasks /Run /TN "WednesdayAI Gateway"
+   ```
+
+5. Verify the gateway is running under the new task, then remove the legacy
+   task:
+
+   ```powershell
+   schtasks /Delete /TN "OpenClaw Gateway" /F
+   ```
+
+Profile variants follow the same steps with `OpenClaw Gateway (<profile>)` and
+`WednesdayAI Gateway (<profile>)`.
+
+### Downgrading to an older core
+
+Older cores only know the legacy `openclaw` service names. Reinstalling with
+one while the new unit is still installed creates a second service. Before
+reinstalling with an older core, stop, disable, and remove the new unit:
+
+- Linux: `systemctl --user disable --now wednesdayai-gateway` (with a profile:
+  `wednesdayai-gateway-<profile>`), then remove the unit file from
+  `~/.config/systemd/user/` if you want the old installer to recreate it.
+- macOS: `launchctl bootout gui/$UID/ai.wednesdayai.gateway`, then
+  `launchctl disable gui/$UID/ai.wednesdayai.gateway`, then remove
+  `~/Library/LaunchAgents/ai.wednesdayai.gateway.plist`.
+- Windows: `schtasks /Change /TN "WednesdayAI Gateway" /DISABLE`, then
+  `schtasks /End /TN "WednesdayAI Gateway"`, then
+  `schtasks /Delete /TN "WednesdayAI Gateway" /F`.

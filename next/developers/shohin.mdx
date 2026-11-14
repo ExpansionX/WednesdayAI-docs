@@ -1,0 +1,52 @@
+---
+title: "Shohin developer notes"
+description: "Implementation contracts for Shohin's security hardening: session callbacks, tenant scoping, boundary validation, and test layout."
+audience: developer
+---
+
+# Shohin developer notes
+
+Repository: `davidrudduck/Shohin` (Next.js App Router, Prisma,
+NextAuth v4, TypeScript).
+
+## Session callbacks (`lib/auth.ts`)
+
+The `jwt` callback re-validates the user on every token refresh and
+throws the exported `InvalidSessionError` when the user is missing,
+unapproved, or unverified — NextAuth catches the throw and
+`getServerSession()` resolves null. The `session` callback throws the
+same error defensively. The authOptions logger filters the expected
+`JWT_SESSION_ERROR` for that error class only.
+
+## Tenant scoping rules
+
+- Resolve the caller via the revalidated `session.user.id` — the
+  required pattern for new and changed routes (a handful of legacy
+  routes still resolve by email claim; migrate them when touched).
+- Every query filters by `userId` (own data) or `organizationId`
+  (shared settings) — including writes inside transactions (invoice
+  PUT/DELETE scope their item `deleteMany` through the owner; `P2025`
+  maps to 404).
+- Payment rows serialize only through `safePaymentMethodSelect` +
+  `toSafePaymentMethod` (`lib/payment-methods.ts`).
+
+## Boundary validation
+
+Settings `[id]` PUTs reject array bodies; rate-card entries require
+`Array.isArray`, a non-blank `serviceName`, and a finite numeric rate
+(`Number()` semantics — `"10USD"` is a 400, not a silently truncated
+10). Email interpolations are HTML-escaped and CR/LF in
+recipient/subject/sender throws before any fetch.
+
+## Task board invariants
+
+One move in flight at a time (single-flight); the move prop is invoked
+inside the promise chain so synchronous throws become rejections that
+clear the pending gate.
+
+## Test layout
+
+Route suites: `test/integration/{settings,income,invoices,auth-flows,register,admin-users}-routes.test.ts`.
+Unit suites: `test/{auth-callbacks,email,payment-methods,migrate-users}-unit.test.ts`.
+Component suites: `test/{invoices-modal,tasks-board-move-race}.test.tsx`.
+E2E: `test/e2e/*.spec.ts` (Playwright).

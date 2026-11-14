@@ -1,5 +1,4 @@
 ---
-description: "Contracts for the deterministic npm publish rail, release-check, and what not to add"
 audience: developer
 component: release/trusted-npm-publishing
 sources:
@@ -11,11 +10,13 @@ sources:
 generated: 2026-08-26
 title: "Trusted npm publishing for contributors"
 summary: "Contracts for the deterministic npm publish rail, release-check, and what not to add"
+description: Contracts for the deterministic npm publish rail, release-check,
+  and what not to add
 ---
 
 # Trusted npm publishing for contributors
 
-The trusted-publishing rail lives under `scripts/npm-publish/` and ships as `.github/workflows/npm-publish.yml`: dev publishes on every eligible push to `main` (pushes touching only `docs/**`, `dev-docs/**`, or root-level `*.md` files are skipped by the workflow's paths-ignore); stable staging runs on `workflow_dispatch` and is auto-dispatched on release creation by the `dispatch-stable-stage` job in `release-please.yml` (the `npm stage approve` step stays human). Do not add a second publish path.
+The trusted-publishing rail lives under `scripts/npm-publish/` and ships as `.github/workflows/npm-publish.yml`: dev publishes on every eligible push to `main` (pushes touching only `docs/**`, `dev-docs/**`, or root-level `*.md` files are skipped by the workflow's paths-ignore); stable staging runs on `workflow_dispatch` and is auto-dispatched on release creation by the `dispatch-stable-stage` job in `release-please.yml` (the `npm stage approve` step stays human). Do not add another publish path. The one sanctioned exception is dev-only: `pnpm release:local-install --publish-dev` (`scripts/release-local-install.ts`) publishes a core and `@wednesdayai/whatsapp` pair built from one commit under the `dev` dist-tag, with the workflow's skip guards, when Actions is unavailable (ADR 2523).
 
 Compatibility target: Node.js `>=24.0.0`. Planned publication jobs also require npm `>=11.15.0`. Current package version is `0.4.11` from `package.json`.
 
@@ -43,7 +44,7 @@ Package order is fixed:
 | Forward publish / stage | `@wednesdayai/whatsapp`, then `wednesdayai` |
 | Rollback                | `wednesdayai`, then `@wednesdayai/whatsapp` |
 
-Stable automation stages `@wednesdayai/whatsapp` and then `wednesdayai` in the same `stable` job, skipping any package already live at that version, and stops for human approval. A maintainer runs `npm stage list`, then approves each package for which a stage was created interactively with `npm stage approve <stage-id>` (one invocation per stage). Packages already live need no approval. After all created stages are approved, the maintainer dispatches `npm-publish.yml` with `verify_approved=yes` to verify both packages, including skipped packages, against the recorded pack integrities and installed pair. Core staging does not wait for WhatsApp approval. Dev publication publishes WhatsApp, then core, directly to the `dev` dist-tag.
+Stable automation stages `@wednesdayai/whatsapp` and then `wednesdayai` in the same `stable` job, skipping any package already live at that version, and stops for human approval. A maintainer runs `pnpm release:approve vX.Y.Z` (`scripts/npm-publish/approve-stable.ts`) on their own terminal. It approves each created stage with `npm stage approve <stage-id>` (npm prompts for 2FA), skips packages already live, then dispatches `npm-publish.yml` with `verify_approved=yes` to verify both packages, including skipped packages, against the recorded pack integrities and installed pair. Core staging does not wait for WhatsApp approval. Dev publication publishes WhatsApp, then core, directly to the `dev` dist-tag. The `dev` job uploads an `npm-dev-pair` artifact with the version and both pack integrities; run `pnpm release:verify-dev` locally to verify the published pair and the installed acceptance check.
 
 ## release-check
 
@@ -96,7 +97,7 @@ export function main(argv = process.argv.slice(2)) {
 
 Avoid:
 
-- Adding `npm publish` or `npm stage publish` outside `npm-publish.yml`.
+- Adding `npm publish` or `npm stage publish` outside `npm-publish.yml`, other than the dev-only `pnpm release:local-install --publish-dev` (ADR 2523).
 - Publishing a working directory instead of an exact sealed tarball.
 - Administering stages or dist-tags through OIDC.
 - Moving or reusing a release tag.
@@ -122,6 +123,6 @@ Every deployment must reference a reproducible artifact: either a published immu
 
 ## Related
 
-- [Release checklist](/developers/contributing/release)
+- [Release checklist](https://docs.wednesdayai.dev/developers/contributing/release)
 - [How WednesdayAI updates reach you](/admin/install/trusted-npm-publishing-user)
 - [Release channels](/admin/install/development-channels)

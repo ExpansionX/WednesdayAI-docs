@@ -39,8 +39,8 @@ generated: 2026-10-27
 # Learning Core (developer)
 
 Internals and extension seams. For operating a deployment see
-[Learning Core (admin)](/plugins/learning-core-admin); for the feature itself see
-[Learning Core](/plugins/learning-core).
+[Learning Core (admin)](/developers/plugins/learning-core-admin); for the feature itself see
+[Learning Core](/developers/plugins/learning-core).
 
 ## Compatibility target
 
@@ -419,8 +419,8 @@ budget against `store.readBudgetUsage({ pass: "consolidation", agentId })`:
   pinned reservation day, else today; the plugin's produce body forwards it as
   `capPreflight.utcDay`. A capped produce run records `items.capExhausted: true`; when it finalized
   nothing it also records `producerReason: "cap_exhausted"`, which the `tasks.runEvents` allowlist
-  in `src/gateway/server-methods/tasks-run-events.ts` surfaces. The run then takes the next-day
-  carry.
+  in `src/gateway/server-methods/tasks-run-events.ts` surfaces. With claimable candidates left, the
+  run queues the usual next-day carry.
 
 ### Distill eligibility
 
@@ -539,8 +539,26 @@ or looks up** claims must match all those shapes - an equality against a bare `l
 matches nothing.
 
 When `mode` is `assist`, `register` also listens for `context.collect` and prepends
-`ctx:{sessionKey}:lessons.active` with up to `maxLessonsForPrompt` active lesson texts. Do not
-import context-engine from this plugin.
+`ctx:{sessionKey}:lessons.active` with up to `maxLessonsForPrompt` active lessons
+(`collectActiveLessons`, `assist-collect.ts`). Do not import context-engine from this plugin.
+
+- **Trigger gate.** Heartbeat and cron turns (`isAutomatedTrigger`) return before the session
+  check, so automated turns never inject lessons and never read the lesson store.
+- **Host OS.** A lesson may carry `hostOs` (`"linux"`, `"darwin"` or `"win32"`, the
+  `process.platform` value). The consolidation judge sets it only when the lesson names one
+  system's commands, paths or service managers; a rewrite without it clears it. Lessons scoped to
+  another OS are filtered out before ranking, so they never use a `maxLessonsForPrompt` slot.
+  Untagged lessons inject on every host.
+- **Wrapper.** The lessons reach the model as one block, each lesson on a dash (`-`) line under the
+  shared `ASSIST_LESSONS_HEADER`, which marks them advisory and subordinate to the current user
+  message, the workspace instructions and the operator's rules:
+
+  ```text
+  <injected-context source="learning-core" kind="lessons">
+  Lessons learned from earlier conversations. They are advisory: the current user message, the workspace instructions and the operator's rules take precedence.
+  - Prefer HTTPS
+  </injected-context>
+  ```
 
 ## Blocking the agent loop
 
@@ -648,7 +666,7 @@ Run the extension's tests with the standard battery; there is no separate learni
 
 ## Related
 
-- [Learning Core](/plugins/learning-core)
-- [Learning Core (admin)](/plugins/learning-core-admin)
-- [Plugin manifest](/plugins/manifest)
-- [Session consumer claims](/plugins/session-consumer-claims)
+- [Learning Core](/developers/plugins/learning-core)
+- [Learning Core (admin)](/developers/plugins/learning-core-admin)
+- [Plugin manifest](/developers/plugins/manifest)
+- [Session consumer claims](/developers/plugins/session-consumer-claims)

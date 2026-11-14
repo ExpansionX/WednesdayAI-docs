@@ -1,0 +1,361 @@
+---
+summary: "Register media understanding providers in a plugin (audio/image/video)"
+read_when:
+  - You want to add a new media understanding provider to a plugin
+  - You need to support audio transcription, image description, or video understanding
+title: "Plugin Media Understanding Providers"
+audience: developer
+sources:
+  - src/plugins/types.ts
+  - src/media-understanding/types.ts
+  - src/plugin-sdk/provider-media-understanding.ts
+  - src/media-understanding/registry.ts
+  - src/media-understanding/runner.entries.ts
+  - src/agents/model-auth.ts
+  - src/infra/net/form-data.ts
+generated: 2026-07-30
+description: Register audio transcription, image description, and video
+  understanding providers from a plugin, including credential resolution and
+  apiKeyProvider borrowing.
+---
+
+# Plugin media understanding providers
+
+WednesdayAI plugins can register **media understanding providers** that handle audio
+transcription, image description, and video understanding. Each provider implements
+wire-protocol logic for one or more capabilities and is automatically discoverable
+via auto-detection metadata.
+
+Media understanding providers are **disabled by default**. Users enable them in config:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "my-provider": { enabled: true },
+    },
+  },
+}
+```
+
+## Basic provider
+
+A minimal audio-only provider:
+
+```ts
+import type {
+  AudioTranscriptionRequest,
+  AudioTranscriptionResult,
+} from "wednesdayai/plugin-sdk/provider-media-understanding";
+
+async function transcribeAudio(
+  request: AudioTranscriptionRequest,
+): Promise<AudioTranscriptionResult> {
+  if (!request.apiKey) {
+    throw new Error("MY_PROVIDER_API_KEY not found");
+  }
+
+  const response = await fetch("https://api.example.com/transcribe", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${request.apiKey}`,
+      "Content-Type": request.mime ?? "application/octet-stream",
+    },
+    body: new Uint8Array(request.buffer),
+  });
+
+  if (!response.ok) {
+    throw new Error(`Transcription failed: ${response.statusText}`);
+  }
+
+  const result = await response.json();
+  return { text: result.transcript, model: request.model };
+}
+
+export default function (api) {
+  api.registerMediaUnderstandingProvider({
+    id: "my-audio-provider",
+    label: "My Audio Provider",
+    capabilities: ["audio"],
+    autoDetectOrder: { audio: 50 },
+    defaultModels: { audio: "my-model-v1" },
+    envVars: ["MY_PROVIDER_API_KEY"],
+    transcribeAudio,
+  });
+}
+```
+
+The legacy `openclaw/plugin-sdk` specifier still loads (ADR 2057).
+
+## Provider contract
+
+A `MediaUnderstandingProviderPlugin` defines:
+
+- **id**: unique provider identifier (used in `provider:` config and auto-detection).
+- **label**: human-readable provider name for logging and UI.
+- **capabilities**: array of `"audio"`, `"image"`, `"video"` — one or more.
+- **autoDetectOrder** (optional): metadata for auto-detection ordering per capability
+  (e.g. `{ audio: 50, image: 40 }`). Lower numbers are tried first.
+- **defaultModels** (optional): default model name per capability when not explicitly
+  configured (e.g. `{ audio: "whisper-large-v3" }`).
+- **envVars** (optional): array of environment variable names holding **credentials only** (e.g.
+  `["MY_API_KEY", "MY_LEGACY_API_KEY"]`). The runner reads these when resolving credentials, so
+  listing a variable here is enough to make it work without a core change. See
+  [Credential resolution](#credential-resolution). They are also named in error messages to guide
+  operators. The first one that resolves to a non-empty value wins, so list the preferred key
+  first and list **nothing that is not a key**: a `MY_BASE_URL` entry would be handed to the
+  provider as `request.apiKey` whenever the real key is unset. Base URLs and other non-secret
+  settings belong in the plugin's own `configSchema`, not here.
+- **transcribeAudio** (optional): `(request: AudioTranscriptionRequest) => Promise<AudioTranscriptionResult>`.
+- **describeImage** (optional): `(request: ImageDescriptionRequest) => Promise<ImageDescriptionResult>`.
+- **describeVideo** (optional): `(request: VideoDescriptionRequest) => Promise<VideoDescriptionResult>`.
+
+These three handlers are flat top-level fields on the registration object passed to
+`api.registerMediaUnderstandingProvider(...)` — there is no `functions` wrapper. Implement one
+handler per entry in `capabilities`.
+
+## Shared wire helpers
+
+The SDK exports wire-protocol helpers and test utilities for common patterns:
+
+```ts
+import {
+  // Shared request/result types
+  AudioTranscriptionRequest,
+  AudioTranscriptionResult,
+  ImageDescriptionRequest,
+  ImageDescriptionResult,
+  VideoDescriptionRequest,
+  VideoDescriptionResult,
+  // OpenAI-compatible shared functions
+  transcribeOpenAiCompatibleAudio,
+  describeOpenAiCompatibleImage,
+  describeOpenAiCompatibleVideo,
+  // Utilities
+  normalizeBaseUrl,
+  fetchWithTimeout,
+  postTranscriptionRequest,
+  postJsonRequest,
+  readErrorResponse,
+} from "wednesdayai/plugin-sdk/provider-media-understanding";
+```
+
+### Multipart uploads
+
+Prefer `postTranscriptionRequest` (or `transcribeOpenAiCompatibleAudio`, which wraps it) over a
+hand-rolled `fetch` for any `multipart/form-data` upload. All outbound requests pass through the
+SSRF egress guard, which dispatches on a bundled HTTP client that only recognises its own
+`FormData` class. A body built from `globalThis.FormData` is not recognised, and the request goes
+out with **no boundary and no fields** — the endpoint answers with a confusing complaint about a
+missing parameter rather than a transport error. The shared helpers rebuild the body for the
+dispatching client, so they are always safe.
+
+If you must build a multipart body yourself, do not set `content-type` or `content-length`
+manually. Let the client derive the boundary.
+
+## OpenAI-compatible provider (audio)
+
+For audio transcription via OpenAI-compatible APIs (Groq, OpenRouter, DeepInfra, etc.):
+
+```ts
+import { transcribeOpenAiCompatibleAudio } from "wednesdayai/plugin-sdk/provider-media-understanding";
+
+const DEFAULT_GROQ_AUDIO_BASE_URL = "https://api.groq.com/openai/v1";
+
+export default function (api) {
+  api.registerMediaUnderstandingProvider({
+    id: "groq",
+    label: "Groq",
+    capabilities: ["audio"],
+    autoDetectOrder: { audio: 20 },
+    defaultModels: { audio: "whisper-large-v3-turbo" },
+    envVars: ["GROQ_API_KEY"],
+    transcribeAudio: (req) =>
+      transcribeOpenAiCompatibleAudio({
+        ...req,
+        baseUrl: req.baseUrl ?? DEFAULT_GROQ_AUDIO_BASE_URL,
+      }),
+  });
+}
+```
+
+The helper normalizes request format, handles multipart FormData, and parses the
+Whisper-compatible JSON response.
+
+## OpenAI-compatible provider (image and video)
+
+For image description and video understanding:
+
+```ts
+import {
+  describeOpenAiCompatibleImage,
+  describeOpenAiCompatibleVideo,
+} from "wednesdayai/plugin-sdk/provider-media-understanding";
+
+const DEFAULT_GATEWAY_BASE_URL = "https://my-gateway.example.com/v1";
+
+export default function (api) {
+  api.registerMediaUnderstandingProvider({
+    id: "my-proxy",
+    label: "My AI Gateway",
+    capabilities: ["image", "video"],
+    autoDetectOrder: { image: 30, video: 30 },
+    defaultModels: { image: "gpt-4o", video: "gpt-4o" },
+    envVars: ["MY_GATEWAY_API_KEY"],
+    describeImage: (req) =>
+      describeOpenAiCompatibleImage({
+        ...req,
+        baseUrl: req.baseUrl ?? DEFAULT_GATEWAY_BASE_URL,
+      }),
+    describeVideo: (req) =>
+      describeOpenAiCompatibleVideo({
+        ...req,
+        baseUrl: req.baseUrl ?? DEFAULT_GATEWAY_BASE_URL,
+      }),
+  });
+}
+```
+
+## Auto-detection ordering
+
+The `autoDetectOrder` field controls which provider is tried first when multiple
+providers are enabled and no explicit model entry is configured.
+
+```ts
+{
+  autoDetectOrder: {
+    audio: 10, // tried first (lower number = earlier)
+    image: 20,
+    // video omitted = not auto-detectable for this capability
+  }
+}
+```
+
+Auto-detection happens per capability independently. If a user has both OpenAI and
+Groq enabled for audio, Groq runs first if `groq.autoDetectOrder.audio < openai.autoDetectOrder.audio`.
+
+## Test utilities
+
+The SDK exports test helpers for mocking provider responses:
+
+```ts
+import {
+  createAuthCaptureJsonFetch,
+  createRequestCaptureJsonFetch,
+  installPinnedHostnameTestHooks,
+} from "wednesdayai/plugin-sdk/testing";
+
+// Stub JSON responses while capturing the Authorization header
+const { fetchFn, getAuthHeader } = createAuthCaptureJsonFetch({
+  text: "transcribed audio",
+});
+
+// After the provider call, verify the request carried the credential
+expect(getAuthHeader()).toContain("Bearer");
+```
+
+## Required fields per capability
+
+**Audio transcription** (`AudioTranscriptionRequest`):
+
+- `buffer`: `Buffer` containing the raw audio bytes.
+- `fileName`: original file name.
+- `apiKey`: resolved credential for the provider.
+- `timeoutMs`: request timeout in milliseconds.
+- `mime` (optional): MIME type of the audio.
+- `model` (optional): transcription model identifier.
+- `language` (optional): BCP 47 language tag.
+- `prompt` (optional): transcription hint/prompt.
+- `baseUrl` (optional): base URL override for the provider endpoint.
+- `headers` (optional): custom headers to merge into the request.
+- `query` (optional): extra query-string parameters.
+- `fetchFn` (optional): fetch override, used in tests.
+
+Returns an `AudioTranscriptionResult`: `{ text: string; model?: string }`.
+
+**Image description** (`ImageDescriptionRequest`):
+
+- `buffer`: `Buffer` containing the raw image bytes.
+- `fileName`: original file name.
+- `model`: vision model identifier.
+- `provider`: id of the provider the request is being resolved for.
+- `timeoutMs`: request timeout in milliseconds.
+- `agentDir`: agent working directory.
+- `cfg`: the resolved `OpenClawConfig`.
+- `mime` (optional): MIME type of the image.
+- `prompt` (optional): description instruction.
+- `maxTokens` (optional): response token cap.
+- `profile` / `preferredProfile` (optional): model profile hints.
+- `apiKey` (optional): credential for the provider — populated by the runner when resolved.
+- `baseUrl` (optional): base URL override for the provider endpoint.
+- `headers` (optional): custom headers to merge into the request.
+- `fetchFn` (optional): fetch override, used in tests.
+
+Returns an `ImageDescriptionResult`: `{ text: string; model?: string }`.
+
+**Video understanding** (`VideoDescriptionRequest`):
+
+- `buffer`: `Buffer` containing the raw video bytes.
+- `fileName`: original file name.
+- `apiKey`: resolved credential for the provider.
+- `timeoutMs`: request timeout in milliseconds.
+- `mime` (optional): MIME type of the video.
+- `model` (optional): video understanding model identifier.
+- `prompt` (optional): description instruction.
+- `baseUrl` (optional): base URL override for the provider endpoint.
+- `headers` (optional): custom headers to merge into the request.
+- `fetchFn` (optional): fetch override, used in tests.
+
+Returns a `VideoDescriptionResult`: `{ text: string; model?: string }`.
+
+## Credential resolution
+
+Your handler receives the resolved credential in `request.apiKey`. The runner fills it from the
+first source that yields a value:
+
+1. A stored auth profile for the provider (`auth-profiles.json`).
+2. An environment variable that core maps for well-known provider ids.
+3. Any variable named in your registration's **`envVars`**, in the order you list them.
+4. `models.providers.<id>.apiKey` in `openclaw.json`.
+
+Step 3 is what makes a plugin self-sufficient: a provider id core has never heard of still
+authenticates from its own declared variable. A provider whose credential resolves nowhere is
+**skipped** during auto-detection rather than attempted and failed.
+
+Declare every variable your provider can authenticate with, not just the canonical one. Core maps
+`GEMINI_API_KEY` for `google`, for example, but an operator who exported only `GOOGLE_API_KEY`
+depends on it appearing in `envVars`.
+
+<Note>
+Releases up to and including 0.4.10 treated `envVars` as documentation only, so a provider absent
+from core's internal map could never authenticate no matter what the operator exported. If you
+maintain a provider plugin, no change is needed on your side beyond declaring `envVars`.
+</Note>
+
+### Borrowing a credential from another provider
+
+When a model entry specifies `apiKeyProvider: "other-provider"`, the media understanding
+runner resolves credentials from that other provider instead of the implementation
+provider, and your own `envVars` are not consulted.
+
+```ts
+// User config:
+{
+  provider: "openai",
+  model: "gpt-4o",
+  apiKeyProvider: "bifrost", // use Bifrost credentials
+}
+
+// Your handler receives:
+// request.apiKey = value of BIFROST_API_KEY (or bifrost's configured key)
+```
+
+## Registering the provider
+
+Use the plugin API method:
+
+```ts
+api.registerMediaUnderstandingProvider(providerDefinition);
+```
+
+Call this once per provider in your plugin's default export or factory function.

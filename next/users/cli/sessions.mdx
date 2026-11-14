@@ -1,0 +1,250 @@
+---
+summary: "CLI reference for `wednesdayai sessions` (list stored sessions + usage)"
+read_when:
+  - You want to list stored sessions and see recent activity
+title: "sessions"
+sources:
+  - src/cli/commands/sessions.ts
+  - src/cli/program/register.status-health-sessions.ts
+  - src/commands/sessions-claims-status.ts
+  - src/gateway/server-methods/sessions.ts
+  - src/gateway/session-utils.ts
+  - src/config/sessions/store.ts
+generated: 2026-07-06
+---
+
+# `wednesdayai sessions`
+
+List stored conversation sessions. The command reads session data through SQL session storage: it
+asks the running gateway for the rows (zero direct database access), or — with no gateway running —
+takes session-storage ownership and reads the configured database in-process. The per-agent
+`sessions.json` path is that agent's store identity; the session index itself lives in the database.
+See [Session Management / Session storage](/next/developers/concepts/session#session-storage).
+
+```bash
+wednesdayai sessions
+wednesdayai sessions --agent work
+wednesdayai sessions --all-agents
+wednesdayai sessions --active 120
+wednesdayai sessions --json
+```
+
+Scope selection:
+
+- default: configured default agent store
+- `--agent <id>`: one configured agent store
+- `--all-agents`: aggregate all configured agent stores
+- `--store <path>`: explicit store path (cannot be combined with `--agent` or `--all-agents`).
+  The path must name a configured agent's session store; an unknown path exits with an error
+  telling you to use `--agent`.
+
+JSON examples:
+
+`wednesdayai sessions --all-agents --json`:
+
+```json
+{
+  "path": null,
+  "stores": [
+    { "agentId": "main", "path": "/home/user/.openclaw/agents/main/sessions/sessions.json" },
+    { "agentId": "work", "path": "/home/user/.openclaw/agents/work/sessions/sessions.json" }
+  ],
+  "allAgents": true,
+  "count": 2,
+  "activeMinutes": null,
+  "sessions": [
+    {
+      "agentId": "main",
+      "key": "agent:main:main",
+      "sessionId": "3f2a…",
+      "kind": "direct",
+      "model": "gpt-5",
+      "modelProvider": "openai",
+      "modelOverride": null,
+      "providerOverride": null,
+      "groupActivation": null,
+      "updatedAt": 1760434020000,
+      "lastReplyAt": 1760434088000,
+      "totalTokens": 18250
+    },
+    { "agentId": "work", "key": "agent:work:main", "model": "claude-opus-4-5" }
+  ]
+}
+```
+
+Each entry in `sessions` is one session index row. Fields (optional ones may be absent):
+
+| Field                                                              | Type    | Meaning                                                                                                                               |
+| ------------------------------------------------------------------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `agentId`                                                          | string  | Store the row came from.                                                                                                              |
+| `key`                                                              | string  | Session key.                                                                                                                          |
+| `sessionId`                                                        | string  | Current conversation id for the key.                                                                                                  |
+| `kind`                                                             | string  | Row class: `direct`, `group`, `global`, or `unknown` (from the stored actor's peer kind, then `chatType`; never parsed from the key). |
+| `updatedAt`                                                        | number  | Last session activity (epoch ms).                                                                                                     |
+| `lastReplyAt`                                                      | number  | Last assistant reply activity (epoch ms).                                                                                             |
+| `ageMs`                                                            | number  | Derived age (`now - updatedAt`) at listing time.                                                                                      |
+| `model`                                                            | string  | Resolved model (override applied).                                                                                                    |
+| `modelProvider`                                                    | string  | Resolved provider.                                                                                                                    |
+| `modelOverride`                                                    | string  | Per-session model override, if set.                                                                                                   |
+| `providerOverride`                                                 | string  | Per-session provider override, if set.                                                                                                |
+| `groupActivation`                                                  | string  | Group activation mode: `mention` or `always` (group sessions).                                                                        |
+| `systemSent`                                                       | boolean | Whether the session has its system prompt bootstrap.                                                                                  |
+| `abortedLastRun`                                                   | boolean | Whether the last run was aborted.                                                                                                     |
+| `thinkingLevel`, `verboseLevel`, `reasoningLevel`, `elevatedLevel` | string  | Per-session toggles.                                                                                                                  |
+| `responseUsage`                                                    | string  | Per-session usage metadata policy: `on`, `off`, `tokens`, or `full`.                                                                  |
+| `inputTokens`, `outputTokens`, `totalTokens`                       | number  | Token counters (best effort, provider-dependent).                                                                                     |
+| `totalTokensFresh`                                                 | boolean | Whether `totalTokens` was recomputed from current entry data.                                                                         |
+| `contextTokens`                                                    | number  | Context window used for percentage display.                                                                                           |
+
+Notes:
+
+- `modelOverride`, `providerOverride`, and `groupActivation` come from the session index row, so
+  they appear whenever the underlying entry carries them — both when the listing is served by the
+  gateway (`sessions.list`) and for a local in-process listing.
+
+## Cleanup maintenance
+
+Run maintenance now (instead of waiting for the next write cycle):
+
+```bash
+wednesdayai sessions cleanup --dry-run
+wednesdayai sessions cleanup --agent work --dry-run
+wednesdayai sessions cleanup --all-agents --dry-run
+wednesdayai sessions cleanup --enforce
+wednesdayai sessions cleanup --enforce --active-key "agent:main:telegram:dm:123"
+wednesdayai sessions cleanup --json
+```
+
+`wednesdayai sessions cleanup` uses `session.maintenance` settings from config:
+
+- Scope note: `wednesdayai sessions cleanup` maintains the session index and retention only. It does not prune cron run logs (`cron/runs/<jobId>.jsonl`), which are managed by `cron.runLog.maxBytes` and `cron.runLog.keepLines` in [Cron configuration](/next/users/automation/cron-jobs#configuration) and explained in [Cron maintenance](/next/users/automation/cron-jobs#maintenance).
+
+- `--dry-run`: preview how many entries would be pruned/capped without writing.
+  - In text mode, dry-run prints a per-session action table (`Action`, `Key`, `Age`, `Model`, `Flags`) so you can see what would be kept vs removed.
+- `--enforce`: apply maintenance even when `session.maintenance.mode` is `warn`.
+- `--active-key <key>`: treats `<key>` as the active session. In warn mode, when that key is old
+  enough to prune or falls over the `maxEntries` cap, the cleanup logs a
+  `session maintenance would evict active session` warning. With `--enforce` the key is kept:
+  it is never retired, and the cap is applied to the other rows.
+- `--agent <id>`: run cleanup for one configured agent store.
+- `--all-agents`: run cleanup for all configured agent stores.
+- `--store <path>`: run against a specific agent's store path. The path must name a configured
+  agent's session store; an unknown path exits with an error telling you to use `--agent`.
+  `--store` cannot be combined with `--agent` or `--all-agents`: the conflicting combination is
+  rejected with an error before anything is routed, so the refusal is identical locally and when
+  a gateway owns the store (no request is sent in that case).
+- `--fix-missing`: accepted for compatibility and does nothing under SQL session storage; the CLI
+  prints `--fix-missing has no effect with SQL session storage and will be removed in the next release`.
+- `--json`: print a JSON summary. With `--all-agents`, output includes one summary per store.
+
+Cleanup only retires session index rows (tombstones): `--enforce` drops index entries whose
+`updatedAt` is older than `session.maintenance.pruneAfter` (and caps the index at `maxEntries`).
+Conversation history is never deleted and stays readable. With the default `warn` mode it retires
+nothing.
+
+`wednesdayai sessions cleanup --all-agents --enforce --dry-run --json`:
+
+```json
+{
+  "allAgents": true,
+  "mode": "enforce",
+  "dryRun": true,
+  "stores": [
+    {
+      "agentId": "main",
+      "storePath": "/home/user/.openclaw/agents/main/sessions/sessions.json",
+      "beforeCount": 120,
+      "afterCount": 80,
+      "pruned": 40,
+      "capped": 0
+    },
+    {
+      "agentId": "work",
+      "storePath": "/home/user/.openclaw/agents/work/sessions/sessions.json",
+      "beforeCount": 18,
+      "afterCount": 18,
+      "pruned": 0,
+      "capped": 0
+    }
+  ]
+}
+```
+
+With `--dry-run`, `pruned` and `capped` are the index keys that would be retired; nothing changes.
+`storePath` identifies the agent's session index; under SQL storage no `sessions.json` file is
+read or written.
+
+## Claims status
+
+View session consumer claim ledger status — what work is owed, stalled, or dead-lettered:
+
+```bash
+wednesdayai sessions claims status
+wednesdayai sessions claims status --agent work
+wednesdayai sessions claims status --json
+```
+
+The command calls the gateway RPC `sessions.claims.status`. Text output shows:
+
+- **Consumers** table: one row per consumer lane — consumer ID, lane, effect kind, enabled flag,
+  and counts by claim status (`pending`, `claimed`, `processing`, `dlq`).
+- **Stalled leases** table: expired leases still in `claimed`/`processing` state (claim ID,
+  consumer, session, lease-until timestamp).
+- **Last sweep** timestamp (when the reconciler last ran).
+- **Recent events** table: last diagnostic events from the in-memory ring buffer
+  (timestamp, kind, consumer, session, count).
+
+`--json` outputs the raw RPC response:
+
+```json
+{
+  "consumers": [
+    {
+      "consumerId": "learning-core:session.end",
+      "agentId": "main",
+      "effectKind": "session.end",
+      "lanes": [
+        {
+          "laneId": "main",
+          "since": 1751820000000,
+          "enabled": true,
+          "pending": 3,
+          "claimed": 0,
+          "processing": 0,
+          "dlq": 1
+        }
+      ]
+    }
+  ],
+  "stalledLeases": [
+    {
+      "claimId": "c-42",
+      "consumerId": "learning-core:session.end",
+      "sessionId": "abc123",
+      "leaseUntil": 1751821230000
+    }
+  ],
+  "lastSweepTs": 1751821200000,
+  "recentEvents": [
+    {
+      "ts": 1751820600000,
+      "kind": "skipped_backlog",
+      "consumerId": "old-plugin:session.end",
+      "count": 12
+    }
+  ]
+}
+```
+
+`recentEvents` currently carries `skipped_backlog` events (emitted when a sweep observes a
+consumer's watermark transition from disabled to enabled). `dlq_terminal` events go through the
+global diagnostic event stream instead, so they appear in logs and diagnostics exports but not in
+this RPC.
+
+Related:
+
+- Operator guide: [Session Consumer Claims](/next/admin/gateway/session-consumer-claims)
+
+Related:
+
+- Session config: [Configuration reference](/next/admin/gateway/configuration-reference#session)

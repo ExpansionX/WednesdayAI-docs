@@ -1,0 +1,375 @@
+---
+summary: "Operate the Gateway task pipeline: configuration reference, budgets, dry runs, rollback, and recovery behavior"
+read_when:
+  - You are enabling or tuning the task pipeline on a Gateway
+  - You need to manage task budgets or investigate deferred and denied runs
+audience: admin
+component: task-pipeline
+sources:
+  - src/config/types.tasks.ts
+  - src/gateway/server-methods/tasks.ts
+  - src/gateway/server-methods/tasks-run-events.ts
+  - src/gateway/server-dreams-bridge.ts
+  - src/config/sessions/pass-measurement-schema.ts
+  - src/config/sessions/task-work-completion.ts
+  - src/gateway/task-pipeline-boot.ts
+  - src/backbone/task-governor.ts
+  - src/backbone/task-recovery.ts
+  - src/config/sessions/task-run-time.ts
+  - src/backbone/passes/cron-run.ts
+  - src/backbone/passes/heartbeat-tick.ts
+generated: "2026-08-20"
+title: "Task operations"
+sidebarTitle: Tasks
+description: Configure the Gateway task pipeline that runs cron, heartbeat,
+  retention, and plugin background passes — every tasks.* key with its default,
+  effect, and restart requirement.
+---
+
+# Task operations
+
+The task pipeline boots with the Gateway when enabled and runs registered background passes
+through the work queue with budgets and durable run records. Concepts:
+[Task pipeline](/next/developers/concepts/tasks). CLI: [`wednesdayai task`](/next/users/cli/task).
+
+## Configuration
+
+All keys live under `tasks` in the Gateway config. Defaults shown.
+
+```json5
+{
+  tasks: {
+    enabled: true, // boot the pipeline with the gateway
+    dispatchConcurrency: 1, // parallel dispatch slots (1..16)
+    preemptionCeiling: 3, // preemptions before cool-down; 2x = terminal
+    budget: {
+      windowHours: 24, // rolling budget window
+      ceilingHorizon: "monthly", // fixed in this release
+      // Optional caps (units per window); omit a scope to leave it uncapped:
+      // perRun:  { units: 1000 },
+      // perLane: { units: 5000 },
+      // global:  { units: 50000, ceiling: { units: 100000 } } // ceiling = hard monthly stop
+    },
+    restartLoop: {
+      maxRestarts: 5, // llm-class passes are deferred past this...
+      windowMinutes: 10, // ...many restarts within this window
+    },
+    idle: {
+      enabled: false, // start the idle monitor (fires the agent_idle hook)
+      thresholdMinutes: 30, // agent must be quiet this long to count as idle
+      pollSeconds: 60, // how often the monitor checks
+    },
+    schedule: {
+      windows: [], // "HH:MM-HH:MM" ranges or cron expressions (croner syntax)
+    },
+  },
+}
+```
+
+Notes:
+
+- Budget enforcement is units-based and checked at admission (`perRun`, `perLane`, and
+  `global`). A run that would exceed a window cap is deferred (not failed) and retried after
+  the window; the run's `budget_denials` counter increments. Attempts count toward the cap,
+  not only successful completions. `costUsd` caps are not checked in this release.
+- The default lane key is `lane:<passId>` when the enqueue does not set `payload.scopeKey`.
+- The global monthly ceiling is a hard stop: once accrued units reach it, dispatching defers
+  until an operator resets the budget or the month rolls over.
+- `tasks.restartLoop` is honored at Gateway boot (defaults `maxRestarts: 5`,
+  `windowMinutes: 10`). Changing it requires a restart
+  (Linux: `systemctl --user restart wednesdayai-gateway`; macOS:
+  `wednesdayai gateway restart --deep`).
+- **Restart-loop detection is durable.** Each Gateway start writes one row to the task
+  budget ledger (scope `governor:restart`), so starts are counted across real process
+  restarts and across every Gateway sharing the same database. The start after
+  `maxRestarts` inside `windowMinutes` (the sixth by default) defers every `llm`-class pass,
+  including `heartbeat-tick`, in every running Gateway until the oldest counted start
+  leaves the window (`retryAt` = oldest start + `windowMinutes`). Deterministic passes keep
+  running. Earlier releases kept these timestamps in memory, so the detector never fired
+  across real restarts.
+- Until a Gateway's startup row is written, its `llm`-class passes are deferred as
+  `governor_error`; the write is retried with backoff (1 s doubling to 5 minutes). If the
+  ledger cannot be written, `llm` work stays deferred (fail closed) rather than running
+  uncounted. A metering-store outage still defers every pass, deterministic or not.
+- Dispatch is priority-ordered with bounded fairness: after 8 consecutive claims of
+  higher-priority passes while a lower-priority pass has ready work, the next claim goes to
+  the longest-waiting lower-priority pass. A permanently busy high-priority pass (for
+  example `heartbeat-tick`) is delayed by at most one lower-priority pass per 8 claims, and
+  the order is unchanged when no lower-priority work is waiting.
+- A `dry_run` execution (`tasks.runDryRun`) skips budget admission entirely, including the
+  restart-loop gate, so it runs even when a window or the monthly ceiling is exhausted. It
+  writes no budget entry and keeps its audited run, outcome, and measurement rows.
+- `tasks.enabled: false` disables boot entirely (a `task.pipeline_disabled` diagnostic is
+  emitted once).
+- The idle monitor only starts when the task pipeline itself is running, so `tasks.enabled: true`
+  is a prerequisite: setting `tasks.idle.enabled: true` or a non-empty `tasks.schedule.windows`
+  while `tasks.enabled` is `false` does nothing (the pipeline never boots, so there is no monitor
+  to start). With the pipeline enabled, either of those settings starts the idle monitor, which
+  fires the `agent_idle` plugin hook when an agent crosses the idle threshold or a schedule window
+  opens. Plugins such as [Dream Cycle](/next/developers/plugins/dream-cycle) consume it to run background work.
+  If durable run storage is unavailable the monitor does not start and a
+  `task.idle_monitor_disabled` diagnostic is emitted instead of failing silently.
+- Idleness is judged from recorded session runs. Turns started through the Gateway `agent`
+  RPC, including `wednesdayai agent` turns sent through the Gateway, are recorded as session
+  runs (kind `chat`, recovery `off`), so the idle trigger fires after them. A
+  `wednesdayai agent --local` turn is not visible to the Gateway (see
+  [agent](/next/users/cli/agent)). A crash leaves such a run `running`; the next Gateway start finalizes
+  it as `abandoned` (see [Restart recovery](/next/admin/gateway/restart-recovery#interrupted-user-runs)).
+- Run records carry `stage` and `trigger_source` columns: `trigger_source` is `boot` for the
+  gateway boot enqueue, `task-dispatcher` for ordinary enqueues, `cron` for `cron-run`,
+  `heartbeat` for `heartbeat-tick`, or the trigger named by the enqueuing plugin (the idle
+  monitor path produces `idle` / `schedule`). Both appear in `wednesdayai task status --json`.
+  Cron job definitions are not stored in `task_runs`; they live in `cron_jobs`. See
+  [Where cron jobs are stored](/next/users/automation/cron-jobs#where-cron-jobs-are-stored).
+- `tasks.enabled: false` keeps _unmigrated_ cron jobs and heartbeat on their pre-pipeline
+  paths (legacy timer and interval `runOnce`). Jobs already flipped to `migrated = true`
+  stay on the pipeline claim path and will not fire until the pipeline is enabled again.
+  Public `cron.*` methods and heartbeat skip reasons stay the same.
+
+## Gateway methods
+
+| Method              | Scope | Purpose                                                                                       |
+| ------------------- | ----- | --------------------------------------------------------------------------------------------- |
+| `tasks.status`      | read  | List runs (status/task filters, limit 1..1000) plus budget totals and window usage per scope  |
+| `tasks.runEvents`   | read  | Projected measurement, phase, and outcome events for 1..50 runs (bounded; never raw payloads) |
+| `tasks.resetBudget` | write | Write an audited reset marker for a scope (re-opens the window and ceiling)                   |
+| `tasks.runDryRun`   | write | Enqueue a `dry_run` execution of a task (no budget entries, audited) and return its `workId`  |
+| `tasks.rollback`    | write | Invoke a pass rollback for a terminal run; idempotent; concurrent calls are serialized        |
+
+Plugins can register additional read-only methods alongside these: the
+[Dream Cycle](/next/developers/plugins/dream-cycle) plugin adds `dream.status`, `dream.weights`, and
+`dream.candidates`.
+
+Status filters are validated: an unknown `status` value returns an invalid-request error
+rather than an empty list. An out-of-range or fractional `limit` is clamped into 1..1000
+instead of rejected.
+
+`tasks.status` reports each source separately. `runsAvailable` is false (with `runsError`)
+when the run store is missing or fails, and `budgetWindow.available` is false (with
+`budgetWindow.error`) when the budget store is missing or fails. One failing source never hides
+the other. Besides its existing totals, `budgetWindow` carries the running governor's
+`windowHours`, `cap` (the per-run, per-lane, or global cap for that scope; `null` for tenant),
+`ceilingCap` (global scope only), `windowStartTs` (the later of `now - windowHours` and the
+last reset), and `windowUsageUnits`/`windowUsageCostUsd` summed from `windowStartTs`, so usage
+compares directly with `cap`. Without a running pipeline the window fields are `null`.
+
+`tasks.runEvents { taskRunIds }` returns `events` keyed by run id, plus `retentionDays` (events
+older than this are pruned). Each entry has a `kind`: `metrics` (the `pass.metrics` row),
+`phase` (one `pass.phase` row), `outcome` (lifecycle rows, including `dry_run`, with only the
+denial, preemption reason, and `recovered` fields), or `unsupported`, `malformed`, `oversize`, and
+`unknown`, which carry no payload. Rows over 16 KiB are reported as `oversize` without being
+read. At most 200 rows per run, 2,000 overall, and 1 MiB are returned; truncation keeps the
+newest rows and is reported per run in `truncated`. Ids must be 1..128 characters with no
+control characters; duplicates are ignored. The jsonl-fs backend answers `UNAVAILABLE`.
+
+`tasks.runDryRun { taskId, requestId? }` returns `{ ok, taskId, workId }`. `workId` is the
+database id of the enqueued work item, and it equals the `workId` of the run in `tasks.status`
+that executes it, so a caller can follow its own dry run without guessing from timestamps.
+Without `requestId`, every call enqueues a new work item. With `requestId`, the call is
+idempotent per task: the id is trimmed and NFC-normalized, and the work item's fingerprint is
+derived from the task id plus that normalized id, so a retry with the same `requestId` for the
+same task returns the same `workId` and enqueues nothing new. A `requestId` that is not a string,
+is empty after trimming, is longer than 128 characters, or contains a control character (C0,
+DEL, or C1) is rejected with `INVALID_REQUEST`. The CLI (`wednesdayai task run --dry-run`) sends
+no `requestId`, so each invocation is a new dry run.
+
+Read-scoped connections also receive a `dreams.update` broadcast event with payload
+`{ ts, kind: "task" | "dream" }`. `kind: "task"` follows a committed `task.completed`,
+`task.failed`, `task.preempted`, `task.budget_deferred`, `task.budget_ceiling_reached`, or
+`task.preemption_ceiling_reached` diagnostic; `kind: "dream"` follows any `dream.*` diagnostic.
+It carries no run data (clients re-fetch with `tasks.status` and `tasks.runEvents`) and is
+dropped for slow consumers. The [Dreams view](/next/admin/web/dreams) refreshes on it.
+
+Rollback appends its audit event before the status write; once
+that durable marker lands, a retry is a no-op. A persist failure after a successful rollback
+returns a distinct `rollback_persist_failed` error — and if the marker itself failed to
+persist, a retry re-invokes the handler, which is why rollback handlers must be idempotent
+(see [Task pipeline](/next/developers/concepts/tasks)).
+
+## Run measurement
+
+Each run can carry measurement rows, written in the same transaction that completes the run, so
+a run never shows an outcome without the measurement that belongs to it:
+
+- **`pass.metrics`** (at most one per run, schema version 1): `mode` (`normal` or `dry_run`),
+  `measurementState` (`complete`, or `unavailable` with `measurementReason: "handler_unsettled"`
+  when a pass ignored its abort signal past the timeout), token counts, `costUsd`, `costSource`,
+  model call counts, `elapsedMs`, and optional `qualityScore`, `authoring`, `skipped`, and
+  pass-specific `items`. Each row is at most 16 KiB.
+- **`pass.phase`** (up to 190 per run): a named phase with its `ordinal`, `offsetMs` from the
+  run start, `durationMs`, and `status` (`ok`, `error`, or `aborted`).
+- **Outcome rows** carry the structured budget denial and the preemption reason.
+
+`costSource` says how to read `costUsd`:
+
+| `costSource`        | Meaning                                                                                        |
+| ------------------- | ---------------------------------------------------------------------------------------------- |
+| `none`              | The run made no model call.                                                                    |
+| `priced`            | Every call reported usage and had a price. `costUsd` is the total.                             |
+| `unpriced`          | Usage is known but at least one model has no published price. `costUsd` is `null`.             |
+| `usage_unavailable` | A call failed or aborted without usage. `costUsd` is `null`; see `knownCostUsd`/`knownTokens`. |
+
+**Pricing rule.** Cost is computed by the Gateway from the model entry under
+`models.providers`. A model with no config entry, and a model declared **without** a `cost`
+block, both report `costSource: "unpriced"` with `costUsd: null` — an absent price is never
+treated as free. A model whose `cost` block is all zeros is a genuinely free model: it reports
+`costSource: "priced"` with `costUsd: 0`. Set `cost` (`input`, `output`,
+`cacheRead`, `cacheWrite`) on a model to get real spend. Budget window units are governor
+admission units, not model spend: `budgetWindow.windowUsageUnits` and the caps never include
+`costUsd`.
+
+**Budget denials.** A deferred run's outcome row names the gate that stopped it:
+`{ reason: "window", scope, usage, cap }` (a `run`, `lane`, or `global` window cap),
+`{ reason: "ceiling", scope: "global", usage, cap }` (the monthly ceiling), or
+`{ reason: "restart_loop" }` (the restart-loop guard). A denied run makes no model call and
+writes no `pass.metrics` row.
+
+**Preemption.** A `preempted` outcome row carries `preemption.reason`: `lease` (the dispatcher
+lost the work lease or preempted the pass for live work), `reclaim` (the run was left `running`
+by a crashed process, and the next claim of its expired work finalized it as `preempted` with
+`recovered: true` and no `pass.metrics` row), or `shutdown` (a cooperative Gateway stop). The run
+record's `preemptionCount` counts `lease` and `reclaim` preemptions; `shutdown` never advances it
+or the preemption ceiling.
+
+**Dry runs.** A `dry_run` run writes a `dry_run` outcome row and a `pass.metrics` row with
+`mode: "dry_run"`. Built-in passes preview in dry-run mode: they make no model call and change
+no lessons, proposals, dream state, or run logs, so any counts in `items` are what a normal run
+would do. A dry run returns no successors and does not feed Dream Cycle adaptation.
+
+## Verifying a deployment
+
+`bash scripts/verify-substrate-webui-surface.sh` is the evidence command for this surface. By
+default it builds a local fixture: a temporary state directory and config (SQLite session
+storage, tasks, Learning Core, and Dream Cycle enabled, no model providers or credentials), and
+it starts this checkout's Gateway from `dist/` on a free loopback port, then stops it and removes
+the fixture. Set `OPENCLAW_VERIFY_GATEWAY_URL` and `OPENCLAW_VERIFY_GATEWAY_TOKEN` to run the
+same checks against a running Gateway instead; the script never restarts it. Each check prints
+one PASS or FAIL line:
+
+1. **preflight:** `hello.features.methods` advertises `tasks.runDryRun`, `tasks.status`,
+   `tasks.runEvents`, and `dream.status`. A missing method is reported as a disabled-plugin
+   prerequisite (exit 3), not as an RPC failure.
+2. **dry-run:** `tasks.runDryRun` of `learning-core.consolidation` with a `requestId` unique to
+   this invocation returns `{ ok, taskId, workId }`. It needs no model credentials and never
+   depends on the latest run.
+3. **run-status:** `tasks.status` is polled until the run with that `workId` completes.
+4. **run-events:** `tasks.runEvents` returns a schema-version-1 `pass.metrics` row with
+   `mode: "dry_run"` for exactly that run.
+5. **read-scope:** `dream.status` answers on a connection that holds only `operator.read`, and
+   the same connection is refused `tasks.runDryRun`.
+
+These five checks are the SC1-SC4 half of the surface; they need no model credentials.
+
+`node --import tsx scripts/verify-substrate-webui-surface-live.mts` verifies the live half,
+SC5-SC11. It boots three throwaway gateway fixtures from this checkout's `dist/`, drives real
+agent sessions against a real configured model, and exercises the v2 operator console in
+headless Chromium, so a run makes real model calls and costs real tokens. The model is selected
+with `OPENCLAW_VERIFY_MODEL` (required, `<provider>/<model>`); its credential comes from the
+operator config, which the verifier reads read-only from `OPENCLAW_VERIFY_PROVIDER_CONFIG`
+(default `~/.openclaw/openclaw.json`). Two more variables tune the run:
+`OPENCLAW_VERIFY_RUN_TIMEOUT_MS` (default `240000`) bounds each poll and contemplation wait, and
+`OPENCLAW_VERIFY_KEEP_TMP=1` keeps the fixture directories on disk instead of deleting them.
+
+The verifier refuses to run against a stale checkout: `dist/entry.js` and
+`dist/control-ui-v2/index.html` must exist, and the commit recorded in `dist/build-info.json`
+must equal `git rev-parse HEAD`, so the evidence names the code under test. Run
+`pnpm build && pnpm control:build:packaged` first. Preflight also launches headless Chromium
+before any fixture boots, so a missing Playwright browser fails fast.
+
+Each fixture is a temporary `/tmp/vswl.*` root with a generated `openclaw.json` written `0600`
+(it embeds the provider credential), a detached gateway process group on free loopback ports,
+and a SIGTERM-then-SIGKILL teardown. The verifier never touches the operator's gateway: the
+checks create real sessions, lessons and skill proposals, which would mutate live learning
+state. The three fixtures cover, one each:
+
+- **learning:** real sessions plus a consolidation and distill pass — the learning checks
+  (SC8, SC9, SC11) and the Dreams and Learning console views (SC5, SC6, SC7 run rows).
+- **dream-priced:** a dream cycle under a stub-priced model — upgrade-day produce, a priced
+  contemplation with cost assertions, and the live Dreams view update.
+- **dream-unpriced:** the unconfigured-producer bucket and the `unpriced` contemplation cost row.
+
+The two dream fixtures run behind a local stub provider that fronts the real one, so the priced
+and unpriced arms of SC10 are both reachable. Every check prints one `PASS [<id>] <detail>` or
+`FAIL [<id>] <detail>` line; a skipped check prints `FAIL [<id>] skipped: <reason>`, and checks
+that depended on it are skipped too. When every check ran and passed, the run ends with
+`VERIFY PASS (16 checks)` and exits 0. A failed check or internal error exits 1. A missing
+prerequisite — no `OPENCLAW_VERIFY_MODEL`, an unreadable provider config, a missing or stale
+build — prints `FAIL [preflight] PREREQUISITE <detail>` before any gateway is spawned and exits 3. SIGINT and SIGTERM run the same cleanup path and exit 130.
+
+**Warning:** with `OPENCLAW_VERIFY_KEEP_TMP=1` the fixture directories stay on disk, and each
+one contains the operator's provider credential in its `openclaw.json`. The run prints the paths
+it kept (`INFO kept <root> (contains the provider credential; delete it)`); delete them after
+inspecting.
+
+## Shutdown and recovery
+
+- Gateway shutdown stops the pipeline before storage closes and awaits the dispatcher drain
+  so no pass writes to closed storage. In-flight passes are aborted through their signal and
+  get up to 15 seconds to settle; a pass that stops in time is recorded as `preempted` with
+  reason `shutdown`, which does not count toward the preemption ceiling. A pass that ignores
+  the signal past the drain is left as a crash would leave it: its work stays claimed until
+  the lease expires, then the next start reclaims it (and that reclaim does count). The stop
+  force-exit budget is 20 seconds, and the generated LaunchAgent (`ExitTimeOut`) and
+  systemd unit (`TimeoutStopSec`) allow 30 seconds, so the service manager does not kill the
+  process first. On existing installs, `wednesdayai doctor` flags the shorter stop timeout;
+  reinstall the service (`wednesdayai gateway install --force`) to pick it up.
+  The agent-turn producers (cron and heartbeat) are stopped and parked delayed-turn waiters
+  are cancelled first; then the agent-turn runner `stop()` is awaited the same way: it stops
+  claiming and finishes in-flight claimed turns of every kind (cron, heartbeat, nudge) before
+  storage closes. Restart confirmation counts those
+  claimed turns together with embedded runs. A stop request (`systemctl --user stop
+wednesdayai-gateway`, `wednesdayai gateway stop`, `SIGTERM`, or `SIGINT`) wins over an
+  in-progress restart evaluation or drain, so the process exits promptly instead of hanging
+  until the supervisor sends `SIGKILL`. Stop-wins does not cover the in-process lock
+  reacquire window (F-2026-08-19-04).
+- On boot, recovery classifies each recoverable run. Same-instance `running` rows become
+  `retrying` (status rewrite only, no attempt increment, no in-place checkpoint resume).
+  Stale-instance `running` rows requeue and consume an attempt. There is no pre-classification
+  interrupt rewrite of every `running` row. Deferred runs wait for their idle window.
+  Terminal runs are untouched. See
+  [Task pipeline recovery](/next/developers/concepts/tasks#recovery-and-retention).
+- **Recovery ceiling:** recoverable runs (`running` / `retrying` / `preempted` / `deferred`
+  from `listRecoverableRuns`) use that run's `retry_policy` when present, otherwise the
+  default (`maxAttempts: 5`, `maxMs: 300000`). A run that has hit its attempt budget
+  (except `preempted`) or has been stuck in `retrying` longer than
+  `maxAttempts * maxMs` (default **25 minutes** since `updatedAt` / `startedAt`) moves to
+  `dlq` on the next boot recovery pass. Age is always UTC: SQLite space-format timestamps
+  are not interpreted as the host timezone. For a `retrying` run with attempts remaining,
+  a missing or unparsable timestamp skips the age-stall arm and falls through to
+  `requeue-after-backoff`; `deferred` stays `wait-idle` and `preempted` stays
+  `requeue-immediate`. That exhaust transition emits a
+  `task.recovery_exhausted` diagnostic (visible in OTel/Langfuse as span
+  `openclaw.task.recovery_exhausted` when `diagnostics-otel` is enabled). No `tasks.*`
+  config key controls this; the change takes effect on the next Gateway start
+  (Linux: `systemctl --user restart wednesdayai-gateway`; macOS:
+  `wednesdayai gateway restart --deep`).
+- Attempt counters only increase on attempt-consuming recovery requeues (`requeue` and
+  `requeue-after-backoff`). Same-instance resume, preemption requeues, and budget deferrals
+  do not burn attempts.
+- Run event logs are pruned after 30 days by the bundled `task-runlog-retention` pass. The
+  30-day period is fixed in this release (there is no `tasks.*` retention key yet); use a
+  dry run to preview (`wednesdayai task run --dry-run task-runlog-retention`).
+
+## Troubleshooting
+
+- **Runs stuck in `deferred` with rising `budget_denials`:** a window cap or the monthly
+  ceiling is exhausted. Inspect `wednesdayai task status`, then
+  `wednesdayai task budget reset --scope global` if intended.
+- **`llm`-class passes deferred right after restarts:** the restart-loop detector tripped
+  (`restartLoop` config); it clears once restarts leave the window.
+- **`preempted_ceiling` runs:** the pass was repeatedly aborted (gateway restarts or manual
+  preemption). This is terminal by design and distinct from failure; re-enqueue the task if
+  the work is still needed.
+- **Runs that used to stay in `retrying` forever now appear as `dlq`:** expected after the
+  recovery ceiling. Check `lastError` / the `task.recovery_exhausted` span reason
+  (`retry exhausted` vs `stalled beyond age threshold`). Re-enqueue the work if it is still
+  needed; investigate why the pass never completed if age-stall is frequent.
+- **A just-restarted Gateway immediately parks fresh interrupted runs as `dlq` with
+  `stalled beyond age threshold`:** that was a timestamp-parse bug on non-UTC hosts
+  (SQLite UTC written without a `Z`, then read as local time). Current recovery ages
+  those stamps as UTC. After you install a build that includes the fix, restart the
+  Gateway. A genuine stall still parks the run after 25 minutes in `retrying`.
+- **Missing task/dream spans in Langfuse or Tempo:** confirm `diagnostics.otel` is enabled
+  and the `diagnostics-otel` plugin is loaded. Task and dream lifecycle events export as
+  `openclaw.task.*` / `openclaw.dream.*` spans — see
+  [OTel & Langfuse](/next/admin/diagnostics/otel-langfuse#task-and-dream-spans).

@@ -15,7 +15,7 @@ drive **runtime validation**, **JSON Schema export**, and **Swift codegen** for
 the macOS app. One source of truth; everything else is generated.
 
 If you want the higher-level protocol context, start with
-[Gateway architecture](/concepts/architecture).
+[Gateway architecture](/developers/concepts/architecture).
 
 ## Mental model (30 seconds)
 
@@ -47,7 +47,7 @@ Common methods + events:
 | Core      | `connect`, `health`, `status`                             | `connect` must be first                                                 |
 | Messaging | `send`, `poll`, `agent`, `agent.wait`                     | side-effects need `idempotencyKey`                                      |
 | Chat      | `chat.history`, `chat.send`, `chat.abort`, `chat.inject`  | WebChat uses these                                                      |
-| Sessions  | `sessions.list`, `sessions.patch`, `sessions.delete`      | scope varies by method/params (ADR 0081); `sessions.delete` needs admin |
+| Sessions  | `sessions.list`, `sessions.patch`, `sessions.delete`      | scope varies by method/params (ADR 0083); `sessions.delete` needs admin |
 | Nodes     | `node.list`, `node.invoke`, `node.pair.*`                 | Gateway WS + node actions                                               |
 | Events    | `tick`, `presence`, `agent`, `chat`, `health`, `shutdown` | server push                                                             |
 
@@ -62,18 +62,23 @@ Authoritative lists live in `src/gateway/server-methods-list.ts` (`listGatewayMe
 - Server handshake: `src/gateway/server/ws-connection/message-handler.ts`; method dispatch and
   scope checks: `src/gateway/server-methods.ts`
 - Node client: `src/gateway/client.ts`
-- Generated JSON Schema: `dist/protocol.schema.json`
-- Generated Swift models: the two `GatewayModels.swift` copies listed in
-  `scripts/protocol-swift-outputs.ts` (`apps/macos` and `apps/shared/OpenClawKit`)
+- Committed JSON Schema snapshot: `src/gateway/protocol/gateway-protocol.schema.json`. The root
+  carries `x-protocol-version` (the `PROTOCOL_VERSION` number) and `x-error-codes` (the
+  `ErrorCodes` values), and every nested position that reuses a named definition carries
+  `x-schema-name` so non-TypeScript generators can name shared types. The npm tarball ships the
+  same file at `dist/contracts/gateway-protocol.schema.json`, alongside the exec and system-run
+  parity fixtures under `dist/contracts/fixtures/` (used by the native apps' parity tests).
+- Generated Swift models: owned by the
+  [WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository, which regenerates
+  them from the synced snapshot (`npm run contracts:sync`).
 
 ## Current pipeline
 
 - `pnpm protocol:gen`
-  - writes JSON Schema (draft‑07) to `dist/protocol.schema.json`
-- `pnpm protocol:gen:swift`
-  - generates Swift gateway models
+  - writes JSON Schema (draft‑07) to `src/gateway/protocol/gateway-protocol.schema.json`
 - `pnpm protocol:check`
-  - runs both generators and verifies the output is committed
+  - regenerates the snapshot and verifies it is committed
+- Swift gateway models are generated in WednesdayAI-apps from the synced snapshot, not in core.
 
 ## How the schemas are used at runtime
 
@@ -249,7 +254,7 @@ Register it in `src/gateway/server-methods.ts` (already merges `systemHandlers`)
 `operator.admin`, and a test fails if an advertised method is unclassified. The narrow
 `operator.sessions.*` web client can call a method only if it is also listed in
 `NARROW_SESSION_READ_METHODS` or `NARROW_SESSION_WRITE_METHODS`, which is an ADR 0077 amendment; a
-rule that depends on the call's params (like the `sessions.patch` field guard) is ADR 0081.
+rule that depends on the call's params (like the `sessions.patch` field guard) is ADR 0083.
 
 4. **Regenerate**
 
@@ -263,11 +268,13 @@ Add a server test in `src/gateway/server.*.test.ts` and note the method in docs.
 
 ## Swift codegen behavior
 
-The Swift generator emits:
+Swift codegen lives in the
+[WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository. Its generator reads
+the synced schema snapshot and emits:
 
 - `GatewayFrame` enum with `req`, `res`, `event`, and `unknown` cases
-- Strongly typed payload structs/enums
-- `ErrorCode` values and `GATEWAY_PROTOCOL_VERSION`
+- Strongly typed payload structs/enums (named via `x-schema-name` for reused definitions)
+- `ErrorCode` values and `GATEWAY_PROTOCOL_VERSION` (from `x-protocol-version` and `x-error-codes`)
 
 Unknown frame types are preserved as raw payloads for forward compatibility.
 
@@ -290,13 +297,15 @@ Unknown frame types are preserved as raw payloads for forward compatibility.
 
 ## Live schema JSON
 
-Generated JSON Schema is in the repo at `dist/protocol.schema.json`. The
-published raw file is typically available at:
-
-- [https://raw.githubusercontent.com/openclaw/openclaw/main/dist/protocol.schema.json](https://raw.githubusercontent.com/openclaw/openclaw/main/dist/protocol.schema.json)
+The committed snapshot is `src/gateway/protocol/gateway-protocol.schema.json` in this repository.
+The published npm package ships the same file at `dist/contracts/gateway-protocol.schema.json`
+plus the exec and system-run parity fixtures under `dist/contracts/fixtures/`; native clients
+read both from there (WednesdayAI-apps syncs them with `npm run contracts:sync`).
 
 ## When you change schemas
 
 1. Update the TypeBox schemas.
 2. Run `pnpm protocol:check`.
-3. Commit the regenerated schema + Swift models.
+3. Commit the regenerated schema snapshot. Swift models are not generated here: WednesdayAI-apps
+   picks them up through its `contracts:sync` flow (a weekly bot PR against the pinned core
+   version).

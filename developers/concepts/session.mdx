@@ -28,7 +28,7 @@ Use `session.dmScope` to control how **direct messages** are grouped:
 - `per-peer`: isolate by sender id across channels.
 - `per-channel-peer`: isolate by channel + sender (recommended for multi-user inboxes).
 - `per-account-channel-peer`: isolate by account + channel + sender (recommended for multi-account inboxes).
-  Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each account to the person with `wednesdayai identity link <name> <value>` (or the self-service `/link` code) so their web chats resolve to the same identity. See [Identities](/gateway/identity).
+  Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each account to the person with `wednesdayai identity link <name> <value>` (or the self-service `/link` code) so their web chats resolve to the same identity. See [Identities](/admin/gateway/identity).
 
 ## Secure DM mode (recommended for multi-user setups)
 
@@ -64,9 +64,9 @@ Notes:
 - Default is `dmScope: "main"` for continuity (all DMs share the main session). This is fine for single-user setups.
 - Local CLI onboarding writes `session.dmScope: "per-channel-peer"` by default when unset (existing explicit values are preserved).
 - For multi-account inboxes on the same channel, prefer `per-account-channel-peer`.
-- If the same person contacts you on multiple channels, link all of their accounts to one identity (`wednesdayai identity link <name> <value>`; see [Identities](/gateway/identity)) so their DM sessions collapse into that canonical identity.
-- You can verify your DM settings with `openclaw security audit` (see [security](/cli/security)).
-- Session isolation and [Workspace Lanes](/concepts/workspace-lanes) solve different problems. `dmScope` separates conversation history; workspace lanes separate user-specific workspace files for multi-user-capable personas.
+- If the same person contacts you on multiple channels, link all of their accounts to one identity (`wednesdayai identity link <name> <value>`; see [Identities](/admin/gateway/identity)) so their DM sessions collapse into that canonical identity.
+- You can verify your DM settings with `wednesdayai security audit` (see [security](/users/cli/security)).
+- Session isolation and [Workspace Lanes](/developers/concepts/workspace-lanes) solve different problems. `dmScope` separates conversation history; workspace lanes separate user-specific workspace files for multi-user-capable personas.
 
 ## Gateway is the source of truth
 
@@ -121,7 +121,7 @@ only the startup backfill chains (user ids, session identity / actor columns, to
 columns) — no index retirement, even in `enforce` mode. Index upkeep happens when the index is
 written:
 
-- **Index upkeep on writes.** Ordinary session-index writes (and `openclaw sessions cleanup`)
+- **Index upkeep on writes.** Ordinary session-index writes (and `wednesdayai sessions cleanup`)
   maintain the index record itself: in `enforce` mode they drop index rows whose `updatedAt` is
   older than `pruneAfter` and cap the index at `maxEntries` rows (a tombstone per dropped row);
   the session being written is never dropped. In `warn` mode they only warn when the active
@@ -147,10 +147,10 @@ What to do:
 
 - start in `mode: "warn"`, then switch to `"enforce"` once the thresholds look right
 - set both time and count limits (`pruneAfter` + `maxEntries`), not just one
-- run `openclaw sessions cleanup --dry-run --json` after config changes to verify projected impact
+- run `wednesdayai sessions cleanup --dry-run --json` after config changes to verify projected impact
   before enforcing
 - to check whether a busy session would be evicted, pass `--active-key <key>` to a warn-mode
-  `openclaw sessions cleanup` and read the warning
+  `wednesdayai sessions cleanup` and read the warning
 
 ### Customize examples
 
@@ -185,8 +185,8 @@ Tune for larger installs (example):
 Preview or force maintenance from CLI:
 
 ```bash
-openclaw sessions cleanup --dry-run
-openclaw sessions cleanup --enforce
+wednesdayai sessions cleanup --dry-run
+wednesdayai sessions cleanup --enforce
 ```
 
 ## Plugin correlation and privacy
@@ -210,7 +210,7 @@ This feature does not make untrusted plugins safe. Plugins still run in-process 
 By default, the session index and every conversation entry are stored in a local SQLite database at
 `<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`) on the gateway host. For shared
 Postgres storage with an optional Redis hot cache, configure `session.storage`. See the
-`session.storage` section in [Gateway configuration](/gateway/configuration).
+`session.storage` section in [Gateway configuration](/admin/gateway/configuration).
 
 SQL session storage is the only session storage: there is no JSONL backend and no file fallback.
 The per-agent `sessions.json` paths survive only as (a) the identity of each agent's index and
@@ -231,6 +231,18 @@ If Postgres is unreachable at boot, the gateway exits with the probe cause inste
 degraded view; the service manager restarts it. The wait is bounded by
 `session.storage.recovery.startupProbeTimeoutMs` (default `600s`).
 
+**Planner statistics (#2239).** A fresh (or freshly-migrated) Postgres store has empty planner
+statistics until autoanalyze kicks in; on a large import the planner then mis-costs session-index
+reads — the observed symptom is 100% DB CPU and multi-second session lists. The one-line
+mitigation on an affected host is `ANALYZE ctx_sessions;`. Stores now self-ANALYZE: after schema
+creation on a fresh database, after a legacy-import sweep or pre-publish index import that
+ingested entries, and (inbox store) after schema open and each bulk-ingest pass, debounced.
+SQLite stores run the cheap `PRAGMA optimize` at open and a full `ANALYZE` after bulk loads.
+An owner open that hits its startup deadline, or a shutdown, while the post-import Postgres
+`ANALYZE` runs cancels that statement on the server (`pg_cancel_backend`) instead of waiting
+for it. The gateway logs `post-import ANALYZE failed` with `aborted: true`, and statistics
+catch up at the next import that ingests entries or at autoanalyze.
+
 ### Single owner
 
 The running gateway is the **single owner** of the session database, enforced by a storage-owner
@@ -242,8 +254,8 @@ holder sidecar; Postgres: `pg_try_advisory_lock` plus a `ctx_storage_owner` row)
   gateway the same way.
 - With no gateway, a CLI command takes ownership as `cli` for the duration of the command:
   index import on open, on-access transcript import, no automatic retention, no background sweep.
-- A second owner is refused with the holder's host and pid. `openclaw agent --local` refuses while
-  a gateway owns the database. Only `openclaw session-storage restore` needs the gateway stopped.
+- A second owner is refused with the holder's host and pid. `wednesdayai agent --local` refuses while
+  a gateway owns the database. Only `wednesdayai session-storage restore` needs the gateway stopped.
 
 ### Append-only history
 
@@ -281,9 +293,9 @@ operator step**. The first gateway start after upgrading:
 
 Import is receipted in the database and therefore resumable: a failing source never fails startup,
 and the next owner open retries it (up to five attempts; after that only an explicit
-`openclaw session-storage import` retries). If an on-access import fails, the turn still proceeds
+`wednesdayai session-storage import` retries). If an on-access import fails, the turn still proceeds
 — availability over completeness — and the failure stays visible in
-`openclaw session-storage status` and `openclaw doctor` until a retry succeeds. Containment
+`wednesdayai session-storage status` and `wednesdayai doctor` until a retry succeeds. Containment
 compares symlink-resolved paths, so a state dir reached through a symlink (for example the macOS
 `/var` -> `/private/var` link) imports the same transcripts as a plain path.
 
@@ -301,9 +313,9 @@ does not discard the imported history.
 ### Status and manual import
 
 ```bash
-openclaw session-storage status          # backend, readiness, legacy import progress
-openclaw session-storage status --json
-openclaw session-storage import          # run the sweep to completion now (retries failures)
+wednesdayai session-storage status          # backend, readiness, legacy import progress
+wednesdayai session-storage status --json
+wednesdayai session-storage import          # run the sweep to completion now (retries failures)
 ```
 
 `status` reports the import state (`none | pending | running | completed | error`), how many
@@ -320,13 +332,13 @@ sources are done, and the pre-import snapshot path when one exists.
 
 ### Backups and rollback
 
-- `openclaw session-storage backup` writes an online SQLite backup (`VACUUM INTO` on a separate
+- `wednesdayai session-storage backup` writes an online SQLite backup (`VACUUM INTO` on a separate
   read-only connection, so appends never wait); default output
   `<state-dir>/backups/sessions-<timestamp>.db` (`0600`). Under a running gateway the file is
   written under `<state-dir>/backups/`. The backup connection waits up to 5 seconds for a lock,
   so a backup no longer fails immediately with `database is locked` when it races another backup
   or the pre-import snapshot on a cold WAL database.
-- `openclaw session-storage restore <file>` is offline: stop the gateway, then the CLI replaces
+- `wednesdayai session-storage restore <file>` is offline: stop the gateway, then the CLI replaces
   `sessions.db` (the previous file is kept as `sessions.db.pre-restore-<timestamp>`).
 - Rollback means restoring a backup **with a SQL-capable build** of WednesdayAI. There is no
   downgrade to JSONL serving.
@@ -338,7 +350,7 @@ database back to a state with fewer or no import receipts, while the imported fi
 make that history available again, return every archived copy to the distinct original path its
 receipt recorded (divergent same-name copies each have their own receipt row):
 
-1. Stop the gateway and restore the backup. `openclaw session-storage restore` refuses to run
+1. Stop the gateway and restore the backup. `wednesdayai session-storage restore` refuses to run
    under a live gateway and preserves the replaced database as
    `<state-dir>/sessions.db.pre-restore-<timestamp>` — the live WAL is checkpointed into that
    archived copy first, so it is self-contained (sidecar archives survive only when the
@@ -407,7 +419,7 @@ receipt recorded (divergent same-name copies each have their own receipt row):
    The script exits non-zero when any row failed; fix the reported rows and re-run it (already
    restored rows then hit the `SKIP (destination exists)` guard and are reported, not overwritten).
 
-4. Start the gateway (or run `openclaw session-storage import`). The census reclassifies the
+4. Start the gateway (or run `wednesdayai session-storage import`). The census reclassifies the
    returned files at their original paths: a source with **no receipt row** in the restored
    database imports fresh; one with a **settled receipt whose fingerprint still matches**
    (`completed` or `archived_only`) is skipped because its rows are already in the restored
@@ -423,19 +435,19 @@ History imported from JSONL follows the same rules as native history: append-onl
 deleted. `session.maintenance` (`session.maintenance.mode: "enforce"` plus
 `pruneAfter`/`maxEntries`) only retires idle or over-cap sessions from the session index
 (tombstones); the conversation rows stay readable. Set `"enforce"` only after
-previewing with `openclaw sessions cleanup --dry-run`.
+previewing with `wednesdayai sessions cleanup --dry-run`.
 
 ## Session pruning
 
 WednesdayAI trims **old tool results** from the in-memory context right before LLM calls by default.
-This never rewrites stored history. See [/concepts/session-pruning](/concepts/session-pruning).
+This never rewrites stored history. See [/concepts/session-pruning](/developers/concepts/session-pruning).
 
 ## Pre-compaction memory flush
 
 When a session nears auto-compaction, WednesdayAI can run a **silent memory flush**
 turn that reminds the model to write durable notes to disk. This only runs when
-the workspace is writable. See [Memory](/concepts/memory) and
-[Compaction](/concepts/compaction).
+the workspace is writable. See [Memory](/developers/concepts/memory) and
+[Compaction](/developers/concepts/compaction).
 
 ## Mapping transports → session keys
 
@@ -491,11 +503,11 @@ that don't list accounts, are left alone:
 
 - Heartbeat and system-event output (cron `--system-event`, ACP nudges) is
   appended to the session chat instead (see
-  [Heartbeat](/gateway/heartbeat#delivery-behavior) for the fallback reason shown
-  in `openclaw status --deep`).
+  [Heartbeat](/admin/gateway/heartbeat#delivery-behavior) for the fallback reason shown
+  in `wednesdayai status --deep`).
 - Sub-agent completion announces run inside the requester session with no
   external send, and session notices are queued as a system event (see
-  [Sub-agents](/tools/subagents#announce)).
+  [Sub-agents](/users/tools/subagents#announce)).
 - `chat.send` replies from the web clients stay in the session chat and are not
   mirrored to the dead route.
 
@@ -570,14 +582,14 @@ Runtime override (owner only):
 
 ## Inspecting
 
-- `openclaw status` — shows store path and recent sessions.
-- `openclaw sessions --json` — dumps every entry (filter with `--active <minutes>`).
-- `openclaw gateway call sessions.list --params '{}'` — fetch sessions from the running gateway (use `--url`/`--token` for remote gateway access).
+- `wednesdayai status` — shows store path and recent sessions.
+- `wednesdayai sessions --json` — dumps every entry (filter with `--active <minutes>`).
+- `wednesdayai gateway call sessions.list --params '{}'` — fetch sessions from the running gateway (use `--url`/`--token` for remote gateway access).
 - Send `/status` as a standalone message in chat to see whether the agent is reachable, how much of the session context is used, current thinking/verbose toggles, and when your WhatsApp web creds were last refreshed (helps spot relink needs).
 - Send `/context list` or `/context detail` to see what’s in the system prompt and injected workspace files (and the biggest context contributors).
 - Send `/stop` (or standalone abort phrases like `stop`, `stop action`, `stop run`, `stop openclaw`) to abort the current run, clear queued followups for that session, and stop any sub-agent runs spawned from it (the reply includes the stopped count).
-- Send `/compact` (optional instructions) as a standalone message to summarize older context and free up window space. See [/concepts/compaction](/concepts/compaction).
-- To review full turns, page the transcript with the gateway `sessions.export` method (the macOS app's "Open session log" uses it), or use `openclaw sessions --json` for index metadata.
+- Send `/compact` (optional instructions) as a standalone message to summarize older context and free up window space. See [/concepts/compaction](/developers/concepts/compaction).
+- To review full turns, page the transcript with the gateway `sessions.export` method (the macOS app's "Open session log" uses it), or use `wednesdayai sessions --json` for index metadata.
 
 ## Tips
 
@@ -587,7 +599,7 @@ Runtime override (owner only):
 ## Troubleshooting
 
 **Two different people share context in DMs (privacy leak)**
-`dmScope: "main"` is the default and routes all direct messages into one session. Set `dmScope: "per-channel-peer"` (or `"per-account-channel-peer"` for multi-account inboxes) so each sender gets an isolated context. Run `openclaw security audit` to confirm your DM isolation settings.
+`dmScope: "main"` is the default and routes all direct messages into one session. Set `dmScope: "per-channel-peer"` (or `"per-account-channel-peer"` for multi-account inboxes) so each sender gets an isolated context. Run `wednesdayai security audit` to confirm your DM isolation settings.
 
 **Session does not reset at the expected daily time**
 The daily reset uses the gateway host's local time (default 4:00 AM). If the gateway host is in a different timezone than expected, the reset fires at the wrong wall-clock time. Adjust `session.reset.atHour` to match your preferred local time, or set the gateway host's timezone. Also verify the gateway restarted after the config change.
@@ -596,13 +608,13 @@ The daily reset uses the gateway host's local time (default 4:00 AM). If the gat
 By default history is kept forever and is never deleted automatically — there is no automatic
 space reclamation. `session.maintenance` (`warn`/`enforce`, `pruneAfter`, `maxEntries`) only
 retires idle or over-cap sessions from the session index (tombstones); the conversation rows stay.
-Use `openclaw sessions cleanup --dry-run --json` to preview which index entries would be retired.
+Use `wednesdayai sessions cleanup --dry-run --json` to preview which index entries would be retired.
 
 ## Related
 
-- [Session pruning](/concepts/session-pruning)
-- [Compaction](/concepts/compaction)
-- [Gateway configuration](/gateway/configuration)
+- [Session pruning](/developers/concepts/session-pruning)
+- [Compaction](/developers/concepts/compaction)
+- [Gateway configuration](/admin/gateway/configuration)
 
 ## Session origin metadata
 

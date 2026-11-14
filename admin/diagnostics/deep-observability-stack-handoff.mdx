@@ -1,0 +1,214 @@
+---
+summary: "Implementation handoff for the /srv/shared deep observability stack"
+audience: admin | developer
+sources:
+  - src/config/types.base.ts
+  - src/infra/diagnostic-capture.ts
+  - extensions/diagnostics-otel/src/runtime-metrics.ts
+  - extensions/diagnostics-otel/src/service.ts
+  - /srv/shared/docker-compose.yml
+  - /srv/shared/otelcol/config.yaml
+  - /srv/shared/config/promtail-config.yml
+generated: 2026-06-18
+read_when:
+  - Wiring WednesdayAI deep observability into the shared Grafana stack
+  - Adding process-level monitoring for the Linux gateway service
+  - Deciding whether profiling should run always-on or only during windows
+title: "Deep Observability Stack Handoff"
+---
+
+# Deep Observability Stack Handoff
+
+This page is the repository-owned handoff for the `/srv/shared` implementation work. It does not edit `/srv/shared`; it names the expected app signals and the stack changes needed to receive, store, query, and report on them.
+
+For operator setup, see [Deep Observability](/admin/gateway/deep-observability). For developer contracts, see [Deep Observability Developer Guide](/admin/diagnostics/deep-observability-developer). For dashboard, alert, recording-rule, and daily/weekly report design, see [Deep Observability Dashboards and Reports](/admin/diagnostics/deep-observability-dashboards-reports).
+
+## WednesdayAI app emits
+
+The application side now has three signal classes:
+
+- OTLP traces, metrics, and optional logs from `diagnostics-otel`, including trace IDs on exported log records for trace-to-log correlation.
+- Low-overhead runtime metrics from the OTel meter when `diagnostics.otel.runtime.enabled` is true: event loop utilization, event loop delay p99, GC duration, process memory, CPU time, uptime, V8 heap/space metrics, resource usage snapshots and per-window deltas, Linux file-descriptor count, and `/proc/self/io` counters.
+- Boundary events for plugin hooks, exported through OTel metrics/traces with bounded labels such as `boundary.kind`, `openclaw.operation`, `openclaw.component.id`, `hook.name`, and status.
+- The primary session write interceptor was audited and left behaviorally unchanged: injected tracers are used when provided, and the module-level OpenTelemetry fallback is intentionally inert when no provider is installed.
+- Authenticated gateway capture methods:
+  - `diagnostics.runtime.snapshot` for read-only process memory, CPU, uptime, and resource usage.
+  - `diagnostics.capture.cpu` for bounded CPU deltas over a requested window.
+  - `diagnostics.capture.heap` for V8 heap snapshots under the configured capture directory.
+  - `diagnostics.capture.report` for an allow-listed Node diagnostic report with environment variables, command line, stacks, module paths, shared object paths, prompt text, credentials, and config omitted.
+  - `diagnostics.profiling.start` and `diagnostics.profiling.stop` as the future Pyroscope adapter seam.
+
+Keep high-cardinality values out of metric labels. `runId`, `sessionKey`, `userId`, `chatId`, prompt text, tool payloads, credentials, and file contents belong in traces/logs only when explicitly gated and redacted.
+
+## /srv/shared changes
+
+### `/srv/shared/docker-compose.yml`
+
+Add or update services and mounts:
+
+- Add a Pyroscope service on the shared network with persistent storage under `/data/docker-volumes/pyroscope` or another retained bind mount.
+- Add a Pyroscope Grafana datasource dependency so Grafana starts after the profile store is reachable.
+- Add optional Grafana Alloy or Beyla for eBPF profiling and HTTP/gRPC RED discovery. Keep this optional because eBPF needs host privileges and should be deployable as a windowed diagnostic tool.
+- Add OTel collector host mounts if using the collector `hostmetrics` receiver:
+  - `/proc:/hostfs/proc:ro`
+  - `/sys:/hostfs/sys:ro`
+  - `/:/hostfs:ro`
+- Add Promtail journald access for `openclaw-gateway.service`:
+  - `/var/log/journal:/var/log/journal:ro`
+  - `/run/log/journal:/run/log/journal:ro`
+  - `/etc/machine-id:/etc/machine-id:ro`
+- Keep existing Docker/cAdvisor/node-exporter coverage. It is useful for host/container baseline, but it does not identify the user-level gateway process or child agent PIDs by itself.
+
+### `/srv/shared/otelcol/config.yaml`
+
+Keep the existing OTLP receiver and Tempo/Prometheus/Loki exporters. Add a `hostmetrics` receiver for process-over-time visibility:
+
+```yaml
+receivers:
+  hostmetrics/wednesdayai:
+    root_path: /hostfs
+    collection_interval: 15s
+    scrapers:
+      process:
+        include:
+          names:
+            - node
+            - bun
+            - wednesdayai
+            - openclaw
+          match_type: regexp
+        metrics:
+          process.cpu.time:
+            enabled: true
+          process.memory.usage:
+            enabled: true
+          process.disk.io:
+            enabled: true
+          process.open_file_descriptors:
+            enabled: true
+```
+
+Then add `hostmetrics/wednesdayai` to the metrics pipeline. If the collector version uses different process scraper names, keep the intent: process scraper coverage for `openclaw-gateway.service`, the main `wednesdayai`/`openclaw` Node process, and child agent processes.
+
+Use resource labels such as `service.namespace=wednesdayai` and low-cardinality process labels. Do not label metrics by session or run.
+
+### `/srv/shared/config/promtail-config.yml`
+
+Keep the Docker scrape. Add a journald scrape for the Linux user service:
+
+```yaml
+scrape_configs:
+  - job_name: openclaw-gateway-journal
+    journal:
+      path: /var/log/journal
+      labels:
+        job: openclaw-gateway
+    relabel_configs:
+      - source_labels: ["__journal__systemd_user_unit"]
+        target_label: unit
+      - source_labels: ["__journal__hostname"]
+        target_label: host
+      - source_labels: ["__journal__systemd_user_unit"]
+        regex: "openclaw-gateway.service"
+        action: keep
+```
+
+If the host stores user journals under `/run/log/journal`, mount that path and configure the matching journal path. The goal is Loki coverage for the real systemd user service, not only Docker containers.
+
+### `/srv/shared/grafana/provisioning/datasources/*.yml`
+
+Add a Pyroscope datasource:
+
+```yaml
+apiVersion: 1
+datasources:
+  - name: Pyroscope
+    type: grafana-pyroscope-datasource
+    access: proxy
+    url: http://pyroscope:4040
+    isDefault: false
+```
+
+Keep existing Prometheus, Loki, Tempo, and Langfuse/Infinity datasources. Wire Tempo trace-to-logs and trace-to-profiles links once Pyroscope is present.
+
+### `/srv/shared/config/prometheus.yml`
+
+If OTel remote write remains the only metrics path, no new scrape is needed for app runtime metrics. Add scrape entries only for new services that expose their own Prometheus endpoints, for example Pyroscope, Alloy, Beyla, or process-exporter if that path is chosen instead of OTel `hostmetrics`.
+
+Recommended optional process-exporter fallback:
+
+```yaml
+- job_name: "wednesdayai-processes"
+  static_configs:
+    - targets: ["process-exporter:9256"]
+      labels:
+        service_namespace: "wednesdayai"
+```
+
+Use either OTel `hostmetrics` process scraper or process-exporter as the baseline process-over-time source. Do not run both unless label names are intentionally separated to avoid duplicate panels and alerts.
+
+### `/srv/shared/config/alert_rules.yml`
+
+Add WednesdayAI-specific rules once the metrics land:
+
+- Gateway process missing for more than two minutes.
+- RSS growth slope sustained over 30-60 minutes.
+- Heap used near V8 heap limit.
+- Event loop utilization or delay sustained above the dashboard threshold.
+- GC pause p99 sustained high.
+- Process disk I/O write/read spikes.
+- Capture enabled, or Pyroscope profiling configured by the stack, in `always` mode longer than the intended window if operators want guardrails.
+- OTel collector dropped spans, metrics, or logs.
+
+Recording rules should precompute low-cardinality aggregates for dashboards:
+
+- CPU rate by process name and host.
+- RSS and heap by process name and host.
+- Disk read/write bytes by process name and host.
+- Plugin hook duration by `openclaw.component.id`, `openclaw.operation`, and status.
+- Model token usage by provider/model and status.
+
+## Profiling operating model
+
+Use the same mode names as `diagnostics.capture.mode` for the current app-side capture gate. Until a Pyroscope SDK or eBPF adapter is added, `diagnostics.profiling.start` and `diagnostics.profiling.stop` are gateway control seams only; real continuous or scheduled profiling is owned by the `/srv` stack change.
+
+| Mode       | Stack behavior                                                                                 | Use case                                       |
+| ---------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------- |
+| `off`      | No Pyroscope SDK/eBPF collection; only cheap metrics stay on.                                  | Stable production baseline after tuning.       |
+| `manual`   | Operator calls gateway capture methods and any configured stack profiler for a bounded window. | Incident deep dive while watching Grafana.     |
+| `always`   | Pyroscope runs continuously, with retention and storage limits configured.                     | Initial burn-in, launch week, regression hunt. |
+| `schedule` | A scheduler starts profile windows around releases or known heavy workloads.                   | Release performance sweep and periodic audit.  |
+
+For initial deployment, `always` is reasonable while the system is being characterized. Once stable, switch to `manual` or `schedule` and keep runtime/process metrics on 24x7.
+
+## Verification
+
+Run these from `/srv/shared` after implementing the stack changes:
+
+```bash
+docker compose config >/tmp/wednesdayai-observability-compose.yml
+test -f /srv/shared/otelcol/config.yaml
+test -f /srv/shared/config/promtail-config.yml
+test -f /srv/shared/config/prometheus.yml
+test -f /srv/shared/config/alert_rules.yml
+test -d /srv/shared/grafana/provisioning/datasources
+rg -n "Pyroscope|pyroscope" /srv/shared/docker-compose.yml /srv/shared/grafana/provisioning/datasources
+rg -n "hostmetrics|process scraper|process\\." /srv/shared/otelcol/config.yaml
+rg -n "openclaw-gateway.service" /srv/shared/config/promtail-config.yml
+```
+
+After restart:
+
+```bash
+docker compose up -d otel-collector promtail prometheus grafana
+docker compose ps
+curl -fsS http://localhost:4318/ >/dev/null || true
+curl -fsS http://localhost:9090/-/ready
+```
+
+In Grafana, verify:
+
+- Prometheus has runtime metrics such as `process_memory_usage`, `process_cpu_time`, and `v8js_gc_duration`.
+- Loki can query `{job="openclaw-gateway"}` or `{unit="openclaw-gateway.service"}`.
+- Tempo traces link to Loki logs by `trace_id` or `traceId`.
+- Pyroscope is queryable before enabling `always` mode.

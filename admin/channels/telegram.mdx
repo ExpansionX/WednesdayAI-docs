@@ -9,16 +9,16 @@ title: "Telegram"
 
 Status: production-ready for bot DMs + groups via grammY. Long polling is the default mode; webhook mode is optional.
 
-Telegram ships as a bundled channel plugin (`extensions/telegram`), so the plugin also appears in `openclaw plugins list`. The `channels.telegram` config keys and behavior are unchanged: set `channels.telegram.enabled: true` as before, or run `openclaw plugins enable telegram` (which also records `plugins.entries.telegram.enabled: true`).
+Telegram ships as a bundled channel plugin (`extensions/telegram`), so the plugin also appears in `wednesdayai plugins list`. The `channels.telegram` config keys and behavior are unchanged: set `channels.telegram.enabled: true` as before, or run `wednesdayai plugins enable telegram` (which also records `plugins.entries.telegram.enabled: true`).
 
 <CardGroup cols={3}>
-  <Card title="Pairing" icon="link" href="/channels/pairing">
+  <Card title="Pairing" icon="link" href="/admin/channels/pairing">
     Default DM policy for Telegram is pairing.
   </Card>
-  <Card title="Channel troubleshooting" icon="wrench" href="/channels/troubleshooting">
+  <Card title="Channel troubleshooting" icon="wrench" href="/admin/channels/troubleshooting">
     Cross-channel diagnostics and repair playbooks.
   </Card>
-  <Card title="Gateway configuration" icon="settings" href="/gateway/configuration">
+  <Card title="Gateway configuration" icon="settings" href="/admin/gateway/configuration">
     Full channel config patterns and examples.
   </Card>
 </CardGroup>
@@ -49,16 +49,16 @@ Telegram ships as a bundled channel plugin (`extensions/telegram`), so the plugi
 ```
 
     Env fallback: `TELEGRAM_BOT_TOKEN=...` (default account only).
-    Telegram does **not** use `openclaw channels login telegram`; configure token in config/env, then start gateway.
+    Telegram does **not** use `wednesdayai channels login telegram`; configure token in config/env, then start gateway.
 
   </Step>
 
   <Step title="Start gateway and approve first DM">
 
 ```bash
-openclaw gateway run
-openclaw pairing list telegram
-openclaw pairing approve telegram <CODE>
+wednesdayai gateway run
+wednesdayai pairing list telegram
+wednesdayai pairing approve telegram <CODE>
 ```
 
     Pairing codes expire after 1 hour.
@@ -118,15 +118,15 @@ Token resolution order is account-aware. In practice, config values win over env
     `channels.telegram.allowFrom` accepts numeric Telegram user IDs. `telegram:` / `tg:` prefixes are accepted and normalized.
     `dmPolicy: "allowlist"` with empty `allowFrom` blocks all DMs and is rejected by config validation.
     The onboarding wizard accepts `@username` input and resolves it to numeric IDs.
-    If you upgraded and your config contains `@username` allowlist entries, run `openclaw doctor --fix` to resolve them (best-effort; requires a Telegram bot token).
-    If you previously relied on pairing-store allowlist files, `openclaw doctor --fix` can recover entries into `channels.telegram.allowFrom` in allowlist flows (for example when `dmPolicy: "allowlist"` has no explicit IDs yet).
+    If you upgraded and your config contains `@username` allowlist entries, run `wednesdayai doctor --fix` to resolve them (best-effort; requires a Telegram bot token).
+    If you previously relied on pairing-store allowlist files, `wednesdayai doctor --fix` can recover entries into `channels.telegram.allowFrom` in allowlist flows (for example when `dmPolicy: "allowlist"` has no explicit IDs yet).
 
     ### Finding your Telegram user ID
 
     Safer (no third-party bot):
 
     1. DM your bot.
-    2. Run `openclaw logs --follow`.
+    2. Run `wednesdayai logs --follow`.
     3. Read `from.id`.
 
     Official Bot API method:
@@ -214,7 +214,7 @@ curl "https://api.telegram.org/bot<bot_token>/getUpdates"
     Getting the group chat ID:
 
     - forward a group message to `@userinfobot` / `@getidsbot`
-    - or read `chat.id` from `openclaw logs --follow`
+    - or read `chat.id` from `wednesdayai logs --follow`
     - or inspect Bot API `getUpdates`
 
   </Tab>
@@ -226,7 +226,7 @@ curl "https://api.telegram.org/bot<bot_token>/getUpdates"
 - Routing is deterministic: Telegram inbound replies back to Telegram (the model does not pick channels).
 - Inbound messages normalize into the shared channel envelope with reply metadata and media placeholders.
 - Group sessions are isolated by group ID. Forum topics append `:topic:<threadId>` to keep topics isolated.
-- DM messages can carry `message_thread_id`; OpenClaw routes them with thread-aware session keys and preserves thread ID for replies.
+- DM messages can carry `message_thread_id`; WednesdayAI routes them with thread-aware session keys and preserves thread ID for replies.
 - Long polling uses grammY runner with per-chat/per-thread sequencing. Overall runner sink concurrency uses `agents.defaults.maxConcurrent`.
 - Telegram Bot API has no read-receipt support (`sendReadReceipts` does not apply).
 
@@ -432,7 +432,7 @@ Privacy boundary:
 
 <AccordionGroup>
   <Accordion title="Live stream preview (native drafts + message edits)">
-    OpenClaw can stream partial replies in real time:
+    WednesdayAI can stream partial replies in real time:
 
     - direct chats: Telegram native draft streaming via `sendMessageDraft`
     - groups/topics: preview message + `editMessageText`
@@ -448,16 +448,16 @@ Privacy boundary:
 
     For text-only replies:
 
-    - DM: OpenClaw updates the draft in place (no extra preview message)
-    - group/topic: OpenClaw keeps the same preview message and performs a final edit in place (no second message)
+    - DM: WednesdayAI updates the draft in place (no extra preview message)
+    - group/topic: WednesdayAI keeps the same preview message and performs a final edit in place (no second message)
 
-    For complex replies (for example media payloads), OpenClaw falls back to normal final delivery and then cleans up the preview message.
+    For complex replies (for example media payloads), WednesdayAI falls back to normal final delivery and then cleans up the preview message.
 
     If the final preview edit fails with an ambiguous error (for example a timeout where the edit may already have landed), WednesdayAI keeps the existing preview, which may be slightly incomplete, rather than sending a duplicate final message.
 
-    Preview streaming is separate from block streaming. When block streaming is explicitly enabled for Telegram, OpenClaw skips the preview stream to avoid double-streaming.
+    Preview streaming is separate from block streaming. When block streaming is explicitly enabled for Telegram, WednesdayAI skips the preview stream to avoid double-streaming.
 
-    If native draft transport is unavailable/rejected, OpenClaw automatically falls back to `sendMessage` + `editMessageText`.
+    If native draft transport is unavailable/rejected, WednesdayAI automatically falls back to `sendMessage` + `editMessageText`.
 
     Telegram-only reasoning stream:
 
@@ -471,7 +471,7 @@ Privacy boundary:
 
     - Markdown-ish text is rendered to Telegram-safe HTML.
     - Raw model HTML is escaped to reduce Telegram parse failures.
-    - If Telegram rejects parsed HTML, OpenClaw retries as plain text.
+    - If Telegram rejects parsed HTML, WednesdayAI retries as plain text.
 
     Link previews are enabled by default and can be disabled with `channels.telegram.linkPreview: false`.
 
@@ -532,7 +532,7 @@ Privacy boundary:
     2. paste code in iOS app
     3. `/pair approve` approves latest pending request
 
-    More details: [Pairing](/channels/pairing#pair-via-telegram-recommended-for-ios).
+    More details: [Pairing](/admin/channels/pairing#pair-via-telegram-recommended-for-ios).
 
   </Accordion>
 
@@ -622,7 +622,7 @@ Privacy boundary:
     - `channels.telegram.actions.sticker` (default: disabled)
     - `channels.telegram.actions.createForumTopic` (default: enabled)
 
-    Reaction removal semantics: [/tools/reactions](/tools/reactions)
+    Reaction removal semantics: [/tools/reactions](/users/tools/reactions)
 
   </Accordion>
 
@@ -769,7 +769,7 @@ Privacy boundary:
   <Accordion title="Reaction notifications">
     Telegram reactions arrive as `message_reaction` updates (separate from message payloads).
 
-    When enabled, OpenClaw enqueues system events like:
+    When enabled, WednesdayAI enqueues system events like:
 
     - `Telegram reaction added: 👍 by Alice (@alice) on msg 42`
 
@@ -791,7 +791,7 @@ Privacy boundary:
   </Accordion>
 
   <Accordion title="Ack reactions">
-    `ackReaction` sends an acknowledgement emoji while OpenClaw is processing an inbound message.
+    `ackReaction` sends an acknowledgement emoji while WednesdayAI is processing an inbound message.
 
     Resolution order:
 
@@ -865,8 +865,8 @@ Privacy boundary:
     CLI send target can be numeric chat ID or username:
 
 ```bash
-openclaw message send --channel telegram --target <telegram-chat-id> --message "hi"
-openclaw message send --channel telegram --target @name --message "hi"
+wednesdayai message send --channel telegram --target <telegram-chat-id> --message "hi"
+wednesdayai message send --channel telegram --target @name --message "hi"
 ```
 
   </Accordion>
@@ -880,8 +880,8 @@ openclaw message send --channel telegram --target @name --message "hi"
     - If `requireMention=false`, Telegram privacy mode must allow full visibility.
       - BotFather: `/setprivacy` -> Disable
       - then remove + re-add bot to group
-    - `openclaw channels status` warns when config expects unmentioned group messages.
-    - `openclaw channels status --probe` can check explicit numeric group IDs; wildcard `"*"` cannot be membership-probed.
+    - `wednesdayai channels status` warns when config expects unmentioned group messages.
+    - `wednesdayai channels status --probe` can check explicit numeric group IDs; wildcard `"*"` cannot be membership-probed.
     - quick session test: `/activation always`.
 
   </Accordion>
@@ -890,7 +890,7 @@ openclaw message send --channel telegram --target @name --message "hi"
 
     - when `channels.telegram.groups` exists, group must be listed (or include `"*"`)
     - verify bot membership in group
-    - review logs: `openclaw logs --follow` for skip reasons
+    - review logs: `wednesdayai logs --follow` for skip reasons
 
   </Accordion>
 
@@ -964,7 +964,7 @@ dig +short api.telegram.org AAAA
   </Accordion>
 </AccordionGroup>
 
-More help: [Channel troubleshooting](/channels/troubleshooting).
+More help: [Channel troubleshooting](/admin/channels/troubleshooting).
 
 ## Telegram config reference pointers
 
@@ -974,10 +974,10 @@ Primary reference:
 - `channels.telegram.botToken`: bot token (BotFather).
 - `channels.telegram.tokenFile`: read token from file path.
 - `channels.telegram.dmPolicy`: `pairing | allowlist | open | disabled` (default: pairing).
-- `channels.telegram.allowFrom`: DM allowlist (numeric Telegram user IDs). `allowlist` requires at least one sender ID. `open` requires `"*"`. `openclaw doctor --fix` can resolve legacy `@username` entries to IDs and can recover allowlist entries from pairing-store files in allowlist migration flows.
+- `channels.telegram.allowFrom`: DM allowlist (numeric Telegram user IDs). `allowlist` requires at least one sender ID. `open` requires `"*"`. `wednesdayai doctor --fix` can resolve legacy `@username` entries to IDs and can recover allowlist entries from pairing-store files in allowlist migration flows.
 - `channels.telegram.defaultTo`: default Telegram target used by CLI `--deliver` when no explicit `--reply-to` is provided.
 - `channels.telegram.groupPolicy`: `open | allowlist | disabled` (default: allowlist).
-- `channels.telegram.groupAllowFrom`: group sender allowlist (numeric Telegram sender IDs). Positive IDs identify users; negative IDs identify group or channel actors. `openclaw doctor --fix` can resolve legacy `@username` entries to IDs. Non-numeric entries are ignored at auth time. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
+- `channels.telegram.groupAllowFrom`: group sender allowlist (numeric Telegram sender IDs). Positive IDs identify users; negative IDs identify group or channel actors. `wednesdayai doctor --fix` can resolve legacy `@username` entries to IDs. Non-numeric entries are ignored at auth time. Group auth does not use DM pairing-store fallback (`2026.2.25+`).
 - Multi-account precedence:
   - `channels.telegram.accounts.default.allowFrom` and `channels.telegram.accounts.default.groupAllowFrom` apply only to the `default` account.
   - Named accounts inherit `channels.telegram.allowFrom` and `channels.telegram.groupAllowFrom` when account-level values are unset.
@@ -1040,7 +1040,7 @@ Primary reference:
 - `channels.telegram.groups.<id>.tools`: per-group tool policy overrides.
 - `channels.telegram.groups.<id>.toolsBySender`: per-group tool policy by sender.
 
-- [Configuration reference - Telegram](/gateway/configuration-reference#telegram)
+- [Configuration reference - Telegram](/admin/gateway/configuration-reference#telegram)
 
 Telegram-specific high-signal fields:
 
@@ -1059,7 +1059,7 @@ Telegram-specific high-signal fields:
 
 ## Related
 
-- [Pairing](/channels/pairing)
-- [Channel routing](/channels/channel-routing)
-- [Multi-agent routing](/concepts/multi-agent)
-- [Troubleshooting](/channels/troubleshooting)
+- [Pairing](/admin/channels/pairing)
+- [Channel routing](/admin/channels/channel-routing)
+- [Multi-agent routing](/developers/concepts/multi-agent)
+- [Troubleshooting](/admin/channels/troubleshooting)

@@ -1,0 +1,613 @@
+---
+summary: "Inbound image/audio/video understanding (optional) with provider + CLI fallbacks"
+read_when:
+  - Designing or refactoring media understanding
+  - Tuning inbound audio/video/image preprocessing
+title: "Media Understanding"
+---
+
+# Media Understanding (Inbound) — 2026-01-17
+
+WednesdayAI can **summarize inbound media** (image/audio/video) before the reply pipeline runs. It auto‑detects when local tools or provider keys are available, and can be disabled or customized. If understanding is off, models still receive the original files/URLs as usual.
+
+**Providers as extensions:** media understanding providers are shipped as plugin extensions (e.g. `@wednesdayai/openai`, `@wednesdayai/google`), not built into core. **By default, all provider extensions are disabled** — enable them in config by setting `plugins.entries.<vendor>.enabled: true`. See [Plugin Extensions](#provider-extensions) below.
+
+## Goals
+
+- Optional: pre‑digest inbound media into short text for faster routing + better command parsing.
+- Preserve original media delivery to the model (always).
+- Support **provider APIs** and **CLI fallbacks**.
+- Allow multiple models with ordered fallback (error/size/timeout).
+
+## High‑level behavior
+
+1. Collect inbound attachments (`MediaPaths`, `MediaUrls`, `MediaTypes`).
+2. For each enabled capability (image/audio/video), select attachments per policy (default: **first**).
+3. Choose the first eligible model entry (size + capability + auth).
+4. If a model fails or the media is too large, **fall back to the next entry**.
+5. On success:
+   - `Body` becomes `[Image]`, `[Audio]`, or `[Video]` block.
+   - Audio sets `{{Transcript}}`; command parsing uses caption text when present,
+     otherwise the transcript.
+   - Captions are preserved as `User text:` inside the block.
+
+If understanding fails or is disabled, **the reply flow continues** with the original body + attachments.
+
+## Config overview
+
+`tools.media` supports **shared models** plus per‑capability overrides:
+
+- `tools.media.models`: shared model list (use `capabilities` to gate).
+- `tools.media.image` / `tools.media.audio` / `tools.media.video`:
+  - defaults (`prompt`, `maxChars`, `maxBytes`, `timeoutSeconds`, `language`)
+  - provider overrides (`baseUrl`, `headers`, `providerOptions`)
+  - Deepgram audio options via `tools.media.audio.providerOptions.deepgram`
+  - audio transcript echo controls (`echoTranscript`, default `false`; `echoFormat`)
+  - optional **per‑capability `models` list** (preferred before shared models)
+  - `attachments` policy (`mode`, `maxAttachments`, `prefer`)
+  - `scope` (optional gating by channel/chatType/session key)
+- `tools.media.concurrency`: max concurrent capability runs (default **2**).
+
+```json5
+{
+  tools: {
+    media: {
+      models: [
+        /* shared list */
+      ],
+      image: {
+        /* optional overrides */
+      },
+      audio: {
+        /* optional overrides */
+        echoTranscript: true,
+        echoFormat: '📝 "{transcript}"',
+      },
+      video: {
+        /* optional overrides */
+      },
+    },
+  },
+}
+```
+
+### Model entries
+
+Each `models[]` entry can be **provider** or **CLI**:
+
+```json5
+{
+  type: "provider", // default if omitted
+  provider: "openai",
+  model: "gpt-5.2",
+  prompt: "Describe the image in <= 500 chars.",
+  maxChars: 500,
+  maxBytes: 10485760,
+  timeoutSeconds: 60,
+  capabilities: ["image"], // optional, used for multi‑modal entries
+  profile: "vision-profile",
+  preferredProfile: "vision-fallback",
+  apiKeyProvider: "bifrost", // optional: use credentials from a different provider (credential borrowing)
+}
+```
+
+#### Credential borrowing (apiKeyProvider)
+
+Use `apiKeyProvider` to apply credentials from a different provider. This is useful when
+a proxy provider (e.g., Bifrost) handles authentication for underlying models:
+
+```json5
+{
+  provider: "openai",
+  model: "gpt-4o",
+  capabilities: ["image", "audio"],
+  apiKeyProvider: "bifrost", // use Bifrost API key instead of OPENAI_API_KEY
+}
+```
+
+#### Config-provided proxy bindings (OpenAI-compatible)
+
+An OpenAI-compatible API in `models.providers` can be used directly as a media
+understanding provider **without a plugin extension**:
+
+```json5
+{
+  models: {
+    providers: {
+      "my-proxy": {
+        api: "openai-completions", // or "openai-responses"
+        baseUrl: "https://my-ai-gateway.example.com/v1",
+        apiKey: "sk-...", // or use an environment variable
+        models: [
+          /* your chat models */
+        ],
+      },
+    },
+  },
+  tools: {
+    media: {
+      audio: {
+        models: [
+          {
+            provider: "my-proxy",
+            model: "whisper-1", // a speech-to-text model your proxy serves — chat model ids do not work here
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+The synthesis is applied automatically when the config is loaded: the proxy provider is registered with audio, image and video capabilities using standard OpenAI-compatible wire formats.
+
+**Image and video** ride the active chat model through the proxy when that model accepts image input; a chat model known to be text-only is skipped, and the proxy image/video path uses the OpenAI-compatible chat-completions wire regardless of whether the entry declares `openai-completions` or `openai-responses`.
+
+**Audio is never auto-detected** on a config-provided proxy: core cannot know which transcription model the proxy routes, so you must name one in `tools.media.audio.models`. A shared `tools.media.models` entry with `capabilities: ["audio"]` works for both the main pass and the pre-mention transcription of `requireMention` group voice notes, with or without a `tools.media.audio` key. `tools.media.audio.models` covers both paths on its own.
+
+Without that entry the gateway logs `media auto-selection exhausted: voice notes are never auto-detected on an OpenAI-compatible models.providers entry (my-proxy) …` and `wednesdayai doctor` names the provider and the same fix. When nothing usable resolves for audio, the pre-mention transcription pass for `requireMention` group voice notes warns with the same remedy on the `media-understanding/audio-preflight` logger.
+
+**Credentials** resolve under the proxy's raw `models.providers` key, in the standard order: stored auth profile, core env map, provider-declared env var, then `models.providers.<id>.apiKey` (first hit wins). The key and the endpoint always come from the same entry, so a proxy key whose id aliases a canonical media id (for example `gemini` vs `google`) is never borrowed from the canonical provider's credentials.
+
+Core sends the configured model id on the request as written in config. Proxy-side model aliasing and routing are operator configuration on the proxy — WednesdayAI does not rewrite or map model ids for the hop.
+
+```json5
+{
+  type: "cli",
+  command: "gemini",
+  args: [
+    "-m",
+    "gemini-3-flash",
+    "--allowed-tools",
+    "read_file",
+    "Read the media at {{MediaPath}} and describe it in <= {{MaxChars}} characters.",
+  ],
+  maxChars: 500,
+  maxBytes: 52428800,
+  timeoutSeconds: 120,
+  capabilities: ["video", "image"],
+}
+```
+
+CLI templates can also use:
+
+- `{{MediaDir}}` (directory containing the media file)
+- `{{OutputDir}}` (scratch dir created for this run)
+- `{{OutputBase}}` (scratch file base path, no extension)
+
+## Defaults and limits
+
+Recommended defaults:
+
+- `maxChars`: **500** for image/video (short, command‑friendly)
+- `maxChars`: **unset** for audio (full transcript unless you set a limit)
+- `maxBytes`:
+  - image: **10MB**
+  - audio: **20MB**
+  - video: **50MB**
+
+Rules:
+
+- If media exceeds `maxBytes`, that model is skipped and the **next model is tried**.
+- Audio files smaller than **1024 bytes** are treated as empty/corrupt and skipped before provider/CLI transcription.
+- If the model returns more than `maxChars`, output is trimmed.
+- `prompt` defaults to simple “Describe the {media}.” plus the `maxChars` guidance (image/video only).
+- If `<capability>.enabled: true` but no models are configured, WednesdayAI determines the
+  image/media model using the chat's session or channel model rather than just the agent default.
+  When the turn's active model is text-only, selection follows the
+  [text-only fallback order](#describing-media-when-the-primary-model-is-text-only).
+
+### Describing media when the primary model is text-only
+
+Media understanding evaluates whether the model handling the turn can perceive images or media
+natively. This check inspects the turn's session or channel model override (if set) rather than only
+the agent default model. If the active model is text-only, media understanding automatically selects
+a capable vision model in this order:
+
+1. `tools.media.image.models` (or shared `tools.media.models`) — explicit configuration replaces
+   the automatic chain below entirely
+2. `agents.defaults.imageModel`
+3. The active provider's first image-capable model in `models.providers.<id>.models[]`
+4. The provider's declared default model (`defaultModels.image`)
+5. The Gemini CLI, when the `gemini` binary is on PATH
+6. Auto-detect across enabled media providers (`autoDetectOrder`)
+
+The order above — the pin displacing the active model — applies only when the turn's active model
+is known to be text-only. When the active model is vision-capable, or unknown to the model
+catalog, `agents.defaults.imageModel` does not displace it: the active model is used first, and
+the pin keeps its fallback slot — after the active-model probe and local audio, before the
+Gemini CLI and auto-detect. This keeps a provider that authenticates through its own declared
+environment variables reachable on the active-model probe.
+
+### Auto-detect media understanding (default)
+
+If `tools.media.<capability>.enabled` is **not** set to `false` and you haven’t
+configured models, WednesdayAI auto-detects enabled providers and chooses based on
+per-provider `autoDetectOrder` metadata. **Shipped order** (lower numbers tried first):
+
+**Audio:**
+
+1. OpenAI (10)
+2. Groq (20)
+3. Deepgram (30)
+4. Google (40)
+5. Mistral (50)
+6. ElevenLabs (60)
+7. OpenRouter (70)
+8. DeepInfra (80)
+9. Bifrost (90)
+
+**Image:**
+
+1. OpenAI (10)
+2. Anthropic (20)
+3. Google (30)
+4. MiniMax (40)
+5. Z.ai (50)
+
+**Video:**
+
+1. Google (10)
+2. Moonshot (20)
+
+When a provider extension is **enabled**, its default model is used automatically if no explicit
+model entry is configured. To enable an extension, add its entry to your config:
+
+```json5
+{
+  plugins: {
+    entries: {
+      openai: { enabled: true },
+      groq: { enabled: true },
+      // other media-understanding providers...
+    },
+  },
+}
+```
+
+**Local CLIs** (audio only) are tried before provider auto-detection if installed:
+
+- `sherpa-onnx-offline` (requires `SHERPA_ONNX_MODEL_DIR` with encoder/decoder/joiner/tokens)
+- `whisper-cli` (`whisper-cpp`; uses `WHISPER_CPP_MODEL` or the bundled tiny model)
+- `whisper` (Python CLI; downloads models automatically)
+
+**Gemini CLI** (`gemini`) using `read_many_files` is available as a fallback CLI entry if configured.
+
+#### Migration from pre-0.5
+
+If you upgraded WednesdayAI and media understanding stopped working, the provider extension
+you need is now **disabled by default**. Check the gateway warning logs for a message like:
+
+```text
+media auto-selection exhausted: no media-understanding providers are registered — enable a
+media provider extension (plugins.entries.<id>.enabled: true)
+```
+
+The fix is to enable your provider extension in config (see above). You may also need to
+set `OPENAI_API_KEY` or the equivalent environment variable for your chosen provider if not
+already set. Credentials resolve in this order, first hit wins:
+
+1. A stored auth profile for the provider.
+2. An environment variable core maps for that provider id.
+3. Any variable the provider extension declares for itself, such as `ELEVENLABS_API_KEY` or
+   `DEEPINFRA_API_KEY`.
+4. `models.providers.<id>.apiKey` in `openclaw.json`.
+
+A provider whose credential resolves nowhere is **skipped** during auto-detection rather than
+tried and failed.
+
+If instead the log says `media auto-selection exhausted: voice notes are never auto-detected on an OpenAI-compatible models.providers entry`, your estate is a config-provided proxy rather than a provider extension — see [Config-provided proxy bindings](#config-provided-proxy-bindings-openai-compatible) and set `tools.media.audio.models`.
+
+<Note>
+Step 3 did not work in releases up to and including 0.4.10: a provider whose id core did not
+recognise could never authenticate, no matter which variable was exported. ElevenLabs and DeepInfra
+were affected, as was Google when only `GOOGLE_API_KEY` was set rather than `GEMINI_API_KEY`.
+</Note>
+
+To disable auto-detection, set:
+
+```json5
+{
+  tools: {
+    media: {
+      audio: {
+        enabled: false,
+      },
+    },
+  },
+}
+```
+
+Note: Binary detection is best-effort across macOS/Linux/Windows; ensure the CLI is on `PATH` (we expand `~`), or set an explicit CLI model with a full command path.
+
+### Proxy environment support (provider models)
+
+When provider-based **audio** and **video** media understanding is enabled, WednesdayAI
+honors standard outbound proxy environment variables for provider HTTP calls:
+
+- `HTTPS_PROXY`
+- `HTTP_PROXY`
+- `https_proxy`
+- `http_proxy`
+
+If no proxy env vars are set, media understanding uses direct egress.
+If the proxy value is malformed, WednesdayAI logs a warning and falls back to direct
+fetch.
+
+## Capabilities (optional)
+
+If you set `capabilities`, the entry only runs for those media types. For shared
+lists, WednesdayAI can infer defaults:
+
+- `openai`, `anthropic`, `minimax`: **image**
+- `google` (Gemini API): **image + audio + video**
+- `groq`: **audio**
+- `deepgram`: **audio**
+
+For CLI entries, **set `capabilities` explicitly** to avoid surprising matches.
+If you omit `capabilities`, the entry is eligible for the list it appears in.
+
+## Provider support matrix (WednesdayAI integrations)
+
+| Provider     | Audio | Image | Video | Notes                                                         |
+| ------------ | ----- | ----- | ----- | ------------------------------------------------------------- |
+| OpenAI       | ✓     | ✓     | —     | Whisper API (audio), vision model (image).                    |
+| Groq         | ✓     | —     | —     | Whisper API via Groq.                                         |
+| Deepgram     | ✓     | —     | —     | Deepgram speech-to-text.                                      |
+| Google       | ✓     | ✓     | ✓     | Gemini API (all three capabilities).                          |
+| Mistral      | ✓     | —     | —     | Mistral Voxtral transcription.                                |
+| ElevenLabs   | ✓     | —     | —     | ElevenLabs Scribe.                                            |
+| MiniMax      | —     | ✓     | —     | MiniMax-VL vision models.                                     |
+| Moonshot     | —     | —     | ✓     | Moonshot video understanding.                                 |
+| OpenRouter   | ✓     | —     | —     | OpenAI-compatible audio transcription proxy.                  |
+| DeepInfra    | ✓     | —     | —     | OpenAI-compatible Whisper proxy.                              |
+| Bifrost      | ✓     | ✓     | ✓     | Proxy/LLM routing; audio, image, video via OpenAI-compatible. |
+| Config proxy | ✓     | ✓     | ✓     | Any OpenAI-compatible API in `models.providers`.              |
+
+## Model selection guidance
+
+- Prefer the strongest latest-generation model available for each media capability when quality and safety matter.
+- For tool-enabled agents handling untrusted inputs, avoid older/weaker media models.
+- Keep at least one fallback per capability for availability (quality model + faster/cheaper model).
+- CLI fallbacks (`whisper-cli`, `whisper`, `gemini`) are useful when provider APIs are unavailable.
+- `parakeet-mlx` note: with `--output-dir`, WednesdayAI reads `<output-dir>/<media-basename>.txt` when output format is `txt` (or unspecified); non-`txt` formats fall back to stdout.
+
+## Provider extensions
+
+Media understanding providers are plugin extensions that must be explicitly enabled. Enable
+a provider extension by adding it to your config under `plugins.entries`:
+
+```json5
+{
+  plugins: {
+    entries: {
+      // Built-in provider extensions; disabled by default
+      openai: { enabled: true },
+      groq: { enabled: true },
+      deepgram: { enabled: true },
+      google: { enabled: true },
+      mistral: { enabled: true },
+      elevenlabs: { enabled: true },
+      openrouter: { enabled: true },
+      deepinfra: { enabled: true },
+      bifrost: { enabled: true },
+      // Enable only the providers you need
+    },
+  },
+}
+```
+
+See [Plugin Agent Tools](/next/developers/plugins/agent-tools) and [Plugin Media Understanding
+Providers](/next/developers/plugins/media-understanding-providers) for details on building custom
+media understanding providers.
+
+Each extension provides:
+
+- **Provider ID**: used in `provider:` field when explicitly configuring a model entry.
+- **Auto-detect metadata**: `autoDetectOrder` (priority for auto-selection) and
+  `defaultModels` (fallback model when none is configured).
+- **Wire functions**: capabilities-specific implementations (audio transcription, image
+  description, video understanding).
+- **Declared env vars**: `envVars`, the environment variables the provider can authenticate from.
+  These are honoured as a credential source, so an extension can ship support for its own key
+  without a core change.
+
+## Attachment policy
+
+Per‑capability `attachments` controls which attachments are processed:
+
+- `mode`: `first` (default) or `all`
+- `maxAttachments`: cap the number processed (default **1**)
+- `prefer`: `first`, `last`, `path`, `url`
+
+When `mode: "all"`, outputs are labeled `[Image 1/2]`, `[Audio 2/2]`, etc.
+
+To describe every photo in an album, configure `attachments` under `tools.media.image`:
+
+```json5
+{
+  tools: {
+    media: {
+      image: {
+        attachments: {
+          mode: "all",
+          maxAttachments: 10,
+        },
+      },
+    },
+  },
+}
+```
+
+## Config examples
+
+### 1) Shared models list + overrides
+
+```json5
+{
+  tools: {
+    media: {
+      models: [
+        { provider: "openai", model: "gpt-5.2", capabilities: ["image"] },
+        {
+          provider: "google",
+          model: "gemini-3-flash-preview",
+          capabilities: ["image", "audio", "video"],
+        },
+        {
+          type: "cli",
+          command: "gemini",
+          args: [
+            "-m",
+            "gemini-3-flash",
+            "--allowed-tools",
+            "read_file",
+            "Read the media at {{MediaPath}} and describe it in <= {{MaxChars}} characters.",
+          ],
+          capabilities: ["image", "video"],
+        },
+      ],
+      audio: {
+        attachments: { mode: "all", maxAttachments: 2 },
+      },
+      video: {
+        maxChars: 500,
+      },
+    },
+  },
+}
+```
+
+### 2) Audio + Video only (image off)
+
+```json5
+{
+  tools: {
+    media: {
+      audio: {
+        enabled: true,
+        models: [
+          { provider: "openai", model: "gpt-4o-mini-transcribe" },
+          {
+            type: "cli",
+            command: "whisper",
+            args: ["--model", "base", "{{MediaPath}}"],
+          },
+        ],
+      },
+      video: {
+        enabled: true,
+        maxChars: 500,
+        models: [
+          { provider: "google", model: "gemini-3-flash-preview" },
+          {
+            type: "cli",
+            command: "gemini",
+            args: [
+              "-m",
+              "gemini-3-flash",
+              "--allowed-tools",
+              "read_file",
+              "Read the media at {{MediaPath}} and describe it in <= {{MaxChars}} characters.",
+            ],
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+### 3) Optional image understanding
+
+```json5
+{
+  tools: {
+    media: {
+      image: {
+        enabled: true,
+        maxBytes: 10485760,
+        maxChars: 500,
+        models: [
+          { provider: "openai", model: "gpt-5.2" },
+          { provider: "anthropic", model: "claude-opus-4-6" },
+          {
+            type: "cli",
+            command: "gemini",
+            args: [
+              "-m",
+              "gemini-3-flash",
+              "--allowed-tools",
+              "read_file",
+              "Read the media at {{MediaPath}} and describe it in <= {{MaxChars}} characters.",
+            ],
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+### 4) Multi‑modal single entry (explicit capabilities)
+
+```json5
+{
+  tools: {
+    media: {
+      image: {
+        models: [
+          {
+            provider: "google",
+            model: "gemini-3-pro-preview",
+            capabilities: ["image", "video", "audio"],
+          },
+        ],
+      },
+      audio: {
+        models: [
+          {
+            provider: "google",
+            model: "gemini-3-pro-preview",
+            capabilities: ["image", "video", "audio"],
+          },
+        ],
+      },
+      video: {
+        models: [
+          {
+            provider: "google",
+            model: "gemini-3-pro-preview",
+            capabilities: ["image", "video", "audio"],
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+## Status output
+
+When media understanding runs, `/status` includes a short summary line:
+
+```text
+📎 Media: image ok (openai/gpt-5.2) · audio skipped (maxBytes)
+```
+
+This shows per‑capability outcomes and the chosen provider/model when applicable.
+
+## Notes
+
+- Understanding is **best‑effort**. Errors do not block replies.
+- Attachments are still passed to models even when understanding is disabled.
+- Use `scope` to limit where understanding runs (e.g. only DMs).
+- A failure is quiet in the reply but not in the log. Each provider that is reached and fails logs
+  one `warn` line with its status and message, and an exhausted chain logs a single `warn`
+  summarising every attempt. Set `logging.level` to `debug` for per-step detail: the resolved
+  chain, each attempt, and the transcript length on success.
+
+## Related docs
+
+- [Configuration](/next/admin/gateway/configuration)
+- [Image & Media Support](/next/users/nodes/images)

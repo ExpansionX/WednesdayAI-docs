@@ -1,0 +1,194 @@
+---
+summary: "CLI reference for `wednesdayai devices` (device pairing + token rotation/revocation)"
+read_when:
+  - You are approving device pairing requests
+  - You need to rotate or revoke device tokens
+title: "devices"
+---
+
+# `wednesdayai devices`
+
+Manage device pairing requests and device-scoped tokens.
+
+## Commands
+
+### `wednesdayai devices list`
+
+List pending pairing requests and paired devices.
+
+```
+wednesdayai devices list
+wednesdayai devices list --json
+```
+
+`--json` returns `pending` and `paired` arrays; each `paired` entry carries a `deviceId` and, when
+the device is linked to a person, an `identity` field holding that person's `session.identityLinks`
+key. A device's person is stored on its pairing record, not in `session.identityLinks`. Gateway
+clients (web client, Control UI) send their turns as `device:<deviceId>`, and assistants with
+[workspace lanes](/next/developers/concepts/workspace-lanes#linking-gateway-devices) require the device to be
+linked. The paired-device table also shows an `Identity` column with the linked key. See
+[Identities](/next/admin/gateway/identity). A companion credential issued by a WednesdayAI app device shows as
+`<name> (companion of <app name>)`, and its `--json` entry carries `companionOf: <app deviceId>`;
+removing, revoking or pruning the app removes its companions (see
+[Device companions and device.self](/next/admin/gateway/protocol#device-companions-and-deviceself)).
+
+The paired table also shows `Registered` (age of the first registration, kept across re-pairing),
+`Last Active` (latest connection activity or token use) and `State`: `connected` for a device with
+an open connection, `stale` for one inactive longer than `gateway.devices.staleAfterDays` (default
+90), and `replaces <n>` when a newer enrolment of the same person, app and hardware supersedes `n`
+older records. `--json` carries the same data as `firstRegisteredAtMs`, `lastActiveAtMs`,
+`connected`, `stale` and `supersedes`.
+
+### `wednesdayai devices link <deviceId> --identity <key>`
+
+Link a paired device to a `session.identityLinks` identity.
+The key must already exist; unknown keys are never created:
+
+```
+wednesdayai devices link <deviceId> --identity Alice
+wednesdayai devices link <deviceId> --identity Alice --json
+```
+
+Prints `Linked <deviceId> to <Identity>.`; when the device is already linked to that identity it
+prints `<deviceId> is already linked to <Identity>.` and writes nothing. A device belongs to one
+person for good. Linking a device that is already linked to someone else is refused:
+
+```
+device:<deviceId> is already linked to Bob. A device never moves to another person: deregister it (wednesdayai devices remove <deviceId>) and pair it again for the new person.
+```
+
+The only way to give a device to someone else, or back to the same person, is to deregister it
+(`devices remove` or `devices unlink`) and pair again; the new pairing is a new device record. A
+node-only device (paired with the `node` role and not `operator`) has no person, and linking it is
+refused with `<deviceId> is a node; nodes have no person and cannot be linked.`
+(`DEVICE_LINK_NODE_REFUSED`). An unpaired device is refused with `unknown deviceId`.
+The identities `prototype`, `constructor` and `__proto__` are reserved and refused; rename them in
+`session.identityLinks` first. That rename is a one-time fix for a hand-edited config; normal
+enrollment never needs a hand edit (see [Identities](/next/admin/gateway/identity)).
+
+The [Control UI v2](/next/admin/web/control-ui-v2) console can link an unlinked device and unlink a linked
+one from its **Nodes & devices** page (Fleet group), over the `device.identity.link` and
+`device.identity.unlink` RPCs (`operator.admin`). It does not change a linked device's person, and
+its **Unlink** deregisters the device like `devices unlink`.
+Identities are created on the gateway host with `wednesdayai identity add <name>` (see
+[Identities](/next/admin/gateway/identity)).
+
+### `wednesdayai devices unlink <deviceId>`
+
+Deregister a device: remove its pairing record, with its tokens and its person, and close its
+connections. Unlinking a device is the same as `devices remove`; there is no unlink-then-link
+rebind, and pairing again creates a new device record:
+
+```
+wednesdayai devices unlink <deviceId>
+wednesdayai devices unlink <deviceId> --json
+```
+
+Prints `Unlinked <deviceId> from <person>.` (or `<deviceId> is not linked.`) and, when the device
+was still paired, `Removed <deviceId>; pair it again to use it.` (`deregistered: true` in
+`--json`). Device ids match case-insensitively.
+
+### `wednesdayai devices remove <deviceId>`
+
+Remove one paired device entry and close its connections. If the device was linked, the removal
+also unlinks it and prints `Unlinked from <keys>.`
+
+```
+wednesdayai devices remove <deviceId>
+wednesdayai devices remove <deviceId> --json
+```
+
+### `wednesdayai devices clear --yes [--pending]`
+
+Clear paired devices in bulk.
+
+```
+wednesdayai devices clear --yes
+wednesdayai devices clear --yes --pending
+wednesdayai devices clear --yes --pending --json
+```
+
+`clear` needs a running gateway; it is never applied locally.
+
+### `wednesdayai devices prune --stale|--superseded [--dry-run] [--yes]`
+
+Revoke and archive stale or superseded paired records:
+
+```
+wednesdayai devices prune --stale --dry-run
+wednesdayai devices prune --stale --yes
+wednesdayai devices prune --superseded --yes
+wednesdayai devices prune --stale --superseded --yes --json
+```
+
+- `--stale` selects devices and legacy node records inactive longer than
+  `gateway.devices.staleAfterDays`.
+- `--superseded` selects records flagged by a newer enrolment (`replaces <n>` in `devices list`).
+  A record is kept when its replacement is being pruned in the same run, so a chain of
+  re-enrolments retires one link at a time and two records never retire each other.
+- `--dry-run` prints `Would archive …` lines and changes nothing. Without `--dry-run`, `--yes` is
+  required.
+
+Each pruned record has every token revoked, is archived in the session database (pairing archive
+tables, token secrets dropped), is removed from the paired table, and is unlinked from its
+identity. A connected device is never pruned; it is reported as `Skipped connected <id>`. Prune
+needs a running gateway (it reads live connection state and writes config).
+
+### `wednesdayai devices approve [requestId] [--latest]`
+
+Approve a pending device pairing request. If `requestId` is omitted, WednesdayAI
+automatically approves the most recent pending request.
+
+```
+wednesdayai devices approve
+wednesdayai devices approve <requestId>
+wednesdayai devices approve --latest
+```
+
+### `wednesdayai devices reject <requestId>`
+
+Reject a pending device pairing request.
+
+```
+wednesdayai devices reject <requestId>
+```
+
+### `wednesdayai devices rotate --device <id> --role <role> [--scope <scope...>]`
+
+Rotate a device token for a specific role (optionally updating scopes).
+
+```
+wednesdayai devices rotate --device <deviceId> --role operator --scope operator.read --scope operator.write
+```
+
+### `wednesdayai devices revoke --device <id> --role <role>`
+
+Revoke a device token for a specific role.
+
+```
+wednesdayai devices revoke --device <deviceId> --role node
+```
+
+## Common options
+
+- `--url <url>`: Gateway WebSocket URL (defaults to `gateway.remote.url` when configured).
+- `--token <token>`: Gateway token (if required).
+- `--password <password>`: Gateway password (password auth).
+- `--timeout <ms>`: RPC timeout.
+- `--json`: JSON output (recommended for scripting).
+
+Note: when you set `--url`, the CLI does not fall back to config or environment credentials.
+Pass `--token` or `--password` explicitly. Missing explicit credentials is an error.
+
+## Notes
+
+- Token rotation returns a new token (sensitive). Treat it like a secret.
+- The pairing and token commands (`list`/`approve`/`reject`/`remove`/`clear`/`prune`/`rotate`/`revoke`) require `operator.pairing` (or `operator.admin`) scope. `devices link` and `devices unlink` require `operator.admin`: linking grants a person's identity.
+- `devices clear` is intentionally gated by `--yes`.
+- Pairing state lives in the session database. When no gateway owns storage, `devices list`,
+  `devices approve`, `devices reject`, `devices remove`, `devices rotate` and `devices revoke`
+  open the database locally and apply the change directly; `devices clear`, `devices prune`,
+  `devices link` and `devices unlink` need a running gateway. On first open the CLI imports any
+  legacy `devices/*.json` / `nodes/*.json` files once (see
+  [Gateway pairing storage](/next/admin/gateway/pairing#storage)).
+- Successful bootstrap redemptions (including the bounded-profile ids `openclaw-even-g2-node`, `openclaw-mentra-node`, `openclaw-user-client`, `wednesdayai-glass-node`) are approved silently and appear under `paired`; non-bootstrap pairing and role or scope upgrade requests can still appear under `pending`. To cut a device off, `devices revoke --device <id> --role <role>` prevents subsequent reconnects but does not close an existing connection: restart the gateway (or otherwise close its socket) for immediate containment. `devices remove <id>` deletes the row so the device must scan a new setup code (see [MentraOS glasses](/next/admin/platforms/mentra-glass)).

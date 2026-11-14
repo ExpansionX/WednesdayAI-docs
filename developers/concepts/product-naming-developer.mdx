@@ -1,0 +1,114 @@
+---
+audience: developer
+component: concepts/product-naming
+sources:
+  - src/agents/system-prompt.ts
+  - src/agents/system-prompt-report.ts
+  - src/agents/system-prompt.branding.test.ts
+  - src/agents/context-branding-grep.test.ts
+  - package.json
+  - dev-docs/adr/0051-system-prompt-markers-wednesdayai.md
+generated: 2026-08-11
+title: "Product naming for contributors"
+summary: "Case map, KEEP vs REPLACE rules, marker lockstep, and guard tests for model-visible branding"
+---
+
+# Product naming for contributors
+
+Model-visible agent context uses the **WednesdayAI** brand. Operator identifiers, disk paths, env vars, and SDK package names stay **openclaw**. This page is the contract for code and tests that touch either side.
+
+## Case map (exact)
+
+| Form                                       | Replace with  |
+| ------------------------------------------ | ------------- |
+| `openclaw` (all lowercase, prose/teaching) | `wednesdayai` |
+| `OPENCLAW` (all uppercase, prose/teaching) | `WEDNESDAYAI` |
+| `OpenClaw` (mixed case, prose/teaching)    | `WednesdayAI` |
+
+Do not invent other spellings (`Wednesday AI`, `wednesday-ai`, `Openclaw`, …).
+
+## KEEP classes (never blind-rename)
+
+Even when a string is model-visible or adjacent to REPLACE text, keep these byte-identical:
+
+- `OPENCLAW_*` env vars
+- `~/.openclaw/`, `openclaw.json`, service/unit names, sockets, `/__openclaw__/canvas/`
+- TypeScript identifiers (`OpenClawConfig`, `createOpenClawTools`, …)
+- Import specifier `wednesdayai/plugin-sdk` (legacy `openclaw/plugin-sdk` specifier still loads per ADR 2057), and dual package/bin aliases
+- Legacy package-pack manifest key `openclaw` (canonical `wednesdayai`; legacy key still loads per ADR 2057), legacy manifest filename `openclaw.plugin.json` (canonical `wednesdayai.plugin.json`; legacy filename still loads per ADR 2057)
+- `__OPENCLAW_REDACTED__`, `openclaw.inbound_meta.v1`, `provider: "openclaw"`
+- Tool-group name `group:openclaw`, browser `profile="openclaw"`, Lobster step `openclaw.invoke`
+
+When a line mixes KEEP and REPLACE (example: `profile="openclaw"` next to “openclaw-managed browser” prose), change **only** the prose token.
+
+## Prompt markers (lockstep)
+
+```ts
+// src/agents/system-prompt.ts
+export const SYSTEM_PROMPT_CACHE_BOUNDARY = "<!-- WEDNESDAYAI_CACHE_BOUNDARY -->";
+export const SYSTEM_PROMPT_PROJECT_CONTEXT_END = "<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->";
+```
+
+`src/agents/system-prompt-report.ts` **must** import those constants — never re-hardcode marker literals. Assembler and parser are same-binary pairs (ADR 0051).
+
+## Surfaces that must say WednesdayAI
+
+- System prompt identity and section headings (`## WednesdayAI Self-Update`, `## WednesdayAI CLI Quick Reference`, docs block, tool blurbs)
+- Subagent / announce / group intro strings that the model reads
+- Tool error and status text reused into model context (including `session_status` version line, browser relay icon name)
+- Bundled skill descriptions/bodies and workspace templates under `docs/reference/templates/`
+- Model-taught docs base URL: `https://docs.wednesdayai.dev`
+- Model-taught CLI spelling: primary binary `wednesdayai` (`openclaw` remains a legacy alias at the process boundary, under staged removal per ADR 2057)
+
+## Public import surface
+
+Plugins and extensions import from the canonical SDK specifier:
+
+```ts
+import type { OpenClawPluginApi } from "wednesdayai/plugin-sdk";
+// legacy alias openclaw/plugin-sdk still loads (ADR 2057)
+```
+
+Do not import core via relative paths into `src/`.
+
+## Guard tests
+
+| Test                                           | Role                                                                                  |
+| ---------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `src/agents/system-prompt.branding.test.ts`    | Assembled prompt contains WednesdayAI identity and no stale `running inside OpenClaw` |
+| `src/agents/context-branding-grep.test.ts`     | Repo sweep gate for high-risk model-context paths                                     |
+| `src/auto-reply/reply/groups.branding.test.ts` | Group-intro branding assembly                                                         |
+| `scripts/docs-surface-product-naming.test.ts`  | docs-surface.yaml product-naming mapping + identity pages                             |
+
+Update colocated string assertions in the **same change** as the source rename. Prefer at least one test that builds the real prompt (or real tool result) rather than only checking a helper return value.
+
+## What not to do
+
+```ts
+// ❌ Re-hardcode markers in the report parser
+const end = "<!-- WEDNESDAYAI_CACHE_BOUNDARY -->\n";
+
+// ❌ Rename env / state dir “for consistency”
+process.env.WEDNESDAYAI_STATE_DIR;
+
+// ❌ Teach the model docs.openclaw.ai or openclaw gateway … in new prompt copy
+```
+
+```ts
+// ✅ Import shared marker constants
+import {
+  SYSTEM_PROMPT_CACHE_BOUNDARY,
+  SYSTEM_PROMPT_PROJECT_CONTEXT_END,
+} from "./system-prompt.js";
+
+// ✅ KEEP operator identity
+process.env.OPENCLAW_STATE_DIR;
+// ~/.openclaw/openclaw.json
+```
+
+## Related
+
+- Admin/operator guide: [Product naming](/developers/concepts/product-naming)
+- User summary: [What is WednesdayAI?](/developers/concepts/product-naming-user)
+- [System Prompt](/developers/concepts/system-prompt), [Prompt Caching](/developers/reference/prompt-caching)
+- ADR 0051: `dev-docs/adr/0051-system-prompt-markers-wednesdayai.md`
