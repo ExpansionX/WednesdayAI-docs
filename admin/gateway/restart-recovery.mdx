@@ -43,6 +43,27 @@ Probes are unauthenticated. `Cache-Control: no-store`. Only `GET` and `HEAD` are
 
 Chat `send` / `chat.send` / `agent` RPCs reject with `RECOVERY_NOT_READY` (`recovery_pending`) until admission opens.
 
+## Restart window
+
+Between shutdown and the next listener, connections are refused (`ECONNREFUSED`). The window is
+bounded by the restart drain (`gateway.restartResilience.drainTimeoutMs`, default 30 s, for active
+tasks and ACP turns), then a shutdown budget of up to 25 s (15 s task dispatcher drain, 5 s
+interactive work, 5 s storage close), then boot. An idle gateway restarts in a few seconds.
+
+`listening on …` means the process is bound. `gateway ready: accepting work (startup Nms)` means
+root work is admitted; when restart recovery runs, `/readyz` returns 200 at the same point.
+Measure the window from the old process's `signal SIGTERM received` line to the new
+`gateway ready` line.
+
+`GatewayClient` reconnects with a 1 s→30 s backoff, and CLI sessions park requests until the
+next hello. Other callers retry after reconnect.
+
+Idle `agent_idle` triggers and cron schedule windows wait while admission is closed and fire on
+the first tick after it opens, so a boot no longer produces one `RECOVERY_NOT_READY` enqueue
+failure per configured agent. A `HH:MM-HH:MM` schedule window that elapses entirely during the
+wait is skipped rather than fired late, the same as any other tick the monitor misses. A cron
+schedule window whose occurrences pass during the wait fires once, not once per missed occurrence.
+
 ## Storage-backed RPCs during a restart
 
 Session storage opens during boot through the fail-fast lifecycle — before the restart-recovery

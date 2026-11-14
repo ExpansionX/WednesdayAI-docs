@@ -2,7 +2,7 @@
 summary: "Versioned kernel contracts, the manifest contracts field, plugin conformance checks, private import rules and the contract surface snapshot"
 read_when:
   - You are building a plugin and want to know which contracts the host provides
-  - You need to declare contract requirements in openclaw.plugin.json
+  - You need to declare contract requirements in wednesdayai.plugin.json
   - You are changing a public plugin-sdk or gateway type and need the versioning rules
   - You hit a contract compatibility, conformance or private import error
 title: "Versioned Kernel Contracts"
@@ -15,18 +15,18 @@ The kernel exposes six versioned contracts. Each contract id names one public su
 extension builds against, versioned as `major.minor` by a constant in
 `src/plugins/contract-versions.ts`. Versions are compiled into the host, so they are reliable
 even when the host version string is not. All ids, constants and the compat checker are
-re-exported from `openclaw/plugin-sdk`.
+re-exported from `wednesdayai/plugin-sdk`.
 
 ## Versioned contracts
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.5`           | The public `openclaw/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                                  | nothing — core provides all of it                                                                   |
-| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `1.1`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
-| `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.1`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
-| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.4`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.31`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.6`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
+| `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.8`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.8`           | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.18`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -49,7 +49,14 @@ Contract versions are `major.minor` strings. The policy is:
   `implemented` type, changing a signature or type shape, or flipping a direction.
 - **Additive** (requires only a minor bump): new optional members, new members on a `provided`
   type, new required members beneath a newly added optional member (omitting the optional parent
-  omits them), and new deprecation markers.
+  omits them), new deprecation markers, and pure string-literal union widening — a union that
+  gains literals while its literal-elided shape stays unchanged — in either direction (proved by
+  `literalRuns`/`shapeHash` on digest-stored entries, or by the elided shape of a short text).
+
+A type-text difference that vanishes under member-order canonicalization is **no change at all**:
+the checker's print order for spread and inferred object types follows symbol allocation, not the
+contract, so order-only permutations emit no change line. Member order that is semantic is never
+canonicalized: bare call/construct signatures and same-name overload groups keep authored order.
 
 Three refinements keep the classifier honest. First, adding members to a `provided` type
 changes the parent's recorded shape text, and that parent change is classified as additive
@@ -71,12 +78,20 @@ both snapshots were produced by the same text algorithm (the snapshot's `typeTex
 an algorithm change is a notice with per-contract counts, like a TypeScript bump, never a
 breaking change by itself.
 
+Optional members can also hide inside one entry's text. A leaf entry with no keys recorded beneath
+it whose type is an inline object (`ConnectParams.auth`) classifies additive in either direction
+when the only difference is new optional properties; a union of object arms, a retyped, removed or
+newly required property stays breaking. The registry check applies the same rule one level down:
+a nested object property that only gained optional properties, with every other keyword
+unchanged, is an optional addition.
+
 A breaking change without a major bump fails CI (see [Changing a contract](#changing-a-contract)).
 
 ## Declaring what your plugin needs
 
-The optional `contracts` field in `openclaw.plugin.json` maps contract ids to the minimum
-`major.minor` version your plugin requires:
+The optional `contracts` field in `wednesdayai.plugin.json` maps contract ids to the minimum
+`major.minor` version your plugin requires (the legacy `openclaw.plugin.json` filename still
+loads):
 
 ```json
 {
@@ -112,9 +127,11 @@ Where the check runs:
 - **At install**: `src/plugins/install.ts` refuses the install with the error code
   `VERSION_INCOMPATIBLE` and the message `plugin "<id>" is not compatible with this host:
 <reason>. Upgrade WednesdayAI and retry.` An invalid version string is prefixed with
-  `invalid contract version in openclaw.plugin.json:`. A malformed `contracts` field (not a map
+  `invalid contract version in <manifest>:`. A malformed `contracts` field (not a map
   whose values are version strings or arrays of strings) is rejected the same way — and before any files are copied — with
-  the message `invalid contracts field in openclaw.plugin.json: <error>`.
+  the message `invalid contracts field in <manifest>: <error>`. `<manifest>` is the filename
+  actually read: `wednesdayai.plugin.json`, or the legacy `openclaw.plugin.json` when that is
+  the only file present.
 - **At load**: `src/plugins/manifest-registry.ts` drops the plugin and records an error
   diagnostic with the internal code `PLUGIN_CONTRACT_INCOMPATIBLE` (or `PLUGIN_MANIFEST_INVALID`
   when the manifest fails to parse — including a malformed `contracts` field — or the declared
@@ -130,8 +147,7 @@ See [Plugin manifest](/plugins/manifest) for the rest of the manifest shape.
 ## Conformance suite
 
 `src/plugin-sdk/conformance.ts`, `conformance-delivery.ts` and `conformance-ingress.ts` ship
-framework-free checkers through `openclaw/plugin-sdk/testing` (same surface as
-`wednesdayai/plugin-sdk/testing`). Each checker returns a report of rule violations;
+framework-free checkers through `wednesdayai/plugin-sdk/testing`. Each checker returns a report of rule violations;
 `assertConformance` throws a typed `ConformanceError` when any report has violations, so
 extension tests never need to import a test framework to run the checks.
 
@@ -141,7 +157,7 @@ import {
   checkDeliveryConformance,
   checkExtensionConformance,
   checkIngressConformance,
-} from "openclaw/plugin-sdk/testing";
+} from "wednesdayai/plugin-sdk/testing";
 
 const reports = [
   ...(await checkExtensionConformance({
@@ -202,22 +218,23 @@ real send path — with a credential-bearing config, that sends a real message. 
 probe only against an in-memory or sandbox adapter.
 
 `test/fixtures/plugins/conformance-reference/` is the reference implementation: a minimal
-in-memory channel plugin that imports only from `openclaw/plugin-sdk` and passes every check.
+in-memory channel plugin that imports only from `wednesdayai/plugin-sdk` and passes every check.
 For an extension-side example, see `extensions/telegram/src/outbound.conformance.test.ts`.
 
 ## Private imports
 
 An extension may import core only through the plugin-sdk surface:
 
-- `openclaw/plugin-sdk` (alias `wednesdayai/plugin-sdk`), and
-- its exported `./plugin-sdk/*` subpaths, for example `openclaw/plugin-sdk/account-id`,
-  `openclaw/plugin-sdk/keyed-async-queue`, `openclaw/plugin-sdk/process-scoped-map`,
-  `openclaw/plugin-sdk/lazy-runtime`, `openclaw/plugin-sdk/escape-regexp`,
-  `openclaw/plugin-sdk/control-ui`,
-  `openclaw/plugin-sdk/provider-web-search` and
-  `openclaw/plugin-sdk/provider-media-understanding`, and
-- `openclaw/plugin-sdk/testing` from test files only. Importing it from production code is
+- `wednesdayai/plugin-sdk` (alias `wednesdayai/plugin-sdk`), and
+- its exported `./plugin-sdk/*` subpaths, for example `wednesdayai/plugin-sdk/account-id`,
+  `wednesdayai/plugin-sdk/keyed-async-queue`, `wednesdayai/plugin-sdk/process-scoped-map`,
+  `wednesdayai/plugin-sdk/lazy-runtime`, `wednesdayai/plugin-sdk/escape-regexp`,
+  `wednesdayai/plugin-sdk/control-ui`,
+  `wednesdayai/plugin-sdk/provider-web-search` and
+  `wednesdayai/plugin-sdk/provider-media-understanding`, and
+- `wednesdayai/plugin-sdk/testing` from test files only. Importing it from production code is
   forbidden because the jiti manifest entrypoint never loads it in production.
+  The legacy `openclaw/plugin-sdk` specifier and its subpaths still load (ADR 2057).
 
 The bare package root `openclaw` and `openclaw/cli-entry` appear in the root `package.json`
 `exports` map, but they are not part of the allowed plugin surface; importing either one from an
@@ -240,7 +257,7 @@ Rule ids:
   still deep-import `src/` when their file is in the documented allowlist).
 - `core-internal-package-path` — a `openclaw/...` or `wednesdayai/...` import that is not one of
   the allowed plugin-sdk subpaths above.
-- `testing-subpath-in-production` — `openclaw/plugin-sdk/testing` imported from a production
+- `testing-subpath-in-production` — `wednesdayai/plugin-sdk/testing` imported from a production
   file instead of a test file.
 - `stale-allowlist-entry` — an allowlist entry whose file no longer deep-imports `src/`, so the
   exception can be deleted.
@@ -250,10 +267,10 @@ Rule ids:
 Plugins load from TypeScript source through jiti, which hands a second concurrent `import()` of
 a module that is still evaluating a partially initialized copy. Calling into it throws
 `ReferenceError: Cannot access '<name>' before initialization`. Wrap every relative dynamic
-import in a module-level loader from `openclaw/plugin-sdk/lazy-runtime`:
+import in a module-level loader from `wednesdayai/plugin-sdk/lazy-runtime`:
 
 ```ts
-import { createLazyRuntimeModule } from "openclaw/plugin-sdk/lazy-runtime";
+import { createLazyRuntimeModule } from "wednesdayai/plugin-sdk/lazy-runtime";
 
 const loadSend = createLazyRuntimeModule(() => import("./send.js"));
 
@@ -306,6 +323,8 @@ error, never a silent fallback to the default base. It fails CI with:
 - `contract.removed` — a contract id disappeared from the snapshot. Fix: reinstate it or record
   the removal with a major bump and a released `@deprecated` alias
   (see [Renaming and removing](#renaming-and-removing)).
+- `payload.untyped` — a member newly typed as an open `Record<string, unknown>` (see
+  [What the snapshot tracks](#what-the-snapshot-tracks)).
 
 ### What the snapshot tracks
 
@@ -314,15 +333,34 @@ optional, its direction, its deprecation marker, and the entry's printed type te
 exceptions: an anonymous object property that gets flattened into dotted child entries records a
 marker instead of its own text (its children carry the shape), and a non-enumerable type text
 longer than 240 characters is stored as a `sha256:` digest (an enumerable one is flattened
-instead; see below). For generic interfaces, classes and type aliases
+instead; see below). A digest-stored entry whose text contains string literals also records them
+as `literalRuns` — the sorted vocabulary per literal run, in position order — plus `shapeHash`, a
+digest of the text with every literal run replaced by a placeholder, so the diff can prove a pure
+vocabulary append without the digest pre-image (runs compare positionally, so one union narrowing
+while another grows is still breaking). Four positions never count as vocabulary, in short texts or
+recorded evidence: template-literal text (quoted fragments there are static content, not union
+members); the argument lists of `Record`, `Pick`, `Omit`, and `Exclude` (key and subtraction
+sets, where a growing union adds or removes properties); a literal carrying the array postfix
+(the `"b"[]` arm of `"a" | "b"[]` is its own alternative, not another run member); and
+conditional-type operands (`T extends "a" ? …` — the inline form of `Exclude`). Edits in those
+positions flip the elided shape and keep the conservative classification. For generic interfaces, classes and type aliases
 the declaration's type-parameter list — constraints and defaults included — is appended to the
 recorded text (`Box<T> { value: T; } <T>`), because the printed type alone drops them; this
-closes the generic-type-alias known limit in ADR 0117. A member whose type is a named type is tracked by that
-type's printed name only, so a change inside that named type surfaces only if the type is exported
-from `openclaw/plugin-sdk` (where the `sdk` contract catches it) or is itself listed as a root in
-`scripts/contract-surface/roots.ts`; a consequence is that such a change can demand an `sdk` bump
-rather than a bump of the contract whose member actually changed. The test-only
-`openclaw/plugin-sdk/testing` subpath is deliberately excluded from the `sdk` contract.
+closes the generic-type-alias known limit in ADR 0117. A member whose type is a named object type
+declared in this repository (an alias or interface outside `node_modules`, not a class, not a root)
+is flattened into dotted child entries like an anonymous object, so removing a member inside it
+demands a major bump of the contract that references it. Types from dependencies and the
+TypeScript library (`Date`, arrays) stay nominal, and so does any type whose declaration carries
+the JSDoc tag `@contractNominal <reason>`: `OpenClawConfig` does, because config keys are
+versioned by the config schema and the `sdk` contract tracks the `OpenClawConfig` export itself.
+The test-only `wednesdayai/plugin-sdk/testing` subpath is deliberately excluded from the `sdk`
+contract.
+
+A member typed as an open record (`Record<string, unknown>`, `{ [key: string]: unknown }` or an
+alias of either) is recorded with `untyped: true`, because its keys cannot be diffed. Typing a
+new member that way fails the check with `payload.untyped`. Fix: give it a typed shape, or tag the
+property `/** @openPayload <reason> */` when its keys are deliberately opaque. Open records that
+already existed are listed in a grandfathered notice on every run.
 
 When an entry's printed text is opaque (past the 240-char digest cap) but the shape behind it is
 enumerable, the generator records that shape as dotted per-member entries and marks the parent
@@ -335,6 +373,13 @@ with a `typeTextVersion` bump: snapshots recorded before it are not compared tex
 notice reports the skip). Entry keys, optionality, deprecation and direction are still compared,
 so removals and optionality regressions stay breaking. A same-key retype or signature change is
 not detected on the run that crosses the version bump.
+
+Zod library types are recorded by their resolved class name plus authored type arguments, wherever
+they appear: `ZodEnum<{ allowlist: "allowlist"; open: "open"; }>`,
+`(schema: ZodType<unknown, unknown>): …`. zod's derived `*Internals` arguments and the class's own
+methods are left out. A zod release that only changes the library's API, or how it aliases
+`ZodTypeAny`, is therefore not a contract change, while an authored change such as a new enum
+option still diffs. This recording shipped with `typeTextVersion` 8.
 
 ## Renaming and removing
 

@@ -137,7 +137,7 @@ Publication runs only from `.github/workflows/npm-publish.yml` through the `npm-
 
 ## Version locations
 
-`package.json` `version` is the single source of truth. Only the release-please Release PR bumps it; never hand-edit it (CI `version:guard` rejects hand edits). All other locations are derived by `pnpm version:sync`; never edit them directly:
+`package.json` `version` is the single source of truth. Only the release-please Release PR bumps it; never hand-edit it (`pnpm version:guard`, part of `pnpm check`, rejects hand edits). All other locations are derived by `pnpm version:sync`; never edit them directly:
 
 - `packages/clawdbot/package.json` and `packages/moltbot/package.json` (shim `version`)
 - every `extensions/*/package.json` `version` field
@@ -161,25 +161,27 @@ Config keys, CLI flags, and SDK exports are never removed immediately when renam
 
 - A rename plus alias is backward-compatible, so use a `feat:` or `fix:` commit, not `BREAKING CHANGE`.
 - Reserve `BREAKING CHANGE` or `!` for hard removals and incompatibilities with no migration path.
-- The `openclaw` to `wednesdayai` rename is the canonical example. The old name remains a permanent alias, so that refactor was never a breaking change.
+- The `openclaw` to `wednesdayai` rename is the canonical example. The old names stay readable as legacy aliases, so each rename step is not a breaking change. Removing an alias follows the staged plan in ADR 2057 (`dev-docs/adr/2057-openclaw-legacy-with-removal.md`): primary flip, then a deprecation notice, then removal under its own ADR.
 
 ## Plugin publish scope (npm)
 
-WednesdayAI extensions use the `@wednesdayai` npm organization for new first-party plugin
-packages:
+All bundled extension packages live in the `@wednesdayai` npm organization:
 
-- **`@wednesdayai/*`** — WednesdayAI-native extensions built for this fork (new additions go here).
-- **`@openclaw/*`** — inherited extensions from the fork base. Publish only if the package is already on npm under that scope; do not add new extensions under `@openclaw/` — use `@wednesdayai/` instead.
+- **`@wednesdayai/*`** — every bundled extension is named `@wednesdayai/<plugin-id>` (ADR 2057).
+- **`@openclaw/*`** — belongs to upstream openclaw. Never publish under that scope and never
+  install from it: an `@openclaw/<id>` install spec for a bundled plugin resolves to the
+  bundled copy shipped with WednesdayAI, not to upstream's npm package.
 
-Bundled plugins that are not on npm stay **disk-tree only** (still shipped in `extensions/**`).
-`@wednesdayai/whatsapp` is the first dependency-bearing first-party plugin on the npm rail.
+Bundled plugins that are not on npm are **`private`** and stay **disk-tree only** (still
+shipped in `extensions/**`). Today only `wednesdayai` (the CLI/core) and
+`@wednesdayai/whatsapp` are published on the npm rail.
 
 Process to derive future publish candidates:
 
 1. Start from plugin ids under `extensions/*`.
-2. Compare with `extensions/*/package.json` names.
+2. Compare with `extensions/*/package.json` names (`@wednesdayai/<plugin-id>`).
 3. Publish new WednesdayAI-native packages under `@wednesdayai/<plugin-id>` only after the package has built JavaScript entries and runtime dependency validation.
-4. Keep inherited `@openclaw/*` packages compatibility-only unless a package is known to target this fork.
+4. Keep unpublished packages `"private": true`; flipping one to published needs its own ADR-level decision (ADR 0037).
 
 Release notes must also call out **new optional bundled plugins** that are **not on by default** (example: `tlon`).
 

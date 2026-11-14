@@ -16,18 +16,18 @@ Start at [/help/troubleshooting](/help/troubleshooting) if you want the fast tri
 Run these first, in this order:
 
 ```bash
-openclaw status
-openclaw gateway status
-openclaw logs --follow
-openclaw doctor
-openclaw channels status --probe
+wednesdayai status
+wednesdayai gateway status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai channels status --probe
 ```
 
 Expected healthy signals:
 
-- `openclaw gateway status` shows `Runtime: running` and `RPC probe: ok`.
-- `openclaw doctor` reports no blocking config/service issues.
-- `openclaw channels status --probe` shows connected/ready channels.
+- `wednesdayai gateway status` shows `Runtime: running` and `RPC probe: ok`.
+- `wednesdayai doctor` reports no blocking config/service issues.
+- `wednesdayai channels status --probe` shows connected/ready channels.
 
 ## Anthropic 429 extra usage required for long context
 
@@ -35,9 +35,9 @@ Use this when logs/errors include:
 `HTTP 429: rate_limit_error: Extra usage is required for long context requests`.
 
 ```bash
-openclaw logs --follow
-openclaw models status
-openclaw config get agents.defaults.models
+wednesdayai logs --follow
+wednesdayai models status
+wednesdayai config get agents.defaults.models
 ```
 
 Look for:
@@ -63,11 +63,11 @@ Related:
 If channels are up but nothing answers, check routing and policy before reconnecting anything.
 
 ```bash
-openclaw status
-openclaw channels status --probe
-openclaw pairing list --channel <channel> [--account <id>]
-openclaw config get channels
-openclaw logs --follow
+wednesdayai status
+wednesdayai channels status --probe
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai config get channels
+wednesdayai logs --follow
 ```
 
 Look for:
@@ -114,7 +114,7 @@ Look for:
 Fix options:
 
 1. Restart the gateway so startup reconciliation can refresh bundled install
-   records: Linux `systemctl --user restart openclaw-gateway`; macOS
+   records: Linux `systemctl --user restart wednesdayai-gateway`; macOS
    `wednesdayai gateway restart --deep`.
 2. Run `wednesdayai plugins update <id>` to reconcile plugin install metadata
    before npm update selection runs.
@@ -124,6 +124,48 @@ Fix options:
 Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
 discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
 record is enough for validation and config-schema checks.
+
+## Plugin or skill install refuses
+
+Use this when `wednesdayai plugins install <id>` or `wednesdayai skills install <id>`
+exits with a refusal and nothing was installed. Catalog installs are verified, not
+trusted: compatibility first (no network), then Sigstore provenance, then digest. The
+full message reference is [Compatibility](/plugins/compatibility).
+
+```bash
+wednesdayai --version
+wednesdayai update
+wednesdayai plugins install <id>
+wednesdayai skills install <id>
+```
+
+Look for:
+
+- ``plugin "<id>" <version> is not compatible with this host: <reason>. Run
+`wednesdayai update` to upgrade WednesdayAI, then retry.`` (or the same shape with `skill`) —
+  the catalog entry needs a newer host than you run.
+- `refusing to install "<id>" <version>: provenance verification failed: <detail>` —
+  the npm artifact has no SLSA attestation, was signed by a different workflow or ref,
+  or its digest differs from the catalog pin.
+- `could not load the Sigstore trusted root (needs https://tuf-repo-cdn.sigstore.dev): ...` —
+  the Sigstore trusted-root refresh could not reach the TUF mirror. Check network egress
+  to `https://tuf-repo-cdn.sigstore.dev` (corporate proxies and airgapped hosts are the
+  usual cause), then retry. Nothing was installed.
+- A leftover `.openclaw-install-stage-*` directory next to the install target
+  (`~/.openclaw/extensions/` or `~/.openclaw/skills/`) — the install failed and the stage
+  cleanup also failed. Stage directories are dot-prefixed and skipped by plugin and skill
+  discovery, so they are inert; it is safe to delete the leftover directory manually, and
+  the refusal error includes a `cleanup also failed: ...` note naming it.
+
+Fix options:
+
+1. For a compatibility refusal: run `wednesdayai update`, then retry the install.
+2. For a provenance refusal: do not retry from the bare npm spec. The artifact must be
+   re-published through the release workflow so a correct attestation exists.
+3. For a trusted-root or network failure: restore egress to
+   `https://tuf-repo-cdn.sigstore.dev` and npmjs, then retry.
+4. For a leftover stage directory: confirm no install is running, then remove
+   `.openclaw-install-stage-*` under the state extensions/skills roots.
 
 ## Host plugin SDK warning at startup
 
@@ -151,7 +193,7 @@ shows a `PLUGIN_HOOK_NOT_DISPATCHED` warning, for example:
 
 ```
 [plugins] startup: 0 loaded, 1 warning — see warnings below
-  ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream openclaw hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
+  ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream wednesdayai hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
     → See the hook parity map: https://docs.wednesdayai.dev/developers/plugins/hook-parity
 ```
 
@@ -212,11 +254,11 @@ Fix options:
 When dashboard/control UI will not connect, validate URL, auth mode, and secure context assumptions.
 
 ```bash
-openclaw gateway status
-openclaw status
-openclaw logs --follow
-openclaw doctor
-openclaw gateway status --json
+wednesdayai gateway status
+wednesdayai status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai gateway status --json
 ```
 
 Look for:
@@ -238,9 +280,9 @@ Common signatures:
 Device auth v2 migration check:
 
 ```bash
-openclaw --version
-openclaw doctor
-openclaw gateway status
+wednesdayai --version
+wednesdayai doctor
+wednesdayai gateway status
 ```
 
 If logs show nonce/signature errors, update the connecting client and verify it:
@@ -260,11 +302,11 @@ Related:
 Use this when service is installed but process does not stay up.
 
 ```bash
-openclaw gateway status
-openclaw status
-openclaw logs --follow
-openclaw doctor
-openclaw gateway status --deep
+wednesdayai gateway status
+wednesdayai status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai gateway status --deep
 ```
 
 Look for:
@@ -275,9 +317,14 @@ Look for:
 
 Common signatures:
 
-- `Gateway start blocked: set gateway.mode=local` → local gateway mode is not enabled. Fix: set `gateway.mode="local"` in your config (or run `openclaw configure`). If you are running OpenClaw via Podman using the dedicated `openclaw` user, the config lives at `~openclaw/.openclaw/openclaw.json`.
+- `Gateway start blocked: set gateway.mode=local` → local gateway mode is not enabled. Fix: set `gateway.mode="local"` in your config (or run `wednesdayai configure`). If you are running WednesdayAI via Podman using the dedicated `openclaw` user, the config lives at `~openclaw/.openclaw/openclaw.json`.
 - `refusing to bind gateway ... without auth` → non-loopback bind without token/password.
 - `another gateway instance is already listening` / `EADDRINUSE` → port conflict.
+- `RECOVERY_NOT_READY` (`recovery_pending`) on chat or `agent` calls → the gateway is listening
+  but restart recovery has not opened admission yet. Wait for the
+  `gateway ready: accepting work (startup Nms)` log line; `/readyz` returns `200` at the same
+  point. Idle and cron triggers deferred across this window fire once admission opens. See
+  [Restart recovery](/gateway/restart-recovery).
 - `Gateway failed to start: ...` → the gateway process exited during startup. The fatal line
   prints the full error cause chain (nested `cause`s walked to the root, redacted), so the
   underlying reason is in the message — for example
@@ -294,22 +341,22 @@ Related:
 
 ## Gateway restart refused on invalid config
 
-Symptom: `openclaw gateway restart` exits non-zero with `Config invalid`, names the config file and the exact issue path, and the gateway keeps running.
+Symptom: `wednesdayai gateway restart` exits non-zero with `Config invalid`, names the config file and the exact issue path, and the gateway keeps running.
 
 This is the pre-flight restart gate working as intended: the gateway never stops when the config it would boot into is already known-invalid. Before this gate, a bad config edit turned a restart into a crash loop under systemd or launchd supervision.
 
 Recovery:
 
 1. Read the issue path in the refusal output, for example `plugins.entries.<id>.config: invalid config: must NOT have additional properties`.
-2. Repair with `openclaw doctor --fix`, or fix the named key manually.
-3. Verify with `openclaw config validate` (prints `Config valid`).
-4. Retry `openclaw gateway restart`.
+2. Repair with `wednesdayai doctor --fix`, or fix the named key manually.
+3. Verify with `wednesdayai config validate` (prints `Config valid`).
+4. Retry `wednesdayai gateway restart`.
 
 Notes:
 
 - `gateway stop` and shutdown signals (`SIGTERM`, `SIGINT`) are never gated; `SIGUSR1` watchdog restarts remain gated.
-- Watchdog restarts from config reload (`gateway.reload.mode="restart"` or `"hybrid"`) are gated the same way: an invalid edit is skipped, the gateway keeps running the previous valid config, and the refusal warning appears in the gateway log. The warning names the config file, the exact issue path, and the same repair commands (`openclaw doctor --fix`, `openclaw config validate`).
-- A first start of a stopped gateway is not gated; invalid config there surfaces as a normal startup error.
+- Watchdog restarts from config reload (`gateway.reload.mode="restart"` or `"hybrid"`) are gated the same way: an invalid edit is skipped, the gateway keeps running the previous valid config, and the refusal warning appears in the gateway log. The warning names the config file, the exact issue path, and the same repair commands (`wednesdayai doctor --fix`, `wednesdayai config validate`).
+- A first start of a stopped gateway is not gated; invalid config there surfaces as a normal startup error. When launchd or systemd runs that start, the gateway waits for the config file to change (or 5 minutes) before exiting, so the service does not restart-loop; fix the config and the service manager restarts it.
 
 Related:
 
@@ -321,11 +368,11 @@ Related:
 If channel state is connected but message flow is dead, focus on policy, permissions, and channel specific delivery rules.
 
 ```bash
-openclaw channels status --probe
-openclaw pairing list --channel <channel> [--account <id>]
-openclaw status --deep
-openclaw logs --follow
-openclaw config get channels
+wednesdayai channels status --probe
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai status --deep
+wednesdayai logs --follow
+wednesdayai config get channels
 ```
 
 Look for:
@@ -354,10 +401,10 @@ Use this when Telegram logs repeat messages like
 or webhook mode receives requests but does not dispatch updates.
 
 ```bash
-openclaw channels status --probe
-openclaw logs --follow
-openclaw config get channels.telegram
-openclaw gateway status --deep
+wednesdayai channels status --probe
+wednesdayai logs --follow
+wednesdayai config get channels.telegram
+wednesdayai gateway status --deep
 ```
 
 Look for:
@@ -406,11 +453,11 @@ Related:
 If cron or heartbeat did not run or did not deliver, verify scheduler state first, then delivery target.
 
 ```bash
-openclaw cron status
-openclaw cron list
-openclaw cron runs --id <jobId> --limit 20
-openclaw system heartbeat last
-openclaw logs --follow
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai system heartbeat last
+wednesdayai logs --follow
 ```
 
 Look for:
@@ -445,8 +492,8 @@ for the warnings.
 If `sessions.runs.list` returns no rows or stale timestamps:
 
 ```bash
-openclaw logs --follow
-journalctl --user -u openclaw-gateway | grep "session-run store write failed"
+wednesdayai logs --follow
+journalctl --user -u wednesdayai-gateway | grep "session-run store write failed"
 ```
 
 Look for:
@@ -477,11 +524,11 @@ Related:
 If a node is paired but tools fail, isolate foreground, permission, and approval state.
 
 ```bash
-openclaw nodes status
-openclaw nodes describe --node <idOrNameOrIp>
-openclaw approvals get --node <idOrNameOrIp>
-openclaw logs --follow
-openclaw status
+wednesdayai nodes status
+wednesdayai nodes describe --node <idOrNameOrIp>
+wednesdayai approvals get --node <idOrNameOrIp>
+wednesdayai logs --follow
+wednesdayai status
 ```
 
 Look for:
@@ -508,11 +555,11 @@ Related:
 Use this when browser tool actions fail even though the gateway itself is healthy.
 
 ```bash
-openclaw browser status
-openclaw browser start --browser-profile openclaw
-openclaw browser profiles
-openclaw logs --follow
-openclaw doctor
+wednesdayai browser status
+wednesdayai browser start --browser-profile openclaw
+wednesdayai browser profiles
+wednesdayai logs --follow
+wednesdayai doctor
 ```
 
 Look for:
@@ -540,8 +587,8 @@ Use this when a tool call fails even though the gateway is healthy, or an agent
 keeps falling back from `edit` to `exec` or a whole-file `write`.
 
 ```bash
-openclaw logs --follow
-journalctl --user -u openclaw-gateway | grep -E '\[tools\] .* (failed|rejected)'
+wednesdayai logs --follow
+journalctl --user -u wednesdayai-gateway | grep -E '\[tools\] .* (failed|rejected)'
 ```
 
 Three journal lines cover tool-call failures:
@@ -614,10 +661,10 @@ Check:
    tool policy:
 
    ```bash
-   openclaw config get tools.profile
-   openclaw config get tools.allow
-   openclaw config get tools.alsoAllow
-   openclaw config get tools.exec.security
+   wednesdayai config get tools.profile
+   wednesdayai config get tools.allow
+   wednesdayai config get tools.alsoAllow
+   wednesdayai config get tools.exec.security
    ```
 
    The `delete` tool ships with the `group:fs` group and the `coding` profile.
@@ -662,8 +709,8 @@ Use this when the gateway logs `tool result exceeded source cap`,
 confirm that context pruning and the tool-output cap are working.
 
 ```bash
-openclaw logs --follow
-openclaw sessions list
+wednesdayai logs --follow
+wednesdayai sessions list
 ```
 
 Common signatures:
@@ -690,7 +737,7 @@ Fix options:
    `cacheWrite` after idle gaps: check `agents.defaults.contextPruning` (mode
    `cache-ttl`) and that the session actually went idle past `ttl`.
 3. Repeated `prompt ledger unavailable` warnings on the same session: check
-   session storage health with `openclaw doctor --deep` and
+   session storage health with `wednesdayai doctor --deep` and
    [Session storage recovery](/gateway/session-storage-recovery).
 
 Related:
@@ -706,10 +753,10 @@ Most post-upgrade breakage is config drift or stricter defaults now being enforc
 ### 1) Auth and URL override behavior changed
 
 ```bash
-openclaw gateway status
-openclaw config get gateway.mode
-openclaw config get gateway.remote.url
-openclaw config get gateway.auth.mode
+wednesdayai gateway status
+wednesdayai config get gateway.mode
+wednesdayai config get gateway.remote.url
+wednesdayai config get gateway.auth.mode
 ```
 
 What to check:
@@ -725,10 +772,10 @@ Common signatures:
 ### 2) Bind and auth guardrails are stricter
 
 ```bash
-openclaw config get gateway.bind
-openclaw config get gateway.auth.token
-openclaw gateway status
-openclaw logs --follow
+wednesdayai config get gateway.bind
+wednesdayai config get gateway.auth.token
+wednesdayai gateway status
+wednesdayai logs --follow
 ```
 
 What to check:
@@ -744,10 +791,10 @@ Common signatures:
 ### 3) Pairing and device identity state changed
 
 ```bash
-openclaw devices list
-openclaw pairing list --channel <channel> [--account <id>]
-openclaw logs --follow
-openclaw doctor
+wednesdayai devices list
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai logs --follow
+wednesdayai doctor
 ```
 
 What to check:
@@ -763,8 +810,8 @@ Common signatures:
 If the service config and runtime still disagree after checks, reinstall service metadata from the same profile/state directory:
 
 ```bash
-openclaw gateway install --force
-openclaw gateway restart
+wednesdayai gateway install --force
+wednesdayai gateway restart
 ```
 
 Related:
