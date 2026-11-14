@@ -56,7 +56,7 @@ Troubleshooting: [/automation/troubleshooting](/automation/troubleshooting)
 Create a one-shot reminder, verify it exists, and run it immediately:
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Reminder" \
   --at "2026-02-01T16:00:00Z" \
   --session main \
@@ -64,9 +64,9 @@ openclaw cron add \
   --wake now \
   --delete-after-run
 
-openclaw cron list
-openclaw cron run <job-id>
-openclaw cron runs --id <job-id>
+wednesdayai cron list
+wednesdayai cron run <job-id>
+wednesdayai cron runs --id <job-id>
 ```
 
 You can do the same from the Web UI:
@@ -83,7 +83,7 @@ You can do the same from the Web UI:
 Schedule a recurring isolated job with delivery:
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Morning brief" \
   --cron "0 7 * * *" \
   --tz "America/Los_Angeles" \
@@ -157,6 +157,8 @@ session backends. On Postgres, every epoch-ms column (`created_at_ms`,
 32-bit `integer` on those columns. Definitions also carry a `created_by_json`
 column (SQLite `TEXT`, Postgres `JSONB`) holding the `createdBy` provenance
 stamp (see [Jobs](#jobs)); the column is added automatically on Gateway start.
+Nullable `owner_user_id`, `owner_org_id` and `space_id` columns are also added
+on start for the upcoming resource-ownership model; nothing reads or writes them yet.
 On first start after upgrade, the Gateway imports
 `~/.openclaw/cron/jobs.json` (or `cron.store` if you set it) into that table
 with every row `migrated = false`, then the table is the source of truth.
@@ -200,8 +202,9 @@ Think of a cron job as: **when** to run + **what** to do.
    - Assistant task → `sessionTarget: "isolated"` + `payload.kind = "agentTurn"`
    - Check first, then nudge → `sessionTarget: "main"` + `payload.kind = "wakeGate"`
 
-Optional: one-shot jobs (`schedule.kind = "at"`) delete after success by default. Set
-`deleteAfterRun: false` to keep them (they will disable after success).
+Optional: one-shot jobs (`schedule.kind = "at"`) delete after they finish by default — on success,
+and on an error that is not retried. Set `deleteAfterRun: false` to keep them (they will disable
+instead).
 
 ## Concepts
 
@@ -217,12 +220,14 @@ A cron job is a stored record with:
 - a **creator stamp** (`createdBy`), set by the Gateway when the job is created: the creating
   connection's `clientId`, plus `clientMode`, `clientDisplayName`, `clientVersion`, and
   `deviceId` when the client reported them. The CLI shows up as `cli`, the agent `cron` tool as
-  `gateway-client/agent`, and the Web UI as `openclaw-control-ui`. It is read-only (`cron.add`
+  `gateway-client/agent:<agentId>` (`gateway-client/agent` on older jobs), and the Web UI as
+  `openclaw-control-ui`. It is read-only (`cron.add`
   and `cron.update` reject it), diagnostic only, and absent on jobs created before it existed.
 
 Jobs are identified by a stable `jobId` (used by CLI/Gateway APIs).
 In agent tool calls, `jobId` is canonical; legacy `id` is accepted for compatibility.
-One-shot jobs auto-delete after success by default; set `deleteAfterRun: false` to keep them.
+One-shot jobs auto-delete after success or a terminal error by default; set `deleteAfterRun: false`
+to keep them.
 
 ### Schedules
 
@@ -676,6 +681,8 @@ Notes:
   Postgres epoch-ms columns are `BIGINT` (SQLite `INTEGER` is already 64-bit).
   The `created_by_json` column (SQLite `TEXT`, Postgres `JSONB`) stores the
   `createdBy` provenance stamp and is added automatically on Gateway start.
+  Nullable `owner_user_id`, `owner_org_id` and `space_id` columns (reserved for
+  resource ownership, currently unused) are added the same way.
   `~/.openclaw/cron/jobs.json` is the import source on first start (override with
   `cron.store`). After import the table is truth; the file is not the claim path.
 - Run history: `~/.openclaw/cron/runs/<jobId>.jsonl` (JSONL, auto-pruned by size and line count).
@@ -707,9 +714,11 @@ When a job fails, WednesdayAI classifies errors as **transient** (retryable) or 
 
 **One-shot jobs (`schedule.kind: "at"`):**
 
-- On transient error: retry up to 3 times with exponential backoff (30s → 1m → 5m).
-- On permanent error: disable immediately.
-- On success or skip: disable (or delete if `deleteAfterRun: true`).
+- On transient error: retry up to 3 times with exponential backoff (30s → 1m → 5m), then treat it
+  as terminal.
+- On terminal error (permanent, or retries exhausted): disable immediately, or delete if
+  `deleteAfterRun: true`. The failed run stays in `openclaw cron runs --id <id>` either way.
+- On success or skip: disable (or delete on success if `deleteAfterRun: true`).
 
 **Recurring jobs (`cron` / `every`):**
 
@@ -797,7 +806,7 @@ What to do:
 - keep `cron.sessionRetention` as short as your debugging/audit needs allow
 - keep run logs bounded with moderate `runLog.maxBytes` and `runLog.keepLines`
 - move noisy background jobs to isolated mode with delivery rules that avoid unnecessary chatter
-- review growth periodically with `openclaw cron runs` and adjust retention before logs become large
+- review growth periodically with `wednesdayai cron runs` and adjust retention before logs become large
 
 ### Customize examples
 
@@ -848,7 +857,7 @@ Tune for high-volume cron usage (example):
 One-shot reminder (UTC ISO, auto-delete after success):
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Send reminder" \
   --at "2026-01-12T18:00:00Z" \
   --session main \
@@ -860,7 +869,7 @@ openclaw cron add \
 One-shot reminder (main session, wake immediately):
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Calendar check" \
   --at "20m" \
   --session main \
@@ -871,7 +880,7 @@ openclaw cron add \
 Recurring isolated job (announce to WhatsApp):
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Morning status" \
   --cron "0 7 * * *" \
   --tz "America/Los_Angeles" \
@@ -885,7 +894,7 @@ openclaw cron add \
 Recurring cron job with explicit 30-second stagger:
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Minute watcher" \
   --cron "0 * * * * *" \
   --tz "UTC" \
@@ -898,7 +907,7 @@ openclaw cron add \
 Recurring isolated job (deliver to a Telegram topic):
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Nightly summary (topic)" \
   --cron "0 22 * * *" \
   --tz "America/Los_Angeles" \
@@ -912,7 +921,7 @@ openclaw cron add \
 Isolated job with model and thinking override:
 
 ```bash
-openclaw cron add \
+wednesdayai cron add \
   --name "Deep analysis" \
   --cron "0 6 * * 1" \
   --tz "America/Los_Angeles" \
@@ -929,11 +938,11 @@ Agent selection (multi-agent setups):
 
 ```bash
 # Pin a job to agent "ops" (falls back to default if that agent is missing)
-openclaw cron add --name "Ops sweep" --cron "0 6 * * *" --session isolated --message "Check ops queue" --agent ops
+wednesdayai cron add --name "Ops sweep" --cron "0 6 * * *" --session isolated --message "Check ops queue" --agent ops
 
 # Switch or clear the agent on an existing job
-openclaw cron edit <jobId> --agent ops
-openclaw cron edit <jobId> --clear-agent
+wednesdayai cron edit <jobId> --agent ops
+wednesdayai cron edit <jobId> --clear-agent
 ```
 
 Identity attribution (link job runs to a person). Only valid on isolated assistant-task jobs —
@@ -951,8 +960,8 @@ wednesdayai cron edit <jobId> --clear-identity
 Manual run (force is the default, use `--due` to only run when due):
 
 ```bash
-openclaw cron run <jobId>
-openclaw cron run <jobId> --due
+wednesdayai cron run <jobId>
+wednesdayai cron run <jobId> --due
 ```
 
 Forced manual run bypasses only the schedule due-time check. It still respects payload
@@ -963,7 +972,7 @@ already running. A manual run may correctly record `Skipped`.
 Edit an existing job (patch fields):
 
 ```bash
-openclaw cron edit <jobId> \
+wednesdayai cron edit <jobId> \
   --message "Updated prompt" \
   --model "opus" \
   --thinking low
@@ -972,19 +981,19 @@ openclaw cron edit <jobId> \
 Force an existing cron job to run exactly on schedule (no stagger):
 
 ```bash
-openclaw cron edit <jobId> --exact
+wednesdayai cron edit <jobId> --exact
 ```
 
 Run history:
 
 ```bash
-openclaw cron runs --id <jobId> --limit 50
+wednesdayai cron runs --id <jobId> --limit 50
 ```
 
 Immediate system event without creating a job:
 
 ```bash
-openclaw system event --mode now --text "Next heartbeat: check battery."
+wednesdayai system event --mode now --text "Next heartbeat: check battery."
 ```
 
 ## Gateway API surface
@@ -993,7 +1002,7 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 - Jobs returned by `cron.list` / `cron.status` carry a read-only `createdBy` provenance stamp
   (see the creator stamp under [Jobs](#jobs)).
 - `cron.run` (force or due), `cron.runs`
-  For immediate system events without a job, use [`openclaw system event`](/cli/system).
+  For immediate system events without a job, use [`wednesdayai system event`](/cli/system).
 
 ## Troubleshooting
 
@@ -1027,7 +1036,8 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 - Check who created it: `wednesdayai cron list --all --json | jq '.jobs[] | {name, createdBy}'`,
   the **Created by** column in `wednesdayai cron list`, or the job inspector in the Web UI.
 - `createdBy.clientId: "cli"` means something on a host ran `wednesdayai cron add` (a script,
-  hook, or shell); `gateway-client/agent` means an agent's `cron` tool created it.
+  hook, or shell); `gateway-client/agent:<agentId>` means an agent's `cron` tool created it
+  (`gateway-client/agent` on older entries).
 - The Gateway log line `cron: job created` carries the same `createdBy` plus `actor`, `deviceId`,
   `clientIp`, and `connId` for that connection. `cron: job updated` and `cron: job removed` carry
   the same connection fields.
@@ -1071,3 +1081,23 @@ openclaw system event --mode now --text "Next heartbeat: check battery."
 - If the announce flow returns `false` (e.g. requester session is busy), the gateway retries up to 3 times with tracking via `announceRetryCount`.
 - Announces older than 5 minutes past `endedAt` are force-expired to prevent stale entries from looping indefinitely.
 - If you see repeated announce deliveries in logs, check the subagent registry for entries with high `announceRetryCount` values.
+
+### A job turned itself off or lost its delivery settings
+
+The SQLite and Postgres stores check each job's stored JSON when they load it.
+
+- If the payload or schedule is unreadable or missing a required field, the job is disabled and
+  its payload or schedule is replaced with a placeholder (an empty system event, or every 60 s).
+  The job still shows in `wednesdayai cron list --all`, so you can fix or remove it. Log line:
+  `cron: disabled job <id>: malformed payload_json` (or `schedule_json`).
+- If the delivery or failure-alert settings are unreadable, they are dropped and the job keeps
+  running without them. Log line: `cron: dropped malformed delivery_json on job <id>` (or
+  `failure_alert_json`).
+- Each warning is logged once per job and column, under subsystem `cron/stored-job`, with the
+  original column text (first 500 characters) in `raw`. The repair is saved on the next store
+  write, so that log line is the only record of the original value.
+- Payload or schedule kinds this version does not know (written by a newer version) are left
+  untouched.
+
+To fix: read `raw` from the log, then restore the job with `wednesdayai cron edit <id> ...` and
+`wednesdayai cron enable <id>`, or delete it with `wednesdayai cron rm <id>`.
