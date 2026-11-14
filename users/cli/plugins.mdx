@@ -8,6 +8,7 @@ component: plugins-cli
 sources:
   - src/cli/plugins-cli.ts
   - src/plugins/catalog.ts
+  - src/plugins/catalog-install.ts
   - src/plugins/catalog.json
   - src/plugins/health-report.ts
   - src/plugins/hook-names.ts
@@ -25,12 +26,16 @@ Manage Gateway plugins/extensions (loaded in-process).
 The legacy `openclaw plugins` alias remains supported. New examples use
 `wednesdayai plugins`.
 
+The singular form is a supported alias: `wednesdayai plugin install <id>` is identical to
+`wednesdayai plugins install <id>`. The canonical command is `plugins`; all WednesdayAI
+messages and docs use that form.
+
 Related:
 
-- Plugin system: [Plugins](/tools/plugin)
-- Plugin manifest + schema: [Plugin manifest](/plugins/manifest)
-- Analysis runtime (operators): [Plugin analysis runtime operations](/plugins/analysis-runtime-admin)
-- Security hardening: [Security](/gateway/security)
+- Plugin system: [Plugins](/users/tools/plugin)
+- Plugin manifest + schema: [Plugin manifest](/developers/plugins/manifest)
+- Analysis runtime (operators): [Plugin analysis runtime operations](/developers/plugins/analysis-runtime-admin)
+- Security hardening: [Security](/admin/gateway/security)
 
 ## Hook timeouts and analysis limits
 
@@ -44,8 +49,8 @@ ceiling. Raise `maxParallelPerPlugin` for more active same-plugin runs, subject 
 
 You do not set these from the CLI. Put them in `openclaw.json` under `plugins.hookTimeouts`
 and `plugins.analysisConcurrency`, then restart the gateway. Full keys:
-[Configuration reference](/gateway/configuration-reference#plugins).
-Operators: [Plugin analysis runtime operations](/plugins/analysis-runtime-admin).
+[Configuration reference](/admin/gateway/configuration-reference#plugins).
+Operators: [Plugin analysis runtime operations](/developers/plugins/analysis-runtime-admin).
 
 ## Commands
 
@@ -68,9 +73,11 @@ Use `plugins list --verbose` or `plugins info <id>` to confirm where a plugin is
 loading from. Bundled plugins report `Origin: bundled`; installed copies under
 `~/.openclaw/extensions` report a managed install source instead.
 
-All plugins must ship a `openclaw.plugin.json` file with an inline JSON Schema
+All plugins must ship a `wednesdayai.plugin.json` file with an inline JSON Schema
 (`configSchema`, even if empty). Missing/invalid manifests or schemas prevent
-the plugin from loading and fail config validation.
+the plugin from loading and fail config validation. The legacy
+`openclaw.plugin.json` filename still loads (ADR 2057); when a plugin root
+contains both files, `wednesdayai.plugin.json` wins.
 
 ## Catalog
 
@@ -85,6 +92,19 @@ install specs. The catalog has two layers:
 
 The `list`, `info`, and `install` commands automatically refresh the remote
 catalog before resolving a bare plugin id against it.
+
+### Pinned entries and verification
+
+Remote catalog entries must pin an exact `version` and a sha512 `integrity` digest. If any
+remote entry is missing its pin, the whole remote payload is rejected and WednesdayAI uses the
+bundled offline snapshot instead. The snapshot carries a pinned `brave-search` entry for
+exactly this case: a feed outage must never resolve a bare catalog id to an unrelated unscoped
+npm package. The published feed is never empty either; the release pipeline replaces pinned
+entries in place rather than clearing the feed.
+
+Catalog-pinned installs are verified, not trusted. See
+[Verified catalog installs](#verified-catalog-installs) and
+[Compatibility](/developers/plugins/compatibility) for the refusal messages.
 
 Remote fetching can be disabled entirely (airgap / mirror mode) or pointed at an
 alternate URL via environment variables:
@@ -140,17 +160,26 @@ wednesdayai plugins status --json
 ```
 
 Shows plugin health. The overall line reads `OK`, `DEGRADED` (at least one
-warning), or `ERROR` (at least one error). Each plugin row uses the health
-vocabulary: `loaded`, `warned` (loaded but at least one warning is attributed
-to it, for example a hook name core does not dispatch), `error`, `disabled`, or
-`skipped`. Warnings and errors are listed under `Issues:` with their diagnostic
-code and remediation — for example a `PLUGIN_HOOK_NOT_DISPATCHED` warning with
-its hook parity map link. The command exits `1` when the overall status is
-`ERROR`. `--json` prints the raw health report.
+warning that belongs to a plugin), or `ERROR` (at least one error). Each plugin
+row uses the health vocabulary: `loaded`, `warned` (at least one warning is
+attributed to it, for example a hook name core does not dispatch on a loaded
+plugin, or a missing optional dependency on a disabled one), `error`,
+`disabled`, or `skipped`. Warnings and errors are listed under `Issues:` with
+their diagnostic code and remediation — for example a
+`PLUGIN_HOOK_NOT_DISPATCHED` warning with its hook parity map link. The command
+exits `1` when the overall status is `ERROR`. `--json` prints the raw health
+report, with registry-level diagnostics under `registryDiagnostics`.
+
+Some diagnostics come from the registry itself and name no plugin — an invalid
+`plugins.slots` value, for instance. They are listed under a
+`Not attributed to a plugin:` heading inside `Issues:`. A warning of that kind
+does not make the overall status `DEGRADED`, because no plugin row would show
+the cause; an error of that kind still makes it `ERROR`.
 
 The gateway logs the same health report once at startup: a summary line such as
 `[plugins] startup: 0 loaded, 1 warning — see warnings below`, with every
-per-plugin warning, including hook registration ones, listed beneath it.
+warning listed beneath it, including hook registration ones and unattributed
+ones (labelled `(no plugin)`).
 
 ### Doctor
 
@@ -160,8 +189,12 @@ wednesdayai plugins doctor
 
 Reports plugin load issues: load errors, missing optional dependencies, and
 warn-level diagnostics (including `PLUGIN_HOOK_NOT_DISPATCHED` hook registration
-warnings). Prints `No plugin issues detected.` when everything is healthy, and
-links to the plugin docs otherwise.
+warnings and `PLUGIN_BUILD_SKEW` build-skew warnings). Warn and error
+diagnostics print under `Diagnostics:` as `- <id>: <message>`, with a
+`→ <remediation>` line beneath each diagnostic that carries one — for
+`PLUGIN_BUILD_SKEW` the remediation names the lockstep reinstall or the
+`plugins update` path. Prints `No plugin issues detected.` when everything is
+healthy, and links to the plugin docs otherwise.
 
 ### Install
 
@@ -183,16 +216,30 @@ install failure falls back to the bundled source. To install an npm package
 with the same name as a catalog entry, use an explicit scoped spec (for example
 `@scope/diffs`).
 
-Plugins with runtime dependencies must run from the managed copy under the active
-state dir (`$OPENCLAW_STATE_DIR/extensions/<id>`, normally
-`~/.openclaw/extensions/<id>`). Do not repair dependency-bearing bundled plugins by
-running `npm install` inside the global WednesdayAI package directory. Re-run
-`wednesdayai plugins install <id>` instead.
+Legacy upstream specs (`@openclaw/<id>`, with or without a version or tag) resolve
+to the bundled copy of the plugin with that id before npm is contacted. Upstream
+openclaw owns the `@openclaw` npm scope, so these specs never install upstream's
+package (ADR 2057).
 
-Dependency-free bundled plugins may run directly from the global package copy when
-they are enabled and loadable. `plugins list`, `plugins doctor`, and config
-validation should not report missing dependency errors for enabled plugins that are
-already healthy from global `node_modules`.
+Some bundled plugins are install-only: their runtime dependencies are not part of
+the WednesdayAI package, so the shipped copy cannot load on its own. They are
+`acpx`, `diagnostics-otel`, `diffs`, `feishu`, `identity-oidc`, `matrix`,
+`mcp-client`, `memory-lancedb`, `msteams`, `nostr`, `tlon`, `twitch`, `whatsapp`
+and `zalouser`. Enabling one without installing it shows **deps missing** in
+`plugins list`, and `plugins doctor` prints the fix:
+
+```bash
+wednesdayai plugins install <id>
+```
+
+That writes a managed copy with its dependencies under the active state dir
+(`$OPENCLAW_STATE_DIR/extensions/<id>`, normally `~/.openclaw/extensions/<id>`), and
+the managed copy takes precedence over the bundled one. Do not repair these plugins
+by running `npm install` inside the global WednesdayAI package directory.
+
+Every other bundled plugin gets its dependencies from the WednesdayAI package itself
+and runs directly from the shipped copy once enabled. `plugins list`, `plugins doctor`,
+and config validation should not report missing dependencies for those.
 
 Bundled installs are reconciled back to the bundled copy that shipped with the
 current WednesdayAI package. During that reconciliation WednesdayAI may remove the old
@@ -207,6 +254,14 @@ If gateway startup logs say `plugin not found` for a bundled plugin, check
 
 Supported archives: `.zip`, `.tgz`, `.tar.gz`, `.tar`.
 
+Installing a local path or archive over an existing install fails with
+`plugin already exists: <targetDir> (delete it first)`. Pass `--force` to
+replace the existing install in place:
+
+```bash
+wednesdayai plugins install ./plugin.tgz --force
+```
+
 Use `--link` to avoid copying a local directory (adds to `plugins.load.paths`):
 
 ```bash
@@ -215,6 +270,52 @@ wednesdayai plugins install -l ./my-plugin
 
 Use `--pin` on npm installs to save the resolved exact spec (`name@version`) in
 `plugins.installs` while keeping the default behavior unpinned.
+
+:::warning
+Installing verifies the plugin by loading it, which **imports the plugin's entry module** and
+runs its top-level code in the CLI process. Dependency lifecycle scripts stay disabled
+(`npm install --ignore-scripts`), and the plugin's `register()` is not called until you run
+`plugins enable`, but module-level side effects do run at install time. For a catalog-pinned
+install the artifact's digest and provenance are verified first. For a direct npm spec, local
+path or archive there is no such verification, so only install sources you trust.
+:::
+
+### Verified catalog installs
+
+When a bare id resolves to a **pinned** catalog entry (one with a `version` and a sha512
+`integrity`), `plugins install` takes the verified rail instead of a plain npm install:
+
+1. **Compatibility preflight** with no network: the entry's `minWednesdayVersion`,
+   `minHostVersion` and `contracts` are checked against this host. See
+   [Compatibility](/developers/plugins/compatibility).
+2. **Sigstore provenance**: the npm SLSA attestation is fetched and verified against the exact
+   signer identity `https://github.com/ExpansionX/WednesdayAI-plugins/.github/workflows/release.yml@refs/heads/main`
+   and the catalog-pinned digest.
+3. **Integrity-checked install**: the npm tarball is installed with the pinned digest as
+   `expectedIntegrity`; a downloaded artifact whose digest differs is refused. The install runs
+   in a stage directory and is verified by loading it before it is promoted; nothing touches
+   the live directory until verification passes.
+4. The command then logs:
+
+   ```text
+   Verified <spec>: sha512 pinned by catalog, provenance signed by <signer identity>
+   ```
+
+A pinned install never falls back to the bundled copy: the catalog pinned one exact artifact,
+and anything else is refused. The install record stores the bare `npmSpec`, so the default
+record stays unpinned unless you pass `--pin`. `--force` replaces an existing install.
+
+Refusals on this path always mean nothing was installed:
+
+- ``plugin "<id>" <version> is not compatible with this host: <reason>. Run `wednesdayai update` to upgrade WednesdayAI, then retry.`` — the pinned version does not fit this host.
+  Run `wednesdayai update` and retry.
+- `refusing to install "<id>" <version>: provenance verification failed: <detail>` — the
+  artifact is not attested, is signed by the wrong workflow or ref, or its digest does not
+  match the catalog. Do not retry from npm; the artifact must be re-published. Full message
+  reference: [Compatibility](/developers/plugins/compatibility#refusal-messages).
+
+Install stays explicit-only for activation: after a verified install, run
+`wednesdayai plugins enable <id>`.
 
 ### Uninstall
 
@@ -248,5 +349,13 @@ reconciles bundled install records so stale copied-bundled records stop looking
 like missing managed installs.
 
 When a stored integrity hash exists and the fetched artifact hash changes,
-OpenClaw prints a warning and asks for confirmation before proceeding. Use
+WednesdayAI prints a warning and asks for confirmation before proceeding. Use
 global `--yes` to bypass prompts in CI/non-interactive runs.
+
+A plugin whose id is a **pinned catalog entry** for the same package updates to the
+catalog-pinned version through the same verified rail as install: compatibility preflight,
+Sigstore provenance against the catalog digest, then an integrity-checked staged install, and
+the `Verified <spec>: sha512 pinned by catalog, provenance signed by <signer identity>` line.
+Refusals use the install refusal messages, nothing is staged, and the current install stays in
+place. The integrity-drift prompt does not apply on this path — the catalog digest is
+authoritative, so a mismatch is refused outright.

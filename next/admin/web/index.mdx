@@ -1,0 +1,128 @@
+---
+summary: "Gateway web surfaces: Control UI, bind modes, and security"
+read_when:
+  - You want to access the Gateway over Tailscale
+  - You want the browser Control UI and config editing
+title: "Web"
+---
+
+# Web (Gateway)
+
+The Gateway serves its browser surfaces from the same port as the Gateway WebSocket:
+
+- [Control UI v2](/next/admin/web/control-ui-v2), the operator console, at the root (`/`) by default
+  (`gateway.controlUiV2.basePath` remounts it)
+- the [web client](/next/admin/web/user-client) at `/v2/client` when `gateway.webClient.enabled: true`
+  (`gateway.webClient.basePath` remounts it)
+
+Capabilities live in [Control UI v2](/next/admin/web/control-ui-v2).
+This page focuses on bind modes, security, and web-facing surfaces.
+
+The [web client](/next/admin/web/using-the-web-client) also brings browser voice features: **Dictate** and
+**Voice mode** in the message box (see
+[Using the web client](/next/admin/web/using-the-web-client#dictate-and-voice)).
+
+## Webhooks
+
+When `hooks.enabled=true`, the Gateway also exposes a small webhook endpoint on the same HTTP server.
+See [Gateway configuration](/next/admin/gateway/configuration) → `hooks` for auth + payloads.
+
+## Config (default-on)
+
+The operator console is served by default. Control it via config:
+
+```json5
+{
+  gateway: {
+    controlUiV2: { enabled: true }, // default; the console owns the gateway root
+  },
+}
+```
+
+## Tailscale access
+
+### Integrated Serve (recommended)
+
+Keep the Gateway on loopback and let Tailscale Serve proxy it:
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "serve" },
+  },
+}
+```
+
+Then start the gateway:
+
+```bash
+openclaw gateway
+```
+
+Open:
+
+- `https://<magicdns>/` (or your configured console path)
+
+### Tailnet bind + token
+
+```json5
+{
+  gateway: {
+    bind: "tailnet",
+    auth: { mode: "token", token: "your-token" },
+  },
+}
+```
+
+Then start the gateway (token required for non-loopback binds):
+
+```bash
+openclaw gateway
+```
+
+Open:
+
+- `http://<tailscale-ip>:18789/` (or your configured console path)
+
+### Public internet (Funnel)
+
+```json5
+{
+  gateway: {
+    bind: "loopback",
+    tailscale: { mode: "funnel" },
+    auth: { mode: "password" }, // or OPENCLAW_GATEWAY_PASSWORD
+  },
+}
+```
+
+## Security notes
+
+- Gateway auth is required by default (token/password or Tailscale identity headers).
+- Non-loopback binds still **require** a shared token/password (`gateway.auth` or env).
+- The wizard generates a gateway token by default (even on loopback).
+- The UI sends `connect.params.auth.token` or `connect.params.auth.password`.
+- For non-loopback console deployments, set `gateway.controlUi.allowedOrigins`
+  explicitly (full origins). Without it, gateway startup is refused by default. This
+  covers the [Control UI v2](/next/admin/web/control-ui-v2) console.
+- `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true` enables
+  Host-header origin fallback mode, but is a dangerous security downgrade.
+- With Serve, Tailscale identity headers can satisfy Control UI/WebSocket auth
+  when `gateway.auth.allowTailscale` is `true` (no token/password required).
+  HTTP API endpoints still require token/password. Set
+  `gateway.auth.allowTailscale: false` to require explicit credentials. See
+  [Tailscale](/next/admin/gateway/tailscale) and [Security](/next/admin/gateway/security). This
+  tokenless flow assumes the gateway host is trusted.
+- `gateway.tailscale.mode: "funnel"` requires `gateway.auth.mode: "password"` (shared password).
+
+## Building the console
+
+From a source checkout, build the packaged console bundle the gateway serves:
+
+```bash
+pnpm control:build:packaged
+```
+
+Hosting options (gateway route, standalone server, container, CDN) are in
+[Control UI v2](/next/admin/web/control-ui-v2).

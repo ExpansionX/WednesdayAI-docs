@@ -1,0 +1,305 @@
+---
+summary: "Gmail Pub/Sub push wired into WednesdayAI webhooks via gogcli"
+read_when:
+  - Wiring Gmail inbox triggers to WednesdayAI
+  - Setting up Pub/Sub push for agent wake
+title: "Gmail PubSub"
+---
+
+# Gmail Pub/Sub -> WednesdayAI
+
+Goal: Gmail watch -> Pub/Sub push -> `gog gmail watch serve` -> WednesdayAI webhook.
+
+## Prereqs
+
+- `gcloud` installed and logged in ([install guide](https://docs.cloud.google.com/sdk/docs/install-sdk)).
+- `gog` (gogcli) installed and authorized for the Gmail account ([gogcli.sh](https://gogcli.sh/)).
+- WednesdayAI hooks enabled (see [Webhooks](/next/users/automation/webhook)).
+- `tailscale` logged in ([tailscale.com](https://tailscale.com/)). Supported setup uses Tailscale Funnel for the public HTTPS endpoint.
+  Other tunnel services can work, but are DIY/unsupported and require manual wiring.
+  Right now, Tailscale is what we support.
+
+Example hook config (enable Gmail preset mapping):
+
+```json5
+{
+  hooks: {
+    enabled: true,
+    token: "OPENCLAW_HOOK_TOKEN",
+    path: "/hooks",
+    presets: ["gmail"],
+  },
+}
+```
+
+To deliver the Gmail summary to a chat surface, override the preset with a mapping
+that sets `deliver` + optional `channel`/`to`:
+
+```json5
+{
+  hooks: {
+    enabled: true,
+    token: "OPENCLAW_HOOK_TOKEN",
+    presets: ["gmail"],
+    mappings: [
+      {
+        match: { path: "gmail" },
+        action: "agent",
+        wakeMode: "now",
+        name: "Gmail",
+        sessionKey: "hook:gmail:{{messages[0].id}}",
+        messageTemplate: "New email from {{messages[0].from}}\nSubject: {{messages[0].subject}}\n{{messages[0].snippet}}\n{{messages[0].body}}",
+        model: "openai/gpt-5.2-mini",
+        deliver: true,
+        channel: "last",
+        // to: "+15551234567"
+      },
+    ],
+  },
+}
+```
+
+If you want a fixed channel, set `channel` + `to`. Otherwise `channel: "last"`
+uses the last delivery route (falls back to WhatsApp).
+
+To force a cheaper model for Gmail runs, set `model` in the mapping
+(`provider/model` or alias). If you enforce `agents.defaults.models`, include it there.
+
+To set a default model and thinking level specifically for Gmail hooks, add
+`hooks.gmail.model` / `hooks.gmail.thinking` in your config:
+
+```json5
+{
+  hooks: {
+    gmail: {
+      model: "openrouter/meta-llama/llama-3.3-70b-instruct:free",
+      thinking: "off",
+    },
+  },
+}
+```
+
+Notes:
+
+- Per-hook `model`/`thinking` in the mapping still overrides these defaults.
+- Fallback order: `hooks.gmail.model` → `agents.defaults.model.fallbacks` → primary (auth/rate-limit/timeouts).
+- If `agents.defaults.models` is set, the Gmail model must be in the allowlist.
+- Gmail hook content is wrapped with external-content safety boundaries by default.
+  To disable (dangerous), set `hooks.gmail.allowUnsafeExternalContent: true`.
+
+Inbox enablement: Gmail is a dedicated inbox-only source — the `hooks.gmail` config block
+itself IS the inbox enablement. No `inbox.sources.gmail` key is required or read.
+
+To customize payload handling further, add `hooks.mappings` or a JS/TS transform module
+under `~/.openclaw/hooks/transforms` (see [Webhooks](/next/users/automation/webhook)).
+
+## Wizard (recommended)
+
+Use the WednesdayAI helper to wire everything together (installs deps on macOS via brew):
+
+```bash
+wednesdayai webhooks gmail setup \
+  --account openclaw@gmail.com
+```
+
+Defaults:
+
+- Uses Tailscale Funnel for the public push endpoint.
+- Writes `hooks.gmail` config for `wednesdayai webhooks gmail run`.
+- Enables the Gmail hook preset (`hooks.presets: ["gmail"]`).
+
+Path note: when `tailscale.mode` is enabled, WednesdayAI automatically sets
+`hooks.gmail.serve.path` to `/` and keeps the public path at
+`hooks.gmail.tailscale.path` (default `/gmail-pubsub`) because Tailscale
+strips the set-path prefix before proxying.
+If you need the backend to receive the prefixed path, set
+`hooks.gmail.tailscale.target` (or `--tailscale-target`) to a full URL like
+`http://127.0.0.1:8788/gmail-pubsub` and match `hooks.gmail.serve.path`.
+
+Want a custom endpoint? Use `--push-endpoint <url>` or `--tailscale off`.
+
+Platform note: on macOS the wizard installs `gcloud`, `gogcli`, and `tailscale`
+via Homebrew; on Linux install them manually first.
+
+Gateway auto-start (recommended):
+
+- When `hooks.enabled=true` and `hooks.gmail.account` is set, the Gateway starts
+  `gog gmail watch serve` on boot and auto-renews the watch.
+- Set `OPENCLAW_SKIP_GMAIL_WATCHER=1` to opt out (useful if you run the daemon yourself).
+- Do not run the manual daemon at the same time, or you will hit
+  `listen tcp 127.0.0.1:8788: bind: address already in use`.
+
+Manual daemon (starts `gog gmail watch serve` + auto-renew):
+
+```bash
+wednesdayai webhooks gmail run
+```
+
+## One-time setup
+
+1. Select the GCP project **that owns the OAuth client** used by `gog`.
+
+```bash
+gcloud auth login
+gcloud config set project <project-id>
+```
+
+Note: Gmail watch requires the Pub/Sub topic to live in the same project as the OAuth client.
+
+2. Enable APIs:
+
+```bash
+gcloud services enable gmail.googleapis.com pubsub.googleapis.com
+```
+
+3. Create a topic:
+
+```bash
+gcloud pubsub topics create gog-gmail-watch
+```
+
+4. Allow Gmail push to publish:
+
+```bash
+gcloud pubsub topics add-iam-policy-binding gog-gmail-watch \
+  --member=serviceAccount:gmail-api-push@system.gserviceaccount.com \
+  --role=roles/pubsub.publisher
+```
+
+## Start the watch
+
+```bash
+gog gmail watch start \
+  --account openclaw@gmail.com \
+  --label INBOX \
+  --topic projects/<project-id>/topics/gog-gmail-watch
+```
+
+Save the `history_id` from the output (for debugging).
+
+## Run the push handler
+
+Local example (shared token auth):
+
+```bash
+gog gmail watch serve \
+  --account openclaw@gmail.com \
+  --bind 127.0.0.1 \
+  --port 8788 \
+  --path /gmail-pubsub \
+  --token <shared> \
+  --hook-url http://127.0.0.1:18789/hooks/gmail \
+  --hook-token OPENCLAW_HOOK_TOKEN \
+  --include-body \
+  --max-bytes 20000
+```
+
+Notes:
+
+- `--token` protects the push endpoint (`x-gog-token` or `?token=`).
+- `--hook-url` points to WednesdayAI `/hooks/gmail` (mapped; isolated run + summary to main).
+- `--include-body` and `--max-bytes` control the body snippet sent to WednesdayAI.
+
+Deletion delivery: the watcher WednesdayAI spawns passes
+`--history-types messageAdded,messageDeleted`, and the Gmail hook ingests
+`deletedMessageIds` from the push payload. If you run `gog gmail watch serve` yourself you
+must add that flag too — a gog version carrying `--history-types` is required (upgrade via
+Homebrew: `brew upgrade gogcli`). Without it the default `history-types` set is
+`messageAdded` only, and deletions are never pushed.
+
+Recommended: `wednesdayai webhooks gmail run` wraps the same flow and auto-renews the watch.
+
+## Expose the handler (advanced, unsupported)
+
+If you need a non-Tailscale tunnel, wire it manually and use the public URL in the push
+subscription (unsupported, no guardrails):
+
+```bash
+cloudflared tunnel --url http://127.0.0.1:8788 --no-autoupdate
+```
+
+Use the generated URL as the push endpoint:
+
+```bash
+gcloud pubsub subscriptions create gog-gmail-watch-push \
+  --topic gog-gmail-watch \
+  --push-endpoint "https://<public-url>/gmail-pubsub?token=<shared>"
+```
+
+Production: use a stable HTTPS endpoint and configure Pub/Sub OIDC JWT, then run:
+
+```bash
+gog gmail watch serve --verify-oidc --oidc-email <svc@...>
+```
+
+## Test
+
+Send a message to the watched inbox:
+
+```bash
+gog gmail send \
+  --account openclaw@gmail.com \
+  --to openclaw@gmail.com \
+  --subject "watch test" \
+  --body "ping"
+```
+
+Check watch state and history:
+
+```bash
+gog gmail watch status --account openclaw@gmail.com
+gog gmail history --account openclaw@gmail.com --since <historyId>
+```
+
+Note: `gog gmail history` is `messageAdded`-only upstream (the command hardcodes its
+history types and exposes no flag), so reconcile history replay cannot observe deletions.
+The watch payload above is the only deletion channel; the periodic resync sweep is the
+backstop for anything it missed.
+
+## Backfill history
+
+`wednesdayai inbox backfill --source gmail [--account <address>] [--since <iso>] [--all]`
+pulls Gmail history into the inbox store — manual, resumable, per-page checkpointed (see
+[Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill)). Gmail specifics:
+
+- **Query** — `in:anywhere` (full history) or `in:anywhere after:YYYY/MM/DD` (ranged).
+  Gmail's `after:` operator is day-granular, and Gmail interprets date bounds at
+  midnight **PST**, while the fetcher builds the bound as a **UTC** calendar date and
+  forwards it without timezone conversion. The server-side window can therefore open up
+  to 8 hours after the UTC day start: for `--since 2024-01-02T00:00:00Z`, a message at
+  `04:00Z` on Jan 2 can be excluded server-side, and the client-side timestamp filter
+  cannot recover it — it only drops items older than the exact epoch, never adds them
+  back. Near-boundary coverage around the since day is therefore approximate; the
+  full-history walk (no `--since`) is unaffected.
+- **Pages** — up to 500 **thread results** per page (`--max 500` on the same gog
+  snapshot search the full resync uses), with every returned thread expanded into all
+  of its messages — a page containing multi-message threads can therefore hold
+  substantially more than 500 messages. The resume token is gog's opaque
+  `nextPageToken` (thread-level). Thread expansion returns every message of a matching
+  thread, including ones older than the exact since boundary — the timestamp filter
+  drops those.
+- **Accounts** — the enabled-account list merges `hooks.gmail.account` (only when it is
+  a plain email address, not a gog selector such as `auto`) with the account cursors
+  already tracked for the source; deduped and sorted.
+- **Deletions** — backfill never drains the reconcile deletion guard; deletion pushes on
+  the watch payload above and pending tombstone intents apply exactly as during live
+  ingestion.
+
+Gmail has no separate `inbox.sources` gate: the enabled-account list is derived from the
+`hooks.gmail` config plus tracked account cursors (a previously active account remains
+backfillable even with no `hooks.gmail` block), and an empty list reports the source as
+not enabled.
+
+## Troubleshooting
+
+- `Invalid topicName`: project mismatch (topic not in the OAuth client project).
+- `User not authorized`: missing `roles/pubsub.publisher` on the topic.
+- Empty messages: Gmail push only provides `historyId`; fetch via `gog gmail history`.
+
+## Cleanup
+
+```bash
+gog gmail watch stop --account openclaw@gmail.com
+gcloud pubsub subscriptions delete gog-gmail-watch-push
+gcloud pubsub topics delete gog-gmail-watch
+```

@@ -10,9 +10,9 @@ title: "ACP Agents"
 
 # ACP agents
 
-[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) sessions let OpenClaw run external coding harnesses (for example Pi, Claude Code, Codex, OpenCode, and Gemini CLI) through an ACP backend plugin.
+[Agent Client Protocol (ACP)](https://agentclientprotocol.com/) sessions let WednesdayAI run external coding harnesses (for example Pi, Claude Code, Codex, OpenCode, and Gemini CLI) through an ACP backend plugin.
 
-If you ask OpenClaw in plain language to "run this in Codex" or "start Claude Code in a thread", OpenClaw should route that request to the ACP runtime (not the native sub-agent runtime).
+If you ask WednesdayAI in plain language to "run this in Codex" or "start Claude Code in a thread", WednesdayAI should route that request to the ACP runtime (not the native sub-agent runtime).
 
 ## Fast operator flow
 
@@ -41,7 +41,7 @@ Examples of natural requests:
 - "Run this as a one-shot Claude Code ACP session and summarize the result."
 - "Use Gemini CLI for this task in a thread, then keep follow-ups in that same thread."
 
-What OpenClaw should do:
+What WednesdayAI should do:
 
 1. Pick `runtime: "acp"`.
 2. Resolve the requested harness target (`agentId`, for example `codex`).
@@ -50,27 +50,27 @@ What OpenClaw should do:
 
 ## ACP versus sub-agents
 
-Use ACP when you want an external harness runtime. Use sub-agents when you want OpenClaw-native delegated runs.
+Use ACP when you want an external harness runtime. Use sub-agents when you want WednesdayAI-native delegated runs.
 
-| Area          | ACP session                           | Sub-agent run                      |
-| ------------- | ------------------------------------- | ---------------------------------- |
-| Runtime       | ACP backend plugin (for example acpx) | OpenClaw native sub-agent runtime  |
-| Session key   | `agent:<agentId>:acp:<uuid>`          | `agent:<agentId>:subagent:<uuid>`  |
-| Main commands | `/acp ...`                            | `/subagents ...`                   |
-| Spawn tool    | `sessions_spawn` with `runtime:"acp"` | `sessions_spawn` (default runtime) |
+| Area          | ACP session                           | Sub-agent run                        |
+| ------------- | ------------------------------------- | ------------------------------------ |
+| Runtime       | ACP backend plugin (for example acpx) | WednesdayAI native sub-agent runtime |
+| Session key   | `agent:<agentId>:acp:<uuid>`          | `agent:<agentId>:subagent:<uuid>`    |
+| Main commands | `/acp ...`                            | `/subagents ...`                     |
+| Spawn tool    | `sessions_spawn` with `runtime:"acp"` | `sessions_spawn` (default runtime)   |
 
-See also [Sub-agents](/tools/subagents).
+See also [Sub-agents](/users/tools/subagents).
 
 ## Thread-bound sessions (channel-agnostic)
 
 When thread bindings are enabled for a channel adapter, ACP sessions can be bound to threads:
 
-- OpenClaw binds a thread to a target ACP session.
+- WednesdayAI binds a thread to a target ACP session.
 - Follow-up messages in that thread route to the bound ACP session.
 - ACP output is delivered back to the same thread.
 - Unfocus/close/archive/idle-timeout or max-age expiry removes the binding.
 
-Thread binding support is adapter-specific. If the active channel adapter does not support thread bindings, OpenClaw returns a clear unsupported/unavailable message.
+Thread binding support is adapter-specific. If the active channel adapter does not support thread bindings, WednesdayAI returns a clear unsupported/unavailable message.
 
 Required feature flags for thread-bound ACP:
 
@@ -104,8 +104,13 @@ Use `runtime: "acp"` to start an ACP session from an agent turn or tool call.
 Notes:
 
 - `runtime` defaults to `subagent`, so set `runtime: "acp"` explicitly for ACP sessions.
-- If `agentId` is omitted, OpenClaw uses `acp.defaultAgent` when configured.
+- If `agentId` is omitted, WednesdayAI uses `acp.defaultAgent` when configured.
 - `mode: "session"` requires `thread: true` to keep a persistent bound conversation.
+- `mode: "run"` children do not post their output to the channel. When the run ends, the
+  requesting agent receives a `task_completion` event with the result and writes the reply
+  (default `completionDelivery: "parent"`; see [Sub-agents](/users/tools/subagents#completion-delivery)).
+  Run-mode children show up in `subagents list`, and `subagents kill` or `/stop` also cancels
+  the ACP turn.
 
 Interface details:
 
@@ -115,14 +120,15 @@ Interface details:
 - `thread` (optional, default `false`): request thread binding flow where supported.
 - `mode` (optional): `run` (one-shot) or `session` (persistent).
   - default is `run`
-  - if `thread: true` and mode omitted, OpenClaw may default to persistent behavior per runtime path
+  - if `thread: true` and mode omitted, WednesdayAI may default to persistent behavior per runtime path
   - `mode: "session"` requires `thread: true`
 - `cwd` (optional): requested runtime working directory (validated by backend/runtime policy).
 - `label` (optional): operator-facing label used in session/banner text.
+- `completionDelivery` (optional, `mode: "run"` only): `"parent"` (default) hands the result to the requesting agent; `"direct"` sends it straight to the requester chat. See [Completion delivery](/users/tools/subagents#completion-delivery).
 
 ## Sandbox compatibility
 
-ACP sessions currently run on the host runtime, not inside the OpenClaw sandbox.
+ACP sessions currently run on the host runtime, not inside the WednesdayAI sandbox.
 
 Current limitations:
 
@@ -150,7 +156,7 @@ Key flags:
 - `--cwd <absolute-path>`
 - `--label <name>`
 
-See [Slash Commands](/tools/slash-commands).
+See [Slash Commands](/users/tools/slash-commands).
 
 ## Session target resolution
 
@@ -165,7 +171,7 @@ Resolution order:
 2. Current thread binding (if this conversation/thread is bound to an ACP session)
 3. Current requester session fallback
 
-If no target resolves, OpenClaw returns a clear error (`Unable to resolve session target: ...`).
+If no target resolves, WednesdayAI returns a clear error (`Unable to resolve session target: ...`).
 
 ## Spawn thread modes
 
@@ -204,7 +210,7 @@ Available command family:
 
 `/acp status` shows the effective runtime options and, when available, both runtime-level and backend-level session identifiers.
 
-Some controls depend on backend capabilities. If a backend does not support a control, OpenClaw returns a clear unsupported-control error.
+Some controls depend on backend capabilities. If a backend does not support a control, WednesdayAI returns a clear unsupported-control error.
 
 ## ACP command cookbook
 
@@ -251,9 +257,9 @@ Current acpx built-in harness aliases:
 - `gemini`
 - `kimi`
 
-When OpenClaw uses the acpx backend, prefer these values for `agentId` unless your acpx config defines custom agent aliases.
+When WednesdayAI uses the acpx backend, prefer these values for `agentId` unless your acpx config defines custom agent aliases.
 
-Direct acpx CLI usage can also target arbitrary adapters via `--agent <command>`, but that raw escape hatch is an acpx CLI feature (not the normal OpenClaw `agentId` path).
+Direct acpx CLI usage can also target arbitrary adapters via `--agent <command>`, but that raw escape hatch is an acpx CLI feature (not the normal WednesdayAI `agentId` path).
 
 ## Required config
 
@@ -306,21 +312,21 @@ If thread-bound ACP spawn does not work, verify the adapter feature flag first:
 
 - Discord: `channels.discord.threadBindings.spawnAcpSessions=true`
 
-See [Configuration Reference](/gateway/configuration-reference).
+See [Configuration Reference](/admin/gateway/configuration-reference).
 
 ## Plugin setup for acpx backend
 
 Install and enable plugin:
 
 ```bash
-openclaw plugins install acpx
-openclaw config set plugins.entries.acpx.enabled true
+wednesdayai plugins install acpx
+wednesdayai config set plugins.entries.acpx.enabled true
 ```
 
 Local workspace install during development:
 
 ```bash
-openclaw plugins install ./extensions/acpx
+wednesdayai plugins install ./extensions/acpx
 ```
 
 Then verify backend health:
@@ -361,7 +367,7 @@ You can override command/version in plugin config:
 Notes:
 
 - `command` accepts an absolute path, relative path, or command name (`acpx`).
-- Relative paths resolve from OpenClaw workspace directory.
+- Relative paths resolve from WednesdayAI workspace directory.
 - `expectedVersion: "any"` disables strict version matching.
 - When `command` points to a custom binary/path, plugin-local auto-install is disabled.
 - WednesdayAI startup remains non-blocking while the backend health check runs.
@@ -376,7 +382,7 @@ At gateway startup, ACP sessions whose identity is still pending are re-resolved
 - Session status reports `idle`, not `dead`, for a resumable session with no running process.
 - The first prompt after the upgrade downloads the new adapter through `npx`, so it takes noticeably longer.
 
-See [Plugins](/tools/plugin).
+See [Plugins](/users/tools/plugin).
 
 ## Permission configuration
 
@@ -406,13 +412,13 @@ Controls what happens when a permission prompt would be shown but no interactive
 Set via plugin config:
 
 ```bash
-openclaw config set plugins.entries.acpx.config.permissionMode approve-all
-openclaw config set plugins.entries.acpx.config.nonInteractivePermissions fail
+wednesdayai config set plugins.entries.acpx.config.permissionMode approve-all
+wednesdayai config set plugins.entries.acpx.config.nonInteractivePermissions fail
 ```
 
 Restart the gateway after changing these values.
 
-> **Important:** OpenClaw currently defaults to `permissionMode=approve-reads` and `nonInteractivePermissions=fail`. In non-interactive ACP sessions, any write or exec that triggers a permission prompt can fail with `AcpRuntimeError: Permission prompt unavailable in non-interactive mode`.
+> **Important:** WednesdayAI currently defaults to `permissionMode=approve-reads` and `nonInteractivePermissions=fail`. In non-interactive ACP sessions, any write or exec that triggers a permission prompt can fail with `AcpRuntimeError: Permission prompt unavailable in non-interactive mode`.
 >
 > If you need to restrict permissions, set `nonInteractivePermissions` to `deny` so sessions degrade gracefully instead of crashing.
 
@@ -432,6 +438,7 @@ What you see as a user:
 - Commands or edits the harness already started may still have completed even though no final reply arrived. Treat any partial output as a side effect that happened, and review the workspace before re-asking.
 - Messages sent while the gateway is restarting never reach the agent, so nothing ran and there are no side effects. The gateway refuses new messages as soon as the restart drain begins, so you may get no reply at all, or an `ACP_GATEWAY_DRAINING` error for a message that arrived just as the drain started. Either way, resend it after the gateway is back.
 - If the gateway crashes instead of restarting cleanly, or the notice could not be delivered during the shutdown (this includes turns started by a spawned agent task rather than a message in the thread), the same notice is delivered at the next boot. Once the notice reaches you it is not repeated; if the gateway still could not deliver it (for example the chat channel was still coming back online), it tries again later instead of skipping you.
+- A run-mode child (`sessions_spawn` with `mode: "run"`) has no thread of its own. If the gateway restarts during its turn, the requesting agent is told the child ended with an error.
 
 To continue, reply in the same thread after the gateway is back. The reply resumes the same ACP session with its earlier context, and `/acp status` shows the same `agentSessionId`. `sessions.runs.continue` does not apply to ACP turns: continuation is by replying in the bound thread, not through that RPC.
 

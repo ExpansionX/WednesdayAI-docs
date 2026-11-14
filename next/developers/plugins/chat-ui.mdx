@@ -1,0 +1,237 @@
+---
+summary: "Ship a chat UI plugin: a browser entry module that adds panels to the web client sidebar, with per-user data via plugins.chatUi.request"
+read_when:
+  - You want to add a Memory, Calendar or Extensions panel to the web client from a plugin
+  - Your panel shows end-user data and you need the chatUser handler contract
+  - The web client does not load your chat UI and you need the failure rules
+title: "Chat UI plugins"
+audience: developer
+sources:
+  - src/plugin-sdk/chat-ui.ts
+  - src/plugins/manifest.ts
+  - src/gateway/plugin-chat-ui.ts
+  - src/gateway/server-methods/plugins-chat-ui.ts
+  - src/config/types.gateway-consoles.ts
+  - apps/web/src/plugins/chat-ui-store.ts
+  - apps/web/src/plugins/chat-ui-host.ts
+generated: 2026-11-12
+---
+
+# Chat UI plugins
+
+A chat UI plugin ships **one browser ES module**. After the operator allowlists the plugin, the
+web client imports the module, calls its `activate(host)`, and the plugin mounts its own DOM into
+the right-panel slot shared with Canvas and Inbox. A panel registered for the `memory` slot
+enables the Sidebar's **Memory** entry (the `calendar` slot enables **Calendar** the same way);
+other panels list under an **Extensions** sidebar group. The **Add extension** entry stays
+disabled: installing new plugins from the client is not part of this tier (ADR 0634, amending
+ADR 0113).
+
+The contract is deliberately small, like `plugin-sdk/control-ui` for the operator console, and
+the two are not compatible: chat panels are single-slot and scoped to the signed-in **end user**,
+not the operator.
+
+## Declare the entry in the manifest
+
+Add an optional `chatUi` object to `openclaw.plugin.json`:
+
+```json
+{
+  "id": "memory-extension",
+  "configSchema": { "type": "object" },
+  "chatUi": {
+    "entry": "ui/index.js",
+    "methods": ["memory-extension.notes.list"]
+  }
+}
+```
+
+- `entry` follows the `controlUi` rules: a **relative** `.js` or `.mjs` path in a subdirectory of
+  the plugin root. Root-level entries, absolute paths, `..` segments, intermediate `.` segments
+  and `.ts` sources are rejected when the manifest loads. The gateway serves the entry's
+  directory (and everything under it) at `/__openclaw__/plugin-chat-ui/<plugin-id>/<path>`,
+  so put only browser assets there — use a dedicated output directory such as `dist/chat-ui/`.
+- `methods` lists the plugin gateway methods the browser side may call. Each name must be
+  non-empty and start with your own plugin id followed by a dot, for example
+  `memory-extension.notes.list`. A method without the prefix is rejected at manifest load, so a
+  chat panel can never proxy another plugin's methods. A method the browser calls but that is
+  not in `methods` fails with "method not exposed to chat UI".
+
+## Allowlist the plugin
+
+Chat UI is opt-in per plugin. The operator lists trusted plugin ids:
+
+```json5
+{
+  gateway: {
+    webClient: {
+      pluginUi: {
+        allow: ["memory-extension"],
+      },
+    },
+  },
+}
+```
+
+Default is **none**: a plugin with a manifest `chatUi.entry` but no allow entry contributes
+nothing (no sidebar entries, no panels, and its assets answer 404). This allowlist is separate
+from `gateway.controlUiV2.pluginUi.allow` on purpose: letting a plugin run in the operator
+console and letting it run for every chat user are different trust decisions.
+
+## Install the SDK import
+
+```ts
+import { defineChatUiPlugin } from "wednesdayai/plugin-sdk/chat-ui";
+```
+
+## The contract
+
+A plugin module default-exports `defineChatUiPlugin({ id, activate })`:
+
+```js
+import { defineChatUiPlugin } from "wednesdayai/plugin-sdk/chat-ui";
+
+export default defineChatUiPlugin({
+  id: "memory-extension",
+  activate(host) {
+    return host.ui.registerPanel({
+      id: "notes",
+      label: "Memory notes",
+      slot: "memory",
+      async mount(el, { host, signal }) {
+        el.textContent = "Loading...";
+        const { notes } = await host.request("memory-extension.notes.list");
+        if (signal.aborted) return;
+        el.textContent = notes.map((n) => n.title).join("\n");
+        return () => {
+          el.textContent = "";
+        };
+      },
+    });
+  },
+});
+```
+
+The essentials:
+
+- `id` **must equal the plugin manifest id**; activation fails otherwise.
+- `activate(host)` may be async and may return a disposer. It must finish within **10 seconds**;
+  a slower activation is aborted and reported as a failure. Failures are isolated per plugin:
+  one broken plugin never breaks the web client, and other plugins still load.
+- `mount(container, { host, signal })` builds DOM inside the given element and returns an
+  optional `dispose()`. The host aborts `signal` and calls the disposer when the panel closes or
+  the connection resets. If `mount` throws, the host aborts `signal` and empties the container
+  at once, then shows the failure note. This is framework-free: bundle your own framework inside
+  the module.
+- Registration inputs are validated: panel `id` matches `/^[a-z0-9][a-z0-9._-]{0,63}$/`,
+  `label` is 1 to 48 characters, `slot` is one of `memory`, `calendar`, `extension`, and panel
+  ids are unique per plugin. Only one panel across all plugins may claim a given `memory` or
+  `calendar` slot: the first registration wins (plugins activate in listed order) and the loser
+  fails with "chat UI slot already registered".
+
+### The host
+
+`ChatUiHost` (from the same subpath) carries:
+
+| Member                    | Behaviour                                                                                                                                                                                        |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `apiVersion`              | Always `1`.                                                                                                                                                                                      |
+| `pluginId`                | The manifest plugin id.                                                                                                                                                                          |
+| `signal`                  | Aborted when the web client resets the plugin: on hello/reconnect, on stop, or on activation failure.                                                                                            |
+| `basePath`                | The web client base path.                                                                                                                                                                        |
+| `request(method, params)` | Calls one of this plugin's manifest `chatUi.methods` **as the signed-in user**, via `plugins.chatUi.request`. Calling an undeclared method rejects with "method not declared in chatUi.methods". |
+| `ui.registerPanel(panel)` | Adds a panel. Returns a disposer.                                                                                                                                                                |
+
+There is no `onEvent` and no navigation in apiVersion 1: gateway events are not filtered per
+user, so a chat panel must re-query through `request` when it needs fresh data.
+
+### Slots and the sidebar
+
+| Slot        | Sidebar effect                                                                                |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `memory`    | The previously disabled **Memory** entry becomes a live button that opens the panel.          |
+| `calendar`  | The previously disabled **Calendar** entry becomes a live button that opens the panel.        |
+| `extension` | A button under the **Extensions** sidebar group, before the disabled **Add extension** entry. |
+
+All panels render in the right-panel slot shared with Canvas and Inbox; opening a chat panel
+closes Canvas or Inbox and vice versa.
+
+## The chatUser handler contract
+
+The browser never reaches your gateway method directly. Every `host.request` goes through the
+`plugins.chatUi.request` dispatcher, which resolves the caller's device to a person (the same
+resolution as `identity.self`) and injects it into your handler options:
+
+```ts
+opts.chatUser; // { person: "alice", deviceId: "..." } — set only by plugins.chatUi.request
+```
+
+Your gateway handler **must** scope every read and write to `opts.chatUser.person` and reject
+when it is absent (for example when a gateway admin calls the method directly):
+
+```ts
+// Node side (the plugin runtime module)
+export default function register(api) {
+  api.registerGatewayMethod("memory-extension.notes.list", async (opts) => {
+    const person = opts.chatUser?.person;
+    if (!person) {
+      opts.respond(false, undefined, {
+        ok: false,
+        error: { code: "forbidden", message: "chat UI requires a resolved person" },
+      });
+      return;
+    }
+    opts.respond(true, { notes: listNotesFor(person) });
+  });
+}
+```
+
+If the signed-in device has no linked identity, the dispatcher answers
+`UNAVAILABLE` with `details.code: "identity_unlinked"` before your handler runs — the browser
+side sees a rejected `request`, not your data. Scoping data to `chatUser.person` is your
+responsibility: the gateway injects identity, it does not sandbox your Node side.
+
+## Same-origin only
+
+Chat plugin modules load only when the web client is **served by the gateway** (the gateway's
+web client hosting, or a reverse proxy in front of it). The client authenticates to the gateway
+over its WebSocket connection and `import()` cannot attach that authentication, so asset
+requests are unauthenticated but confined to allowlisted plugins' UI directories and carry
+`Cross-Origin-Resource-Policy: same-origin`. When the gateway origin differs from
+`window.location.origin`, the client does not import anything and reports the feature as
+cross-origin. Support for cross-origin plugin UI is tracked separately (#1310).
+
+## Keeping the entry small
+
+The entry module is fetched after the client connects, before first use of a slot. Keep it
+small: register panels and lazy-load heavy code (framework runtimes, charts) inside `mount`.
+
+## Updating a plugin
+
+The browser caches loaded plugin modules. After you change or redeploy a plugin's UI, **reload
+the browser tab**; there is no live hot-reload. Changing the allowlist takes effect when the
+gateway applies the new config, plus a tab reload. The client also **resets and re-activates**
+every chat module whenever the gateway connection drops and reconnects, so never rely on module
+state kept across activations.
+
+## Troubleshooting
+
+**The Memory entry stays disabled.** No plugin registered a `memory` panel: the gateway does not
+advertise `plugins.chatUi.list` (older gateway), no plugin is allowlisted under
+`gateway.webClient.pluginUi.allow`, or the plugin's activation failed.
+
+**`request` rejects with `identity_unlinked`.** The signed-in device has no linked person. Link
+the device identity (the same identity flow the client uses for `identity.self`), then retry.
+
+**Nothing loads and the client says the gateway is cross-origin.** The web client is served from
+a different origin than the gateway. Serve the client from the gateway origin (or a reverse
+proxy in front of it).
+
+**The panel shows "This extension failed to load."** The module import failed, the default
+export is missing or its `id` does not match the manifest id, activation threw or timed out, or
+`mount` threw. Check the manifest `chatUi.entry` path, the allowlist, and that the built module
+default-exports `defineChatUiPlugin({ id: "<manifest-id>", ... })`.
+
+**Assets answer 404.** The plugin is not in `gateway.webClient.pluginUi.allow` (default none), or
+the request is outside the plugin's declared UI directory (`node_modules`, dot-prefixed segments
+and paths resolving outside the plugin root are refused).

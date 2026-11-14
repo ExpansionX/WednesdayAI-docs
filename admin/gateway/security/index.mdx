@@ -9,12 +9,12 @@ title: "Security"
 
 > [!WARNING]
 > **Personal assistant trust model:** this guidance assumes one trusted operator boundary per gateway (single-user/personal assistant model).
-> OpenClaw is **not** a hostile multi-tenant security boundary for multiple adversarial users sharing one agent/gateway.
+> WednesdayAI is **not** a hostile multi-tenant security boundary for multiple adversarial users sharing one agent/gateway.
 > If you need mixed-trust or adversarial-user operation, split trust boundaries (separate gateway + credentials, ideally separate OS users/hosts).
 
 ## Scope first: personal assistant security model
 
-OpenClaw security guidance assumes a **personal assistant** deployment: one trusted operator boundary, potentially many agents.
+WednesdayAI security guidance assumes a **personal assistant** deployment: one trusted operator boundary, potentially many agents.
 
 - Supported security posture: one user/trust boundary per gateway (prefer one OS user/host/VPS per boundary).
 - Not a supported security boundary: one shared gateway/agent used by mutually untrusted or adversarial users.
@@ -23,27 +23,27 @@ OpenClaw security guidance assumes a **personal assistant** deployment: one trus
 
 This page explains hardening **within that model**. It does not claim hostile multi-tenant isolation on one shared gateway.
 
-## Quick check: `openclaw security audit`
+## Quick check: `wednesdayai security audit`
 
-See also: [Formal Verification (Security Models)](/security/formal-verification/)
+See also: [Formal Verification (Security Models)](/admin/security/formal-verification)
 
 Run this regularly (especially after changing config or exposing network surfaces):
 
 ```bash
-openclaw security audit
-openclaw security audit --deep
-openclaw security audit --fix
-openclaw security audit --json
+wednesdayai security audit
+wednesdayai security audit --deep
+wednesdayai security audit --fix
+wednesdayai security audit --json
 ```
 
 It flags common footguns (Gateway auth exposure, browser control exposure, elevated allowlists, filesystem permissions).
 If `--fix` cannot safely rewrite an invalid config file, it records that config
 mutation was skipped and still continues with filesystem hardening such as state
 directory and config-file permission repair. Fix the reported config syntax or
-schema issues, then rerun `openclaw security audit --fix` if a config migration or
+schema issues, then rerun `wednesdayai security audit --fix` if a config migration or
 policy rewrite was also needed.
 
-OpenClaw is both a product and an experiment: you’re wiring frontier-model behavior into real messaging surfaces and real tools. **There is no “perfectly secure” setup.** The goal is to be deliberate about:
+WednesdayAI is both a product and an experiment: you’re wiring frontier-model behavior into real messaging surfaces and real tools. **There is no “perfectly secure” setup.** The goal is to be deliberate about:
 
 - who can talk to your bot
 - where the bot is allowed to act
@@ -53,14 +53,14 @@ Start with the smallest access that still works, then widen it as you gain confi
 
 ## Deployment assumption (important)
 
-OpenClaw assumes the host and config boundary are trusted:
+WednesdayAI assumes the host and config boundary are trusted:
 
 - If someone can modify Gateway host state/config (`~/.openclaw`, including `openclaw.json`), treat them as a trusted operator.
 - Running one Gateway for multiple mutually untrusted/adversarial operators is **not a recommended setup**.
 - For mixed-trust teams, split trust boundaries with separate gateways (or at minimum separate OS users/hosts).
-- OpenClaw can run multiple gateway instances on one machine, but recommended operations favor clean trust-boundary separation.
+- WednesdayAI can run multiple gateway instances on one machine, but recommended operations favor clean trust-boundary separation.
 - Recommended default: one user per machine/host (or VPS), one gateway for that user, and one or more agents in that gateway.
-- If multiple users want OpenClaw, use one VPS/host per user.
+- If multiple users want WednesdayAI, use one VPS/host per user.
 
 ### Practical consequence (operator trust boundary)
 
@@ -74,7 +74,7 @@ Inside one Gateway instance, authenticated operator access is a trusted control-
 
 ## Personal assistant model (not a multi-tenant bus)
 
-OpenClaw is designed as a personal assistant security model: one trusted operator boundary, potentially many agents.
+WednesdayAI is designed as a personal assistant security model: one trusted operator boundary, potentially many agents.
 
 - If several people can message one tool-enabled agent, each of them can steer that same permission set.
 - Per-user session/memory isolation helps privacy, but does not convert a shared agent into per-user host authorization.
@@ -197,7 +197,7 @@ If more than one person can DM your bot:
 - **Runtime expectation drift** (for example `tools.exec.host="sandbox"` while sandbox mode is off, which runs directly on the gateway host).
 - **Model hygiene** (warn when configured models look legacy; not a hard block).
 
-If you run `--deep`, OpenClaw also attempts a best-effort live Gateway probe.
+If you run `--deep`, WednesdayAI also attempts a best-effort live Gateway probe.
 
 ## Credential storage map
 
@@ -231,7 +231,7 @@ High-signal `checkId` values you will most likely see in real deployments (not e
 
 | `checkId`                                          | Severity      | Why it matters                                                                       | Primary fix key/path                                                                              | Auto-fix |
 | -------------------------------------------------- | ------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------- | -------- |
-| `fs.state_dir.perms_world_writable`                | critical      | Other users/processes can modify full OpenClaw state                                 | filesystem perms on `~/.openclaw`                                                                 | yes      |
+| `fs.state_dir.perms_world_writable`                | critical      | Other users/processes can modify full WednesdayAI state                              | filesystem perms on `~/.openclaw`                                                                 | yes      |
 | `fs.config.perms_writable`                         | critical      | Others can change auth/tool policy/config                                            | filesystem perms on `~/.openclaw/openclaw.json`                                                   | yes      |
 | `fs.config.perms_world_readable`                   | critical      | Config can expose tokens/settings                                                    | filesystem perms on config file                                                                   | yes      |
 | `gateway.bind_no_auth`                             | critical      | Remote bind without shared secret                                                    | `gateway.bind`, `gateway.auth.*`                                                                  | no       |
@@ -275,21 +275,30 @@ For break-glass scenarios only, `gateway.controlUi.dangerouslyDisableDeviceAuth`
 disables device identity checks entirely. This is a severe security downgrade;
 keep it off unless you are actively debugging and can revert quickly.
 
-`openclaw security audit` warns when this setting is enabled.
+`wednesdayai security audit` warns when this setting is enabled.
 
 ### Control UI plugin modules
 
 Control UI v2 can load trusted plugin browser modules behind
 `gateway.controlUiV2.pluginUi.allow` (default none, see
-[Control UI plugins](/plugins/control-ui)). A plugin's browser code runs with the
+[Control UI plugins](/developers/plugins/control-ui)). A plugin's browser code runs with the
 signed-in operator's console authority - the same trust class as the plugin's
 in-process gateway code - so allow only plugins whose server-side code you
 already trust. Plugin UI assets are served unauthenticated, but confined to
 allowlisted plugins' UI directories.
 
+The web client has a parallel tier behind `gateway.webClient.pluginUi.allow`
+(default none, see [Chat UI plugins](/developers/plugins/chat-ui)). There the exposure is
+wider: a plugin's browser code runs for **every signed-in chat user**, not just
+operators. Data calls are dispatched through `plugins.chatUi.request`, which
+injects the caller's resolved user (`chatUser.person`) into the plugin handler
+and refuses devices with no linked identity - but per-user scoping inside the
+handler is the plugin's responsibility, so allow a plugin for chat users only
+if you trust both its code and its per-user data handling.
+
 ## Insecure or dangerous flags summary
 
-`openclaw security audit` includes `config.insecure_or_dangerous_flags` when
+`wednesdayai security audit` includes `config.insecure_or_dangerous_flags` when
 known insecure/dangerous debug switches are enabled. That check currently
 aggregates:
 
@@ -300,7 +309,7 @@ aggregates:
 - `hooks.mappings[<index>].allowUnsafeExternalContent=true`
 - `tools.exec.applyPatch.workspaceOnly=false`
 
-Complete `dangerous*` / `dangerously*` config keys defined in OpenClaw config
+Complete `dangerous*` / `dangerously*` config keys defined in WednesdayAI config
 schema:
 
 - `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback`
@@ -359,9 +368,9 @@ proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 
 ## HSTS and origin notes
 
-- OpenClaw gateway is local/loopback first. If you terminate TLS at a reverse proxy, set HSTS on the proxy-facing HTTPS domain there.
-- If the gateway itself terminates HTTPS, you can set `gateway.http.securityHeaders.strictTransportSecurity` to emit the HSTS header from OpenClaw responses.
-- Detailed deployment guidance is in [Trusted Proxy Auth](/gateway/trusted-proxy-auth#tls-termination-and-hsts).
+- WednesdayAI gateway is local/loopback first. If you terminate TLS at a reverse proxy, set HSTS on the proxy-facing HTTPS domain there.
+- If the gateway itself terminates HTTPS, you can set `gateway.http.securityHeaders.strictTransportSecurity` to emit the HSTS header from WednesdayAI responses.
+- Detailed deployment guidance is in [Trusted Proxy Auth](/admin/gateway/trusted-proxy-auth#tls-termination-and-hsts).
 - For non-loopback Control UI deployments, `gateway.controlUi.allowedOrigins` is required by default. This covers both consoles: a gateway with only `gateway.controlUiV2.enabled` is held to the same requirement and refused at startup without it.
 - `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback=true` enables Host-header origin fallback mode; treat it as a dangerous operator-selected policy.
 - Treat DNS rebinding and proxy-host header behavior as deployment hardening concerns; keep `trustedProxies` tight and avoid exposing the gateway directly to the public internet.
@@ -378,7 +387,7 @@ private messages and tool output.
 **Any process/user with filesystem access can read these files.** Treat disk access as the trust
 boundary: directories should be `0700`, database/sidecar/backup/archive files `0600`. Protect
 custom paths and database credentials too. For stronger isolation between agents, use separate
-OS users or hosts. Use `openclaw session-storage backup` for a consistent online SQLite copy;
+OS users or hosts. Use `wednesdayai session-storage backup` for a consistent online SQLite copy;
 copying only the live `.db` file can miss committed data still in its WAL.
 
 ## Node execution (system.run)
@@ -391,7 +400,7 @@ If a macOS node is paired, the Gateway can invoke `system.run` on that node. Thi
 
 ## Dynamic skills (watcher / remote nodes)
 
-OpenClaw can refresh the skills list mid-session:
+WednesdayAI can refresh the skills list mid-session:
 
 - **Skills watcher**: changes to `SKILL.md` can update the skills snapshot on the next agent turn.
 - **Remote nodes**: connecting a macOS node can make macOS-only skills eligible (based on bin probing).
@@ -417,7 +426,7 @@ People who message you can:
 
 Most failures here are not fancy exploits — they’re “someone messaged the bot and the bot did what they asked.”
 
-OpenClaw’s stance:
+WednesdayAI’s stance:
 
 - **Identity first:** decide who can talk to the bot (DM pairing / allowlists / explicit “open”).
 - **Scope next:** decide where the bot is allowed to act (group allowlists + mention gating, tools, sandboxing, device permissions).
@@ -426,8 +435,8 @@ OpenClaw’s stance:
 ## Command authorization model
 
 Slash commands and directives are only honored for **authorized senders**. Authorization is derived from
-channel allowlists/pairing plus `commands.useAccessGroups` (see [Configuration](/gateway/configuration)
-and [Slash commands](/tools/slash-commands)). If a channel allowlist is empty or includes `"*"`,
+channel allowlists/pairing plus `commands.useAccessGroups` (see [Configuration](/admin/gateway/configuration)
+and [Slash commands](/users/tools/slash-commands)). If a channel allowlist is empty or includes `"*"`,
 commands are effectively open for that channel.
 
 `/exec` is a session-only convenience for authorized operators. It does **not** write config or
@@ -440,7 +449,7 @@ Two built-in tools can make persistent control-plane changes:
 - `gateway` can call `config.apply`, `config.patch`, and `update.run`.
 - `cron` can create scheduled jobs that keep running after the original chat/task ends.
 
-`config.apply` is **denied by default** for non-sandbox agents (`gateway.config_apply`) even when the `gateway` tool itself is allowed. Re-enable with `tools.allow` or `tools.alsoAllow` (including `agents.list[].tools.alsoAllow`). Bare `*` does not count. `config.patch` stays available. A write that drops unnamed top-level keys is refused and the on-disk file is unchanged. See [Config writes](/gateway/config-writes).
+`config.apply` is **denied by default** for non-sandbox agents (`gateway.config_apply`) even when the `gateway` tool itself is allowed. Re-enable with `tools.allow` or `tools.alsoAllow` (including `agents.list[].tools.alsoAllow`). Bare `*` does not count. `config.patch` stays available. A write that drops unnamed top-level keys is refused and the on-disk file is unchanged. See [Config writes](/admin/gateway/config-writes).
 
 For any agent/surface that handles untrusted content, deny these by default:
 
@@ -462,12 +471,12 @@ Plugins run **in-process** with the Gateway. Treat them as trusted code:
 - Prefer explicit `plugins.allow` allowlists.
 - Review plugin config before enabling.
 - Restart the Gateway after plugin changes.
-- If you install plugins from npm (`openclaw plugins install <npm-spec>`), treat it like running untrusted code:
+- If you install plugins from npm (`wednesdayai plugins install <npm-spec>`), treat it like running untrusted code:
   - The install path is `~/.openclaw/extensions/<pluginId>/` (or `$OPENCLAW_STATE_DIR/extensions/<pluginId>/`).
-  - OpenClaw uses `npm pack` and then runs `npm install --omit=dev` in that directory (npm lifecycle scripts can execute code during install).
+  - WednesdayAI uses `npm pack` and then runs `npm install --omit=dev` in that directory (npm lifecycle scripts can execute code during install).
   - Prefer pinned, exact versions (`@scope/pkg@1.2.3`), and inspect the unpacked code on disk before enabling.
 
-Details: [Plugins](/tools/plugin)
+Details: [Plugins](/users/tools/plugin)
 
 ## DM access model (pairing / allowlist / open / disabled)
 
@@ -481,15 +490,15 @@ All current DM-capable channels support a DM policy (`dmPolicy` or `*.dm.policy`
 Approve via CLI:
 
 ```bash
-openclaw pairing list <channel>
-openclaw pairing approve <channel> <code>
+wednesdayai pairing list <channel>
+wednesdayai pairing approve <channel> <code>
 ```
 
-Details + files on disk: [Pairing](/channels/pairing)
+Details + files on disk: [Pairing](/admin/channels/pairing)
 
 ## DM session isolation (multi-user mode)
 
-By default, OpenClaw routes **all DMs into the main session** so your assistant has continuity across devices and channels. If **multiple people** can DM the bot (open DMs or a multi-person allowlist), consider isolating DM sessions:
+By default, WednesdayAI routes **all DMs into the main session** so your assistant has continuity across devices and channels. If **multiple people** can DM the bot (open DMs or a multi-person allowlist), consider isolating DM sessions:
 
 ```json5
 {
@@ -503,7 +512,7 @@ This is a messaging-context boundary, not a host-admin boundary. If users are mu
 
 Workspace lanes are a separate opt-in workspace-file boundary for multi-user-capable personas. Use
 them with secure DM mode when one persona may serve multiple users, but do not treat them as a
-hostile co-tenant security boundary. See [Workspace Lanes](/concepts/workspace-lanes).
+hostile co-tenant security boundary. See [Workspace Lanes](/developers/concepts/workspace-lanes).
 
 ### Secure DM mode (recommended)
 
@@ -513,11 +522,11 @@ Treat the snippet above as **secure DM mode**:
 - Local CLI onboarding default: writes `session.dmScope: "per-channel-peer"` when unset (keeps existing explicit values).
 - Secure DM mode: `session.dmScope: "per-channel-peer"` (each channel+sender pair gets an isolated DM context).
 
-If you run multiple accounts on the same channel, use `per-account-channel-peer` instead. If the same person contacts you on multiple channels, link all of their accounts to one identity with `wednesdayai identity link <name> <value>` (see [Identities](/gateway/identity)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; linking the browser to the identity (`wednesdayai devices link <deviceId> --identity <name>`, or pairing it with `wednesdayai identity link <name> --qr`) makes web turns resolve to the same identity. See [Session Management](/concepts/session) and [Configuration](/gateway/configuration).
+If you run multiple accounts on the same channel, use `per-account-channel-peer` instead. If the same person contacts you on multiple channels, link all of their accounts to one identity with `wednesdayai identity link <name> <value>` (see [Identities](/admin/gateway/identity)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; linking the browser to the identity (`wednesdayai devices link <deviceId> --identity <name>`, or pairing it with `wednesdayai identity link <name> --qr`) makes web turns resolve to the same identity. See [Session Management](/developers/concepts/session) and [Configuration](/admin/gateway/configuration).
 
 ## Allowlists (DM + groups) — terminology
 
-OpenClaw has two separate “who can trigger me?” layers:
+WednesdayAI has two separate “who can trigger me?” layers:
 
 - **DM allowlist** (`allowFrom` / `channels.discord.allowFrom` / `channels.slack.allowFrom`; legacy: `channels.discord.dm.allowFrom`, `channels.slack.dm.allowFrom`): who is allowed to talk to the bot in direct messages.
   - When `dmPolicy="pairing"`, approvals are written to the account-scoped pairing allowlist store under `~/.openclaw/credentials/` (`<channel>-allowFrom.json` for default account, `<channel>-<accountId>-allowFrom.json` for non-default accounts), merged with config allowlists.
@@ -530,7 +539,7 @@ OpenClaw has two separate “who can trigger me?” layers:
   - Replying to a bot message (implicit mention) does **not** bypass sender allowlists like `groupAllowFrom`.
   - **Security note:** treat `dmPolicy="open"` and `groupPolicy="open"` as last-resort settings. They should be barely used; prefer pairing + allowlists unless you fully trust every member of the room.
 
-Details: [Configuration](/gateway/configuration) and [Groups](/channels/groups)
+Details: [Configuration](/admin/gateway/configuration) and [Groups](/admin/channels/groups)
 
 ## Prompt injection (what it is, why it matters)
 
@@ -551,11 +560,11 @@ Red flags to treat as untrusted:
 - “Read this file/URL and do exactly what it says.”
 - “Ignore your system prompt or safety rules.”
 - “Reveal your hidden instructions or tool outputs.”
-- “Paste the full contents of ~/.openclaw or your logs.”
+- “Paste the full contents of ~/.wednesdayai or your logs.”
 
 ## Unsafe external content bypass flags
 
-OpenClaw includes explicit bypass flags that disable external-content safety wrapping:
+WednesdayAI includes explicit bypass flags that disable external-content safety wrapping:
 
 - `hooks.mappings[].allowUnsafeExternalContent`
 - `hooks.gmail.allowUnsafeExternalContent`
@@ -628,7 +637,7 @@ Keep config + state private on the gateway host:
 - `~/.openclaw/openclaw.json`: `600` (user read/write only)
 - `~/.openclaw`: `700` (user only)
 
-`openclaw doctor` can warn and offer to tighten these permissions.
+`wednesdayai doctor` can warn and offer to tighten these permissions.
 
 ### 0.4) Network exposure (bind + port + firewall)
 
@@ -722,7 +731,7 @@ Set a token so **all** WS clients must authenticate:
 }
 ```
 
-Doctor can generate one for you: `openclaw doctor --generate-gateway-token`.
+Doctor can generate one for you: `wednesdayai doctor --generate-gateway-token`.
 
 Note: `gateway.remote.token` / `.password` are client credential sources. They
 do **not** protect local WS access by themselves.
@@ -743,7 +752,7 @@ Auth modes:
 
 - `gateway.auth.mode: "token"`: shared bearer token (recommended for most setups).
 - `gateway.auth.mode: "password"`: password auth (prefer setting via env: `OPENCLAW_GATEWAY_PASSWORD`).
-- `gateway.auth.mode: "trusted-proxy"`: trust an identity-aware reverse proxy to authenticate users and pass identity via headers (see [Trusted Proxy Auth](/gateway/trusted-proxy-auth)).
+- `gateway.auth.mode: "trusted-proxy"`: trust an identity-aware reverse proxy to authenticate users and pass identity via headers (see [Trusted Proxy Auth](/admin/gateway/trusted-proxy-auth)).
 
 Rotation checklist (token/password):
 
@@ -754,9 +763,9 @@ Rotation checklist (token/password):
 
 ### 0.6) Tailscale Serve identity headers
 
-When `gateway.auth.allowTailscale` is `true` (default for Serve), OpenClaw
+When `gateway.auth.allowTailscale` is `true` (default for Serve), WednesdayAI
 accepts Tailscale Serve identity headers (`tailscale-user-login`) for Control
-UI/WebSocket authentication. OpenClaw verifies the identity by resolving the
+UI/WebSocket authentication. WednesdayAI verifies the identity by resolving the
 `x-forwarded-for` address through the local Tailscale daemon (`tailscale whois`)
 and matching it to the header. This only triggers for requests that hit loopback
 and include `x-forwarded-for`, `x-forwarded-proto`, and `x-forwarded-host` as
@@ -777,20 +786,20 @@ and require token/password auth.
 
 **Security rule:** do not forward these headers from your own reverse proxy. If
 you terminate TLS or proxy in front of the gateway, disable
-`gateway.auth.allowTailscale` and use token/password auth (or [Trusted Proxy Auth](/gateway/trusted-proxy-auth)) instead.
+`gateway.auth.allowTailscale` and use token/password auth (or [Trusted Proxy Auth](/admin/gateway/trusted-proxy-auth)) instead.
 
 Trusted proxies:
 
 - If you terminate TLS in front of the Gateway, set `gateway.trustedProxies` to your proxy IPs.
-- OpenClaw will trust `x-forwarded-for` (or `x-real-ip`) from those IPs to determine the client IP for local pairing checks and HTTP auth/local checks.
+- WednesdayAI will trust `x-forwarded-for` (or `x-real-ip`) from those IPs to determine the client IP for local pairing checks and HTTP auth/local checks.
 - Ensure your proxy **overwrites** `x-forwarded-for` and blocks direct access to the Gateway port.
 
-See [Tailscale](/gateway/tailscale) and [Web overview](/web).
+See [Tailscale](/admin/gateway/tailscale) and [Web overview](/admin/web).
 
 ### 0.6.1) Browser control via node host (recommended)
 
 If your Gateway is remote but the browser runs on another machine, run a **node host**
-on the browser machine and let the Gateway proxy browser actions (see [Browser tool](/tools/browser)).
+on the browser machine and let the Gateway proxy browser actions (see [Browser tool](/users/tools/browser)).
 Treat node pairing like admin access.
 
 Recommended pattern:
@@ -836,10 +845,10 @@ Recommendations:
 
 - Keep tool summary redaction on (`logging.redactSensitive: "tools"`; default).
 - Add custom patterns for your environment via `logging.redactPatterns` (tokens, hostnames, internal URLs).
-- When sharing diagnostics, prefer `openclaw status --all` (pasteable, secrets redacted) over raw logs.
+- When sharing diagnostics, prefer `wednesdayai status --all` (pasteable, secrets redacted) over raw logs.
 - Rotate log files if you don’t need long retention; session conversation history is never deleted automatically (`session.maintenance` only retires session index entries).
 
-Details: [Logging](/gateway/logging)
+Details: [Logging](/admin/gateway/logging)
 
 ### 1) DMs: pairing by default
 
@@ -925,12 +934,12 @@ Built-in baseline for chat-driven agent turns: non-owner senders cannot use the 
 
 ## Sandboxing (recommended)
 
-Dedicated doc: [Sandboxing](/gateway/sandboxing)
+Dedicated doc: [Sandboxing](/admin/gateway/sandboxing)
 
 Two complementary approaches:
 
-- **Run the full Gateway in Docker** (container boundary): [Docker](/install/docker)
-- **Tool sandbox** (`agents.defaults.sandbox`, host gateway + Docker-isolated tools): [Sandboxing](/gateway/sandboxing)
+- **Run the full Gateway in Docker** (container boundary): [Docker](/admin/install/docker)
+- **Tool sandbox** (`agents.defaults.sandbox`, host gateway + Docker-isolated tools): [Sandboxing](/admin/gateway/sandboxing)
 
 Note: to prevent cross-agent access, keep `agents.defaults.sandbox.scope` at `"agent"` (default)
 or `"session"` for stricter per-session isolation. `scope: "shared"` uses a
@@ -942,7 +951,7 @@ Also consider agent workspace access inside the sandbox:
 - `agents.defaults.sandbox.workspaceAccess: "ro"` mounts the agent workspace read-only at `/agent` (disables `write`/`edit`/`delete`/`apply_patch`)
 - `agents.defaults.sandbox.workspaceAccess: "rw"` mounts the agent workspace read/write at `/workspace`
 
-Important: `tools.elevated` is the global baseline escape hatch that runs exec on the host. Keep `tools.elevated.allowFrom` tight and don’t enable it for strangers. You can further restrict elevated per agent via `agents.list[].tools.elevated`. See [Elevated Mode](/tools/elevated).
+Important: `tools.elevated` is the global baseline escape hatch that runs exec on the host. Keep `tools.elevated.allowFrom` tight and don’t enable it for strangers. You can further restrict elevated per agent via `agents.list[].tools.elevated`. See [Elevated Mode](/users/tools/elevated).
 
 ### Sub-agent delegation guardrail
 
@@ -973,7 +982,7 @@ access those accounts and data. Treat browser profiles as **sensitive state**:
 
 ### Browser SSRF policy (trusted-network default)
 
-OpenClaw’s browser network policy defaults to the trusted-operator model: private/internal destinations are allowed unless you explicitly disable them.
+WednesdayAI’s browser network policy defaults to the trusted-operator model: private/internal destinations are allowed unless you explicitly disable them.
 
 - Default: `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork: true` (implicit when unset).
 - Legacy alias: `browser.ssrfPolicy.allowPrivateNetwork` is still accepted for compatibility.
@@ -999,7 +1008,7 @@ Example strict policy:
 
 With multi-agent routing, each agent can have its own sandbox + tool policy:
 use this to give **full access**, **read-only**, or **no access** per agent.
-See [Multi-Agent Sandbox & Tools](/tools/multi-agent-sandbox-tools) for full details
+See [Multi-Agent Sandbox & Tools](/users/tools/multi-agent-sandbox-tools) for full details
 and precedence rules.
 
 Common use cases:
@@ -1062,7 +1071,7 @@ Common use cases:
           scope: "agent",
           workspaceAccess: "none",
         },
-        // Session tools can reveal sensitive data from transcripts. By default OpenClaw limits these tools
+        // Session tools can reveal sensitive data from transcripts. By default WednesdayAI limits these tools
         // to the current session + spawned subagent sessions, but you can clamp further if needed.
         // See `tools.sessions.visibility` in the configuration reference.
         tools: {
@@ -1119,7 +1128,7 @@ If your AI does something bad:
 
 ### Contain
 
-1. **Stop it:** stop the macOS app (if it supervises the Gateway) or terminate your `openclaw gateway` process.
+1. **Stop it:** stop the macOS app (if it supervises the Gateway) or terminate your `wednesdayai gateway` process.
 2. **Close exposure:** set `gateway.bind: "loopback"` (or disable Tailscale Funnel/Serve) until you understand what happened.
 3. **Freeze access:** switch risky DMs/groups to `dmPolicy: "disabled"` / require mentions, and remove `"*"` allow-all entries if you had them.
 
@@ -1134,11 +1143,11 @@ If your AI does something bad:
 1. Check Gateway logs: `/tmp/openclaw/openclaw-YYYY-MM-DD.log` (or `logging.file`).
 2. Review the relevant session history through `chat.history` or `sessions.export`. Preserve a consistent database backup, including any evidence in `backups/` and `legacy-session-archive/`; do not assume the old `agents/<agentId>/sessions/*.jsonl` paths hold current history.
 3. Review recent config changes (anything that could have widened access: `gateway.bind`, `gateway.auth`, dm/group policies, `tools.elevated`, plugin changes).
-4. Re-run `openclaw security audit --deep` and confirm critical findings are resolved.
+4. Re-run `wednesdayai security audit --deep` and confirm critical findings are resolved.
 
 ### Collect for a report
 
-- Timestamp, gateway host OS + OpenClaw version
+- Timestamp, gateway host OS + WednesdayAI version
 - The session transcript(s) + a short log tail (after redacting)
 - What the attacker sent + what the agent did
 - Whether the Gateway was exposed beyond loopback (LAN/Tailscale Funnel/Serve)
@@ -1175,7 +1184,7 @@ Commit the updated `.secrets.baseline` once it reflects the intended state.
 
 ## Reporting Security Issues
 
-Found a vulnerability in OpenClaw? Please report responsibly:
+Found a vulnerability in WednesdayAI? Please report responsibly:
 
 1. Email: [security@openclaw.ai](mailto:security@openclaw.ai)
 2. Don't post publicly until fixed

@@ -149,15 +149,15 @@ also the sender name: the model's Sender block reads
 `wednesdayai devices link <deviceId> --identity <key>`, or pair with
 `wednesdayai qr --client <id> --identity <key>` (or `wednesdayai identity link <key> --qr`) so the
 first connect links the device; `wednesdayai devices remove` also unlinks. See
-[Identities](/gateway/identity).
+[Identities](/admin/gateway/identity).
 
-Get device ids with `openclaw devices list --json` (the `deviceId` field of each entry under
+Get device ids with `wednesdayai devices list --json` (the `deviceId` field of each entry under
 `paired`). A device-less gateway turn is denied on every lane key; an unlinked device is denied on
 `canonical-identity` and `account-channel-peer` (see `channel-peer` below). The reason is shown to
 the requester:
 
 - Device not linked:
-  `This assistant keeps a private workspace for each person, and this device isn't linked to a person yet. Ask your administrator to add "device:<deviceId>" to your entry in session.identityLinks.`
+  `This assistant keeps a private workspace for each person, and this device isn't linked to a person yet. Ask your administrator to link it: wednesdayai devices link <deviceId> --identity <your name>`
 - No paired device:
   `This assistant keeps a private workspace for each person, and this connection has no paired device identity, so it can't be linked to a person. Connect from a paired device.`
 - `account-channel-peer` agent:
@@ -227,7 +227,7 @@ this slice is `hybrid` only. Other values are denied by policy until a later tas
 
 ### Sandbox lane fencing
 
-When [sandboxing](/gateway/sandboxing) is enabled, set `fenceToLane: true` in the agent's sandbox
+When [sandboxing](/admin/gateway/sandboxing) is enabled, set `fenceToLane: true` in the agent's sandbox
 config to bind the sandbox tool filesystem to the user's effective lane workspace instead of the
 shared persona root. Without this flag, a sandboxed multi-lane agent can still traverse up to the
 persona root and reach sibling lane directories via the workspace mount.
@@ -282,10 +282,12 @@ Workspace lane data is additive. Existing hooks and plugins continue to run with
 Gateway turns (`chat.send`, `sessions.steer`, talk) carry `SenderId: "device:<deviceId>"` when the
 connect frame has a verified device block, and the app id (for example `openclaw-user-client`) only
 when it does not. A Control UI running with `gateway.controlUi.dangerouslyDisableDeviceAuth` counts
-as device-less: any presented device block is ignored. Identity consumers match `device:<id>` values
-against `session.identityLinks` directly; nothing re-derives identity from the session key or the
-delivery route. For a linked device the sender name (ADR 0104) is the identityLinks key; the raw
-`device:<id>` stays the sender id and the client display name is the Sender-block `client` field.
+as device-less: any presented device block is ignored. A `device:<id>` sender resolves to the
+person recorded as the device's owner on its pairing record (`devices link`, or a setup code with
+`--identity`), never to a `device:` value in `session.identityLinks`; nothing re-derives identity
+from the session key or the delivery route. For a linked device the sender name (ADR 0104) is the
+identityLinks key; the raw `device:<id>` stays the sender id and the client display name is the
+Sender-block `client` field.
 
 A lane-enabled agent resolves the lane from the validated run identity on every path. A run that
 cannot be attributed to a linked identity fails closed with `WorkspaceLaneDeniedError`
@@ -364,7 +366,7 @@ Every lane denial carries `details.reason: "workspace_lane_denied"` on the gatew
 with `gatewayErrorReason(err)` (`src/gateway/client.ts`) instead of matching the message text.
 Core behavior keys on the marker: the CLI `agent` command skips its embedded fallback,
 `sessions_send` reports `status: "error"` with the denial instead of waiting out a timeout, and a
-denied subagent announce settles without retry (see [Sub-agents](/tools/subagents)).
+denied subagent announce settles without retry (see [Sub-agents](/users/tools/subagents)).
 
 ### Bootstrap hooks
 

@@ -28,17 +28,37 @@ This guide owns docs placement, the doc rules, i18n, docs sync, the coverage lif
 
 ## Docs sync
 
-`scripts/docs-sync.sh` copies English core docs to the docs site repository, and `scripts/docs-drift.mjs` reports which site pages are likely stale. Both map a core path to a site path, and the two maps must stay identical:
+The docs site repository (`ExpansionX/WednesdayAI-docs`, Mintlify at `docs.wednesdayai.dev`) holds three versions of the same pages:
 
-- `docs/contributing/*` maps to `developers/contributing/*`.
-- `CONTRIBUTING.md` maps to the single page `developers/contributing`, with site frontmatter prepended.
-- Other prefixes follow the persona rules in the scripts (`gateway/` to `admin/gateway/`, and so on).
+- The **latest release** sits at the root (`admin/`, `users/`, `developers/`, `reference/`, `index.mdx`, `changelog.mdx`). It is the default version, so its URLs never change.
+- `next/` is the unreleased version. `scripts/docs-sync.sh` rebuilds it from one core `main` SHA after every core merge.
+- `vA.B/` directories pin older release minors, newest first.
 
-Only pages listed in a `dev-docs/wai-feature-list.json` feature are synced, so a new core doc needs a `core_doc_paths` entry there or `--all` skips it. `scripts/docs-sync.test.ts` enforces that every `docs-surface.yaml` entry whose `docs_page` is the persona-mapped target of its core `source` is covered.
+```
+docs repo root
+├── docs.json                 navigation.versions: latest (default) | next | vA.B ...
+├── admin/ users/ developers/ reference/ index.mdx changelog.mdx   latest release
+├── next/admin/ ... next/changelog.mdx                             unreleased
+├── v0.6/admin/ ...                                                pinned snapshot
+└── .wednesdayai-sync/next.json release.json                       source SHA markers
+```
 
-When the site page already exists, `scripts/docs-sync-frontmatter.mjs` merges the frontmatter: core keys win and site-only keys (`description`, `sidebarTitle`) are kept. A core doc never has to carry site-only keys, and a sync never drops them.
+Edit core, never the docs repo, for any synced page. A fix made in the docs repo is overwritten by the next sync.
 
-Run `scripts/docs-sync.sh --dry-run` to see the mapping before a real sync.
+`scripts/docs-sync.sh` syncs English core docs to the site through the single `mapCoreDocToPersona` mapping in `scripts/docs-drift.mjs` (`gateway/` to `admin/gateway/`, `CONTRIBUTING.md` to the single page `developers/contributing`, and so on). Only pages listed in a `dev-docs/wai-feature-list.json` feature under `core_doc_paths` are synced; `scripts/docs-sync.test.ts` enforces that every `docs-surface.yaml` entry whose `docs_page` is the persona-mapped target of its core `source` is covered. When the site page already exists, `scripts/docs-sync-frontmatter.mjs` merges the frontmatter: core keys win and site-only keys (`description`, `sidebarTitle`) are kept.
+
+Two gates run in core before anything is published:
+
+- `pnpm docs:check-mdx` compiles every published core doc with `@mdx-js/mdx` (issue #2519). HTML comments and bare `<word>` placeholders in prose fail; use the repo's MDX comment form `{/_ note _/ && null}` (oxfmt-stable in `.md`) and backticks instead.
+- `pnpm docs:check-published-links` resolves every internal link and image of the published docs against core. A link must reach a published core doc, an existing asset, or a docs-repo page route.
+
+After a core PR merges, run `scripts/docs-sync.sh` once from the repo root. It rebuilds `next/` from a single core SHA on a fresh `docs-sync/next` branch, force-pushes, and squash-merges its own PR; never merge docs-sync PRs by hand. It skips the run when docs `next` is already at or past that SHA, and it exits with guidance when the site has no versions yet. The one-time bootstrap is `scripts/docs-sync.sh --release <latest tag> --ref origin/main`: `--ref` overrides the release source when the tag predates a sync fix, and the run prints the override. `scripts/docs-sync.sh --dry-run` prints the mapping and pushes nothing; `--feature <slug>` narrows a dry run only.
+
+`scripts/docs-sync.sh --release vX.Y.Z` cuts the default version from the tag. On a minor bump it snapshots the previous root to `vA.B/`; retention keeps four minors (the latest at the root plus three snapshots) and a pruned version redirects `/vX.Y/:slug*` to `/:slug*`. It sets the release banner, opens the `docs: WednesdayAI vX.Y.Z` PR, and merges it only once the GitHub release is published (not draft): rerun the command after publishing. See [Release](/developers/contributing/release).
+
+Adding a new page takes two steps: add the core doc to the feature's `core_doc_paths` in `dev-docs/wai-feature-list.json`, then add the page to the `next` version's navigation in the docs repo's `docs.json` (next mode never edits docs.json). At release, the root navigation takes over whatever `next` carried.
+
+The sync rewrites internal links and images to their own version prefix and copies images to content-addressed `media/` paths shared by every version.
 
 ## Docs coverage lifecycle
 

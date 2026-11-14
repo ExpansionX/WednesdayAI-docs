@@ -1,0 +1,210 @@
+---
+summary: "Logging surfaces, file logs, WS log styles, and console formatting"
+read_when:
+  - Changing logging output or formats
+  - Debugging CLI or gateway output
+title: "Logging"
+audience: admin
+sources:
+  - src/logging/logger.ts
+  - src/logging/levels.ts
+  - src/logging/file-log-writer.ts
+  - src/logging/subsystem.ts
+  - src/config/types.base.ts
+  - src/config/zod-schema.ts
+generated: 2026-07-30
+---
+
+# Logging
+
+For a user-facing overview (CLI + Control UI + config), see [/logging](/next/admin/logging).
+
+WednesdayAI has two log “surfaces”:
+
+- **Console output** (what you see in the terminal / Debug UI).
+- **File logs** (JSON lines) written by the gateway logger.
+
+## File-based logger
+
+- Default rolling log file is under `/tmp/openclaw/` (one file per day): `openclaw-YYYY-MM-DD.log`
+  - Date uses the gateway host's local timezone.
+- The log file path and level can be configured via `~/.openclaw/openclaw.json`:
+  - `logging.file`
+  - `logging.level`
+  - `logging.maxFileBytes`
+  - `logging.maxBackups`
+
+The file format is one JSON object per line.
+
+The Control UI **Logs** screen tails this file via the gateway (`logs.tail`).
+The CLI follows the same file (directly when local, via `logs.tail` with `--rpc` or in remote
+mode):
+
+```bash
+wednesdayai logs --follow
+wednesdayai-logs          # lightweight local follower
+```
+
+**Verbose vs. log levels**
+
+- **File logs** are controlled exclusively by `logging.level`.
+- `--verbose` only affects **console verbosity** (and WS log style); it does **not**
+  raise the file log level.
+- To capture verbose-only details in file logs, set `logging.level` to `debug` or
+  `trace`.
+- Accepted values, least to most verbose: `silent`, `fatal`, `error`, `warn`, `info`
+  (default), `debug`, `trace`. Each level includes everything less verbose than it.
+- Releases up to and including 0.4.10 applied the levels above `info` inverted, so
+  `debug` behaved as `warn` and `trace` as `error`. Raising `logging.level` on those
+  builds silently _reduced_ file detail; upgrade if `debug` appears to do nothing.
+
+## Rotation and resource controls
+
+Gateway file logging is bounded by size rotation. The primary log uses:
+
+- `logging.maxFileBytes`: active file cap in bytes. Default: 10 MB.
+- `logging.maxBackups`: number of rotated backups to retain. Default: 5; use
+  `0` to truncate without keeping backups.
+
+Rotated primary backups are gzip-compressed by default. The same rotation engine
+also backs durable diagnostic and audit file logs through named profiles under
+`logging.fileLogs`:
+
+```json5
+{
+  logging: {
+    fileLogs: {
+      defaults: {
+        maxFileBytes: 10485760,
+        maxBackups: 5,
+        compress: "gzip",
+        maxQueuedBytes: 1048576,
+        mode: "jsonl",
+      },
+      profiles: {
+        "cron.run": {
+          maxFileBytes: 2097152,
+          maxBackups: 3,
+          keepLines: 2000,
+        },
+        "agents.rawStream": {
+          maxFileBytes: 1048576,
+          maxBackups: 2,
+        },
+      },
+    },
+  },
+}
+```
+
+Profile fields:
+
+- `file`: profile file path. Some stateful logs intentionally ignore this to
+  keep readers pointed at canonical paths.
+- `maxFileBytes`: active file cap before rotation.
+- `maxBackups`: retained backup count; `0` truncates without backups.
+- `compress`: `"gzip"` or `false`.
+- `maxQueuedBytes`: per-writer in-memory queue budget before new writes are
+  dropped by non-strict writers.
+- `keepLines`: visible-tail retention for logs that still expose legacy tail
+  views, such as cron run logs.
+- `mode`: `"jsonl"` or `"text"`.
+
+Built-in profiles are `primary`, `cron.run`, `config.audit`, `hooks.command`,
+`agents.rawStream`, `extensions.learningCore`, and
+`extensions.voiceCall.calls`. Sessions and conversations are not controlled by
+`logging.fileLogs`; they use their own storage retention and maintenance
+settings.
+
+## Console capture
+
+The CLI captures `console.log/info/warn/error/debug/trace` and writes them to file logs,
+while still printing to stdout/stderr.
+
+You can tune console verbosity independently via:
+
+- `logging.consoleLevel` (default `info`)
+- `logging.consoleStyle` (`pretty` | `compact` | `json`)
+
+## Tool summary redaction
+
+Verbose tool summaries (e.g. `🛠️ Exec: ...`) can mask sensitive tokens before they hit the
+console stream. This is **tools-only** and does not alter file logs.
+
+- `logging.redactSensitive`: `off` | `tools` (default: `tools`)
+- `logging.redactPatterns`: array of regex strings (overrides defaults)
+  - Use raw regex strings (auto `gi`), or `/pattern/flags` if you need custom flags.
+  - Matches are masked by keeping the first 6 + last 4 chars (length >= 18), otherwise `***`.
+  - Defaults cover common key assignments, CLI flags, JSON fields, bearer headers, PEM blocks,
+    popular token prefixes, and URL userinfo passwords (`postgres://user:pass@host/db` — only the
+    password is masked; scheme, user and host survive).
+
+## Gateway WebSocket logs
+
+The gateway prints WebSocket protocol logs in two modes:
+
+- **Normal mode (no `--verbose`)**: only “interesting” RPC results are printed:
+  - errors (`ok=false`)
+  - slow calls (default threshold: `>= 50ms`)
+  - parse errors
+- **Verbose mode (`--verbose`)**: prints all WS request/response traffic.
+
+### WS log style
+
+`wednesdayai gateway` supports a per-gateway style switch:
+
+- `--ws-log auto` (default): normal mode is optimized; verbose mode uses compact output
+- `--ws-log compact`: compact output (paired request/response) when verbose
+- `--ws-log full`: full per-frame output when verbose
+- `--compact`: alias for `--ws-log compact`
+
+Examples:
+
+```bash
+# optimized (only errors/slow)
+wednesdayai gateway
+
+# show all WS traffic (paired)
+wednesdayai gateway --verbose --ws-log compact
+
+# show all WS traffic (full meta)
+wednesdayai gateway --verbose --ws-log full
+```
+
+## Console formatting (subsystem logging)
+
+The console formatter is **TTY-aware** and prints consistent, prefixed lines.
+Subsystem loggers keep output grouped and scannable.
+
+Behavior:
+
+- **Subsystem prefixes** on every line (e.g. `[gateway]`, `[canvas]`, `[tailscale]`)
+- **Subsystem colors** (stable per subsystem) plus level coloring
+- **Color when output is a TTY or the environment looks like a rich terminal** (`TERM`/`COLORTERM`/`TERM_PROGRAM`), respects `NO_COLOR`; a non-empty `FORCE_COLOR` other than `0` forces color on and overrides `NO_COLOR`
+- **Shortened subsystem prefixes**: drops leading `gateway/` + `channels/`, keeps last 2 segments (e.g. `whatsapp/outbound`)
+- **Sub-loggers by subsystem** (auto prefix + structured field `{ subsystem }`)
+- **`logRaw()`** for QR/UX output (no prefix, no formatting)
+- **Console styles** (e.g. `pretty | compact | json`)
+- **Structured metadata** on `pretty` and `compact` (and therefore on journald, which
+  captures the same stdout/stderr stream): a call such as
+  `log.warn("recovery incident", { incidentKey: "session-restart:abc", kind: "restart", reasonCode: 2 })`
+  prints the message followed by a dimmed `key=value` suffix, for example
+  `[gateway] recovery incident incidentKey=session-restart:abc kind=restart reasonCode=2`.
+  Bare-looking string values (letters, digits, `_`, `.`, `/`, `:`, `@`, `+`, `-`) print
+  unquoted; anything else is JSON-quoted (for example `detail="two words"`). `undefined`,
+  functions, and symbols are omitted, matching the `json` console style and the JSONL
+  file log. A value that cannot be serialized prints as `"[unserializable]"`. Long values
+  are truncated per key and across the whole suffix without splitting a UTF-16 surrogate
+  pair.
+
+  Treat structured metadata as operator-visible. The `json` console style and the JSONL file
+  log already carried these fields, but `pretty` and `compact` are the default styles, so on
+  those the fields now reach stdout/stderr and therefore journald. Nothing redacts them: the
+  renderer writes the values it is given, and the tool-summary redaction described in
+  [Logging](/next/admin/logging) covers tool output, not log metadata. Do not put secrets, tokens, or raw
+  credentials in a log call's metadata object; hash or truncate identifiers before logging them.
+
+- **Console log level** separate from file log level (file keeps full detail when `logging.level` is set to `debug`/`trace`)
+- **WhatsApp message bodies** are logged at `debug` (use `--verbose` to see them)
+
+This keeps existing file logs stable while making interactive output scannable.

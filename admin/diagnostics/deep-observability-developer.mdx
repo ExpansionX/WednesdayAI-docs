@@ -1,0 +1,225 @@
+---
+summary: "Developer contracts for WednesdayAI deep observability events, metrics, and release sweeps"
+audience: developer
+sources:
+  - src/infra/diagnostic-events.ts
+  - src/plugins/hooks.ts
+  - extensions/diagnostics-otel/src/service.ts
+  - extensions/diagnostics-otel/src/runtime-metrics.ts
+  - extensions/diagnostics-otel/src/attribute-policy.ts
+  - src/gateway/server-methods/diagnostics.ts
+  - scripts/release-performance-sweep.ts
+generated: 2026-06-25
+read_when:
+  - Adding plugin or boundary telemetry
+  - Consuming runtime metrics from diagnostics-otel
+  - Extending release performance sweep behavior
+title: "Deep Observability Developer Guide"
+---
+
+# Deep Observability Developer Guide
+
+Deep observability is split between app-side contracts and stack-side storage. Application code emits bounded events, metrics, spans, logs, and capture results. The `/srv` monitoring stack stores, dashboards, profiles, alerts, and reports on those signals.
+
+Do not add a second metrics export path for this feature. App metrics flow through the existing OpenTelemetry meter in `diagnostics-otel`.
+
+## Boundary event contract
+
+Use the diagnostic event bus for app boundary attribution. The public shape is defined by `DiagnosticBoundaryEvent`:
+
+```typescript
+export type DiagnosticBoundaryKind =
+  | "plugin"
+  | "channel"
+  | "provider"
+  | "tool"
+  | "routing"
+  | "memory"
+  | "search"
+  | "runtime";
+
+export type DiagnosticBoundaryStatus = "ok" | "error" | "blocked" | "skipped";
+
+export type DiagnosticBoundaryEvent = {
+  type: "boundary";
+  boundary: {
+    kind: DiagnosticBoundaryKind;
+  };
+  operation: string;
+  component: {
+    id: string;
+  };
+  status: DiagnosticBoundaryStatus;
+  durationMs: number;
+  provider?: string;
+  model?: string;
+  channel?: string;
+  tool?: {
+    name: string;
+  };
+  hook?: {
+    name: string;
+  };
+  runId?: string;
+  sessionKey?: string;
+  sessionId?: string;
+  chatId?: string | number;
+  userId?: string;
+};
+```
+
+The current production instrumentation emits plugin hook boundary events from `src/plugins/hooks.ts`. The broader kinds are part of the shared event contract and should be instrumented in separate, source-specific slices.
+
+## Emit plugin boundary events
+
+Boundary events should wrap the real production dispatch path, not only an isolated helper. Use low-cardinality fields for metric labels, and leave raw run, session, user, or chat identifiers to traces/logs where policy can drop or redact them.
+
+Correct pattern:
+
+```typescript
+import { emitDiagnosticEvent } from "openclaw/plugin-sdk";
+
+const startedAt = Date.now();
+let status: "ok" | "error" = "ok";
+
+try {
+  await runHook();
+} catch (err) {
+  status = "error";
+  throw err;
+} finally {
+  emitDiagnosticEvent({
+    type: "boundary",
+    boundary: { kind: "plugin" },
+    operation: "beforeMessageWrite",
+    component: { id: pluginId },
+    hook: { name: "beforeMessageWrite" },
+    status,
+    durationMs: Math.max(0, Date.now() - startedAt),
+  });
+}
+```
+
+What not to do:
+
+```typescript
+emitDiagnosticEvent({
+  type: "boundary",
+  boundary: { kind: "plugin" },
+  operation: "beforeMessageWrite",
+  component: { id: `${pluginId}:${sessionKey}:${runId}` },
+  status: "ok",
+  durationMs: 1,
+});
+```
+
+That turns high-cardinality identifiers into metric labels after export. Use `component.id` for the bounded plugin or component name only.
+
+## Runtime metrics emitted by diagnostics-otel
+
+When `diagnostics.otel.runtime.enabled` is true, `extensions/diagnostics-otel/src/runtime-metrics.ts` registers these instruments:
+
+| Metric                                        | Type               | Notes                                                                             |
+| --------------------------------------------- | ------------------ | --------------------------------------------------------------------------------- |
+| `nodejs.eventloop.utilization`                | observable gauge   | Interval event loop utilization ratio.                                            |
+| `nodejs.eventloop.delay.p99`                  | observable gauge   | P99 event loop delay for the latest collection window, in seconds.                |
+| `v8js.gc.duration`                            | histogram          | GC pause duration in seconds, with `v8js.gc.type` when known.                     |
+| `process.memory.usage`                        | observable gauge   | RSS, heap total, heap used, external, and array buffers.                          |
+| `process.cpu.time`                            | observable counter | User and system CPU time in seconds.                                              |
+| `process.runtime.nodejs.resource_usage`       | observable gauge   | Node resource usage snapshot.                                                     |
+| `process.runtime.nodejs.resource_usage.delta` | observable gauge   | Per-window resource deltas for CPU time, page faults, and fs read/write counters. |
+| `process.uptime`                              | observable gauge   | Process uptime in seconds.                                                        |
+| `v8js.memory.heap.*`                          | observable gauges  | V8 heap limit and heap-space size, available, physical, and used values.          |
+| `process.unix.file_descriptor.count`          | observable gauge   | Open file descriptor count when `/proc/self/fd` is readable.                      |
+| `wednesdayai.process.io`                      | observable gauge   | Parsed `/proc/self/io` counters when available.                                   |
+
+The collector registers callbacks only while enabled and removes callbacks on stop. Keep new runtime metrics behind the same `diagnostics.otel.runtime.enabled` gate unless they are already part of a cheaper always-on signal.
+
+## Attribute policy
+
+`extensions/diagnostics-otel/src/attribute-policy.ts` bounds metric and trace/log attributes. The policy exists to protect Prometheus, Loki, Tempo, and Langfuse from cardinality blowups and sensitive values.
+
+Use semantic convention names where they exist, such as `nodejs.*`, `v8js.*`, `process.*`, `system.*`, and `gen_ai.*`. Use `wednesdayai.*` or the existing `openclaw.*` namespace for WednesdayAI-specific concepts such as plugin hooks, routing, recovery, and queue lanes.
+
+Never use these as metric labels:
+
+- `runId`
+- `sessionKey`
+- `userId`
+- `chatId`
+- prompt text
+- tool payloads
+- file contents
+- credentials
+
+## Gateway diagnostics methods
+
+The gateway handlers live in `src/gateway/server-methods/diagnostics.ts` and are registered in the core gateway method map.
+
+| Method                         | Scope            | Developer note                                                                         |
+| ------------------------------ | ---------------- | -------------------------------------------------------------------------------------- |
+| `diagnostics.runtime.snapshot` | `operator.read`  | Uses `getDiagnosticRuntimeSnapshot()` and does not require capture to be enabled.      |
+| `diagnostics.capture.cpu`      | `operator.admin` | Requires capture enabled and mode not `off`; returns CPU usage delta.                  |
+| `diagnostics.capture.heap`     | `operator.admin` | Requires capture enabled and mode not `off`; writes a V8 heap snapshot.                |
+| `diagnostics.capture.report`   | `operator.admin` | Requires capture enabled and mode not `off`; writes an allow-listed diagnostic report. |
+| `diagnostics.profiling.start`  | `operator.admin` | Placeholder app-side control seam until the stack profiler adapter exists.             |
+| `diagnostics.profiling.stop`   | `operator.admin` | Placeholder app-side control seam until the stack profiler adapter exists.             |
+
+Do not present `diagnostics.profiling.start` or `diagnostics.profiling.stop` as active Pyroscope collection. Real Pyroscope SDK or eBPF scheduling is monitoring-stack follow-up work.
+
+## Release performance sweep
+
+`scripts/release-performance-sweep.ts` supports dry and live modes. Dry mode returns fixture data. Live mode uses the gateway client path and requires `diagnostics.runtime.snapshot`; `--capture` also requires `diagnostics.capture.cpu` and `diagnostics.capture.report`.
+
+The sweep writes `release-performance-sweep.json` and `release-performance-sweep.md` when `--output-dir` is set. Keep the output safe for operator review: no raw prompts, credentials, chat IDs, session keys, or user identifiers.
+
+## Async safety
+
+Plugin `register` functions may be synchronous or async, but they run during gateway startup. Do not perform synchronous blocking I/O in `register()`.
+
+Do not do this:
+
+```typescript
+import fs from "node:fs";
+import { Type, type OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  const config = fs.readFileSync("./config.json", "utf8");
+  api.registerTool({
+    name: "example_tool",
+    description: config,
+    parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "done" }] };
+    },
+  });
+}
+```
+
+Do this instead:
+
+```typescript
+import fs from "node:fs/promises";
+import { Type, type OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default async function register(api: OpenClawPluginApi): Promise<void> {
+  const config = await fs.readFile("./config.json", "utf8");
+  api.registerTool({
+    name: "example_tool",
+    description: config,
+    parameters: Type.Object({}),
+    async execute() {
+      return { content: [{ type: "text", text: "done" }] };
+    },
+  });
+}
+```
+
+Hook and tool handlers run on the shared Node.js event loop. A slow hook delays the user-visible turn, so emit boundary timing around the actual hook work and move long-running work out of the synchronous startup path.
+
+## Related
+
+- [OTel and Langfuse Diagnostics](/admin/diagnostics/otel-langfuse)
+- [Deep Observability](/admin/gateway/deep-observability)
+- [Deep Observability Stack Handoff](/admin/diagnostics/deep-observability-stack-handoff)
+- [Deep Observability Dashboards and Reports](/admin/diagnostics/deep-observability-dashboards-reports)

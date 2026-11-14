@@ -16,7 +16,7 @@ linked accounts live in one place in the gateway config:
 {
   session: {
     identityLinks: {
-      Alice: ["telegram:123456789", "slack:U061CR7GN", "device:6abfaeda…"],
+      Alice: ["telegram:123456789", "slack:U061CR7GN"],
     },
   },
 }
@@ -24,8 +24,9 @@ linked accounts live in one place in the gateway config:
 
 The key is the canonical identity used everywhere a person matters: sender attribution, workspace
 lanes, cron and heartbeat `identity` fields, and cross-channel DM session merging. The values are
-provider-prefixed link values: `telegram:<id>`, `discord:<id>`, `device:<deviceId>`,
-`oauth:<provider>:<subject>` and so on.
+provider-prefixed channel identities: `telegram:<id>`, `discord:<id>`, `oauth:<provider>:<subject>`
+and so on. Devices are not listed here: a paired device's person is recorded on its pairing record
+(see [Conflicts and devices](#conflicts-and-devices)).
 
 You never edit that map by hand. Every proof of control ends in one core link operation, exposed as
 the `identity` CLI commands and the gateway `identity.*` RPCs, that writes the config for you.
@@ -129,7 +130,7 @@ The web client shows these errors:
 
 With the bundled `identity-oidc` plugin enabled, a person signs in with Google, Microsoft Entra or
 GitHub; a provider-verified invite links the sign-in to the person and enrolls the browser. See
-[Identity OIDC](/plugins/identity-oidc).
+[Identity OIDC](/developers/plugins/identity-oidc).
 
 ## Listing and unlinking
 
@@ -141,7 +142,8 @@ wednesdayai identity unlink telegram:123456789
 ```
 
 `identity unlink <value>` removes the value from every identity and prints
-`Unlinked telegram:123456789 from Alice.`, or `telegram:123456789 is not linked.`
+`Unlinked telegram:123456789 from Alice.`, or `telegram:123456789 is not linked.` It refuses
+`device:` values: unlinking a device deregisters it, which is `wednesdayai devices unlink`.
 
 ## Conflicts and devices
 
@@ -156,20 +158,69 @@ Ownership is resolved canonically: a legacy config entry that holds a bare `"123
 `telegram:123`. Link-code claims are serialized per claimed value, so two people redeeming codes
 for the same sender cannot interleave their ownership check, link and approval.
 
-Devices are different: a device is a credential and may be re-bound. `identity link` refuses
-`device:` values and points you at the device command:
+Devices are linked with their own command. `identity link` refuses `device:` values and points you
+at the device command:
 
 ```
 Use "wednesdayai devices link <deviceId> --identity <name>" for devices.
 ```
 
-`wednesdayai devices link <deviceId> --identity <name>` moves the `device:<deviceId>` value to the
-target person (linking implicitly unlinks it from the previous person). `devices unlink` and
-`devices remove` drop the value. These device commands are unchanged by the identity command set.
-The [Control UI v2](/web/control-ui-v2) console can do the same from the **Nodes & devices** page
-(Fleet group): link a paired device to a person, change its person, or unlink it, over the
-`device.identity.link` and `device.identity.unlink` RPCs (both need `operator.admin`). See
-[devices](/cli/devices).
+A device belongs to one person for good. Its person is stored on its pairing record (the
+`owner_person` column of `pairing_devices` in the session database), not in `session.identityLinks`.
+`wednesdayai devices link <deviceId> --identity <name>` sets it once; linking the same person again
+is a no-op, and a device another person owns is refused. The only rebind path is deregister then
+re-pair: `devices remove` or `devices unlink` (they are the same: the device's pairing record, its
+tokens and its person go together, then its connections close), then pair again, which creates a
+new device record, even for the same person. A setup code bound to a different person cannot
+rebind a paired device either (`bootstrap_device_owned`). Node-only devices have no person and are
+never linked.
+
+`device:` values in `session.identityLinks` confer nothing. On startup the gateway moves each
+one for a paired device that is not node-only onto that device's record (a device listed under
+several people goes to the first, the person it resolved to before), logs and skips the rest, and
+strips them all from the config. `config.set`, `config.patch` and
+`config.apply` refuse a write that adds one (`DEVICE_LINK_VALUE_REFUSED`). The
+[Control UI v2](/admin/web/control-ui-v2) console can link a paired device to a person or unlink
+(deregister) it from the **Nodes & devices** page (Fleet group), over the `device.identity.link`
+and `device.identity.unlink` RPCs (both need `operator.admin`). See [devices](/users/cli/devices).
+
+## What a linked device can see
+
+Linking a device to a person also limits what that device sees. A connection without
+`operator.admin` whose device is linked to a person receives chat and agent events, node pushes
+(for example on WednesdayAI Glass), `chat.history`, `chat.send` and `sessions.list` only for:
+
+- conversations that person owns: a direct conversation belongs to the person who started it, or
+  to the first linked person who chats in it, and never changes hands after that; and
+- conversations nobody owns, such as the shared main session, group chats and cron sessions.
+
+Another person's session answers `session not found`. Connections with `operator.admin` and
+operator or web devices linked to nobody keep full visibility, so a single-person install behaves
+as before. A linked node (a device connected as a node and linked to a person) sees that person's
+conversations and the shared ones. A node install linked to nobody has no person: it gets only
+sessions nobody owns. Other session methods (for example `sessions.describe` or `sessions.patch`)
+are not limited yet.
+
+Each sign-in is its own device. When two people sign in to the web client from the same browser,
+each sign-in pairs a separate device linked to that person, and each connection sees only its own
+person's sessions. A connection keeps the person it signed in as: if its device is later linked to
+someone else, that open connection stops seeing either person's sessions until it signs in again.
+A message from that connection is refused if it reaches the gateway's admission check after the
+relink; a message admitted before the relink still runs. A conversation stays with its owner: a
+message sent into it from an admin connection or an unlinked device does not change who owns it,
+and the reply is delivered only to the owner's devices (and to the sender). Resetting a session
+(`/new`) starts a new conversation; the old one keeps its owner. If a message is refused because
+its conversation now belongs to someone else, only the sender gets "session changed, retry".
+
+Unlinking or removing a device (`devices unlink`, `devices remove`, or **Log out** in the web
+client) also closes that device's open connections, including one that was still connecting. It
+reconnects as whatever it is then paired and linked as.
+
+A WednesdayAI app device's companion browser (ADR 2242) always stays with the app's person:
+unlinking or removing the app removes its companions, a companion itself cannot be linked to a
+different person, and a companion setup code redeemed by a device another person already owns is
+refused with `bootstrap_device_owned` (see
+[Device companions and device.self](/admin/gateway/protocol#device-companions-and-deviceself)).
 
 ## Gateway RPCs
 
@@ -186,7 +237,7 @@ The CLI talks to the same gateway methods every client uses:
 | `identity.logout`     | `operator.write` (narrow) | log the calling browser out                 |
 
 The narrow methods read the verified device id from the connection, never from the request body, so
-a caller can only act on its own device and person. See [Protocol](/gateway/protocol) for the scope
+a caller can only act on its own device and person. See [Protocol](/admin/gateway/protocol) for the scope
 model.
 
 ## What logout does
@@ -194,21 +245,27 @@ model.
 **Log out** in the web client asks the gateway to run `identity.logout` (waiting up to 3 seconds),
 then always clears the browser's own credential and keypair. When the call reaches the gateway it:
 
-- removes the paired device server side,
-- unlinks its `device:<deviceId>` value from every identity.
+- deregisters the paired device server side: its pairing record, tokens and person go together,
+  then its connections close.
+- removes any companion devices it issued (a WednesdayAI app device's browser companions).
 
-The unlink always runs, even when the pairing removal failed: a device whose credential is gone
-must not keep its link. If the gateway is unreachable, the browser still forgets itself but the
-paired device and its link remain; remove them with `wednesdayai devices remove <deviceId>`. The next sign-in pairs a fresh device. The keypair is rotated because a
-paired browser belongs to one person: keeping it would let the next person inherit the previous
-person's link.
+If the gateway is unreachable, the browser still forgets itself but the paired device remains;
+remove it with `wednesdayai devices remove <deviceId>`. The next sign-in pairs a fresh device. The
+keypair is rotated because a paired browser belongs to one person: keeping it would let the next
+person inherit the previous person's device.
 
 A `#setup=<token>` link (an enrollment bootstrap) that arrives at a browser which is already paired
 is never redeemed automatically. The web client shows a confirmation naming the consequence, and
 only after you confirm does it log the current device out and re-pair under the new identity. On a
-browser with no stored credential, redemption is automatic; if an earlier auth failure left the
-browser's keypair orphaned (its token was cleared but the keypair remained), that redemption
-rotates the keypair instead of re-presenting the orphaned device id.
+browser with no stored credential, redemption is automatic. Every redemption pairs a fresh
+keypair: an orphaned one (its token was cleared but the keypair remained) is rotated, and when
+another gateway's credential on the same origin still uses the browser's keypair, the new pairing
+gets a keypair of its own instead, so neither pairing is broken.
+
+The web client's person always comes from the device credential its own sign-in minted, never from
+a per-browser link: every sign-in pairs a new device, and logout forgets it. A setup code for
+another person therefore cannot rebind a paired browser; the gateway refuses it, which is why the
+confirmation logs the browser out first.
 
 ## The account-linking switch
 

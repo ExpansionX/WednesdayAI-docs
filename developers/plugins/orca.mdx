@@ -1,0 +1,290 @@
+---
+summary: "Orca plugin: watch and drive Orca agent sessions from Control UI v2 and the web client"
+read_when:
+  - You want to pair an Orca host with the gateway
+  - You need to grant a user read or control access to Orca agent sessions
+  - You are changing the orca.v1.* gateway methods or syncing Orca's vendored modules
+title: "Orca"
+---
+
+# Orca (plugin)
+
+The Orca plugin (`extensions/orca`) connects the gateway to [Orca](https://github.com/stablyai/orca)
+hosts. Operators pair hosts and grant access in Control UI v2; granted users see their Orca agent
+sessions in a panel in the web client, read terminal screens, answer agent requests, and launch
+new sessions.
+
+The gateway reaches an Orca host through one of two transports:
+
+- **paired**: the gateway pairs with the Orca runtime and speaks Orca's end-to-end encrypted
+  protocol. Full feature set, including structured chat sessions.
+- **cli**: the gateway runs the `orca` CLI, on the gateway host or on a WednesdayAI node.
+  Terminals, worktrees and repos only; no chat sessions.
+
+<Warning>
+Pairing a host, or granting `control` on it, equals shell access on that Orca host. A paired
+device can read workspace files, send terminal input, and control agents. A `control` grant
+passes that power to the WednesdayAI user.
+</Warning>
+
+## Admin guide
+
+### Enable the plugin
+
+Orca is a bundled plugin and is disabled by default:
+
+```bash
+wednesdayai plugins enable orca
+```
+
+or set `plugins.entries.orca.enabled: true`, then restart the gateway.
+
+The Orca page in Control UI v2 is a plugin module, and plugin modules load only when allowlisted
+(see [Control UI plugins](/developers/plugins/control-ui)):
+
+```json5
+{
+  gateway: {
+    controlUiV2: {
+      pluginUi: {
+        allow: ["orca"],
+      },
+    },
+  },
+}
+```
+
+The web client's Orca panel does not need the allowlist; it appears for users with a grant.
+
+### Pair a host
+
+1. In the Orca desktop app, create a pairing code.
+2. In Control UI v2, open **Orca** → **Hosts**, enter a **Label** (up to 48 characters) and paste the
+   **Pairing code** under **Pair Orca host**. Either the `orca://pair?code=…` link or the Orca
+   web link (`…/web-index.html#pairing=…`) works. A code pairs once: WednesdayAI exchanges it for
+   its own device token, so pairing again needs a new code.
+3. The host appears in the hosts table with its endpoint, scope, and state. Unpair it from the
+   same table.
+
+Pairings are stored by the plugin in `<stateDir>/orca/pairings.json` (written atomically, mode
+0600). Paired target ids start with `p-`.
+
+The code's scope decides what the gateway can do:
+
+- **Mobile** codes get the phone app's method set. Users can launch an agent into an existing
+  worktree. Launching into a new worktree also needs `worktree.create` in Orca's mobile method
+  set, which current Orca releases include.
+- **Runtime** codes (Orca's **Shared Server Access**) get the full runtime method set.
+
+Chats and launches need an Orca host that serves them to paired clients. Otherwise the call fails
+with `orca-method-unavailable` and one of these messages:
+
+- "This Orca host cannot launch agents for WednesdayAI; update Orca on that host."
+- "This Orca host cannot serve chat sessions to WednesdayAI; update Orca or turn chats on."
+
+### CLI fallback targets
+
+When native pairing is not available, configure `cliTargets`. Each target runs the `orca` CLI:
+
+```json5
+{
+  plugins: {
+    entries: {
+      orca: {
+        enabled: true,
+        config: {
+          cliPath: "orca", // default for every target
+          cliTargets: [
+            { id: "local", label: "This host" },
+            {
+              id: "studio",
+              label: "Studio Mac",
+              nodeId: "<node-id>",
+              cliPath: "/opt/homebrew/bin/orca",
+              environment: "work",
+            },
+          ],
+        },
+      },
+    },
+  },
+}
+```
+
+| Field         | Notes                                                                                  |
+| ------------- | -------------------------------------------------------------------------------------- |
+| `id`          | Required. Lowercase letters, digits, `-`, max 32 characters, unique, not `p-` prefixed |
+| `label`       | Display name; defaults to `id`                                                         |
+| `environment` | Passed to the CLI as `--environment=<value>`                                           |
+| `nodeId`      | Run the CLI on this WednesdayAI node (via `system.run`) instead of the gateway host    |
+| `cliPath`     | CLI binary for this target; defaults to the top-level `cliPath` (`orca`)               |
+
+A node target needs the CLI on the node's exec allowlist. Use the absolute path:
+
+```bash
+wednesdayai approvals allowlist add --node <id> --agent "*" "/abs/path/to/orca"
+```
+
+Node failures surface as `orca-node-offline`, `orca-node-command-denied`, or
+`orca-node-exec-denied`; a missing binary as `orca-cli-missing`.
+
+The node's exec approvals record the last command that matched an allowlist entry
+(`lastUsedCommand`). The record goes on the agent's own entry for that pattern when one
+exists, otherwise on the `"*"` entry added with `--agent "*"`. For terminal sends and
+launches, the WednesdayAI node host records the text and prompt as
+`--text=[redacted]` and `--prompt=[redacted]`. Native app nodes, and node
+hosts that run commands through the macOS app exec host, do not apply this redaction yet
+([WednesdayAI-apps#63](https://github.com/ExpansionX/WednesdayAI-apps/issues/63)). On those
+nodes the record includes the sent text or prompt; if it is sensitive, use a paired target
+instead.
+
+### Other settings
+
+| Key             | Default                      | Notes                                     |
+| --------------- | ---------------------------- | ----------------------------------------- |
+| `snapshotLimit` | `30` (max 60)                | Maximum sessions per snapshot             |
+| `launchAgents`  | `["claude", "codex", "omp"]` | Agents users may launch (1 to 12 entries) |
+
+### Grants
+
+Access is off for every user by default. Grant it per person in
+`plugins.entries.orca.config.access.users`, or from the **Access** tab of the Orca page in
+Control UI v2:
+
+```json5
+{
+  access: {
+    users: {
+      alice: { targets: ["*"], mode: "read" },
+      bob: { targets: ["studio", "p-abc123"], mode: "control" },
+    },
+  },
+}
+```
+
+- `targets`: target ids, or `"*"` for every target.
+- `mode`: `read` (see sessions and screens) or `control` (also send input, answer requests,
+  message, and launch).
+- The key is the person id from `session.identityLinks`; the user's device must be linked.
+- Grant edits go through `config.patch` and take effect after the gateway restarts.
+
+Operators reach every target in control mode; operator scopes still gate their writes.
+
+<Warning>
+Control lets a person answer agents and type into agent terminals on that Orca host. Treat it
+like shell access.
+</Warning>
+
+## User guide
+
+When you hold a grant, the web client sidebar shows **Orca** below Inbox, with a badge counting
+sessions that need attention. The panel:
+
+- lists agent sessions on your granted hosts, with state, plan, and attention messages;
+- opens a session to show its terminal screen, or its chat and pending requests on paired hosts;
+- with `control`: types text or keys (enter, escape, arrows, tab, ctrl-c) into the terminal,
+  answers approvals and questions, and sends chat messages;
+- with `control`: launches a new session for an allowed agent, in an existing worktree or a new
+  one.
+
+The panel polls while it is visible. A `read` grant shows everything without input controls. If
+Orca starts a session but does not deliver or confirm your prompt, the panel says so and shows the
+prompt so you can copy it and send it from the session; it does not launch again.
+
+## Developer notes
+
+- Gateway API: the versioned `orca.v1.*` methods, documented in the
+  [Orca API reference](/developers/reference/orca-api).
+- Control UI v2 module: `extensions/orca/ui/index.js` (vanilla JS). The web client panel is
+  native code in `apps/web/src/ui/orca/`; no plugin JS runs in the web client.
+- Transports implement `OrcaBackend` (`extensions/orca/src/backend.ts`).
+
+### Vendor-sync policy
+
+Orca's runtime RPC is internal to Orca and has no stability promise. The plugin tracks it:
+
+- Orca's client crypto and pairing modules are vendored verbatim into
+  `extensions/orca/src/vendor/orca/`. Do not edit them by hand.
+- The RPC contracts the plugin calls are hand-mirrored. `extensions/orca/scripts/orca-upstream.json`
+  pins the upstream commit and records the hash of each vendored and mirrored upstream file.
+- Every backend response is parsed leniently, so drift fails loudly with `orca-bad-output` or
+  `orca-method-unavailable`.
+
+Regenerate or check against an Orca checkout:
+
+```bash
+node --import tsx extensions/orca/scripts/sync-orca-vendor.ts --orca <checkout> --write
+node --import tsx extensions/orca/scripts/sync-orca-vendor.ts --orca <checkout> --check
+```
+
+`--check` fails and names the changed upstream files when Orca drifted from the recorded commit.
+When a mirrored file changes, update its `usedBy` files, then `--write`.
+
+### Upstream drift report
+
+`extensions/orca/scripts/orca-drift-report.ts` runs the `--check` comparison against the latest
+stablyai/orca `main` and keeps one GitHub issue current. It runs locally on a timer, because
+GitHub Actions is limited to release and publish jobs. It needs `git` and a `gh` CLI that can
+create and edit issues on ExpansionX/WednesdayAI-core.
+
+```bash
+node --import tsx extensions/orca/scripts/orca-drift-report.ts [--orca <checkout>]
+```
+
+- `--orca` defaults to `${XDG_CACHE_HOME:-~/.cache}/wednesdayai/orca-upstream`, which is
+  cloned on the first run. Each run fetches `main` and detaches HEAD on it. A checkout with
+  uncommitted changes is refused. Use a dedicated checkout, not one you work in.
+- No drift: exits 0 and makes no GitHub call.
+- Drift: opens an issue titled "Orca upstream drift: vendored or mirrored files changed on
+  stablyai/orca main" (labels `factory-backlog`, `severity:low`). The issue lists the changed
+  files, the plugin files that mirror them, and a `git diff` command for each. Later runs edit
+  the open issue when the drift changes, and leave it alone when nothing changed. Running it
+  twice is safe.
+- Exits 1 when `git` or `gh` fails.
+
+To run it daily, add a systemd user service and timer. Adjust `WorkingDirectory` to your
+checkout:
+
+```ini
+# ~/.config/systemd/user/orca-drift.service
+[Unit]
+Description=Orca upstream drift report
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/src/WednesdayAI-core
+ExecStart=/usr/bin/env node --import tsx extensions/orca/scripts/orca-drift-report.ts
+```
+
+```ini
+# ~/.config/systemd/user/orca-drift.timer
+[Unit]
+Description=Daily Orca upstream drift report
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=1h
+
+[Install]
+WantedBy=timers.target
+```
+
+```bash
+systemctl --user daemon-reload && systemctl --user enable --now orca-drift.timer
+```
+
+If `node` comes from a version manager, put its absolute path in `ExecStart`. If `gh` cannot
+reach its keyring from a user service, set `GH_TOKEN` through `EnvironmentFile=`.
+
+Or use cron:
+
+```cron
+0 6 * * * mkdir -p ~/.cache/wednesdayai && cd ~/src/WednesdayAI-core && node --import tsx extensions/orca/scripts/orca-drift-report.ts >> ~/.cache/wednesdayai/orca-drift.log 2>&1
+```
+
+## Related
+
+- [Orca API reference](/developers/reference/orca-api)
+- [Control UI plugins](/developers/plugins/control-ui)
+- [Plugins](/users/tools/plugin)

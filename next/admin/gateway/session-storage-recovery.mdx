@@ -1,0 +1,274 @@
+---
+summary: "Session storage lifecycle: fail-fast startup, single ownership, status snapshot, and the automatic legacy JSONL import"
+read_when:
+  - The gateway exits at startup with a session storage error
+  - Upgrading an install whose history lives in sessions.json / *.jsonl files
+  - Inspecting storage.v1 status or the legacy import archive
+title: "Session storage recovery"
+---
+
+# Session storage recovery
+
+Session storage (SQLite by default, Postgres optional) is the only store for sessions and
+conversation history. The gateway starts it on every boot — configured or not — and treats it as
+fail-fast: if storage cannot open, the gateway exits with the cause and the service manager
+restarts it. There is no degraded mode, no JSONL fallback, and no serving without storage.
+
+## Startup sequence
+
+`startSessionStorage` (`src/config/sessions/storage-lifecycle.ts`) runs this sequence, bounded
+end-to-end by `session.storage.recovery.startupProbeTimeoutMs` (default 600000 ms):
+
+1. **Acquire storage ownership** for the database as role `gateway`, waiting up to the same
+   budget for a `cli` holder to finish.
+2. **Open the runtime**: create the backend candidate, run `session.storage.migration.validateOnStart`
+   validation when configured, prove connectivity with a first real `sessions.list()` round-trip,
+   import every legacy `sessions.json` index, then commit the activation.
+3. **Start the background import sweep** (below) and publish storage.
+
+Any failure or the deadline: the candidate is closed, ownership is released, nothing is committed,
+and the gateway exits with `FatalConfiguredStorageStartError` carrying the underlying cause
+(connectivity, credentials, schema locks). Nothing ever serves JSONL instead.
+
+A late-resolving start never publishes: once the deadline aborts the open, the candidate is closed
+and never committed, even if the backend answers afterwards.
+
+## Single ownership
+
+One process owns a session store at a time (ADR 0097 D4):
+
+- **SQLite**: a kernel-held lock on `<sessions.db>.owner.lock` plus a private holder sidecar
+  (pid, role, hostname, start time). A process crash releases the kernel lock automatically.
+  Do not delete a lock file to bypass a live holder.
+- **Postgres**: a dedicated owner connection holds `pg_try_advisory_lock`, scoped to the
+  database and schema; `ctx_storage_owner` records the holder.
+
+Core, hooks and plugin SDK bundles share the owner runtime and its write queues. Index updates
+and session appends remain serialized even when callers use different bundles.
+
+New SQLite database directories use mode 0700; the database, WAL and SHM files are tightened to
+0600 at open. If the filesystem refuses mode changes with `EPERM`, `ENOTSUP` or `EROFS`, storage
+logs a warning and continues; verify the mount's effective access controls. Other permission
+hardening errors still fail the open.
+
+While a gateway owns the database, CLI commands never open it: every storage read and maintenance
+write goes to the gateway over RPC. With no gateway running, a CLI command takes ownership as
+`cli` for the duration of the command (no retention, no import sweep). Errors you may see:
+
+- `openclaw (pid N) is using session storage; retry when it finishes.` — another CLI command holds it.
+- `Session storage is owned by a gateway on <hostname> (pid N); run this command where that gateway runs.`
+
+A second gateway pointed at the same database fails storage start and exits; it never serves
+alongside the first. `agent --local` refuses while a gateway owns the database. Only
+`session-storage restore` requires the gateway to be stopped.
+
+## Lifecycle states and storage.v1
+
+The lifecycle exposes four phases: `starting`, `ready`, `failed`, `stopping`. Status and doctor
+project the snapshot as `{version:"storage.v1", state, configuredBackend, liveBackend, since, lastError}`
+where `configuredBackend` is the configured backend, `liveBackend` is `sqlite`, `postgres`, or
+`null` before publish, and `lastError` carries the start failure cause. Inspect with
+`wednesdayai status`, `wednesdayai doctor --deep`, or
+`openclaw session-storage status` (`openclaw` is the alias).
+
+Legacy import `done` and `total` describe work in the current sweep, excluding completed-receipt
+no-ops. A fully completed pass has `done === total`; repeating an already completed import
+reports zero new work. Pending, failed, and attempt-capped source counts describe receipts
+separately.
+
+Storage-backed RPCs (run history, `chat.history`, the session-run and task reads, the session
+writers) are held at dispatch for up to 10 seconds while the start completes; after that they
+answer retryable `RECOVERY_NOT_READY` (`storage_starting`). During shutdown they answer
+`storage_stopping` until the socket closes. Because a start failure exits the process, a serving
+gateway normally reports `ready`. See
+[Protocol](/next/admin/gateway/protocol#session-storage-readiness) for the method classification.
+
+## Configuration
+
+```json5
+{
+  session: {
+    storage: {
+      backend: "postgres",
+      databaseUrl: "postgresql://user:pass@localhost:5432/openclaw",
+    },
+  },
+}
+```
+
+`backend` defaults to `sqlite` (the database lives at `<stateDir>/sessions.db`). The only
+surviving `session.storage.recovery` keys are:
+
+| Key                                                 | Default  | Effect                                                                                |
+| --------------------------------------------------- | -------- | ------------------------------------------------------------------------------------- |
+| `session.storage.recovery.startupProbeTimeoutMs`    | `600000` | Maximum time the gateway waits for session storage to open at startup before exiting. |
+| `session.storage.recovery.hydrationClosureMaxPages` | `20`     | Max ancestor-closure pages during hydration. Restart-only.                            |
+
+`session.storage.mode`, `session.storage.fallbackToJsonlOnError`, and the retired
+`session.storage.recovery.*`, `session.maintenance.*`, and prune-only
+`session.storage.consumerClaims.progressWindowMs` / `maxRetentionBackstopMs` keys are removed
+automatically when a legacy config loads; the gateway logs each change at start.
+
+## Legacy JSONL import
+
+Installs upgraded from the retired file backend keep their history: `sessions.json` indices and
+per-session `*.jsonl` transcripts are import sources only, never served or written again.
+
+- **Index import** runs before storage publishes: every agent's `sessions.json` becomes index rows.
+  The database always wins — a key that already has a row or tombstone is left untouched, so import
+  never changes a current session winner and never resurrects a deleted session.
+- **Transcript import** runs on first access to a legacy session (including from inside an active
+  turn, such as `/compact` or a voice inject) and again in a throttled background sweep, newest
+  first. All valid entries are imported, including branches; imported rows are marked
+  `metadata.legacyImport` and keep their original timestamps.
+- **Receipts** live in the database (`ctx_legacy_imports`), so the import is resumable: failed
+  sources retry on the next owner open, imported-but-unarchived sources finish archiving, and only
+  completed sources are skipped. A failing source never fails startup.
+  `wednesdayai session-storage import` runs the sweep to completion on demand and retries sources past
+  their attempt cap. When a sweep pass finishes (not aborted) with actual work, the gateway logs
+  one `legacy import completed` line summarizing the pass: `sources` (sources processed),
+  `failed`, `rejected` (rejected legacy lines), and `pendingArchive` (imported sources whose
+  archive move is still pending). A pass with nothing to import logs no summary line.
+  Containment compares real (symlink-resolved) paths, so a state dir reached through a symlink
+  (a symlinked `~/.openclaw`, or the macOS `/var` -> `/private/var` link) no longer drops
+  transcripts named by an index entry's `sessionFile`. Discovered transcripts are still recorded
+  under the configured path spelling, so each file keeps a single import receipt; a sessions-dir
+  symlink that points outside the dir is still rejected.
+
+Archives: every imported source is moved — fingerprint-verified — to
+`<stateDir>/legacy-session-archive/<agentId>/` (files 0600, dirs 0700). Reset, deleted, and
+replayed transcript archives, `session-runs.jsonl`, and everything under `<stateDir>/recovery/**`
+are archived **without** import and kept indefinitely: they are the only copy. A fully imported
+archive copy with zero rejected lines is purged after 30 days. Before the first import on SQLite
+the owner writes a snapshot to `<stateDir>/backups/`.
+
+Transcripts whose session key cannot be resolved are imported under
+`agent:<agentId>:legacy:<sessionId>`. The operator override map
+`<stateDir>/recovery/session-key-overrides.json` (`{ "<sessionId>": "<full sessionKey>" }`) is
+still honoured for import key resolution; add mappings there before running
+`wednesdayai session-storage import`.
+
+## Backups
+
+`wednesdayai session-storage backup` writes a consistent SQLite copy with `VACUUM INTO` from a
+separate read-only worker connection (appends never wait on it). Gateway backup paths stay
+under `<stateDir>/backups/`; a local-owner CLI can use another `--out` path. The backup
+connection waits up to 5 seconds for a lock, so two backups, or a backup and the pre-import
+snapshot, no longer fail immediately with `database is locked` when they open a cold WAL database
+together.
+`wednesdayai session-storage restore <file>` replaces the database offline — stop the gateway
+first; restore refuses while a gateway owns storage. The source is recovered through SQLite
+(committed `-wal` frames included) from a private temporary copy, never from the backup file
+itself, into a staged `0600` file that is integrity-checked and fsynced before anything
+moves. Existing live `-wal`/`-shm` files are written to their `0600` fsynced
+`.pre-restore-<timestamp>` archive names first, then the current database is checkpointed so
+its committed WAL state lands in the main file: a blocked checkpoint aborts the restore
+before anything changes, a corrupt or missing database keeps the sidecar archives, and a
+successful checkpoint drops them (their content is folded into the archived main). The main file is
+hardlinked — never removed — into its `.pre-restore-<timestamp>` archive, leftover live
+sidecars are removed, and the staged file is swapped onto the live path with a single atomic
+rename. A failed restore never deletes a pre-restore archive — the error names the paths it
+kept — while a failure after the rename leaves the restored database published. For Postgres
+use `pg_dump` / managed backups.
+
+`wednesdayai session-storage validate` also runs SQLite integrity and context checks on a separate
+read-only worker connection, not the gateway event loop or live writer's queue. With WAL enabled,
+the checks share one consistent read snapshot. Without WAL, each statement releases its read
+lock before the next scan so validation does not hold up owner commits for the entire pass.
+The validation connection waits up to 5 seconds for an owner commit before reporting a lock
+error. On non-WAL mounts, a single long `integrity_check` or context scan still delays owner
+writes while its read lock is held; if it outlasts the writer's busy timeout, the write can
+fail with `database is locked`. Run validation (including doctor's checks) during a quiet
+period on large databases or slow non-WAL mounts. Validation retains the full integrity
+check rather than substituting a less thorough check.
+
+## Legacy user-row cleanup
+
+User rows written before the `__openclaw.ingress` carrier shipped can carry baked-in channel framing blocks (`Conversation info (untrusted metadata): …`), a `Current time: …` line, and a leading message stamp in `content_text`, `clean_user_message` and the `message` text content. Core never rewrites these rows; the render layer guards against double-stamping, but the artifacts stay in storage until you clean them.
+
+`scripts/sessions/clean-legacy-user-rows.ts` removes them, per row, with an undo log. It selects only `role='user'` rows whose `message` JSON has no `__openclaw.ingress` (post-upgrade rows are never candidates), never touches `raw_entry`, `raw_line`, `raw_sha256`, `content_blocks`, `provider_payload` or `metadata`, skips rows where a text field would change from non-empty to empty (reported as `ambiguous`), and is idempotent — a second run changes nothing. SQLite `ctx_fts` resyncs via its UPDATE trigger; Postgres `content_text_tsv` is a generated column. JSONL transcripts are out of scope: they are the raw log and render-time guards handle them.
+
+1. **Back up first.** The store runs with WAL enabled, so use SQLite's backup API, not a plain `cp`:
+
+   ```sh
+   mkdir -p ~/.openclaw/backups
+   dest=~/.openclaw/backups/ctx-backup-$(date +%Y%m%d-%H%M%S).sqlite
+   sqlite3 ~/.openclaw/<sessions sqlite path> ".backup '$dest'"
+   sqlite3 "$dest" 'PRAGMA integrity_check'   # must print: ok
+   ```
+
+   For Postgres, take a dump of the `ctx_*` tables before proceeding.
+
+2. **Dry-run** (default; prints `scanned` / `changed` / `ambiguous` / `skippedNoop` overall and per field):
+
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path>
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --postgres-url <url>
+   ```
+
+3. **Apply with an undo log** (`--undo-log` is required with `--apply`; the path must not exist — the run refuses to truncate an existing log):
+
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path> \
+     --apply --undo-log ~/.openclaw/backups/undo-$(date +%Y%m%d-%H%M%S).jsonl
+   ```
+
+   <Warning>
+   The undo log holds complete original conversation content (including anything users typed). Keep it under a private, dated path such as `~/.openclaw/backups/` — never a shared location — and keep it until you have verified the result.
+   </Warning>
+
+4. **Verify.** Re-run the dry-run: it should report `changed=0`. Spot-check cleaned rows and confirm full-text search follows the cleaned `content_text`.
+5. **Restore if needed** (conditional and atomic; rows that moved on after the cleanup are never overwritten):
+
+   ```sh
+   pnpm tsx scripts/sessions/clean-legacy-user-rows.ts --sqlite <path> \
+     --restore ~/.openclaw/backups/undo-<date>.jsonl
+   ```
+
+Narrow a run with `--agent <id>` (exact agent id) or `--limit <n>`. Full procedure, verification queries and restore semantics: `dev-docs/runbooks/legacy-user-row-cleanup.md` in the repository.
+
+## Postgres notes
+
+Schema setup (tables, indexes, idempotent column adds) runs inside one transaction under a
+5-second `lock_timeout` (a separate advisory lock serializes concurrent schema passes and is not
+bounded by that timeout). If another transaction holds a conflicting lock on an existing table for
+longer than that — typically a long-running or idle-in-transaction session, such as a stuck
+client, a backup, or a manual `psql` session — the schema pass fails, storage start fails with it,
+and the gateway exits with the cause. Nothing is corrupted: find the blocking transaction
+(`pg_stat_activity`, `pg_locks`), let it finish or cancel it, then start the gateway again.
+
+Idle pool-client failures do not crash the gateway. The pool (4 connections) and every client
+it hands out carry error listeners that log warnings and replace failed idle clients.
+Sustained warnings mean a connectivity problem.
+
+The dedicated **owner connection** is different: each probe has a 5-second deadline, with
+30 seconds between probes. Three consecutive probe misses signal loss; a successful probe
+resets the miss count. An explicit connection error or close signals loss immediately.
+Loss permits one bounded reattach attempt; failure or another loss before 10 stable minutes
+terminates the process, since serving without ownership could admit a second writer.
+
+## Troubleshooting
+
+- **Gateway exits at startup with `FatalConfiguredStorageStartError`:** the configured backend did
+  not open within `startupProbeTimeoutMs`, or the open failed. The fatal error carries the cause —
+  connectivity, credentials, or a Postgres schema lock — and the CLI prints it as one redacted
+  line: `Gateway failed to start: <full cause chain>` (nested causes included, e.g.
+  `connect ECONNREFUSED 127.0.0.1:5432` for an unreachable Postgres). Fix the cause and let the
+  service manager restart the gateway. No JSONL was served or written.
+- **`session storage is owned by...`:** another process owns the database. For a `cli` holder,
+  retry when it finishes; for a gateway on another host or config, run the command where that
+  gateway runs so it can proxy over RPC.
+- **Legacy import stuck or a source failing:** `wednesdayai session-storage status` reports per-state
+  counts; `wednesdayai session-storage import` retries failed sources immediately. Repeated failures
+  name the source path and cause in the gateway log — never edit transcripts in place while the
+  gateway runs.
+- **`session storage unavailable: ... flagged for SQL reconciliation` (`binding_needs_reconcile`):**
+  a storage write failed mid-batch and the reconciliation read that followed failed too, leaving
+  the agent's store binding flagged. While that binding's retained snapshot is empty, session
+  reads report this unavailable error instead of serving an empty list; a flagged non-empty
+  snapshot keeps serving its last contents until the next locked write reconciles it from SQL.
+  Fix the underlying storage failure (connectivity, credentials, permissions, locks); the next
+  locked write clears the flag. This is a retryable unavailability, not data loss: the rows are
+  still in the database.
+- **State stays `starting` in `status`:** a large legacy index import runs before publish. Watch
+  the log; the 10-second RPC hold answers retryable `storage_starting` meanwhile.

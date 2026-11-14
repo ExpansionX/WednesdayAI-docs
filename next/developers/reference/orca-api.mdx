@@ -1,0 +1,175 @@
+---
+summary: "Orca client API: versioned orca.v1.* gateway methods, params/results, grants, errors"
+read_when:
+  - Building a client that lists or drives Orca agent sessions over the gateway
+  - Changing the orca.v1.* wire contract
+title: "Orca API"
+---
+
+# Orca API
+
+The Orca plugin (`extensions/orca`) exposes a versioned client API over the gateway WebSocket,
+registered via `api.registerGatewayMethod`. Setup, pairing, and grants are covered in
+[Orca](/next/developers/plugins/orca).
+
+- Params are strict objects: unknown keys fail with `orca-invalid-params`.
+- `targetId` names a configured CLI target or a paired host (`p-` prefix); max 64 characters.
+- `terminal` handles match `^term_[A-Za-z0-9-]{1,80}$`.
+- Write methods return `{ ok: true }` (launch adds fields) and invalidate the target's snapshot
+  cache.
+- Write methods log an audit line with the caller, target, and ids; never the typed text.
+
+## Scopes and grants
+
+- Read methods (`orca.v1.access`, `snapshot`, `screen`, `repos`, `requests`) and write methods
+  (`orca.v1.send`, `launch`, `respond`, `message`) admit narrow user-client sessions as well
+  as operators. `orca.v1.admin.*` is unclassified and fails closed to `operator.admin`.
+- Operators see every target in `control` mode.
+- A narrow caller (`openclaw-user-client`) resolves to a person through
+  `session.identityLinks`, then to `plugins.entries.orca.config.access.users[<person>]`. No
+  grant means no targets. A target outside the grant fails with `orca-access-denied`; a write on
+  a `read` grant fails with `orca-read-only`. Enforcement sits in the method handler.
+- Chat methods (`requests`, `respond`, `message`) need a paired target; CLI targets fail with
+  `orca-not-structured`.
+
+## Methods
+
+### `orca.v1.access`
+
+Params: none.
+
+Result: `{ enabled, mode?, targets, launchAgents }`. A narrow caller with no grant gets
+`{ enabled: false, targets: [], launchAgents: [] }`, not an error. Otherwise `mode` is `read` or
+`control`, and each target is `{ id, label, transport: "paired" | "cli", structured }`.
+`structured` is `true` for paired targets. Clients hide the Orca entry when `enabled` is false.
+
+### `orca.v1.snapshot`
+
+Params: `targetId`.
+
+Result: `{ targetId, fetchedAt, truncated, worktrees, agents }`, capped at `snapshotLimit`
+agents (`truncated` set when cut).
+
+- `worktrees[]`: `{ id, name, repo, branch, status, parentWorktreeId, lastActivityAt }`.
+- `agents[]`: `{ key, kind: "terminal" | "chat", worktreeId, agentType, state, needsAttention,
+attention: { kind, message } | null, plan, title, prompt, lastMessage, updatedAt, terminal,
+sessionId }`. Terminal agents carry `terminal`; chat agents carry `sessionId`.
+
+### `orca.v1.screen`
+
+Params: `targetId`, `terminal`.
+
+Result: `{ status, lines, truncated }`, the last 200 lines of the terminal.
+
+### `orca.v1.repos`
+
+Params: `targetId`.
+
+Result: `{ repos: [{ id, name }] }`, for picking a repo when launching into a new worktree.
+
+### `orca.v1.requests`
+
+Params: `targetId`, `sessionId`.
+
+Result: `{ items }`, the session's pending prompts. Each item is `{ itemId, revision, kind:
+"approval" | "question", title, detail, planText, options, questions }`; `options[]` is `{ id,
+label, intent: "grant" | "refuse" | null }`.
+
+### `orca.v1.send`
+
+Types into a terminal. Requires `control`.
+
+| Param      | Type              | Notes                                            |
+| ---------- | ----------------- | ------------------------------------------------ |
+| `targetId` | string            |                                                  |
+| `terminal` | string            | terminal handle                                  |
+| `text`     | string, optional  | 1 to 4000 characters                             |
+| `submit`   | boolean, optional | press enter after `text`; only with `text`       |
+| `key`      | string, optional  | `enter`, `escape`, `up`, `down`, `tab`, `ctrl-c` |
+
+Exactly one of `text` or `key` is required.
+
+### `orca.v1.launch`
+
+Starts an agent session. Requires `control`.
+
+| Param         | Type             | Notes                                                                                     |
+| ------------- | ---------------- | ----------------------------------------------------------------------------------------- |
+| `targetId`    | string           |                                                                                           |
+| `agent`       | string           | must be in the plugin's `launchAgents`                                                    |
+| `prompt`      | string, optional | 1 to 8000 characters                                                                      |
+| `worktreeId`  | string, optional | launch in an existing worktree                                                            |
+| `newWorktree` | object, optional | `{ repoId, name, parentWorktreeId? }`; `name` matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$` |
+
+Exactly one of `worktreeId` or `newWorktree` is required. Result:
+`{ ok: true, kind?, detail?, promptDelivery? }`, where `kind` is `structured` (a chat) or
+`terminal`, and `detail` is a human-readable note. `promptDelivery` is set only when the session
+started but the prompt may not have reached the agent: `not-delivered` (Orca did not send it) or
+`unconfirmed` (Orca could not confirm it arrived). Clients should show the prompt back to the user
+rather than launch again. The CLI transport never sets it.
+
+Mobile-scoped pairings can launch into existing worktrees. A new worktree needs `worktree.create` in
+Orca's mobile method set; see [pairing scope](/next/developers/plugins/orca#pair-a-host). A host that cannot launch
+agents or serve chats fails with `orca-method-unavailable` and the message "This Orca host cannot
+launch agents for WednesdayAI; update Orca on that host." or "This Orca host cannot serve chat
+sessions to WednesdayAI; update Orca or turn chats on."
+
+### `orca.v1.respond`
+
+Answers a pending request. Requires `control` and a paired target.
+
+Params: `targetId`, `sessionId`, `itemId`, `revision` (integer from `orca.v1.requests`), and
+exactly one of `optionId` (approval) or `answers` (question: 1 to 10 of `{ questionId,
+optionIds (max 20), other? }`). A request that moved on fails with `orca-request-stale`;
+refetch and retry.
+
+### `orca.v1.message`
+
+Sends a chat message. Requires `control` and a paired target.
+
+Params: `targetId`, `sessionId`, `text` (1 to 8000 characters). Result: `{ ok: true }`.
+
+## Admin methods
+
+Operator-only (`operator.admin`); narrow callers get `orca-access-denied`.
+
+- `orca.v1.admin.targets` (no params): `{ targets: [{ id, label, transport, state, endpoint?,
+scope?, lastError?, runtimeVersion? }] }`. CLI targets report `state: "unprobed"`.
+- `orca.v1.admin.pair` (`code`, up to 131072 characters; `label`, up to 48): pairs a host and
+  returns `{ targetId }`.
+- `orca.v1.admin.unpair` (`targetId` of a paired host): returns `{ ok: true }`.
+
+## Errors
+
+Errors use gateway codes `INVALID_REQUEST` or `UNAVAILABLE`, with `details.reason`:
+
+| Reason                     | Code              | Meaning                                                   |
+| -------------------------- | ----------------- | --------------------------------------------------------- |
+| `orca-invalid-params`      | `INVALID_REQUEST` | params failed validation, or agent not in `launchAgents`  |
+| `orca-access-denied`       | `INVALID_REQUEST` | target not granted, or admin method from a narrow caller  |
+| `orca-read-only`           | `INVALID_REQUEST` | write on a `read` grant                                   |
+| `orca-pairing-invalid`     | `INVALID_REQUEST` | pairing code could not be parsed                          |
+| `orca-request-stale`       | `INVALID_REQUEST` | request revision changed; refetch                         |
+| `orca-not-structured`      | `INVALID_REQUEST` | chat method on a CLI target                               |
+| `orca-offline`             | `UNAVAILABLE`     | paired host unreachable                                   |
+| `orca-revoked`             | `UNAVAILABLE`     | Orca revoked the pairing; pair again                      |
+| `orca-incompatible`        | `UNAVAILABLE`     | Orca runtime protocol not supported                       |
+| `orca-timeout`             | `UNAVAILABLE`     | call timed out                                            |
+| `orca-output-truncated`    | `UNAVAILABLE`     | CLI output exceeded the read limit                        |
+| `orca-call-failed`         | `UNAVAILABLE`     | backend call failed                                       |
+| `orca-bad-output`          | `UNAVAILABLE`     | response did not match the mirrored contract (Orca drift) |
+| `orca-method-unavailable`  | `UNAVAILABLE`     | Orca lacks the method (drift, scope, or host support)     |
+| `orca-request-refused`     | `UNAVAILABLE`     | Orca refused the request                                  |
+| `orca-pairing-failed`      | `UNAVAILABLE`     | pairing or the pairings service failed                    |
+| `orca-store-corrupt`       | `UNAVAILABLE`     | `<stateDir>/orca/pairings.json` unreadable                |
+| `orca-cli-missing`         | `UNAVAILABLE`     | `orca` CLI not found                                      |
+| `orca-node-offline`        | `UNAVAILABLE`     | the CLI target's node is not connected                    |
+| `orca-node-command-denied` | `UNAVAILABLE`     | the node does not allow `system.run`                      |
+| `orca-node-exec-denied`    | `UNAVAILABLE`     | the CLI path is not on the node's exec allowlist          |
+
+## Versioning
+
+Method names are versioned. A breaking change ships a new `orca.v2.*` family side-by-side with
+`orca.v1.*`. Clients discover served methods via the hello-ok `features.methods` advertisement
+and should feature-detect; the web client shows Orca only when the gateway serves the `orca.v1`
+family and the caller holds a grant.

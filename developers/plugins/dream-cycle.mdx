@@ -1,0 +1,330 @@
+---
+summary: "Dream Cycle plugin: idle-time sleep stages, contemplation, adaptation, crystallisation"
+read_when:
+  - You want the agent to do background reflection work while it is idle
+  - You are configuring idle or scheduled background triggers
+audience: admin
+component: dream-cycle
+sources:
+  - extensions/dream-cycle/index.ts
+  - src/config/types.tasks.ts
+  - src/backbone/idle-monitor.ts
+generated: "2026-08-09"
+title: "Dream Cycle"
+---
+
+# Dream Cycle (plugin)
+
+Idle-time background reflection. When an agent goes quiet, the dream cycle runs a short ordered
+series of sleep stages that review recent task outcomes, optionally ask a contemplation model a
+question, adapt per-agent success weights, and record repeated-work candidates for later review.
+
+## Install
+
+```bash
+wednesdayai plugins install ./extensions/dream-cycle
+```
+
+## What it does
+
+- Runs a **cycle** made of ordered **stages** (`light`, `deep`, `rem` by default), each with its own
+  cadence, so cheap work runs often and expensive work runs rarely.
+- Runs registered **passes** inside each stage on the durable task pipeline, so every pass run gets a
+  task run record, a budget, and preemption by live user turns.
+- **Contemplates**: asks a configured provider and model a question, under a hard per-cycle call cap.
+- **Adapts**: folds `completed` and `failed` task outcomes into a per-agent success rate.
+- **Crystallises**: turns repeated task work into candidate records for the learning loop.
+
+Everything is off until you turn it on.
+
+## Turning it on
+
+The plugin is disabled by default. It reads `enabled` from its plugin config entry, referred to
+throughout the engineering record as `dreams.enabled`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "dream-cycle": {
+        "enabled": true,
+        "config": {
+          "enabled": true
+        }
+      }
+    }
+  }
+}
+```
+
+The outer `enabled` activates the plugin; the inner `config.enabled` (`dreams.enabled`) activates the
+engine. With the inner flag unset or `false` the plugin registers nothing: no passes, no triggers, no
+gateway methods.
+
+## Sleep stages
+
+Three stages ship by default:
+
+| Stage   | Order | Cadence (hours) | Enabled | Max pass runs |
+| ------- | ----- | --------------- | ------- | ------------- |
+| `light` | 1     | 6               | yes     | 10            |
+| `deep`  | 2     | 24              | yes     | 10            |
+| `rem`   | 3     | 168             | yes     | 10            |
+
+A stage runs only when its cadence has elapsed since its last run; otherwise the cycle skips it.
+`maxPassRuns` caps how many passes one stage run may execute.
+
+Supplying `stages` replaces the default list outright, so list every stage you want. Reorder with
+`order`, switch one off with `enabled: false`, and rename freely: the engine sorts enabled stages by
+`order` and ignores the rest.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "dream-cycle": {
+        "config": {
+          "enabled": true,
+          "stages": [
+            { "name": "light", "order": 1, "cadenceHours": 4, "enabled": true, "maxPassRuns": 5 },
+            { "name": "deep", "order": 2, "cadenceHours": 24, "enabled": true, "maxPassRuns": 10 },
+            { "name": "rem", "order": 3, "cadenceHours": 168, "enabled": false, "maxPassRuns": 10 }
+          ]
+        }
+      }
+    }
+  }
+}
+```
+
+An entry without a `name` is dropped. Missing fields fall back to `order` by position,
+`cadenceHours: 24`, `enabled: true`, and `maxPassRuns: 10`.
+
+## Contemplation backend
+
+Contemplation has **no default model**. Both `provider` and `model` must be set, or the contemplation
+pass returns unconfigured and emits `dream.contemplation_unconfigured` once per cycle. Nothing else
+in the cycle is blocked by this.
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "dream-cycle": {
+        "config": {
+          "enabled": true,
+          "contemplation": {
+            "provider": "example-provider",
+            "model": "example-model",
+            "maxCallsPerCycle": 3
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`maxCallsPerCycle` defaults to `3` and is a hard cap: once reached, further calls in the same cycle
+return rate-capped and emit `dream.rate_capped` instead of reaching the provider. Set it to `0` to
+allow no calls at all.
+
+Inference runs through the analysis runtime at the provider layer, so the configured provider and
+model are subject to the same credentials, routing, and accounting as any other analysis run. The
+plugin never talks to a model endpoint directly.
+
+## Idle trigger
+
+The cycle is started by core, not by the plugin. Core watches for agents that have gone quiet and
+emits an `agent_idle` event, which the plugin turns into queued task work.
+
+Idle watching is configured under the top-level `tasks.idle` key and is **off by default**:
+
+```json
+{
+  "tasks": {
+    "idle": {
+      "enabled": true,
+      "thresholdMinutes": 30,
+      "pollSeconds": 60
+    }
+  }
+}
+```
+
+| Key                | Default | Meaning                                                            |
+| ------------------ | ------- | ------------------------------------------------------------------ |
+| `enabled`          | `false` | Turn idle watching on.                                             |
+| `thresholdMinutes` | `30`    | How long an agent must have no run activity before it counts idle. |
+| `pollSeconds`      | `60`    | How often the monitor checks.                                      |
+
+An agent is only considered idle when its newest run has not been updated inside the threshold and
+the command queues are quiet. One idle-triggered cycle is enqueued per agent per UTC day: a second
+idle stretch on the same day collides on the same work id and is deduplicated.
+
+## Schedule windows
+
+Instead of, or alongside, idle watching, you can pin cycles to fixed windows with the top-level
+`tasks.schedule` key. It is empty by default:
+
+```json
+{
+  "tasks": {
+    "schedule": {
+      "windows": ["02:00-04:00", "0 3 * * 0"]
+    }
+  }
+}
+```
+
+Each entry in `windows` is one of two forms, decided by whether the string contains a space:
+
+- **Local time range**, `HH:MM-HH:MM`, no space. Both sides are 24-hour local times. A range whose
+  close is at or before its open crosses midnight, so `22:00-02:00` is valid and covers four hours.
+- **Cron expression**, which always contains a space, evaluated with croner. `0 3 * * 0` fires at
+  03:00 every Sunday.
+
+Each window occurrence fires at most once. Firing is keyed to the window bucket start rather than to
+the moment of firing, so a restart in the middle of a window does not fire it a second time, and the
+same window on the next day is a fresh bucket. An unparseable entry is skipped with a warning and
+does not stop the other windows.
+
+Setting `tasks.idle.enabled` or a non-empty `tasks.schedule.windows` starts the monitor, but only
+when the task pipeline itself is running — `tasks.enabled: true` must also be set, or the pipeline
+never boots and there is no monitor to start (see [Task operations](/admin/gateway/tasks)). If durable
+run storage is unavailable the monitor is not started and a `task.idle_monitor_disabled` diagnostic
+is emitted rather than failing silently.
+
+## Hooks and SDK seams
+
+The engine is built from four public seams, so a different plugin could implement its own cycle
+against the same contracts:
+
+| Seam               | Kind       | Purpose                                                                         |
+| ------------------ | ---------- | ------------------------------------------------------------------------------- |
+| `agent_idle`       | hook       | Fired by core when an agent goes idle or a schedule window opens.               |
+| `task_outcome`     | hook       | Fired when a task run finishes, with the outcome and optional quality.          |
+| `registerTaskPass` | SDK export | Registers a background pass the task dispatcher can run.                        |
+| `enqueueTaskWork`  | SDK export | Queues one unit of work for a registered pass, with idempotency fingerprinting. |
+
+The dream cycle registers its passes with `registerTaskPass`, subscribes to `agent_idle` to enqueue
+a cycle with `enqueueTaskWork`, and consumes `task_outcome` for adaptation and crystallisation.
+
+Lifecycle diagnostics use the typed builders from `wednesdayai/plugin-sdk` (`dreamDiagnostic` /
+`taskDiagnostic`) so events join the closed `DiagnosticEventPayload` union and export through
+`diagnostics-otel` as `openclaw.dream.*` / `openclaw.task.*` spans. Pass seams accept
+`DiagnosticEventInput` only — no cast-through of loose objects. Live field name is `passId`
+(not `passName`).
+
+## Safety guardrails
+
+Passes never touch the filesystem, the network, or a model directly. Each capability is handed in as
+a narrow facade, and the whole engine stays inside the ordinary task governance rails.
+
+- **Writes go through a file facade** scoped to a private `dream-cycle` directory under the state
+  directory, created with owner-only permissions. Absolute paths, parent-relative segments, and
+  symlink escapes are rejected before any write, and a rejection emits a boundary-violation
+  diagnostic. There is no unscoped write path.
+- **Fetches go through a guarded fetch facade** that applies the strict SSRF policy with no allowlist
+  widening, so private and loopback destinations stay blocked. Responses are size-limited, defaulting
+  to 5 MiB, and an oversized body is rejected rather than buffered.
+- **Inference stays at the provider layer** via the analysis runtime, using the configured provider
+  and model. No endpoint, key, or transport detail lives in the plugin.
+- **Rate caps are enforced before the call**, not after: `maxCallsPerCycle` bounds contemplation calls
+  per cycle, and each stage is separately bounded by `maxPassRuns`.
+- **Task governance applies unchanged.** Every pass run is a task run, so it inherits budgets,
+  concurrency limits, retry policy, and preemption by live user turns.
+
+## Observability
+
+Task runs, including dream passes, are visible from the CLI:
+
+```bash
+wednesdayai task status
+wednesdayai task status --json
+```
+
+The plugin also registers three read-only gateway methods. All three need only the
+`operator.read` scope:
+
+| Method             | Returns                                                                                     |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| `dream.status`     | Per-stage state (last run and whether the stage is due), record counts, and `activeCycles`. |
+| `dream.weights`    | Per-agent completed and failed totals with a derived success rate.                          |
+| `dream.candidates` | Repeated-work candidate records collected by crystallisation.                               |
+
+All three reads are bounded:
+
+- `dream.candidates` takes an optional `limit`, an integer from 1 to 200 (default 50). Any other
+  value is rejected with `INVALID_REQUEST`. It returns `{ candidates, truncated }`, newest first.
+- `dream.status` counts `questionCount` and `candidateCount` newest first. When a file is larger
+  than the scan limit, the count is a lower bound and `questionCountTruncated` or
+  `candidateCountTruncated` is `true`.
+- Both reads stop after 8 MiB of the file. They skip lines longer than 64 KiB and lines that do not
+  parse, such as a line left half-written by a crash.
+- `dream.weights` returns at most 200 rows, newest `updatedAt` first, with `truncated: true` when
+  more agents exist. It reads an in-memory map. It does not re-read the outcome log on each call.
+- A file that exists but cannot be read, for example because of a permission error, makes the
+  method fail with `UNAVAILABLE`. It is never reported as empty.
+
+The weights map is stored in `weights.jsonl`, a snapshot whose first line records the last outcome
+it includes (`lastOutcomeSequence`). Every outcome appended to `outcomes.jsonl` carries a sequence
+number. At startup the plugin loads the snapshot and replays only newer outcomes, so an outcome
+recorded just before a crash is not lost. `outcomes.jsonl` is rotated at 1 MiB into
+`outcomes.<sequence>.jsonl`. A rotated file is deleted only after a later snapshot includes it.
+The snapshot keeps a row for each agent in `agents.list` plus the `global` row. Rows for agents that
+are no longer listed are removed on the next write. With no `agents.list`, no rows are removed.
+
+`activeCycles` lists at most 20 in-flight cycles, newest first. Each entry has `cycleKey`,
+`currentStage`, `pendingPassCount`, `failedStages`, and `createdAt` (epoch ms). Plans older than 7
+days are left out. Reading the status never changes the stage state. When a cycle completes or its
+stale plan is pruned, its failed-stage record is removed with it.
+
+Read-scoped connections also receive a `dreams.update` event (`{ ts, kind: "task" | "dream" }`)
+after a task outcome commits or a dream diagnostic fires. It carries no data; clients re-fetch.
+The [Dreams view](/admin/web/dreams) in the Control UI shows all of this in one place.
+
+Every dream pass run records a `pass.metrics` row (see
+[Run measurement](/admin/gateway/tasks#run-measurement)). The contemplation pass records its model
+calls, tokens, cost, and phase timings (`select` and `contemplate`), so contemplation spend is
+visible per run. Cost follows the Gateway pricing rule: a contemplation model declared under
+`models.providers` without a `cost` block reports `costUsd: 0` (`costSource: "priced"`); set
+`cost` on the model to see real spend. A run that stopped before its inner pass records
+`skipped` (`payload_invalid` or `stage_skipped`) with no model call.
+
+- **Dry runs.** `wednesdayai task run --dry-run dream-cycle.<pass>` previews without side
+  effects: the cycle plans its stages without writing the plan or enqueuing work, and a stage
+  pass runs with file writes and contemplation refused, so a pass that ignores the mode fails
+  loudly instead of writing or spending. Contemplation reports how many queued questions it
+  would answer.
+- **Aborted contemplation.** A contemplation call aborted by preemption or shutdown completes
+  the run as `preempted`, not `failed`, and its usage is still recorded.
+- **Outcomes it ignores.** Adaptation and crystallisation skip dry-run outcomes, every
+  `learning-core.*` outcome, and any bare-id core/backbone pass (a `taskId` with no `.`, such as
+  `cron-run` or `heartbeat-tick`), so learning passes and core housekeeping never skew the
+  weights or add candidates.
+
+Diagnostic events cover the lifecycle: `dream.cycle_started`, `dream.cycle_completed`,
+`dream.stage_skipped`, `dream.pass_completed`, `dream.contemplation_unconfigured`,
+`dream.contemplation_skipped`, `dream.contemplation_failed`, `dream.rate_capped`,
+`dream.jsonl_parse_skipped`, `dream.crystallisation_candidate`, `dream.fetch_failed`,
+`task.boundary_violation`, and `task.idle_monitor_disabled`. With `diagnostics-otel` enabled
+these export as short spans (`openclaw.dream.*` / `openclaw.task.*`); failed contemplation and
+fetch set OTel error status. Attribute tables:
+[Task and dream spans](/admin/diagnostics/otel-langfuse#task-and-dream-spans).
+
+## Skill emission demarcation
+
+The dream cycle stops at **candidates**. It records that a piece of work has recurred and writes a
+candidate record, and that is its final artifact.
+
+Turning a candidate into a skill proposal is owned exclusively by
+[Learning Core](/developers/plugins/learning-core). The dream cycle does not write SKILL.md files, does not
+queue skill proposals, and does not modify the skills directory. Keeping the boundary here means the
+review and approval path for new skills stays in one place.
+
+## Related
+
+- [Learning Core](/developers/plugins/learning-core)
+- [Plugins](/users/tools/plugin)
+- [Skills](/users/tools/skills)

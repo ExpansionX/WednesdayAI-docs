@@ -1,0 +1,478 @@
+---
+summary: "Sub-agents: spawning isolated agent runs that announce results back to the requester chat"
+read_when:
+  - You want background/parallel work via the agent
+  - You are changing sessions_spawn or sub-agent tool policy
+  - You are implementing or troubleshooting thread-bound subagent sessions
+title: "Sub-Agents"
+---
+
+# Sub-agents
+
+Sub-agents are background agent runs spawned from an existing agent run. They run in their own session (`agent:<agentId>:subagent:<uuid>`) and, when finished, **announce** their result back to the requester chat channel.
+
+## Slash command
+
+Use `/subagents` to inspect or control sub-agent runs for the **current session**:
+
+- `/subagents list`
+- `/subagents kill <id|#|all>`
+- `/subagents log <id|#> [limit] [tools]`
+- `/subagents info <id|#>`
+- `/subagents send <id|#> <message>`
+- `/subagents steer <id|#> <message>`
+- `/subagents spawn <agentId> <task> [--model <model>] [--thinking <level>]`
+
+Thread binding controls:
+
+These commands work on channels that support persistent thread bindings. See **Thread supporting channels** below.
+
+- `/focus <subagent-label|session-key|session-id|session-label>`
+- `/unfocus`
+- `/agents`
+- `/session idle <duration|off>`
+- `/session max-age <duration|off>`
+
+`/subagents info` shows run metadata (status, timestamps, session id, transcript path, cleanup).
+
+### Spawn behavior
+
+`/subagents spawn` starts a background sub-agent as a user command, not an internal relay, and it sends one final completion update back to the requester chat when the run finishes.
+
+- The spawn command is non-blocking; it returns a run id immediately.
+- On completion, the sub-agent announces a summary/result message back to the requester chat channel.
+- For manual spawns, delivery is resilient:
+  - WednesdayAI tries direct `agent` delivery first with a stable idempotency key.
+  - If direct delivery fails, it falls back to queue routing.
+  - If queue routing is still not available, the announce is retried with a short exponential backoff before final give-up.
+- The completion handoff to the requester session is runtime-generated internal context (not user-authored text) and includes:
+  - `Result` (`assistant` reply text, or latest `toolResult` if the assistant reply is empty)
+  - `Status` (`completed successfully` / `failed` / `timed out` / `unknown`)
+  - compact runtime/token stats
+  - a delivery instruction telling the requester agent to rewrite in normal assistant voice (not forward raw internal metadata)
+- `--model` and `--thinking` override defaults for that specific run.
+- Use `info`/`log` to inspect details and output after completion.
+- `/subagents spawn` is one-shot mode (`mode: "run"`). For persistent thread-bound sessions, use `sessions_spawn` with `thread: true` and `mode: "session"`.
+- For ACP harness sessions (Codex, Claude Code, Gemini CLI), use `sessions_spawn` with `runtime: "acp"` and see [ACP Agents](/next/users/tools/acp-agents).
+
+### Completion delivery
+
+`completionDelivery` applies to `sessions_spawn` calls with `runtime: "subagent"` and to
+`runtime: "acp"` calls with `mode: "run"`. Thread-bound ACP sessions (`mode: "session"`) ignore
+it: their output goes straight to the bound thread.
+
+Top-level sub-agent completions use parent-first delivery by default. The completion is
+passed to the parent as an internal `task_completion` event, and the parent model turn
+authors the user-facing reply. This keeps raw child output out of the channel and lets the
+parent synthesize sibling results or return `NO_REPLY` when no response is needed.
+
+Use `completionDelivery: "direct"` when a top-level sub-agent completion must be sent straight
+to the requester channel in the existing completion format. Direct delivery is suppressed while
+sibling or descendant sub-agent runs are pending; the completion follows the parent agent-turn
+path instead of being sent externally immediately. Nested requesters remain internal: their child
+completions are delivered to their parent and are not externally delivered. The `parent` mode is
+the default.
+
+You can select the mode at either of these configuration levels:
+
+```json5
+{
+  agents: {
+    defaults: {
+      subagents: {
+        completionDelivery: "parent", // "parent" or "direct"; default: "parent"
+      },
+    },
+    list: [
+      {
+        id: "<agent-id>",
+        subagents: {
+          completionDelivery: "direct", // override the global default for this agent
+        },
+      },
+    ],
+  },
+}
+```
+
+For one spawn, pass the same setting as the `sessions_spawn` parameter:
+
+```json
+{
+  "task": "<task>",
+  "completionDelivery": "direct"
+}
+```
+
+The effective precedence is cron direct delivery first, then the spawn parameter, the
+requesting agent's `agents.list[].subagents.completionDelivery`, the global
+`agents.defaults.subagents.completionDelivery`, and finally `parent`.
+
+Cron job announces always use direct delivery, regardless of these settings. Thread-bound
+and other forced direct routes keep their existing direct behavior.
+
+Primary goals:
+
+- Parallelize "research / long task / slow tool" work without blocking the main run.
+- Keep sub-agents isolated by default (session separation + optional sandboxing).
+- Keep the tool surface hard to misuse: sub-agents do **not** get session tools by default.
+- Support configurable nesting depth for orchestrator patterns.
+
+Cost note: each sub-agent has its **own** context and token usage. For heavy or repetitive
+tasks, set a cheaper model for sub-agents and keep your main agent on a higher-quality model.
+You can configure this via `agents.defaults.subagents.model` or per-agent overrides.
+
+## Tool
+
+Use `sessions_spawn`:
+
+- Starts a sub-agent run (`deliver: false`, global lane: `subagent`)
+- Then runs an announce step and posts the announce reply to the requester chat channel
+- Default model: inherits the caller unless you set `agents.defaults.subagents.model` (or per-agent `agents.list[].subagents.model`); an explicit `sessions_spawn.model` still wins.
+- Default thinking: inherits the caller unless you set `agents.defaults.subagents.thinking` (or per-agent `agents.list[].subagents.thinking`); an explicit `sessions_spawn.thinking` still wins.
+- Default run timeout: if `sessions_spawn.runTimeoutSeconds` is omitted, WednesdayAI uses `agents.defaults.subagents.runTimeoutSeconds` when set; otherwise it falls back to `0` (no timeout).
+
+Tool params:
+
+- `task` (required)
+- `label?` (optional)
+- `agentId?` (optional; spawn under another agent id if allowed)
+- `model?` (optional; overrides the sub-agent model; an invalid or disallowed value fails the spawn with an error instead of starting the run)
+- `thinking?` (optional; overrides thinking level for the sub-agent run)
+- `runTimeoutSeconds?` (defaults to `agents.defaults.subagents.runTimeoutSeconds` when set, otherwise `0`; when set, the sub-agent run is aborted after N seconds)
+- `thread?` (default `false`; when `true`, requests channel thread binding for this sub-agent session)
+- `mode?` (`run|session`)
+  - default is `run`
+  - if `thread: true` and `mode` omitted, default becomes `session`
+  - `mode: "session"` requires `thread: true`
+- `cleanup?` (`delete|keep`, default `keep`)
+- `sandbox?` (`inherit|require`, default `inherit`; `require` rejects spawn unless target child runtime is sandboxed)
+- `sessions_spawn` does **not** accept channel-delivery params (`target`, `channel`, `to`, `threadId`, `replyTo`, `transport`). For delivery, use `message`/`sessions_send` from the spawned run.
+
+## Thread-bound sessions
+
+When thread bindings are enabled for a channel, a sub-agent can stay bound to a thread so follow-up user messages in that thread keep routing to the same sub-agent session.
+
+### Thread supporting channels
+
+- Discord (currently the only supported channel): supports persistent thread-bound subagent sessions (`sessions_spawn` with `thread: true`), manual thread controls (`/focus`, `/unfocus`, `/agents`, `/session idle`, `/session max-age`), and adapter keys `channels.discord.threadBindings.enabled`, `channels.discord.threadBindings.idleHours`, `channels.discord.threadBindings.maxAgeHours`, and `channels.discord.threadBindings.spawnSubagentSessions`.
+
+Quick flow:
+
+1. Spawn with `sessions_spawn` using `thread: true` (and optionally `mode: "session"`).
+2. WednesdayAI creates or binds a thread to that session target in the active channel.
+3. Replies and follow-up messages in that thread route to the bound session.
+4. Use `/session idle` to inspect/update inactivity auto-unfocus and `/session max-age` to control the hard cap.
+5. Use `/unfocus` to detach manually.
+
+Manual controls:
+
+- `/focus <target>` binds the current thread (or creates one) to a sub-agent/session target.
+- `/unfocus` removes the binding for the current bound thread.
+- `/agents` lists active runs and binding state (`thread:<id>` or `unbound`).
+- `/session idle` and `/session max-age` only work for focused bound threads.
+
+Config switches:
+
+- Global default: `session.threadBindings.enabled`, `session.threadBindings.idleHours`, `session.threadBindings.maxAgeHours`
+- Channel override and spawn auto-bind keys are adapter-specific. See **Thread supporting channels** above.
+
+See [Configuration Reference](/next/admin/gateway/configuration-reference) and [Slash commands](/next/users/tools/slash-commands) for current adapter details.
+
+Allowlist:
+
+- `agents.list[].subagents.allowAgents`: list of agent ids that can be targeted via `agentId` (`["*"]` to allow any). Default: only the requester agent.
+- Sandbox inheritance guard: if the requester session is sandboxed, `sessions_spawn` rejects targets that would run unsandboxed.
+
+Discovery:
+
+- Use `agents_list` to see which agent ids are currently allowed for `sessions_spawn`.
+
+Auto-archive:
+
+- Sub-agent sessions are automatically archived after `agents.defaults.subagents.archiveAfterMinutes` (default: 60).
+- Archive uses `sessions.delete` and renames the transcript to `*.deleted.<timestamp>` (same folder).
+- `cleanup: "delete"` archives immediately after announce (still keeps the transcript via rename).
+- Auto-archive is best-effort; pending timers are lost if the gateway restarts.
+- `runTimeoutSeconds` does **not** auto-archive; it only stops the run. The session remains until auto-archive.
+- Auto-archive applies equally to depth-1 and depth-2 sessions.
+
+## Nested Sub-Agents
+
+By default, sub-agents cannot spawn their own sub-agents (`maxSpawnDepth: 1`). You can enable one level of nesting by setting `maxSpawnDepth: 2`, which allows the **orchestrator pattern**: main → orchestrator sub-agent → worker sub-sub-agents.
+
+### How to enable
+
+```json5
+{
+  agents: {
+    defaults: {
+      subagents: {
+        maxSpawnDepth: 2, // allow sub-agents to spawn children (default: 1)
+        maxChildrenPerAgent: 5, // max active children per agent session (default: 5)
+        maxConcurrent: 8, // global concurrency lane cap (default: 8)
+        runTimeoutSeconds: 900, // default timeout for sessions_spawn when omitted (0 = no timeout)
+      },
+      nested: {
+        maxConcurrent: 2, // coordination lane cap for nested/orchestrator work (default: 2)
+      },
+    },
+  },
+}
+```
+
+### Depth levels
+
+| Depth | Session key shape                            | Role                                          | Can spawn?                   |
+| ----- | -------------------------------------------- | --------------------------------------------- | ---------------------------- |
+| 0     | `agent:<id>:main`                            | Main agent                                    | Always                       |
+| 1     | `agent:<id>:subagent:<uuid>`                 | Sub-agent (orchestrator when depth 2 allowed) | Only if `maxSpawnDepth >= 2` |
+| 2     | `agent:<id>:subagent:<uuid>:subagent:<uuid>` | Sub-sub-agent (leaf worker)                   | Never                        |
+
+### Announce chain
+
+Results flow back up the chain:
+
+1. Depth-2 worker finishes → announces to its parent (depth-1 orchestrator)
+2. Depth-1 orchestrator receives the announce, synthesizes results, finishes → announces to main
+3. Main agent receives the announce and delivers to the user
+
+Each level only sees announces from its direct children.
+
+### Tool policy by depth
+
+- **Depth 1 (orchestrator, when `maxSpawnDepth >= 2`)**: Gets `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history` so it can manage its children. Other session/system tools remain denied.
+- **Depth 1 (leaf, when `maxSpawnDepth == 1`)**: No session tools (current default behavior).
+- **Depth 2 (leaf worker)**: No session tools — `sessions_spawn` is always denied at depth 2. Cannot spawn further children.
+
+### Per-agent spawn limit
+
+Each agent session (at any depth) can have at most `maxChildrenPerAgent` (default: 5) active children at a time. This prevents runaway fan-out from a single orchestrator.
+
+### Cascade stop
+
+Stopping a depth-1 orchestrator automatically stops all its depth-2 children:
+
+- `/stop` in the main chat stops all depth-1 agents and cascades to their depth-2 children.
+- `/subagents kill <id>` stops a specific sub-agent and cascades to its children.
+- `/subagents kill all` stops all sub-agents for the requester and cascades.
+
+## Authentication
+
+Sub-agent auth is resolved by **agent id**, not by session type:
+
+- The sub-agent session key is `agent:<agentId>:subagent:<uuid>`.
+- The auth store is loaded from that agent's `agentDir`.
+- The main agent's auth profiles are merged in as a **fallback**; agent profiles override main profiles on conflicts.
+
+Note: the merge is additive, so main profiles are always available as fallbacks. Fully isolated auth per agent is not supported yet.
+
+Spawned sub-agents inherit the requester identity of the spawning session (the child carries
+`identitySource: "parent-session"`), so tools with identity-based access checks resolve the same
+user in the child run. The target agent's `agents.list[].inheritRequesterIdentity: false` switches
+this off at the gateway: delegated turns on that agent run without a person identity (see
+[`inheritRequesterIdentity`](/next/admin/gateway/configuration-reference#agentslist-per-agent-overrides)).
+System-triggered parents that run without a resolved identity spawn
+unattributed children — there is no fallback identity. Sub-agent runs and announces resolve the
+target agent's workspace lane from that identity, so an unattributed run or announce into a
+lane-enabled agent is denied (see [Workspace Lanes](/next/developers/concepts/workspace-lanes)).
+
+## Announce
+
+Sub-agents report back via an announce step:
+
+- The announce step runs inside the sub-agent session (not the requester session).
+- If the sub-agent replies exactly `ANNOUNCE_SKIP`, nothing is posted.
+- Otherwise the announce reply is posted to the requester chat channel via a follow-up `agent` call (`deliver=true`).
+- If the requester session's stored route names a non-default account that the channel's configured account list no longer includes, the announce has no external target: the completion is delivered as the announce turn inside the requester session instead, with no default-account fallback (see [Sessions](/next/developers/concepts/session#delivery-routes-go-stale)).
+- Announce replies preserve thread/topic routing when available on channel adapters.
+- Announce context is normalized to a stable internal event block:
+  - source (`subagent` or `cron`)
+  - child session key/id
+  - announce type + task label
+  - status line derived from runtime outcome (`success`, `error`, `timeout`, or `unknown`)
+  - result content from the announce step (or `(no output)` if missing)
+  - a follow-up instruction describing when to reply vs. stay silent
+- `Status` is not inferred from model output; it comes from runtime outcome signals.
+- If the gateway RPC channel fails while waiting for a sub-agent to complete, the run is finalized with `status: error` and a message indicating the wait failure, rather than silently remaining in an active state.
+
+Announce payloads include a stats line at the end (even when wrapped):
+
+- Runtime (e.g., `runtime 5m12s`)
+- Token usage (input/output/total)
+- Estimated cost when model pricing is configured (`models.providers.*.models[].cost`)
+- `sessionKey`, `sessionId`, and transcript path (so the main agent can fetch history via `sessions_history` or inspect the file on disk)
+- Internal metadata is meant for orchestration only; user-facing replies should be rewritten in normal assistant voice.
+
+Parent-mode announce delivery uses the durable agent-turn path rather than an in-memory
+announce queue. An accepted completion is retained until its announce turn executes, so a
+gateway restart does not discard an undelivered completion. On boot, pending registry entries
+are resumed and the announce idempotency key prevents duplicate effective delivery. Direct and
+cron delivery bypass this parent-mode path.
+
+A parent-mode announce turn denied by the requester's workspace lane is acked without a retry
+loop and never marks the completion delivered; the announce flow falls back to the direct leg,
+which carries the requester identity. A parked announce released into a denial has no flow left:
+the registry settles the run immediately, for it and every run merged into the same announce
+turn. The settle keeps the child session (`cleanup: "keep"`), fires the deferred
+`subagent_ended` and `task_outcome` hooks exactly like the give-up path, and logs
+`Subagent announce denied by workspace lane`.
+
+Parent-mode announce turns are recorded in session-run history with `kind: "announce"`.
+Direct and cron delivery do not create these turns. Inspect parent-mode turns with
+`sessions.runs.list`, for example:
+
+```bash
+wednesdayai gateway call sessions.runs.list --json
+```
+
+The terminal row lets you verify completion after a restart and distinguish an announce
+turn from chat, cron, heartbeat, or nudge work.
+
+## Sub-agent access control (which agents, which tools)
+
+Sub-agent configuration lives across three independent surfaces. They answer different questions — keep them straight.
+
+### 1. Which agent IDs can this agent spawn? (per-agent allowlist)
+
+`agents.list[].subagents.allowAgents` — per-agent allowlist of target agent IDs for `sessions_spawn`'s `agentId` parameter.
+
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "orchestrator",
+        subagents: {
+          allowAgents: ["research", "writer", "critic"], // only these
+          // allowAgents: ["*"],                          // any agent (open)
+        },
+      },
+    ],
+  },
+}
+```
+
+- Default (field omitted): only the **requester agent's own ID** is allowed — an agent can spawn sub-agents under its own ID but not under others.
+- `["*"]` opens it to any agent ID.
+- Entries are matched case-insensitively after normalization.
+- This is **allowlist-only**; there is no deny-list for target agent IDs. To restrict, omit IDs from `allowAgents`.
+- Sandbox inheritance guard still applies: a sandboxed requester cannot spawn into an unsandboxed target, even if the ID is allowlisted.
+- Discovery: call `agents_list` to see which IDs are currently allowed for `sessions_spawn`.
+- Teams: an agent that leads an [`agents.teams`](/next/admin/gateway/configuration-reference#agentsteams) entry can also spawn every member of that team, in addition to `allowAgents`. Members get no extra rights from the team.
+- Internal agents (`userFacing: false`) can be spawned like any other agent, but not with `thread: true`, because that binds them to a user-visible thread.
+
+### 2. Global sub-agent tuning (timing, depth, concurrency)
+
+`agents.defaults.subagents.*` — global defaults for all sub-agent runs, not per-agent.
+
+```json5
+{
+  agents: {
+    defaults: {
+      subagents: {
+        maxConcurrent: 8, // subagent lane cap (default: 8)
+        maxSpawnDepth: 2, // allow sub-agents to spawn children (default: 1)
+        maxChildrenPerAgent: 5, // active children per requester session (default: 5)
+        archiveAfterMinutes: 60, // auto-archive finished sub-agent sessions (default: 60)
+        model: "anthropic/claude-haiku", // default model for spawned sub-agents
+        thinking: "low", // default thinking level for spawned sub-agents
+        runTimeoutSeconds: 900, // default run timeout (0 = no timeout)
+        announceTimeoutMs: 60000, // announce delivery gateway timeout (default: 60000)
+        announceFanInCoalesce: true, // coalesce parallel completions into one parent turn (default: true)
+      },
+    },
+  },
+}
+```
+
+- No `allowAgents` field here — the per-agent allowlist (#1) is the only place to restrict target IDs.
+- Per-agent overrides: `agents.list[].subagents.model` and `agents.list[].subagents.thinking` win over the defaults.
+
+### 3. Which tools can sub-agents use? (global tool policy)
+
+`tools.subagents.tools.*` — global tool policy applied to all spawned sub-agents. This controls **tool access**, not which agent IDs can be spawned.
+
+```json5
+{
+  tools: {
+    subagents: {
+      model: "anthropic/claude-haiku", // default model (also settable via #2)
+      tools: {
+        allow: ["read", "exec", "process"], // if set, becomes allow-only (deny still wins)
+        alsoAllow: ["browser"], // merge into allow / default sub-agent denylist
+        deny: ["gateway", "cron"], // deny wins over allow
+      },
+    },
+  },
+}
+```
+
+- Deny wins over allow. If both are set, denied tools stay denied.
+- Sub-agents always start with **all tools except session tools** (`sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`) and system tools. At `maxSpawnDepth >= 2`, depth-1 orchestrators additionally receive `sessions_spawn`, `subagents`, `sessions_list`, `sessions_history`.
+- See [Tool Policy](#tool-policy-sub-agent-tools) below for the default denylist and nesting behavior.
+
+## Tool Policy (sub-agent tools)
+
+By default, sub-agents get **all tools except session tools** and system tools:
+
+- `sessions_list`
+- `sessions_history`
+- `sessions_send`
+- `agents_nudge`
+- `sessions_spawn`
+
+When `maxSpawnDepth >= 2`, depth-1 orchestrator sub-agents additionally receive `sessions_spawn`, `subagents`, `sessions_list`, and `sessions_history` so they can manage their children.
+
+Override via config:
+
+```json5
+{
+  agents: {
+    defaults: {
+      subagents: {
+        maxConcurrent: 1,
+      },
+    },
+  },
+  tools: {
+    subagents: {
+      tools: {
+        // deny wins
+        deny: ["gateway", "cron"],
+        // if allow is set, it becomes allow-only (deny still wins)
+        // allow: ["read", "exec", "process"]
+      },
+    },
+  },
+}
+```
+
+- `tools.subagents.model`: default model selection for spawned sub-agents (string or `{ primary, fallbacks }`).
+- `tools.subagents.tools.allow`: if set, becomes allow-only (deny still wins).
+- `tools.subagents.tools.alsoAllow`: additional allowlist entries merged into allow and/or default sub-agent denylist.
+- `tools.subagents.tools.deny`: denied tools (deny wins over allow).
+
+## Concurrency
+
+Sub-agents use a dedicated in-process queue lane:
+
+- Lane name: `subagent`
+- Concurrency: `agents.defaults.subagents.maxConcurrent` (default `8`)
+- Nested/orchestrator coordination uses the `nested` lane with
+  `agents.defaults.nested.maxConcurrent` (default `2`)
+
+## Stopping
+
+- Sending `/stop` in the requester chat aborts the requester session and stops any active sub-agent runs spawned from it, cascading to nested children. For run-mode ACP children this also cancels the ACP turn.
+- `/subagents kill <id>` stops a specific sub-agent (cancelling the ACP turn for an ACP child) and cascades to its children. A child cancelled with `/acp cancel` is reported to the requester as not completed.
+
+## Limitations
+
+- Pending announce work is durable through the configured session storage and is resumed after a gateway restart. The in-process steer fast-path retains its existing crash window.
+- If a sub-agent's `agent.wait` call fails (e.g., gateway RPC channel drops), the run is finalized as an error completion with cleanup, rather than remaining stuck as "active" until the next gateway restart.
+- Sub-agents still share the same gateway process resources; treat `maxConcurrent` as a safety valve.
+- `sessions_spawn` is always non-blocking: it returns `{ status: "accepted", runId, childSessionKey }` immediately.
+- Sub-agent context only injects `AGENTS.md` + `TOOLS.md` (no `SOUL.md`, `IDENTITY.md`, `USER.md`, `HEARTBEAT.md`, or `BOOTSTRAP.md`).
+- Maximum nesting depth is 5 (`maxSpawnDepth` range: 1–5). Depth 2 is recommended for most use cases.
+- `maxChildrenPerAgent` caps active children per session (default: 5, range: 1–20).

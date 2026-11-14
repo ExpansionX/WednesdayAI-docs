@@ -1,0 +1,216 @@
+---
+title: "Hooks"
+description: "Two kinds of hooks in WednesdayAI: in-plugin lifecycle hooks via api.on(), and standalone HOOK.md event hooks."
+audience: developer
+---
+
+# Hooks
+
+WednesdayAI has **two distinct hook systems**. They share the word "hook" but are registered, discovered, and fired differently. Pick the one that matches your use case.
+
+| | Lifecycle hooks | Standalone hooks |
+| --- | --------------- | ---------------- |
+| Where | Inside a plugin | A `HOOK.md` + handler directory |
+| Registered via | `api.on(name, handler)` | Auto-discovery of `HOOK.md` |
+| Fires on | 33 typed runtime events | Coarse gateway/command events |
+| Typical use | Transform LLM input/output, observe model calls, context lifecycle | Run code on `/new`, `/reset`, gateway start |
+| Can mutate the run? | Yes (some hooks) | No — side-effect automation |
+
+<Warning>
+  There is no exported `HookContext` type. Lifecycle hook handlers receive a typed
+  `event` and a typed `ctx` per hook name (see `PluginHookHandlerMap`). Standalone
+  `HOOK.md` handlers receive their own runtime context. Do not `import { HookContext }`
+  from the SDK — it does not exist.
+</Warning>
+
+## Lifecycle hooks (in-plugin, via `api.on`)
+
+Inside a plugin's `register` function, attach a handler to a named lifecycle event:
+
+```ts
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  api.on("transform_llm_input", (event) => {
+    // event.messages, event.provider, event.model are typed.
+    // Return a modified messages array to mutate the run.
+    return { messages: event.messages };
+  });
+
+  api.on("model_call_ended", (event) => {
+    // Observe-only: read usage, headers, timing.
+    api.logger.info(`model call ${event.outcome} in ${event.durationMs}ms`);
+  });
+}
+```
+
+`api.on(name, handler, opts?)` is fully typed: the `event` and `ctx` arguments are inferred from the hook name, and the allowed return type is enforced per hook. An optional `{ priority }` controls ordering when multiple plugins hook the same event.
+
+### Mutation semantics
+
+Lifecycle hooks fall into three categories:
+
+- **Mutating** — the handler's return value replaces or amends the run. Examples: `transform_llm_input` / `transform_llm_output` (rewrite messages/output), `before_tool_call` (rewrite params or `block`), `before_message_write` (rewrite or `block` the message), `before_prompt_build` (append system prompt / context), `before_model_resolve` (override model/provider), `before_context_send` (return `{ messages? }` to replace the outgoing message list), `message_sending` (rewrite or `cancel`), and the `context.*` / `compaction.plan` lifecycle hooks (contribute context, prune, plan compaction).
+- **Observe-only** — the return value is ignored. Examples: `llm_input`, `llm_output`, `model_call_ended` (read usage/headers), `agent_end`, `session_start` / `session_end`, `gateway_start` / `gateway_stop`.
+- **Short-circuiting** — `before_tool_call` may return `{ block: true, blockReason }` to stop a tool call; `before_message_write` may return `{ block: true }` to drop a message.
+
+<Note>
+  `model_call_ended` is observe-only for run control but **may** mutate `usage` and
+  `proxyMetadata` in place — core reads `proxyMetadata` back afterwards to record the
+  actual provider/model. It fires once per run attempt (after the full tool-use loop),
+  not once per individual LLM API call, and runs serially because of these in-place
+  mutation semantics.
+</Note>
+
+### Lifecycle hook catalogue
+
+These are the `PluginHookName` values accepted by `api.on(...)`. Fire timing and whether the return value is honoured are noted.
+
+| Hook | Fires | Return honoured |
+| ---- | ----- | --------------- |
+| `before_model_resolve` | Before the model/provider is chosen for a run | Yes — override `modelOverride` / `providerOverride` |
+| `before_prompt_build` | Before the system prompt and context are assembled | Yes — `systemPrompt` (appended after built sections), `prependContext` (inserted before the user turn) |
+| `before_context_send` | Just before messages are sent to the model | Yes — replace `messages` |
+| `before_agent_start` | Legacy combined pre-run hook | Yes — combines prompt-build and model-resolve results |
+| `llm_input` | After input is prepared for the model | No (observe) |
+| `llm_output` | After the model returns | No (observe) |
+| `model_call_ended` | Once per run attempt, after the tool-use loop | Observe; may mutate `usage` / `proxyMetadata` in place (serial) |
+| `agent_end` | When an agent run finishes | No (observe) |
+| `before_compaction` | Before context compaction runs | No (observe) |
+| `after_compaction` | After compaction completes | No (observe) |
+| `before_reset` | On `/new` or `/reset`, before the session clears | No (observe) |
+| `message_received` | An inbound message is received | No (observe) |
+| `message_sending` | Before an outbound message is sent | Yes — rewrite `content` or `cancel` |
+| `message_sent` | After an outbound message is sent | No (observe) |
+| `before_tool_call` | Before a tool executes | Yes — rewrite `params`, or `block` with `blockReason` |
+| `after_tool_call` | After a tool executes | No (observe) |
+| `tool_result_persist` | Before a tool result is written to the transcript | Yes — replace the `message` |
+| `before_message_write` | Before any message is written to the JSONL transcript | Yes — `block` or replace the `message` |
+| `session_start` | A session starts | No (observe) |
+| `session_end` | A session ends | No (observe) |
+| `subagent_spawning` | A subagent is about to spawn | Yes — `{ status: "ok"; threadBindingReady?: boolean }` to allow, or `{ status: "error"; error: string }` to block |
+| `subagent_delivery_target` | Resolving where a subagent reply is delivered | Yes — override `origin` |
+| `subagent_spawned` | A subagent has spawned | No (observe) |
+| `subagent_ended` | A subagent ended | No (observe) |
+| `gateway_start` | The gateway process starts | No (observe) |
+| `gateway_stop` | The gateway process stops | No (observe) |
+| `transform_llm_input` | Mutate the message list before the model call | Yes — return `messages` |
+| `transform_llm_output` | Mutate assistant output after the model call | Yes — return `assistantTexts` |
+| `storage.afterAppend` | After a conversation entry is appended to storage | No (observe) |
+| `context.collect` | Collecting context for the current turn | Yes — return a `PromptContribution` |
+| `context.project` | Projecting collected contributions into messages | Yes — `messages`, `projection`, `contribution` |
+| `context.prune` | Pruning context under token pressure | Yes — `messages`, `dropped`, `compactionHandled`, `contribution?` |
+| `compaction.plan` | Planning a compaction pass | Yes — `plan`, `messages`, `contribution` |
+| `agent_idle` | The core idle monitor crosses an idle threshold or a schedule window opens | No (observe) |
+| `task_outcome` | A task or subagent run completes with an outcome | No (observe) |
+
+### `before_prompt_build` example
+
+```typescript
+api.on("before_prompt_build", (event, ctx) => {
+  // event.systemPrompt — the assembled system prompt (read-only; do not mutate)
+  // event.messages — session messages prepared for this run
+
+  return {
+    // Appended after the built system prompt sections:
+    systemPrompt: "Always respond in the user's language.",
+
+    // Inserted before the user turn in the message list:
+    prependContext: `Current user timezone: ${getUserTimezone(ctx.sessionKey)}`,
+  };
+});
+```
+
+Both `systemPrompt` and `prependContext` are optional — return either, both, or neither. `systemPrompt` is appended once per run after the full section build; `prependContext` is a plaintext string inserted into the context immediately before the user's message.
+
+<Tip>
+  The `context.*` and `compaction.plan` hooks are the context-engine surface. A plugin that
+  fully owns compaction can set `ownsCompaction: true` in its plugin definition (or return
+  `compactionHandled: true` from `context.prune`) so the runtime skips its built-in compaction
+  trigger and avoids double-compaction races.
+</Tip>
+
+## Runtime and turn identity context
+
+Agent, message (`message_*`), tool, and `before_message_write` hook contexts carry two optional identity objects alongside their per-hook fields:
+
+- **`ctx.runtimeIdentity?: PluginRuntimeIdentity`** — who and where: `agentId`, `sessionKey`, channel ids, sender fields (`senderId`, `senderName`, `senderE164`, `canonicalIdentity`), and the privacy-safe digests `providerConversationId` / `hashedUserId` (truncated SHA-256, never raw provider ids). `identitySource` (`"sender" | "parent-session" | "job-config"`) is the provenance of `canonicalIdentity` and is never defaulted — absent provenance means the emitting seam did not know it.
+- **`ctx.turn?: PluginTurnIdentity`** — correlation for the current turn: `turnId` (falls back to the run id), `runId`, `sessionId`, `turnNumber`, `inboundMessageId`, `userEntryId` / `assistantEntryId`, and per-session plus global sequence numbers.
+
+Treat every field as optional: hooks fired outside a channel run (gateway start, cron) may carry neither object. See the [plugin hooks reference](/next/reference/plugin-hooks) for the full typed contract.
+
+## Inbound channel replies
+
+`message_sending` and `message_sent` fire not only on adapter-initiated outbound sends but also on **replies to inbound channel messages** — every built-in channel (Telegram, Discord, Slack, Signal, iMessage, WhatsApp web, Matrix, MS Teams) routes inbound reply delivery through the same shared helpers (`applyMessageSendingHook` / `createMessageSentEmitter`, re-exported from `openclaw/plugin-sdk`).
+
+| Hook | Event | Result |
+| ---- | ----- | ------ |
+| `message_sending` | `{ to, content, metadata? }` before each payload chunk is sent | `{ content?, cancel? }` — rewrite the text or cancel the send |
+| `message_sent` | `{ to, content, success, error? }` after the actual send attempt | void (observe) |
+
+`message_sending` rewrites payload text only — media is never rewritten. A throwing handler is logged and the original payload still sends. `message_sent` fires only after a real send attempt, including after partial sends of chunked replies.
+
+## Standalone hooks (HOOK.md)
+
+Standalone hooks are directories auto-discovered by the gateway. They run side-effect automation on coarse events and do not modify the run.
+
+```text
+my-hook/
+├── HOOK.md          # metadata + docs (frontmatter drives discovery)
+└── handler.ts       # handler module
+```
+
+`HOOK.md` frontmatter declares the events the hook handles:
+
+```markdown
+---
+name: my-hook
+description: "Saves a marker when the session resets"
+metadata: { "openclaw": { "emoji": "💾", "events": ["command:new", "command:reset"] } }
+---
+```
+
+Common standalone events include `command:new`, `command:reset`, `command:stop`, `agent:bootstrap`, `gateway:startup`, `message:received`, `message:transcribed`, `message:preprocessed`, and `message:sent`. The handler exports a function (default export, or the name given by `metadata.openclaw.export`) that runs when a declared event fires.
+
+`message:transcribed` fires when an inbound audio message has been transcribed. `message:preprocessed` fires after the message has been enriched with links, images, and transcripts — immediately before routing. Both are useful for logging pipelines and external integrations that need the enriched message body without modifying the run.
+
+### Bundled standalone hooks
+
+WednesdayAI ships several bundled hooks, disabled by default. Enable them with the CLI:
+
+```bash
+openclaw hooks list             # see all discovered hooks + status
+openclaw hooks enable session-memory
+openclaw hooks info session-memory
+openclaw hooks check
+```
+
+`session-memory` and `session-journal` are both session-reset hooks — `session-memory` writes a structured summary of the conversation, while `session-journal` makes an LLM call to produce a reflective journal entry. `session-journal` is enabled **per-agent** via `sessionJournal.enabled: true` in the agent config rather than via `hooks.internal.entries`. See the [Hooks catalogue](/next/reference/hooks-catalogue) for the full list and configuration details.
+
+### Discovery and precedence
+
+Standalone hooks are discovered from (highest precedence first):
+
+1. `<workspace>/hooks/` — per-agent hooks
+2. `~/.openclaw/hooks/` — user-installed shared hooks
+3. bundled hooks shipped with WednesdayAI
+
+### Installing hook packs
+
+```bash
+openclaw hooks install @wednesdayai/my-hook-pack   # npm pack
+openclaw hooks install ./path/to/my-hook           # local directory
+```
+
+`openclaw hooks install` runs `npm install --ignore-scripts`. Keep dependencies to pure JS/TS with no postinstall build steps.
+
+## Which hook should I use?
+
+- Need to **transform the run** (rewrite LLM input/output, gate tool calls, shape context, observe model usage)? Use a **lifecycle hook** in a plugin via `api.on(...)`.
+- Need to **run a side effect on a coarse event** (`/new`, `/reset`, gateway start) without modifying the run? Use a **standalone HOOK.md hook**.
+
+## What's next
+
+- [Write your first plugin](/next/developers/plugins/your-first-plugin) — where `api.on(...)` lives
+- [Agent tools](/next/developers/agent-tools) — register tools the AI can call
+- [Plugin SDK reference](/next/developers/sdk) — the full exported surface

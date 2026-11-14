@@ -18,7 +18,7 @@ title: "Heartbeat"
 
 # Heartbeat (Gateway)
 
-> **Heartbeat vs Cron?** See [Cron vs Heartbeat](/automation/cron-vs-heartbeat) for guidance on when to use each.
+> **Heartbeat vs Cron?** See [Cron vs Heartbeat](/users/automation/cron-vs-heartbeat) for guidance on when to use each.
 
 Heartbeat runs **periodic agent turns** on a configured session so the model can
 surface anything that needs attention without spamming you. By default that is
@@ -26,7 +26,7 @@ the agent main session; for high-traffic sessions, use `isolatedSession: true`
 so each heartbeat runs in a fresh sibling transcript while delivery still uses
 the base session.
 
-Troubleshooting: [/automation/troubleshooting](/automation/troubleshooting)
+Troubleshooting: [/automation/troubleshooting](/users/automation/troubleshooting)
 
 When the task pipeline is available, each heartbeat that actually runs is
 enqueued as a `heartbeat-tick` task pass. Skip reasons are unchanged
@@ -84,7 +84,7 @@ The default prompt is intentionally broad:
   follow-ups (inbox, calendar, reminders, queued work) and surface anything urgent.
 - **Human check-in**: “Checkup sometimes on your human during day time” nudges an
   occasional lightweight “anything you need?” message, but avoids night-time spam
-  by using your configured local timezone (see [/concepts/timezone](/concepts/timezone)).
+  by using your configured local timezone (see [/concepts/timezone](/developers/concepts/timezone)).
 
 If you want a heartbeat to do something very specific (e.g. “check Gmail PubSub
 stats” or “verify gateway health”), set `agents.defaults.heartbeat.prompt` (or
@@ -93,7 +93,7 @@ stats” or “verify gateway health”), set `agents.defaults.heartbeat.prompt`
 ## Response contract
 
 - If nothing needs attention, reply with **`HEARTBEAT_OK`**.
-- During heartbeat runs, OpenClaw treats `HEARTBEAT_OK` as an ack when it appears
+- During heartbeat runs, WednesdayAI treats `HEARTBEAT_OK` as an ack when it appears
   at the **start or end** of the reply. The token is stripped and the reply is
   dropped if the remaining content is **≤ `ackMaxChars`** (default: 300).
 - If `HEARTBEAT_OK` appears in the **middle** of a reply, it is not treated
@@ -149,8 +149,8 @@ Whether a heartbeat config change needs a gateway restart depends on the config 
 ### Per-agent heartbeats
 
 If any `agents.list[]` entry includes a `heartbeat` block, **only those agents**
-run heartbeats. The per-agent block merges on top of `agents.defaults.heartbeat`
-(so you can set shared defaults once and override per agent).
+run heartbeats. The per-agent block merges key-by-key over `agents.defaults.heartbeat`
+(so a partial block inherits the rest — set shared defaults once and override per agent).
 
 Example: two agents, only the second agent runs heartbeats.
 
@@ -181,7 +181,7 @@ Example: two agents, only the second agent runs heartbeats.
 ```
 
 The `identity` value must match an existing `session.identityLinks` key (see
-[Session](/gateway/configuration-reference#session)) — unmatched values leave heartbeat runs
+[Session](/admin/gateway/configuration-reference#session)) — unmatched values leave heartbeat runs
 unattributed.
 
 ### Active hours example
@@ -249,13 +249,13 @@ Use `accountId` to target a specific account on multi-account channels like Tele
 
 ### Field notes
 
-- `every`: heartbeat interval (duration string; default unit = minutes).
+- `every`: heartbeat interval (duration string; default unit = minutes). A blank, whitespace-only, or non-positive value (e.g. `0m`) disables the heartbeat instead of falling back to the 30m default; an unparsable duration is rejected at config validation.
 - `model`: optional model override for heartbeat runs (`provider/model`).
 - `includeReasoning`: when enabled, also deliver the separate `Reasoning:` message when available (same shape as `/reasoning on`).
 - `session`: optional session key for heartbeat runs.
   - `main` (default): agent main session.
-  - Explicit session key (copy from `openclaw sessions --json` or the [sessions CLI](/cli/sessions)).
-  - Session key formats: see [Sessions](/concepts/session) and [Groups](/channels/groups).
+  - Explicit session key (copy from `wednesdayai sessions --json` or the [sessions CLI](/users/cli/sessions)).
+  - Session key formats: see [Sessions](/developers/concepts/session) and [Groups](/admin/channels/groups).
   - When `isolatedSession: true`, configure the base session key here. Do not
     pre-append `:heartbeat`; the runtime creates and refreshes the sibling
     `:heartbeat` session itself.
@@ -268,13 +268,13 @@ Use `accountId` to target a specific account on multi-account channels like Tele
   - `allow` (default): allow direct/DM heartbeat delivery.
   - `block`: suppress direct/DM delivery (`reason=dm-blocked`).
 - `to`: optional recipient override (channel-specific id, e.g. E.164 for WhatsApp or a Telegram chat id). For Telegram topics/threads, use `<chatId>:topic:<messageThreadId>`.
-- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. If the account id does not match a configured account for the resolved channel, the output goes to the session chat instead (see the fallback note below).
+- `accountId`: optional account id for multi-account channels. When `target: "last"`, the account id applies to the resolved last channel if it supports accounts; otherwise it is ignored. With `target: "last"`, an account id that doesn't match a configured account for the resolved channel sends the output to the session chat instead (see the fallback note below). With an explicit channel target, an unknown account id is a config validation error (`unknown heartbeat accountId`); fix the account id.
 - `identity`: optional `session.identityLinks` key (matched case-insensitively against the keys). On match, heartbeat runs carry that canonical identity as the requester identity (`identitySource: "job-config"`). Unmatched or absent values leave runs as unattributed system runs — there is never a default or fallback identity. Attribution is operator-configured only; agents cannot set it.
 - `prompt`: overrides the default prompt body (not merged).
 - `ackMaxChars`: max chars allowed after `HEARTBEAT_OK` before delivery.
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
-- `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only heartbeat-specific bootstrap files such as `HEARTBEAT.md`. Note the interaction with `isolatedSession`: with `isolatedSession: false` (heartbeat shares the main session), the heartbeat keeps the session's normal full bootstrap regardless of `lightContext`, and the HEARTBEAT.md checklist is inlined into the trigger message instead (only when the session's normal bootstrap does not already inject it — the stock bootstrap file list includes HEARTBEAT.md, in which case nothing is duplicated) — this keeps the system prompt byte-identical to user turns so provider prefix caching survives every heartbeat (see [Prompt caching](/reference/prompt-caching#byte-stability-across-trigger-kinds)). `lightContext` only takes effect for isolated `:heartbeat` sessions.
-- `isolatedSession`: when true, each heartbeat enqueues an `agent.turn` (`kind` heartbeat) and runs in a fresh sibling `:heartbeat` session with no prior conversation transcript. A positive `wakeGate` also nudges the named main session (`kind` nudge). Delivery routing and duplicate suppression still use the base session. The isolated run resolves its own session **before** any event peek or consume, so it does not drain the base session's queued non-signal events. `contextKey=signal:*` events may transfer into that isolated turn; remaining non-signal events stay on the base session for its next turn. The `:heartbeat` session key suffix causes the storage layer to tag these entries with `trigger_source = 'heartbeat'`; session recall (`readByKey`) and analytics queries automatically exclude them so heartbeat turns do not appear in conversation history or inflate per-turn metrics. See [Session History Hygiene](/concepts/session-history-hygiene).
+- `lightContext`: when true, heartbeat runs use lightweight bootstrap context and keep only heartbeat-specific bootstrap files such as `HEARTBEAT.md`. Note the interaction with `isolatedSession`: with `isolatedSession: false` (heartbeat shares the main session), the heartbeat keeps the session's normal full bootstrap regardless of `lightContext`, and the HEARTBEAT.md checklist is inlined into the trigger message instead (only when the session's normal bootstrap does not already inject it — the stock bootstrap file list includes HEARTBEAT.md, in which case nothing is duplicated) — this keeps the system prompt byte-identical to user turns so provider prefix caching survives every heartbeat (see [Prompt caching](/developers/reference/prompt-caching#byte-stability-across-trigger-kinds)). Only the **reduced bootstrap context** requires an isolated session; prompt selection is separate. `lightContext` also swaps the default heartbeat prompt for the shorter light wording ("Follow the HEARTBEAT.md instructions in your context strictly. Do not infer or repeat old tasks. If nothing needs attention, reply HEARTBEAT_OK."), and a shared-session heartbeat uses that wording too whenever the checklist actually reaches the turn — from the session bootstrap or inlined. When a shared session has nothing to inline (HEARTBEAT.md missing, empty or failed to load, and absent from the session bootstrap), the runner falls back to the default prompt rather than pointing the model at context that is not there. A configured `heartbeat.prompt` wins over both, with one edge: that fallback keys off the resolved prompt text, so a `heartbeat.prompt` set to exactly the light wording is indistinguishable from the light default and is replaced in the nothing-to-inline case too. Any other configured text is used verbatim.
+- `isolatedSession`: when true, each heartbeat enqueues an `agent.turn` (`kind` heartbeat) and runs in a fresh sibling `:heartbeat` session with no prior conversation transcript. A positive `wakeGate` also nudges the named main session (`kind` nudge). Delivery routing and duplicate suppression still use the base session. The isolated run resolves its own session **before** any event peek or consume, so it does not drain the base session's queued non-signal events. `contextKey=signal:*` events may transfer into that isolated turn; remaining non-signal events stay on the base session for its next turn. The `:heartbeat` session key suffix causes the storage layer to tag these entries with `trigger_source = 'heartbeat'`; session recall (`readByKey`) and analytics queries automatically exclude them so heartbeat turns do not appear in conversation history or inflate per-turn metrics. See [Session History Hygiene](/developers/concepts/session-history-hygiene).
 - `skipWhenBusy`: when true, also skips this agent's heartbeat while its session-keyed subagent or nested lanes are busy.
 - `toolsAllow`: exact tool names an isolated heartbeat may use. `[]` = no tools. Matching is case- and alias-insensitive. When set, the heartbeat also omits the skills list **and skips skill-declared environment overrides**, so a tool that depends on a skill-provided environment variable will not see it. Applies only with `isolatedSession: true`; on a shared-session heartbeat it is ignored with a warn. The list can only narrow the tool surface — the session's policy `tools.allow` still applies, so `toolsAllow` never widens what the agent may use. An allow-list entry that matches no tool logs a `toolsAllow names matched no tool` warn. Unset keeps the agent's full tool surface.
 - `activeHours`: restricts heartbeat runs to a time window. Object with `start` (HH:MM, inclusive; use `00:00` for start-of-day), `end` (HH:MM exclusive; `24:00` allowed for end-of-day), and optional `timezone`.
@@ -310,13 +310,14 @@ stay silent.
 - Heartbeat deliveries allow direct/DM targets by default. Set `directPolicy: "block"` to suppress direct-target sends while still running the heartbeat turn.
 - If the main queue, cron queue, or target session lane is busy, the heartbeat is skipped and retried later.
 - With `skipWhenBusy: true`, this agent's own session-keyed subagent/nested lanes also defer heartbeat runs. Other agents' busy lanes do not defer this agent.
-- Output always lands somewhere. If `last` or an explicit channel target can't be
+- Session chat is the fallback. If `last` or an explicit channel target can't be
   resolved, the channel isn't ready (`checkReady`), or the send fails, the output is
-  appended to the session chat instead. The operator gets a gateway log `warn`
+  appended to the session chat instead. If that append also fails, the output is
+  not delivered and the gateway logs `heartbeat: output could not be delivered to any surface`. The operator gets a gateway log `warn`
   (`heartbeat: delivery target unavailable; delivered to session chat`, repeated
   occurrences at `info` until the gateway restarts), a heartbeat `sent` event on
   channel `webchat` with reason `fallback:<reason>`, and the same reason in
-  `openclaw status --deep`. Reasons: `no-external-route`, `target-unavailable`,
+  `wednesdayai status --deep`. Reasons: `no-external-route`, `target-unavailable`,
   `unknown-account`, `channel-not-ready`, `send-failed`. Only `target: "none"`,
   `directPolicy: "block"`, and `showAlerts: false` keep output undelivered.
 - Heartbeat-only replies do **not** keep the session alive; the last `updatedAt`
@@ -358,7 +359,7 @@ Precedence: per-account → per-channel → channel defaults → built-in defaul
 - `showAlerts`: sends the alert content when the model returns a non-OK reply.
 - `useIndicator`: emits indicator events for UI status surfaces.
 
-If **all three** are false, OpenClaw skips the heartbeat run entirely (no model call).
+If **all three** are false, WednesdayAI skips the heartbeat run entirely (no model call).
 
 ### Per-channel vs per-account examples
 
@@ -397,7 +398,7 @@ agent to read it. Think of it as your “heartbeat checklist”: small, stable, 
 safe to include every 30 minutes.
 
 If `HEARTBEAT.md` exists but is effectively empty (only blank lines and markdown
-headers like `# Heading`), OpenClaw skips the heartbeat run to save API calls.
+headers like `# Heading`), WednesdayAI skips the heartbeat run to save API calls.
 If the file is missing, the heartbeat still runs and the model decides what to do.
 
 When `wakeGate` is configured, the empty-file check is bypassed — the gate
@@ -439,7 +440,7 @@ Safety note: don’t put secrets (API keys, phone numbers, private tokens) into
 You can enqueue a system event and trigger an immediate heartbeat with:
 
 ```bash
-openclaw system event --text "Check for urgent follow-ups" --mode now
+wednesdayai system event --text "Check for urgent follow-ups" --mode now
 ```
 
 If multiple agents have `heartbeat` configured, a manual wake runs each of those
@@ -480,11 +481,11 @@ The nudge is reachable from four trigger surfaces, all producing the same main-s
 persona wake:
 
 - **Cron** — a job with a `wakeGate` payload (see
-  [Cron vs Heartbeat](/automation/cron-vs-heartbeat#nudge-and-wake-gate-jobs)).
+  [Cron vs Heartbeat](/users/automation/cron-vs-heartbeat#nudge-and-wake-gate-jobs)).
 - **Heartbeat** — a heartbeat configured with a `wakeGate` (next section).
 - **Plugin / hook** — `api.runtime.signals.nudge(...)` (see
-  [Agent Signals](/plugins/agent-signals#nudge)).
-- **CLI** — [`openclaw agent nudge`](/cli/agent-nudge).
+  [Agent Signals](/developers/plugins/agent-signals#nudge)).
+- **CLI** — [`wednesdayai agent nudge`](/users/cli/agent-nudge).
 
 ### Plugin / hook example
 
@@ -510,7 +511,7 @@ There are two gate kinds:
 
 - **`command`** — runs a shell command and parses its **last non-empty stdout line** as JSON
   `{ "wakeAgent": boolean, "text"?: string, "data"?: unknown }`. A non-zero exit, a timeout,
-  unparseable output, or `wakeAgent !== true`, all mean "do not wake". This kind invokes **no model
+  unparsable output, or `wakeAgent !== true`, all mean "do not wake". This kind invokes **no model
   runner at all** — the cheapest path, ideal for git/curl/SQL checks.
 - **`model`** — runs an isolated cheap turn (a sibling session on the `Analysis` lane, with optional
   `model`/`provider`/`lightContext` overrides) that inspects sources and returns a structured wake
@@ -585,14 +586,14 @@ turn instead of leaving it running in the background.
 The Gateway emits structured log lines at the following levels so operators can observe and
 troubleshoot wake-gate decisions without enabling verbose debug mode:
 
-| Condition                                                      | Level   | Fields                                                                   |
-| -------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ |
-| Command gate: non-zero exit, empty output, or unparseable JSON | `warn`  | `exit`, `tail` (last ≤512 chars of stdout)                               |
-| Model gate: empty output                                       | `warn`  | _(none beyond `kind`)_                                                   |
-| Model gate: unparseable JSON                                   | `warn`  | `tail` (last ≤512 chars of model output)                                 |
-| Gate returned `wakeAgent: false`                               | `debug` | `tail` (bounded stdout or model output)                                  |
-| Gate returned `wakeAgent: true`                                | `info`  | `hasText`, `hasData` (boolean flags only — **never** the payload values) |
-| Run suppressed by a negative gate                              | `debug` | `agentId`, `reason: "wake-gate-empty"`                                   |
+| Condition                                                     | Level   | Fields                                                                   |
+| ------------------------------------------------------------- | ------- | ------------------------------------------------------------------------ |
+| Command gate: non-zero exit, empty output, or unparsable JSON | `warn`  | `exit`, `tail` (last ≤512 chars of stdout)                               |
+| Model gate: empty output                                      | `warn`  | _(none beyond `kind`)_                                                   |
+| Model gate: unparsable JSON                                   | `warn`  | `tail` (last ≤512 chars of model output)                                 |
+| Gate returned `wakeAgent: false`                              | `debug` | `tail` (bounded stdout or model output)                                  |
+| Gate returned `wakeAgent: true`                               | `info`  | `hasText`, `hasData` (boolean flags only — **never** the payload values) |
+| Run suppressed by a negative gate                             | `debug` | `agentId`, `reason: "wake-gate-empty"`                                   |
 
 The `info`-level wake-true log intentionally carries only boolean presence flags (`hasText`,
 `hasData`) to prevent payload content and secrets from appearing in the gateway log.

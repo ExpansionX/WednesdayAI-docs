@@ -1,0 +1,821 @@
+---
+summary: "Deep troubleshooting runbook for gateway, channels, automation, nodes, and browser"
+read_when:
+  - The troubleshooting hub pointed you here for deeper diagnosis
+  - You need stable symptom based runbook sections with exact commands
+title: "Troubleshooting"
+---
+
+# Gateway troubleshooting
+
+This page is the deep runbook.
+Start at [/help/troubleshooting](/next/users/help/troubleshooting) if you want the fast triage flow first.
+
+## Command ladder
+
+Run these first, in this order:
+
+```bash
+wednesdayai status
+wednesdayai gateway status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai channels status --probe
+```
+
+Expected healthy signals:
+
+- `wednesdayai gateway status` shows `Runtime: running` and `RPC probe: ok`.
+- `wednesdayai doctor` reports no blocking config/service issues.
+- `wednesdayai channels status --probe` shows connected/ready channels.
+
+## Anthropic 429 extra usage required for long context
+
+Use this when logs/errors include:
+`HTTP 429: rate_limit_error: Extra usage is required for long context requests`.
+
+```bash
+wednesdayai logs --follow
+wednesdayai models status
+wednesdayai config get agents.defaults.models
+```
+
+Look for:
+
+- Selected Anthropic Opus/Sonnet model has `params.context1m: true`.
+- Current Anthropic credential is not eligible for long-context usage.
+- Requests fail only on long sessions/model runs that need the 1M beta path.
+
+Fix options:
+
+1. Disable `context1m` for that model to fall back to the normal context window.
+2. Use an Anthropic API key with billing, or enable Anthropic Extra Usage on the subscription account.
+3. Configure fallback models so runs continue when Anthropic long-context requests are rejected.
+
+Related:
+
+- [/providers/anthropic](/next/admin/providers/anthropic)
+- [/reference/token-use](/next/developers/reference/token-use)
+- [/help/faq#why-am-i-seeing-http-429-ratelimiterror-from-anthropic](/next/users/help/faq#why-am-i-seeing-http-429-ratelimiterror-from-anthropic)
+
+## No replies
+
+If channels are up but nothing answers, check routing and policy before reconnecting anything.
+
+```bash
+wednesdayai status
+wednesdayai channels status --probe
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai config get channels
+wednesdayai logs --follow
+```
+
+Look for:
+
+- Pairing pending for DM senders.
+- Group mention gating (`requireMention`, `mentionPatterns`).
+- Channel/group allowlist mismatches.
+
+Common signatures:
+
+- `drop guild message (mention required` → group message ignored until mention.
+- `pairing request` → sender needs approval.
+- `blocked` / `allowlist` → sender/channel was filtered by policy.
+
+Related:
+
+- [/channels/troubleshooting](/next/admin/channels/troubleshooting)
+- [/channels/pairing](/next/admin/channels/pairing)
+- [/channels/groups](/next/admin/channels/groups)
+
+## Bundled plugin warning at startup
+
+Use this when gateway logs include `Config warnings:` followed by
+`plugin not found: <id>` for a plugin you expect to be bundled, especially when
+`plugins info` or normal channel behavior suggests the plugin is actually
+available.
+
+```bash
+wednesdayai plugins info <id>
+wednesdayai plugins list --verbose
+wednesdayai config get plugins.installs
+wednesdayai logs --follow
+```
+
+Look for:
+
+- `plugins info <id>` reports `Origin: bundled` and `Status: loaded`.
+- `plugins.installs.<id>.source` is `bundled`, or an older copied bundled record
+  can be reconciled to `bundled`.
+- The stored `sourcePath` still points at the current bundled extension path.
+- The id appears only in stale config (`plugins.entries`, `allow`, `deny`, or
+  `slots.memory`) for a plugin you no longer use.
+
+Fix options:
+
+1. Restart the gateway so startup reconciliation can refresh bundled install
+   records: Linux `systemctl --user restart wednesdayai-gateway`; macOS
+   `wednesdayai gateway restart --deep`.
+2. Run `wednesdayai plugins update <id>` to reconcile plugin install metadata
+   before npm update selection runs.
+3. Remove stale plugin references from `plugins.entries`, `plugins.allow`,
+   `plugins.deny`, or `plugins.slots.memory` if the plugin is no longer wanted.
+
+Do not add bundled extension paths to `plugins.load.paths`. Bundled plugins are
+discovered from the installed WednesdayAI package, and a valid `source: "bundled"`
+record is enough for validation and config-schema checks.
+
+## Plugin or skill install refuses
+
+Use this when `wednesdayai plugins install <id>` or `wednesdayai skills install <id>`
+exits with a refusal and nothing was installed. Catalog installs are verified, not
+trusted: compatibility first (no network), then Sigstore provenance, then digest. The
+full message reference is [Compatibility](/next/developers/plugins/compatibility).
+
+```bash
+wednesdayai --version
+wednesdayai update
+wednesdayai plugins install <id>
+wednesdayai skills install <id>
+```
+
+Look for:
+
+- ``plugin "<id>" <version> is not compatible with this host: <reason>. Run
+`wednesdayai update` to upgrade WednesdayAI, then retry.`` (or the same shape with `skill`) —
+  the catalog entry needs a newer host than you run.
+- `refusing to install "<id>" <version>: provenance verification failed: <detail>` —
+  the npm artifact has no SLSA attestation, was signed by a different workflow or ref,
+  or its digest differs from the catalog pin.
+- `could not load the Sigstore trusted root (needs https://tuf-repo-cdn.sigstore.dev): ...` —
+  the Sigstore trusted-root refresh could not reach the TUF mirror. Check network egress
+  to `https://tuf-repo-cdn.sigstore.dev` (corporate proxies and airgapped hosts are the
+  usual cause), then retry. Nothing was installed.
+- A leftover `.openclaw-install-stage-*` directory next to the install target
+  (`~/.openclaw/extensions/` or `~/.openclaw/skills/`) — the install failed and the stage
+  cleanup also failed. Stage directories are dot-prefixed and skipped by plugin and skill
+  discovery, so they are inert; it is safe to delete the leftover directory manually, and
+  the refusal error includes a `cleanup also failed: ...` note naming it.
+
+Fix options:
+
+1. For a compatibility refusal: run `wednesdayai update`, then retry the install.
+2. For a provenance refusal: do not retry from the bare npm spec. The artifact must be
+   re-published through the release workflow so a correct attestation exists.
+3. For a trusted-root or network failure: restore egress to
+   `https://tuf-repo-cdn.sigstore.dev` and npmjs, then retry.
+4. For a leftover stage directory: confirm no install is running, then remove
+   `.openclaw-install-stage-*` under the state extensions/skills roots.
+
+## Host plugin SDK warning at startup
+
+Use this when gateway logs include
+`plugins: host plugin SDK unavailable; plugins load it through jiti: ...`.
+
+At startup the gateway prepares its own copy of the plugin SDK and hands it to
+plugins, so they do not reload the SDK through jiti. This warning means that
+handoff failed; the text after the colon is the underlying error. Plugins still
+load through the jiti fallback and keep working, but startup is slower and
+plugins run against their own SDK copy instead of the host one.
+
+Fix options:
+
+1. Restart the gateway. The handoff is retried on every startup, so a transient
+   failure clears on its own.
+2. If the warning repeats, read the error at the end of the log line. A missing
+   or damaged plugin-sdk build in the installed package is the usual cause;
+   update or reinstall WednesdayAI.
+
+## Plugin hook never fires
+
+Use this when a plugin hook handler never runs and the gateway startup log
+shows a `PLUGIN_HOOK_NOT_DISPATCHED` warning, for example:
+
+```
+[plugins] startup: 0 loaded, 1 warning — see warnings below
+  ⚠ hook-ghost — unknown typed hook "before_agent_run" ignored: upstream wednesdayai hook not dispatched by WednesdayAI (unsupported; use "before_agent_start") (PLUGIN_HOOK_NOT_DISPATCHED)
+    → See the hook parity map: https://docs.wednesdayai.dev/developers/plugins/hook-parity
+```
+
+Per-plugin warnings, including hook registration ones, appear under the
+`[plugins] startup:` summary line. The warning means the plugin registered a
+hook name that this gateway does not dispatch, so the handler is ignored while
+the plugin keeps loading. Run `wednesdayai plugins status` to see the warning
+and its remediation, then check the [hook parity map](/next/developers/plugins/hook-parity) for
+the WednesdayAI hook name to register instead. The plugin shows as `degraded`
+in `wednesdayai plugins list`.
+
+## ACP startup identity reconcile fails at startup
+
+Use this when gateway logs include `startup identity reconcile failed for
+<session-key>: code=ACP_BACKEND_UNAVAILABLE` from the `acp/manager` subsystem,
+or the summary line
+`acp startup identity reconcile (renderer=...): checked=N resolved=N failed=N`
+with a nonzero `failed` count.
+
+At gateway startup the gateway re-resolves ACP sessions whose harness identity
+is still pending. If a session's backend is not healthy yet, the gateway waits
+up to 30 seconds (polling every 250 ms) for it to report healthy, then retries
+each deferred session once. Sessions whose backend is still unhealthy when the
+wait expires count as `failed` and log this warning. They are not lost: each
+session re-resolves on its next use.
+
+```bash
+wednesdayai logs --follow
+wednesdayai config get plugins.entries.acpx
+```
+
+Look for:
+
+- `acpx runtime backend registered (command: ..., expectedVersion: ..., pluginLocalInstall: ...)`
+  followed within about 30 seconds by `acpx runtime backend ready`.
+- No `acpx local binary unavailable or mismatched (...); running plugin-local install`
+  line. That line means the plugin-local `acpx` binary does not match the pin
+  and an npm install ran during startup.
+- Run the `command` path from the `acpx runtime backend registered` line with
+  `--version`; it must print the same version as the `expectedVersion` on that
+  line, which is the exact `acpx` version declared in the plugin's
+  `package.json`.
+
+Fix options:
+
+1. If `acpx runtime backend ready` never appears, read the earlier
+   `acpx runtime setup failed: ...` or
+   `acpx runtime backend probe failed after local install` lines for the root
+   cause, fix it (missing or broken `acpx` binary, adapter download, harness
+   authentication), and restart the gateway.
+2. If the plugin-local binary version is wrong, restart the gateway and let the
+   plugin-local install re-pin it to the declared version, or reinstall the
+   acpx plugin.
+3. Affected sessions need no manual repair: they re-resolve on their next use.
+
+## Dashboard control ui connectivity
+
+When dashboard/control UI will not connect, validate URL, auth mode, and secure context assumptions.
+
+```bash
+wednesdayai gateway status
+wednesdayai status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai gateway status --json
+```
+
+Look for:
+
+- Correct probe URL and dashboard URL.
+- Auth mode/token mismatch between client and gateway.
+- HTTP usage where device identity is required.
+
+Common signatures:
+
+- `device identity required` → non-secure context or missing device auth.
+- `device nonce required` / `device nonce mismatch` → client is not completing the
+  challenge-based device auth flow (`connect.challenge` + `device.nonce`).
+- `device signature invalid` / `device signature expired` → client signed the wrong
+  payload (or stale timestamp) for the current handshake.
+- `unauthorized` / reconnect loop → token/password mismatch.
+- `gateway connect failed:` → wrong host/port/url target.
+
+Device auth v2 migration check:
+
+```bash
+wednesdayai --version
+wednesdayai doctor
+wednesdayai gateway status
+```
+
+If logs show nonce/signature errors, update the connecting client and verify it:
+
+1. waits for `connect.challenge`
+2. signs the challenge-bound payload
+3. sends `connect.params.device.nonce` with the same challenge nonce
+
+Related:
+
+- [/web/control-ui-v2](/next/admin/web/control-ui-v2)
+- [/gateway/authentication](/next/admin/gateway/authentication)
+- [/gateway/remote](/next/admin/gateway/remote)
+
+## Gateway service not running
+
+Use this when service is installed but process does not stay up.
+
+```bash
+wednesdayai gateway status
+wednesdayai status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai gateway status --deep
+```
+
+Look for:
+
+- `Runtime: stopped` with exit hints.
+- Service config mismatch (`Config (cli)` vs `Config (service)`).
+- Port/listener conflicts.
+
+Common signatures:
+
+- `Gateway start blocked: set gateway.mode=local` → local gateway mode is not enabled. Fix: set `gateway.mode="local"` in your config (or run `wednesdayai configure`). If you are running WednesdayAI via Podman using the dedicated `openclaw` user, the config lives at `~openclaw/.openclaw/openclaw.json`.
+- `refusing to bind gateway ... without auth` → non-loopback bind without token/password.
+- `another gateway instance is already listening` / `EADDRINUSE` → port conflict.
+- `RECOVERY_NOT_READY` (`recovery_pending`) on chat or `agent` calls → the gateway is listening
+  but restart recovery has not opened admission yet. Wait for the
+  `gateway ready: accepting work (startup Nms)` log line; `/readyz` returns `200` at the same
+  point. Idle and cron triggers deferred across this window fire once admission opens. See
+  [Restart recovery](/next/admin/gateway/restart-recovery).
+- `Gateway failed to start: ...` → the gateway process exited during startup. The fatal line
+  prints the full error cause chain (nested `cause`s walked to the root, redacted), so the
+  underlying reason is in the message — for example
+  `Gateway failed to start: ... configured session storage startup failed ... connect ECONNREFUSED 127.0.0.1:5432`
+  when the configured Postgres is unreachable. Fix the named cause and let the service supervisor
+  restart the gateway. Storage start causes are covered in
+  [Session storage recovery](/next/admin/gateway/session-storage-recovery).
+
+Related:
+
+- [/gateway/background-process](/next/admin/gateway/background-process)
+- [/gateway/configuration](/next/admin/gateway/configuration)
+- [/gateway/doctor](/next/admin/gateway/doctor)
+
+## Gateway restart refused on invalid config
+
+Symptom: `wednesdayai gateway restart` exits non-zero with `Config invalid`, names the config file and the exact issue path, and the gateway keeps running.
+
+This is the pre-flight restart gate working as intended: the gateway never stops when the config it would boot into is already known-invalid. Before this gate, a bad config edit turned a restart into a crash loop under systemd or launchd supervision.
+
+Recovery:
+
+1. Read the issue path in the refusal output, for example `plugins.entries.<id>.config: invalid config: must NOT have additional properties`.
+2. Repair with `wednesdayai doctor --fix`, or fix the named key manually.
+3. Verify with `wednesdayai config validate` (prints `Config valid`).
+4. Retry `wednesdayai gateway restart`.
+
+Notes:
+
+- `gateway stop` and shutdown signals (`SIGTERM`, `SIGINT`) are never gated; `SIGUSR1` watchdog restarts remain gated.
+- Watchdog restarts from config reload (`gateway.reload.mode="restart"` or `"hybrid"`) are gated the same way: an invalid edit is skipped, the gateway keeps running the previous valid config, and the refusal warning appears in the gateway log. The warning names the config file, the exact issue path, and the same repair commands (`wednesdayai doctor --fix`, `wednesdayai config validate`).
+- A first start of a stopped gateway is not gated; invalid config there surfaces as a normal startup error. When launchd or systemd runs that start, the gateway waits for the config file to change (or 5 minutes) before exiting, so the service does not restart-loop; fix the config and the service manager restarts it.
+
+Related:
+
+- [/gateway/configuration](/next/admin/gateway/configuration)
+- [/gateway/doctor](/next/admin/gateway/doctor)
+
+## Channel connected messages not flowing
+
+If channel state is connected but message flow is dead, focus on policy, permissions, and channel specific delivery rules.
+
+```bash
+wednesdayai channels status --probe
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai status --deep
+wednesdayai logs --follow
+wednesdayai config get channels
+```
+
+Look for:
+
+- DM policy (`pairing`, `allowlist`, `open`, `disabled`).
+- Group allowlist and mention requirements.
+- Missing channel API permissions/scopes.
+
+Common signatures:
+
+- `mention required` → message ignored by group mention policy.
+- `pairing` / pending approval traces → sender is not approved.
+- `missing_scope`, `not_in_channel`, `Forbidden`, `401/403` → channel auth/permissions issue.
+
+Related:
+
+- [/channels/troubleshooting](/next/admin/channels/troubleshooting)
+- [/channels/whatsapp](/next/admin/channels/whatsapp)
+- [/channels/telegram](/next/admin/channels/telegram)
+- [/channels/discord](/next/admin/channels/discord)
+
+## Telegram fleet polling or webhook conflicts
+
+Use this when Telegram logs repeat messages like
+`Network request for 'getUpdates' failed!`, account health shows `conflicted`,
+or webhook mode receives requests but does not dispatch updates.
+
+```bash
+wednesdayai channels status --probe
+wednesdayai logs --follow
+wednesdayai config get channels.telegram
+wednesdayai gateway status --deep
+```
+
+Look for:
+
+- Per-account `mode`, `state`, `owner`, `retryAt`, `poll.lastPollAt`, and
+  `webhook.lastRequestOutcome` in the Channels UI.
+- `conflicted` state or `telegram.poll.conflict` diagnostics, which usually
+  means two local accounts, two gateway processes, or a webhook and polling
+  process are trying to own the same bot token.
+- Repeated `getUpdates` network errors, which usually point to DNS, IPv6, TLS,
+  proxy, firewall, or host egress problems to `api.telegram.org`.
+- A `Polling stall detected` log line, which means the built-in watchdog
+  force-restarted a wedged `getUpdates` cycle; frequent stalls point to a
+  stuck socket or proxy between the gateway and `api.telegram.org`.
+- Webhook `rejected`, `malformed`, `timeout`, or non-2xx outcomes, which point
+  to a bad public URL, wrong secret token, reverse-proxy mismatch, or a slow
+  webhook handler.
+
+Fix options:
+
+1. Give each enabled `channels.telegram.accounts.<id>` entry its own
+   `botToken` or `tokenFile`; `TELEGRAM_BOT_TOKEN` is only a fallback for the
+   default account.
+2. Ensure one bot token has exactly one owner: one configured account, one
+   gateway process, and either polling or webhook mode.
+3. If polling, let WednesdayAI clear webhook ownership non-destructively at
+   startup; if a webhook owner reappears later, polling re-runs that cleanup
+   automatically on `409` instead of conflict-looping. Treat any manual
+   `drop_pending_updates` operation as destructive
+   unless you intentionally want to discard pending Telegram updates.
+4. If direct Bot API egress is unstable, configure `channels.telegram.proxy`
+   or the Telegram `network` settings described in the Telegram channel guide.
+
+Use the Channels UI for transport health and Sessions active runs for execution
+state. OTel and Langfuse are useful for fleet-wide trends, retry/flood-wait
+visibility, and correlating Telegram ingress with model and tool spans.
+
+Related:
+
+- [/channels/telegram#multi-bot-fleet](/next/admin/channels/telegram#multi-bot-fleet)
+- [/channels/telegram#polling-webhook-and-ownership](/next/admin/channels/telegram#polling-webhook-and-ownership)
+- [/diagnostics/otel-langfuse#telegram-fleet-diagnostics](/next/admin/diagnostics/otel-langfuse#telegram-fleet-diagnostics)
+
+## Cron and heartbeat delivery
+
+If cron or heartbeat did not run or did not deliver, verify scheduler state first, then delivery target.
+
+```bash
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai system heartbeat last
+wednesdayai logs --follow
+```
+
+Look for:
+
+- Cron enabled and next wake present.
+- Job run history status (`ok`, `skipped`, `error`).
+- Heartbeat skip reasons (`quiet-hours`, `requests-in-flight`, `alerts-disabled`).
+
+Common signatures:
+
+- `cron: scheduler disabled; jobs will not run automatically` → cron disabled.
+- `cron: timer tick failed` → scheduler tick failed; check file/log/runtime errors.
+- `main job requires payload.kind="systemEvent"` → stored job type and payload are incompatible. Recreate or edit it as a Timeline message, Check first, then nudge, or isolated Assistant task job.
+- `wake-gate-empty` → a wake-gate cron check found no work, so the skipped run is expected.
+- `heartbeat skipped` with `reason=quiet-hours` → outside active hours window.
+- `heartbeat: delivery target unavailable; delivered to session chat` → the configured or `last` target couldn't be resolved, wasn't ready, or failed to send, so the output went to the session chat. `fallbackReason` names the cause (`no-external-route`, `target-unavailable`, `unknown-account`, `channel-not-ready`, `send-failed`); `staleChannel`/`staleAccountId` name the lost route only when it survived resolution. A route whose account was removed from config is cleared before the fallback, so a `no-external-route` without those fields, on a session that used to deliver externally, usually means its account was removed; check the session's stored route against `channels.<channel>.accounts`.
+- `heartbeat skipped` with `reason=dm-blocked` → heartbeat target resolved to a DM-style destination while `agents.defaults.heartbeat.directPolicy` (or per-agent override) is set to `block`.
+
+Related:
+
+- [/automation/troubleshooting](/next/users/automation/troubleshooting)
+- [/automation/cron-jobs](/next/users/automation/cron-jobs)
+- [/gateway/heartbeat](/next/admin/gateway/heartbeat)
+
+## Session run history is empty or stale
+
+Main-session turns (chat, cron, heartbeat) are recorded as session-run rows in the configured
+session storage backend, powering run history and crash recovery. Recording is best effort: a
+failed store write never fails the turn itself, so a broken store stays invisible unless you look
+for the warnings.
+
+If `sessions.runs.list` returns no rows or stale timestamps:
+
+```bash
+wednesdayai logs --follow
+journalctl --user -u wednesdayai-gateway | grep "session-run store write failed"
+```
+
+Look for:
+
+- `session-run store write failed` warns from subsystem `sessions/session-runs/recorder`. The warn
+  is rate limited to one per minute per operation and carries a `suppressed` count of failures
+  held back in that window, so a persistent failure shows as a steady drip instead of log
+  flooding.
+- Schema drift after an upgrade. With `session.storage.backend: "postgres"` or `"sqlite"` the
+  gateway adds any missing session tables and columns automatically on boot, so a gateway restart
+  repairs drift without manual SQL. That schema pass waits at most 5 seconds for Postgres locks on
+  existing tables: a long-running or idle-in-transaction session (stuck client, backup, manual
+  `psql`) fails storage startup and the gateway exits with the cause. Resolve the
+  blocker (`pg_stat_activity`, `pg_locks`) and start the gateway again; there is no file fallback.
+
+If warnings appeared before an upgrade and stopped after a restart, schema drift is one possible
+cause — the restarted gateway converged it. The same warning also fires for generic store
+failures, so if warnings persist after a healthy restart, capture the `error` field from one
+warning line and check database connectivity, credentials, and permissions.
+
+Related:
+
+- [/concepts/session](/next/developers/concepts/session)
+- [/gateway/configuration](/next/admin/gateway/configuration)
+
+## Node paired tool fails
+
+If a node is paired but tools fail, isolate foreground, permission, and approval state.
+
+```bash
+wednesdayai nodes status
+wednesdayai nodes describe --node <idOrNameOrIp>
+wednesdayai approvals get --node <idOrNameOrIp>
+wednesdayai logs --follow
+wednesdayai status
+```
+
+Look for:
+
+- Node online with expected capabilities.
+- OS permission grants for camera/mic/location/screen.
+- Exec approvals and allowlist state.
+
+Common signatures:
+
+- `NODE_BACKGROUND_UNAVAILABLE` → node app must be in foreground.
+- `*_PERMISSION_REQUIRED` / `LOCATION_PERMISSION_REQUIRED` → missing OS permission.
+- `SYSTEM_RUN_DENIED: approval required` → exec approval pending.
+- `SYSTEM_RUN_DENIED: allowlist miss` → command blocked by allowlist.
+
+Related:
+
+- [/nodes/troubleshooting](/next/users/nodes/troubleshooting)
+- [/nodes/index](/next/users/nodes)
+- [/tools/exec-approvals](/next/users/tools/exec-approvals)
+
+## Browser tool fails
+
+Use this when browser tool actions fail even though the gateway itself is healthy.
+
+```bash
+wednesdayai browser status
+wednesdayai browser start --browser-profile openclaw
+wednesdayai browser profiles
+wednesdayai logs --follow
+wednesdayai doctor
+```
+
+Look for:
+
+- Valid browser executable path.
+- CDP profile reachability.
+- Extension relay tab attachment for `profile="chrome"`.
+
+Common signatures:
+
+- `Failed to start Chrome CDP on port` → browser process failed to launch.
+- `browser.executablePath not found` → configured path is invalid.
+- `Chrome extension relay is running, but no tab is connected` → extension relay not attached.
+- `Browser attachOnly is enabled ... not reachable` → attach-only profile has no reachable target.
+
+Related:
+
+- [/tools/browser-linux-troubleshooting](/next/users/tools/browser-linux-troubleshooting)
+- [/tools/chrome-extension](/next/users/tools/chrome-extension)
+- [/tools/browser](/next/users/tools/browser)
+
+## Agent tool calls fail
+
+Use this when a tool call fails even though the gateway is healthy, or an agent
+keeps falling back from `edit` to `exec` or a whole-file `write`.
+
+```bash
+wednesdayai logs --follow
+journalctl --user -u wednesdayai-gateway | grep -E '\[tools\] .* (failed|rejected)'
+```
+
+Three journal lines cover tool-call failures:
+
+- `[tools] <tool> failed: <message>` (error level): the tool executed and its
+  execute stage failed, for example a file that does not exist or an edit that
+  found no match. The message is the tool's own error text.
+- `[tools] <tool> rejected: <category>` (warn level): the agent loop rejected
+  the call before execution. Categories: `schema validation failed (N issues)`
+  (the arguments did not match the tool schema), `unknown tool`, and `blocked`
+  (a policy denied the call). A tool name that is not a valid identifier shows
+  as `<invalid tool name>`.
+- `[tools] <tool> failed: details redacted` (warn level): the call ended in an
+  error that is not a rejection, most often a cancelled run aborting the tool.
+
+The warn-level lines never echo the call arguments or the model-authored
+rejection text; the full error and the original arguments stay in the session
+transcript. Inspect them with `sessions_history` for that session, or read the
+session JSONL file under `~/.openclaw/agents/<agentId>/sessions/`.
+
+The session reply carries a one-line warning for the same failure, for example
+`⚠️ 📝 Edit: in notes.md failed (not found)`. The suffix is a bounded failure
+class, not the raw error:
+
+- `(invalid tool arguments)` - the model called the tool wrong, for example an
+  edit whose `oldText` does not match the file.
+- `(not found)` - the target file or directory does not exist.
+- `(permission denied)` - the call was denied: errno codes (`EACCES`, `EPERM`,
+  `EROFS`) or a workspace/sandbox guard (`workspaceOnly`, symlink and hardlink
+  guards). Only the errno codes mean the filesystem refused access; a guard
+  denial means changing `workspaceOnly` or the sandbox policy, not file permissions.
+- `(blocked by policy)` - a tool policy or loop guard blocked the call, or a
+  plugin hook blocked it without giving a reason. A hook block with a reason
+  shows a bare `failed`.
+- A bare `failed` with no suffix means the error fit no known class.
+
+The path in the warning echoes the model's own argument and may not be a real
+path. The error text (its first line, capped at 400 characters, including the errno
+and resolved path) is shown instead of the class only when verbose tool details are on. `exec`/`bash` failures stay out
+of the chat at default verbosity; their full output is in the journal and the
+session transcript.
+
+The file tools accept the argument shapes models commonly send: `edit`,
+`write`, `read` and `delete` take `path` and also accept `file_path`; `delete`
+removes one file and refuses directories, the workspace root, and paths outside
+the workspace; `edit` additionally
+accepts legacy top-level `oldText`/`newText` or `old_string`/`new_string`, which
+are folded into the `edits` list, and `edits` may arrive as a JSON string;
+`write` accepts empty `content` (it creates or truncates the file). A recurring
+`edit rejected: schema validation failed` on those shapes means the gateway
+predates the alias-handling fix, or the agent was instructed to use an argument
+shape the current schema does not define.
+
+Related:
+
+- [/tools](/next/users/tools)
+- [/logging](/next/admin/logging)
+- [/concepts/session](/next/developers/concepts/session)
+
+## Agent keeps re-running BOOTSTRAP onboarding
+
+Use this when the agent re-injects `BOOTSTRAP.md` on every session and
+onboarding never completes. Onboarding is stamped complete
+(`onboardingCompletedAt`) only once `BOOTSTRAP.md` is gone from the workspace,
+and the ritual ends with "Delete this file", which needs filesystem tools.
+
+Check:
+
+1. Confirm `BOOTSTRAP.md` still exists in the agent workspace. Then check the
+   tool policy:
+
+   ```bash
+   wednesdayai config get tools.profile
+   wednesdayai config get tools.allow
+   wednesdayai config get tools.alsoAllow
+   wednesdayai config get tools.exec.security
+   ```
+
+   The `delete` tool ships with the `group:fs` group and the `coding` profile.
+   A `messaging` profile (the onboarding default on older installs) has no fs
+   tools at all, so the agent cannot write `IDENTITY.md` or delete
+   `BOOTSTRAP.md`.
+
+2. If `tools.exec.security: "deny"` blocks shell access, the agent has no exec
+   fallback either; `delete` is the only way to finish the ritual.
+
+Fix (opt in for existing deployments). If `tools.allow` is empty or unset,
+add the fs group alongside your profile, keeping any existing `alsoAllow`
+entries:
+
+```json5
+{
+  tools: {
+    alsoAllow: ["group:fs"],
+    fs: { workspaceOnly: true },
+  },
+}
+```
+
+If `tools.allow` already lists tools, add `"group:fs"` to that list instead.
+Config validation rejects `allow` and `alsoAllow` in the same scope.
+
+New installs get this from onboarding automatically when no explicit
+`tools.profile` is set. `tools.fs.workspaceOnly: true` scopes `read`/`write`/
+`edit`/`apply_patch` to the workspace; `delete` is always workspace-contained.
+
+If the workspace uses lanes, the gateway must be on a version where lane seed
+files are copied only at lane creation: earlier versions re-copied
+`BOOTSTRAP.md` from the persona root on every turn, so a lane could never
+finish onboarding. Upgrading fixes this; the persona-root `BOOTSTRAP.md` stays
+as the lane seed template by design, so completion is per lane.
+
+## Tool output caps and context pruning log lines
+
+Use this when the gateway logs `tool result exceeded source cap`,
+`tool-result context guard reduced tool output`, or
+`prompt ledger unavailable; recomputing projections`, or when you want to
+confirm that context pruning and the tool-output cap are working.
+
+```bash
+wednesdayai logs --follow
+wednesdayai sessions list
+```
+
+Common signatures:
+
+- `tool result exceeded source cap` → a single tool result exceeded the
+  in-memory source cap (`400,000` text chars). The agent keeps a head-and-tail
+  excerpt; the full raw bytes are stored out-of-band when database write-through
+  is on. Expected once per oversized result, not per call.
+- `tool-result context guard reduced tool output` → one line per eviction
+  batch, carrying `toolNames`. Expected after a cache-TTL pruning round or an
+  aggregate eviction, not on every call.
+- `prompt ledger unavailable; recomputing projections` → the stored pruning
+  ledger row for a session could not be read (corrupt, timed out, or written by a
+  future build). The session recomputes projections from stored history and logs
+  this warning once. A corrupt or unknown-version row is overwritten; a timed-out
+  read leaves the row for the next run. Repeated warnings on the same session
+  point at storage corruption.
+
+Fix options:
+
+1. Large `tool result exceeded source cap` volume: cap output at the tool level
+   or return less per call; the in-memory context is bounded by design.
+2. No `tool-result context guard reduced tool output` lines and large
+   `cacheWrite` after idle gaps: check `agents.defaults.contextPruning` (mode
+   `cache-ttl`) and that the session actually went idle past `ttl`.
+3. Repeated `prompt ledger unavailable` warnings on the same session: check
+   session storage health with `wednesdayai doctor --deep` and
+   [Session storage recovery](/next/admin/gateway/session-storage-recovery).
+
+Related:
+
+- [/concepts/session-pruning](/next/developers/concepts/session-pruning)
+- [/concepts/compaction](/next/developers/concepts/compaction)
+- [/reference/session-management-compaction](/next/developers/reference/session-management-compaction)
+
+## If you upgraded and something suddenly broke
+
+Most post-upgrade breakage is config drift or stricter defaults now being enforced.
+
+### 1) Auth and URL override behavior changed
+
+```bash
+wednesdayai gateway status
+wednesdayai config get gateway.mode
+wednesdayai config get gateway.remote.url
+wednesdayai config get gateway.auth.mode
+```
+
+What to check:
+
+- If `gateway.mode=remote`, CLI calls may be targeting remote while your local service is fine.
+- Explicit `--url` calls do not fall back to stored credentials.
+
+Common signatures:
+
+- `gateway connect failed:` → wrong URL target.
+- `unauthorized` → endpoint reachable but wrong auth.
+
+### 2) Bind and auth guardrails are stricter
+
+```bash
+wednesdayai config get gateway.bind
+wednesdayai config get gateway.auth.token
+wednesdayai gateway status
+wednesdayai logs --follow
+```
+
+What to check:
+
+- Non-loopback binds (`lan`, `tailnet`, `custom`) need auth configured.
+- Old keys like `gateway.token` do not replace `gateway.auth.token`.
+
+Common signatures:
+
+- `refusing to bind gateway ... without auth` → bind+auth mismatch.
+- `RPC probe: failed` while runtime is running → gateway alive but inaccessible with current auth/url.
+
+### 3) Pairing and device identity state changed
+
+```bash
+wednesdayai devices list
+wednesdayai pairing list --channel <channel> [--account <id>]
+wednesdayai logs --follow
+wednesdayai doctor
+```
+
+What to check:
+
+- Pending device approvals for dashboard/nodes.
+- Pending DM pairing approvals after policy or identity changes.
+
+Common signatures:
+
+- `device identity required` → device auth not satisfied.
+- `pairing required` → sender/device must be approved.
+
+If the service config and runtime still disagree after checks, reinstall service metadata from the same profile/state directory:
+
+```bash
+wednesdayai gateway install --force
+wednesdayai gateway restart
+```
+
+Related:
+
+- [/gateway/pairing](/next/admin/gateway/pairing)
+- [/gateway/authentication](/next/admin/gateway/authentication)
+- [/gateway/background-process](/next/admin/gateway/background-process)

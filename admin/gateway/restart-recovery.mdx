@@ -26,7 +26,7 @@ Snapshot `phase` walks:
 A subsystem safety hold is different from a durable blocked item. Session storage no longer holds
 root work: the fail-fast lifecycle opens storage before this control plane runs, and a storage
 start failure exits the process instead of degrading it (see
-[Session storage recovery](/gateway/session-storage-recovery)).
+[Session storage recovery](/admin/gateway/session-storage-recovery)).
 
 `ready` may still be `degraded: true` when items remain `blocked` (unknown settlement). Root work is admitted; operators repair those items with Doctor.
 
@@ -76,7 +76,7 @@ once storage is ready. If the gateway is still starting after 10 seconds, they a
 `RECOVERY_NOT_READY` (`storage_starting`), and the log carries a single warning from the
 `gateway/storage-fence` subsystem — `session storage still starting after 10000ms; storage-backed
 methods answer RECOVERY_NOT_READY` — once per boot, not one line per request. The full method
-classification is in [Protocol](/gateway/protocol#session-storage-readiness).
+classification is in [Protocol](/admin/gateway/protocol#session-storage-readiness).
 
 `UNAVAILABLE` with `details.code = "storage_start_failed"` from these methods means the storage
 gate never reached ready in this process while the gateway kept serving: restart recovery failed
@@ -161,7 +161,7 @@ in the same restart machinery as other interactive work:
   owner is left to the next boot.
 
 The user-facing behavior, including the notice text and how to continue, is in
-[ACP agents](/tools/acp-agents#gateway-restarts).
+[ACP agents](/users/tools/acp-agents#gateway-restarts).
 
 ### Background child processes
 
@@ -209,12 +209,12 @@ If an adapter throws after its mutation may have started, automatic recovery rec
 - **`/readyz` stays 503 with `recovery_pending`:** no runtime installed, or admission still recovering. Check gateway logs for journal/lock errors.
 - **`/readyz` 503, `phase: blocked`, `journal_unwritable` / `journal_corrupt`:** the sqlite file at `${stateDir}/restart-recovery.sqlite` is preserved; do not delete it to “fix” corruption.
 - **`/readyz` 200 but `degraded: true`:** blocked items remain. An interrupted task pass clears on its own after its lease is reclaimed. Inspect the others with Doctor, and do not restart in a loop expecting unknown settlement to resume on its own.
-- **Two live gateways on one state dir:** the second fails session-storage ownership and exits (the database is owned by the first gateway; see [Session storage recovery](/gateway/session-storage-recovery)). It may instead fail restart-recovery owner CAS / kernel lock (`owner_lock_held`). Stop the prior process before starting the second.
+- **Two live gateways on one state dir:** the second fails session-storage ownership and exits (the database is owned by the first gateway; see [Session storage recovery](/admin/gateway/session-storage-recovery)). It may instead fail restart-recovery owner CAS / kernel lock (`owner_lock_held`). Stop the prior process before starting the second.
 - **`storage_start_failed` from run history or `chat.history` with the gateway otherwise healthy:** the storage gate never reached ready while this process kept serving — a restart-recovery failure, not a storage failure (storage start failures exit the process). `details.reasonCodes` names the hold (`owner_lock_held`, `prior_owner_unproven`, `owner_fence_unavailable`, `journal_unavailable`, `journal_unwritable`, `journal_corrupt`, `storage_supervisor_start_failed`, `assembly_failed`). Remove the cause — stop the other process, or repair the state dir's journal — then restart the gateway. Clients may latch on this answer; it clears only after the restart.
-- **A user reports `ACP error (ACP_TURN_INTERRUPTED)` or `ACP_GATEWAY_DRAINING` around a restart:** expected behavior, not a fault. The first is a turn the shutdown cancelled; the second is a message that arrived while the gateway was draining and was never sent to the agent. Inspect the rows with `sessions.runs.list` (filter `kind: "acp"`); what the user should do is in [ACP agents](/tools/acp-agents#gateway-restarts).
+- **A user reports `ACP error (ACP_TURN_INTERRUPTED)` or `ACP_GATEWAY_DRAINING` around a restart:** expected behavior, not a fault. The first is a turn the shutdown cancelled; the second is a message that arrived while the gateway was draining and was never sent to the agent. Inspect the rows with `sessions.runs.list` (filter `kind: "acp"`); what the user should do is in [ACP agents](/users/tools/acp-agents#gateway-restarts).
 
 ## Related
 
-- [Session storage recovery](/gateway/session-storage-recovery)
-- [Doctor](/gateway/doctor)
-- [Outbound delivery](/gateway/outbound-delivery)
+- [Session storage recovery](/admin/gateway/session-storage-recovery)
+- [Doctor](/admin/gateway/doctor)
+- [Outbound delivery](/admin/gateway/outbound-delivery)

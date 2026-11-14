@@ -1,170 +1,174 @@
 ---
+summary: "Harden live config writes: named top-level removals, honest CAS, and default-deny whole-document apply"
+read_when:
+  - A config write was refused with CONFIG_WRITE_REFUSED
+  - You need to allow or deny agent config.apply without disabling the gateway tool
+  - You are calling config.set, config.apply, or config.patch from the CLI or Control UI
 title: "Config writes"
-sidebarTitle: "Config writes"
-description: "How the gateway writes openclaw.json: write methods, baseHash concurrency, the top-level removal guard, backups, audit trail, and hot-reload vs restart."
 audience: admin
+component: config-write-hardening
+sources:
+  - src/gateway/protocol/schema/config.ts
+  - src/gateway/server-methods/config.ts
+  - src/config/io.ts
+  - src/agents/tools/gateway-tool.action-policy.ts
+  - src/config/env-preserve.ts
+  - src/gateway/server.impl.ts
+generated: 2026-08-13
+sidebarTitle: Config writes
+description: "How the gateway writes openclaw.json: write methods, baseHash
+  concurrency, the top-level removal guard, backups, audit trail, and hot-reload
+  vs restart."
 ---
 
 # Config writes
 
-Every path that mutates `openclaw.json` goes through one writer: `writeConfigFile` in the core config I/O layer. The gateway RPC methods (`config.set`, `config.patch`, `config.apply`), the CLI, the chat `/config` command, and plugins all funnel through it. This page documents what that writer does, which gateway methods write config, and when a change is hot-reloaded versus requiring a restart.
+WednesdayAI refuses a config write that would drop top-level keys you did not name. Agents can still patch settings. Whole-document replace stays available, but it is **denied by default**.
 
-## Write paths
+This page covers operator writes (`config.set` / `config.apply` / `config.patch`), tool policy, and secret-preserving startup writes. It does not replace the [field reference](/admin/gateway/configuration-reference). Chat-facing behavior is in [Changing settings](/developers/concepts/config-changes-user). Gateway client authors should read [Config writes (developer)](/admin/gateway/config-writes-developer).
 
-| Path | Method | Notes |
-|------|--------|-------|
-| Gateway RPC | `config.set`, `config.patch`, `config.apply` | Used by the control UI, API clients, and the agent's `gateway` tool |
-| CLI | `openclaw config set/get/unset`, channel onboarding commands | Direct `writeConfigFile` calls in the CLI process |
-| Chat command | `/config set`, `/config unset` | Owner-only; gated by `commands.config` and per-channel `configWrites` |
-| Agent tool | `gateway` tool, actions `config.patch` / `config.apply` | Owner-only tool the assistant uses to change its own config |
-| Plugins | `api.runtime.config.writeConfigFile` | See [Config writes (developers)](/developers/config-writes) |
+## Quickstart
 
-Hand-editing the file in a text editor is also supported — the gateway watches the file and applies the reload policy described in [Hot reload versus restart](#hot-reload-versus-restart).
-
-## Gateway RPC methods
-
-| Method | Scope | Writes | Behaviour after write |
-|--------|-------|--------|----------------------|
-| `config.get` | `operator.read` | No | Returns the current file snapshot with secrets redacted, plus its hash |
-| `config.schema` | `operator.admin` | No | Returns the full config schema including plugin and channel schemas |
-| `config.set` | `operator.admin` | Yes | Full-document replace. No restart is scheduled — the file watcher applies the reload policy |
-| `config.patch` | `operator.admin` | Yes | JSON merge patch (arrays of objects merge by id). Schedules a gateway restart after writing |
-| `config.apply` | `operator.admin` | Yes | Full-document replace. Runs the restart gate and schedules a gateway restart after writing |
-
-`config.patch` is the safe default for targeted changes: only the paths present in the patch are touched, everything else is preserved as it exists on disk (including keys the caller never saw). `config.apply` replaces the whole document and is meant for intentional full replacements.
-
-## Optimistic concurrency (baseHash)
-
-Key: `baseHash` (request parameter) — no default; **required** by every write method when a config file already exists.
-
-The flow:
-
-1. The client calls `config.get` and receives the snapshot plus its hash.
-2. The client sends that hash as `baseHash` with `config.set` / `config.patch` / `config.apply`.
-3. The gateway re-reads the file. If the hash no longer matches, the write is refused with `config changed since last load; re-run config.get and retry`.
-
-This prevents two writers from clobbering each other's changes. If you see the error, re-read the config and retry — someone (or something) wrote between your read and your write.
-
-## Validation and secret redaction
-
-Before anything touches disk:
-
-- **Schema validation.** The merged document is validated against the full config schema, including schemas contributed by loaded plugins and channel plugins. An invalid write is refused before the file is modified, with the offending path and issue in the error.
-- **Secret redaction.** `config.get` returns the config with secret values (API keys, tokens) replaced by redaction markers. On write, unchanged redacted values are restored from the file on disk — a client that read, modified one unrelated key, and wrote back cannot accidentally blank your secrets, and the agent never sees secret values in the first place.
-- **Environment variable references.** If the file uses `${VAR}` references (for example `"${ANTHROPIC_API_KEY}"`), the writer restores the reference instead of persisting the resolved value, unless the write actually changed that value.
-
-## Top-level key removal guard
-
-Default: refusals **on**; cannot be disabled globally.
-
-A write that would drop a top-level key that exists on disk (for example losing the whole `channels` or `agents` block) is refused with error code `CONFIG_WRITE_REFUSED`:
-
-```text
-Refusing to write <path>: top-level-keys-lost:<keys>. This write would remove
-top-level configuration that exists on disk. If the removal is intended, pass
-allowTopLevelKeyRemoval with the exact key(s).
-```
-
-To remove a top-level key intentionally, the caller must name it in `allowTopLevelKeyRemoval`. The CLI `openclaw config unset` and the chat `/config unset` command do this automatically for the path you name. The agent's `gateway` tool never sends `allowTopLevelKeyRemoval`, so the assistant cannot silently delete top-level config blocks.
-
-Advisory conditions are logged but never block: a greater-than-50% size shrink, a missing `meta` block, or removal of `gateway.mode`.
-
-## Write mechanics: atomicity, backups, audit
-
-Every write follows the same sequence:
-
-1. Serialize the validated document as pretty-printed JSON with a stamped config version.
-2. Write to a temporary file in the same directory with mode `0600`.
-3. Rotate backups: the previous file is copied to `openclaw.json.bak`, and the existing ring shifts — `openclaw.json.bak.1` through `openclaw.json.bak.4` (5 backups total, permissions hardened to `0600`, orphan `.bak.*` files pruned).
-4. Atomically rename the temp file over `openclaw.json` (with a copy fallback on Windows).
-5. Append an audit record to `~/.openclaw/logs/config-audit.jsonl`.
-
-The audit record captures timestamps, previous and next hashes and sizes, process identity, changed-path count, and the outcome (`rename`, `copy-fallback`, `failed`, or `refused`). To answer "who changed the config and when", read that file:
+Preferred path for a small change: merge a patch. Capture `hash` from `config.get`, then call `config.patch`.
 
 ```bash
-tail -n 5 ~/.openclaw/logs/config-audit.jsonl
+wednesdayai gateway call config.get --params '{}'
+wednesdayai gateway call config.patch --params '{
+  "raw": "{ logging: { level: \"info\" } }",
+  "baseHash": "<hash>"
+}'
 ```
 
-Gateway-scope writes (`config.patch`, `config.apply`) additionally log a control-plane line with the acting client, device id, client IP, and the changed paths.
+Expected: the gateway validates, writes `~/.openclaw/openclaw.json`, and restarts. Unnamed top-level keys stay on disk.
 
-## Restart gate
+<Warning>
+`config.apply` replaces the entire file. Agents cannot call it unless you opt in. A partial document without `allowTopLevelKeyRemoval` is refused (`INVALID_REQUEST`, `details.code: CONFIG_WRITE_REFUSED`) and the on-disk file is left unchanged.
+</Warning>
 
-Key: `gateway.restartPolicy` — default `"drain"`; values `"drain" | "force" | "cancel"`.
+## Named top-level removals
 
-`config.patch` and `config.apply` restart the gateway after writing (via SIGUSR1, with restart coalescing and an optional `restartDelayMs`). Before that, the restart gate checks for active runs (in-flight agent turns and embedded runs):
+`allowTopLevelKeyRemoval` default: omitted (treated as `[]`).
 
-| Policy / confirmation | Behaviour when runs are active |
-|-----------------------|-------------------------------|
-| No active runs | Restart proceeds immediately |
-| `gateway.restartPolicy: "drain"` (default) | The write is **not** performed; the response carries `requiresConfirmation: true` with the active run count. Retry with `confirmed: "drain"` to proceed, or `confirmed: "cancel"` to abort |
-| `gateway.restartPolicy: "force"` or `confirmed: "force"` | Restart proceeds immediately |
-| `gateway.restartPolicy: "cancel"` or `confirmed: "cancel"` | The restart is refused |
-
-The gate check happens **before** any file write, so a confirmation round-trip never leaves a half-applied state on disk.
-
-After the restart completes, a restart sentinel (written before the restart) delivers the writer's `note` back to the session that requested the change — this is how the assistant reports "done" after it restarts itself.
-
-This change requires a gateway restart: `config.patch` and `config.apply` perform it automatically. `config.set` does not — see below.
-
-## Hot reload versus restart
-
-Key: `gateway.reload.mode` — default `"hybrid"`; values `"off" | "restart" | "hot" | "hybrid"`. Companion key: `gateway.reload.debounceMs` — default `300`.
+Write RPCs `config.set`, `config.apply`, and `config.patch` accept an optional string array. Only keys listed there may disappear from the top level of `~/.openclaw/openclaw.json`. The gateway does **not** infer intent from the payload.
 
 ```json5
 {
-  gateway: {
-    reload: {
-      mode: "hybrid",    // off | restart | hot | hybrid
-      debounceMs: 300,   // debounce window for file-watcher reloads
-    },
+  raw: '{ agents: { defaults: { workspace: "~/.openclaw/workspace" } } }',
+  baseHash: "<hash>",
+  allowTopLevelKeyRemoval: ["channels"],
+}
+```
+
+| Situation                                                  | Result                                                                         |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------ |
+| Payload drops `channels` and the request lists `channels`  | Write proceeds                                                                 |
+| Payload drops `channels` and the array is empty or omitted | `INVALID_REQUEST` (`details.code: CONFIG_WRITE_REFUSED`); file bytes unchanged |
+| Nested edit only (no top-level key removed)                | No allowance needed                                                            |
+
+First-party removers already name the key for you:
+
+- Control UI Save / Save & restart (form and Raw JSON5)
+- `wednesdayai config unset <topLevelKey>`
+- Chat `/config unset <topLevelKey>`
+
+This change takes effect immediately on the next write. No gateway restart is required for the guard itself. `config.apply` and `config.patch` still restart the gateway after a successful write.
+
+## Optimistic concurrency (`baseHash`)
+
+`baseHash` default: omitted in the schema; **required at runtime** when a config file already exists.
+
+1. Call `config.get` and read `payload.hash`.
+2. Pass that value as `baseHash` on `config.set`, `config.apply`, or `config.patch`.
+3. If the file changed since that read, the RPC returns `INVALID_REQUEST` (`config changed since last load; re-run config.get and retry`).
+
+The agent `gateway` tool does not fetch a hash for you. Missing `baseHash` fails closed.
+
+## Default-deny whole-document apply
+
+`gateway.config_apply` default: **denied** for non-sandbox agents.
+
+The `gateway` tool stays available. Reads, `config.patch`, restart, and `update.run` are not default-denied. Prefer `tools.alsoAllow: ["gateway.config_apply"]`. A restrictive `tools.allow` must include `gateway` (or a whole-tool glob) plus `gateway.config_apply`. Bare `*` does **not** re-enable apply.
+
+```json5
+{
+  tools: {
+    alsoAllow: ["gateway.config_apply"],
   },
 }
 ```
 
-The file watcher (chokidar) watches `openclaw.json` and reacts to **external edits** — including writes made via `config.set`, the CLI, `/config`, or your text editor. When the file changes, the gateway debounces, re-reads, and validates. An invalid file is never applied: the reload is skipped with a warning and the previous config keeps running.
+Per-agent:
 
-Which strategy applies:
+```json5
+{
+  agents: {
+    list: [
+      {
+        id: "main",
+        tools: {
+          alsoAllow: ["gateway.config_apply"],
+        },
+      },
+    ],
+  },
+}
+```
 
-- `"hybrid"` (default) — the gateway classifies the changed paths and hot-reloads what it can, restarts when required.
-- `"hot"` — hot-reload only. Changes that would require a restart are **ignored** with a warning.
-- `"restart"` — restart the gateway for every config change.
-- `"off"` — never react to config changes; nothing is applied until the next manual restart.
+Deny still wins. `tools.deny: ["gateway.config_apply"]` keeps apply blocked even if `alsoAllow` lists it.
 
-Classification of changed paths (hybrid mode):
+This change takes effect immediately (hot-reload).
 
-| Changed path prefix | Action |
-|--------------------|--------|
-| `hooks`, `hooks.gmail` | Reload hooks; restart the Gmail watcher |
-| `cron` | Restart the cron scheduler |
-| `models`, `agents.defaults.model`, `agents.defaults.heartbeat`, `agent.heartbeat` | Restart the heartbeat |
-| `browser` | Restart browser control |
-| `gateway.channelHealthCheckMinutes` | Restart the channel health monitor |
-| Channel plugin hot-reload prefixes (per channel) | Restart that channel |
-| `tools`, `agents`, `skills`, `messages`, `session`, `routing`, `identity`, `logging`, `secrets`, `ui`, and similar | No action — read per-turn, effective on the next turn |
-| `plugins`, `gateway.*` (other), `session.storage`, `discovery`, `canvasHost` | Gateway restart required |
-| Any unmatched path | Gateway restart required (fail-safe default) |
+<Warning>
+Allowing `gateway.config_apply` still cannot drop unnamed top-level keys. The agent tool does not send `allowTopLevelKeyRemoval`, so a truncating apply is refused even after you opt in.
+</Warning>
 
-<Note>
-`config.patch` and `config.apply` bypass this classification: they always schedule a restart after writing. The reload policy governs external edits and `config.set` writes. If you want a patch-style change without the restart, use `config.set` with the full document, or accept the restart.
-</Note>
+## Secret-preserving writes
 
-Restart commands when you need them manually (Linux: `systemctl --user restart openclaw-gateway`; macOS: `wednesdayai gateway restart --deep`).
+Startup writes (activation migration, bundled reconcile, Control UI origin seed) restore object-form SecretRefs (`source: "env" | "file" | "exec"`) and `${VAR}` string refs. An ephemeral runtime gateway auth token generated for this process is stripped before persist.
+
+After those writes, `~/.openclaw/openclaw.json` still contains refs, not resolved plaintext. Persist a token on purpose with `wednesdayai config set gateway.auth.mode token` and `wednesdayai config set gateway.auth.token <token>`.
+
+See [Secrets management](/admin/gateway/secrets).
+
+## Rate limits
+
+Control-plane write RPCs (`config.apply`, `config.patch`, `update.run`) are limited to **3 requests per 60 seconds** per `deviceId+clientIp`. When limited, the RPC returns `UNAVAILABLE` with `retryAfterMs`.
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `config changed since last load; re-run config.get and retry` | Another writer changed the file between your read and write | Re-run `config.get` and retry with the fresh `baseHash` |
-| `CONFIG_WRITE_REFUSED` / `top-level-keys-lost` | The write would drop a top-level key you did not name | If intentional, name the key in `allowTopLevelKeyRemoval` (CLI and `/config unset` do this for you) |
-| `requiresConfirmation: true` response with `activeRuns` | Restart gate: runs were in flight and policy is `drain` | Retry with `confirmed: "drain"`, or wait for the runs to finish |
-| `config reload skipped (invalid config)` in logs | The edited file fails validation | Fix the JSON5; the previously loaded config keeps running until then |
-| Change did not take effect | `gateway.reload.mode` is `"off"`, or the path requires a restart under `"hot"` | Restart the gateway, or use `"hybrid"` |
-| `__OPENCLAW_REDACTED__` appears in the file where a secret was | A writer persisted the redaction marker instead of an unchanged secret or a new value | Restore from `openclaw.json.bak` (or `.bak.1` … `.bak.4`) and re-do the change with a current `config.get` round-trip |
+**Write returns `INVALID_REQUEST` with `details.code: CONFIG_WRITE_REFUSED`**
+
+The payload dropped one or more top-level keys that the request did not name. The on-disk file is unchanged. Either keep those keys in the document, or list them in `allowTopLevelKeyRemoval`. Gateway log: `Config write refused: <path> (...)`.
+
+**Agent says apply is denied (`Gateway tool action denied by policy: gateway.config_apply`)**
+
+Expected on a default install. Use `config.patch` for surgical edits, or add `tools.alsoAllow: ["gateway.config_apply"]` if you truly need whole-document replace. Do not set `tools.allow: ["gateway.config_apply"]` alone — the whole `gateway` tool must stay allowed.
+
+**`config base hash required` or `config changed since last load`**
+
+Re-run `config.get` and retry with the new `hash`. Do not omit `baseHash` when a config file exists.
+
+**Older build already truncated the file**
+
+Run `wednesdayai doctor`: when the config is invalid it offers to restore the newest valid backup ([details](/users/cli/doctor#restore-the-config-from-a-backup)). Or restore `~/.openclaw/openclaw.json.bak` by hand, then restart:
+
+```bash
+systemctl --user restart wednesdayai-gateway   # Linux
+wednesdayai gateway restart --deep          # macOS
+```
+
+Prove the live guard with an isolated temp config (never points at the real file):
+
+```bash
+bash scripts/verify-config-write-hardening.sh --bin "node $PWD/openclaw.mjs"
+```
 
 ## Related
 
-- [Configuration](/admin/gateway/configuration) — the config file itself
-- [Tool policy](/admin/gateway/tool-policy) — `tools.exec` security and the exec approvals file
-- [Exec approvals](/admin/gateway/exec-approvals) — the exec approval flow
-- [Config writes (developers)](/developers/config-writes) — the plugin surface for config writes
-- [Reference: config](/reference/config)
+- [Configuration](/admin/gateway/configuration) (task-oriented setup and RPC examples)
+- [Configuration reference](/admin/gateway/configuration-reference) (`tools.allow` / `tools.alsoAllow`)
+- [Tools](/users/tools) (gateway tool actions)
+- [Security](/admin/gateway/security#control-plane-tools-risk)
+- [Config writes (developer)](/admin/gateway/config-writes-developer)
+- [Changing settings](/developers/concepts/config-changes-user)
+- [Control UI v2](/admin/web/control-ui-v2)

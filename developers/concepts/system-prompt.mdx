@@ -8,7 +8,7 @@ title: "System Prompt"
 
 # System Prompt
 
-WednesdayAI builds a custom system prompt for every agent run. The prompt is **WednesdayAI-owned** and does not use the pi-coding-agent default prompt. Model-visible copy uses the WednesdayAI product name; operator paths and env vars still use the stable `openclaw` identifiers — see [Product naming](/concepts/product-naming).
+WednesdayAI builds a custom system prompt for every agent run. The prompt is **WednesdayAI-owned** and does not use the pi-coding-agent default prompt. Model-visible copy uses the WednesdayAI product name; operator paths and env vars still use the stable `openclaw` identifiers — see [Product naming](/developers/concepts/product-naming).
 
 The prompt is assembled by WednesdayAI and injected into each agent run. The default identity line is:
 
@@ -23,7 +23,7 @@ The prompt is intentionally compact and uses fixed sections:
 - **Tooling**: current tool list + short descriptions.
 - **Safety**: short guardrail reminder to avoid power-seeking behavior or bypassing oversight.
 - **Skills** (when available): tells the model how to load skill instructions on demand.
-- **WednesdayAI Self-Update**: use `config.patch` for targeted edits; first call `config.get` and pass `payload.hash` as `baseHash`. `config.apply` is default-denied for non-sandbox agents. `update.run` stays available. See [Config writes](/gateway/config-writes).
+- **WednesdayAI Self-Update**: use `config.patch` for targeted edits; first call `config.get` and pass `payload.hash` as `baseHash`. `config.apply` is default-denied for non-sandbox agents. `update.run` stays available. See [Config writes](/admin/gateway/config-writes).
 - **WednesdayAI CLI Quick Reference**: primary CLI spelling taught to the model (`wednesdayai …`).
 - **Workspace**: working directory (`agents.defaults.workspace`).
 - **Documentation**: local path to WednesdayAI docs (repo or npm package), public mirror `https://docs.wednesdayai.dev`, and when to read them.
@@ -44,9 +44,17 @@ When `agents.defaults.systemPrompt.cache.boundary` is `auto` (default), the asse
 - `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` — cache-stable prefix ends; per-turn suffix begins.
 - `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->` — ends the Project Context / workspace-file block when that block is present.
 
-Constants are exported once from `src/agents/system-prompt.ts` and imported by the system-prompt report parser so assembler and parser cannot drift (ADR 0051). Set `cache.boundary: "off"` to render one continuous prompt with no cache-boundary marker. Changing marker text invalidates provider prompt-cache prefixes once at upgrade time — see [Prompt Caching](/reference/prompt-caching).
+Constants are exported once from `src/agents/system-prompt.ts` and imported by the system-prompt report parser so assembler and parser cannot drift (ADR 0051). Set `cache.boundary: "off"` to render one continuous prompt with no cache-boundary marker. Changing marker text invalidates provider prompt-cache prefixes once at upgrade time — see [Prompt Caching](/developers/reference/prompt-caching).
 
-One more per-turn tail exists outside the section list: a `chat.send` request may carry `turnContext`, a sanitized client instruction that WednesdayAI appends as the final part of that turn's volatile suffix — after the boundary marker and after any plugin system-prompt additions. It appears on that turn only and is never persisted; see [Gateway protocol](/gateway/protocol).
+Which side of the boundary a section renders on is fixed by its slot. `src/agents/system-prompt-slots.ts` lists every slot with its tier: agent-tier slots render before the marker, session-tier slots after it. The file also lists the render order of the sections (ADR 2105).
+
+Two additive slots accept plugin content: `custom.agent` is the last agent-tier placement (above the cache boundary) and `custom.session` renders directly before `## Runtime`, so no plugin-provided section can follow the runtime section. Blocks come from `before_prompt_build` (`prependSystemContext`, `appendSystemContext`) and from the deprecated `context.collect` `prependSystemPrompt`/`appendSystemPrompt` aliases. Each non-empty block renders as `## Plugin context (source: plugin:<id>)` followed by the block text (internal blank lines preserved), in priority order (ties keep arrival order); blank blocks are skipped. A hook `systemPrompt` that does not contain the base prompt renders as one of these labeled blocks instead of replacing the prompt; a full replacement (equal to or extending the base) still replaces the prompt — the other plugins' blocks keep their placements before `## Runtime` and only the replacing plugin's own suffix is appended at the very end of the prompt — and when several handlers return replacements the highest-priority one wins with a warning naming the rest (ADR 2105).
+
+Some exclusive slots can be claimed by a plugin (ADR 2105): a context owner registered for `prompt:memory`, `prompt:context`, `prompt:guardrails` or `prompt:brain` renders that section for the sessions it owns. `memory` claims require the plugin's manifest kind to be `memory` (selected with `plugins.slots.memory`); `context` claims require kind `context-engine` (selected with `plugins.slots.contextEngine`, or `"none"` to disable context-engine plugins). `guardrails` and `brain` accept any loaded plugin. A claimed `memory` section still honours operator section config; the other claimed slots render the plugin's text as-is. With `promptMode=none` no sections — claimed or core — render. Isolated analysis and probe runs that disable plugin hooks resolve no claims, so no plugin-authored text reaches their prompt. See [Plugins](/users/tools/plugin) for the registration contract.
+
+One more per-turn tail exists outside the section list: a `chat.send` request may carry `turnContext`, a sanitized client instruction that WednesdayAI renders as the closing `Turn context (client-provided):` lane of that turn's current user prompt envelope, after the user message — the system prompt (boundary marker, plugin additions and all) stays byte-identical with or without it (ADR 2105 PR 6). One exception: when core cannot resolve the turn's current user row in the final provider input (for example, an overflow compaction cut it out of a continuation request, or a `transform_llm_input` hook replaced the messages without their ingress carrier), the context rides that provider request's system-prompt tail instead (the legacy placement). It appears on that turn only and is never persisted; see [Gateway protocol](/admin/gateway/protocol).
+
+Per-turn plugin content can also land in the current user-message envelope (ADR 2105): a context owner registered for `turn:now`, `turn:analysis` or `turn:recall` renders that lane ahead of `context.collect` contributions, each labeled `<lane title> (plugin: <id>):`. `recall` claims require the plugin's manifest kind to be `memory`; `now` and `analysis` accept any loaded plugin. When a `message-render` context owner is active, core skips the envelope blocks and the resolved claims ride `context.project` `turnInputs.lanes` instead. The client `turnContext` is never part of that hand-off: core attaches the closing lane itself after the owner render and after the diagnostic capture, so an owner that renders its lanes cannot put the context into model-call diagnostics (ADR 2105 PR 6 fix round 4). See [Plugins](/users/tools/plugin) for the registration contract.
 
 ## Prompt modes
 
@@ -88,7 +96,7 @@ The preset selects which sections render and how verbose they are. It does not c
 cache-friendly layout: regardless of preset, WednesdayAI splits the prompt into a stable prefix and a
 volatile suffix at a cache boundary whenever `cache.boundary` is `auto` (the default). Set
 `cache.boundary: "off"` to render one continuous prompt with no boundary marker. See
-[Prompt Caching](/reference/prompt-caching) for the section ordering and tuning guidance.
+[Prompt Caching](/developers/reference/prompt-caching) for the section ordering and tuning guidance.
 
 Regular section modes are:
 
@@ -230,7 +238,7 @@ The `lean` and `minimal` presets use this ordered Project Context list:
 Internal hooks can intercept this step via `agent:bootstrap` to mutate or replace
 the injected bootstrap files (for example swapping `SOUL.md` for an alternate persona).
 
-To inspect the effective preset, cache boundary, Project Context file modes, raw versus injected file sizes, truncation, and tool schema overhead, use `/context list` or `/context detail`. See [Context](/concepts/context).
+To inspect the effective preset, cache boundary, Project Context file modes, raw versus injected file sizes, truncation, tool schema overhead, and a per-slot breakdown of the last run's system prompt (owner, rendered size, and a 16-hex hash per slot — `/context detail` only), use `/context list` or `/context detail`. See [Context](/developers/concepts/context).
 
 ## Time handling
 
@@ -251,7 +259,7 @@ Configure with:
 - `agents.defaults.timeFormat` (`auto` | `12` | `24`)
 - `agents.defaults.envelopeTimestamp` (`"off"` also disables the stamps and the prevention line)
 
-See [Date & Time](/date-time) for full behavior details.
+See [Date & Time](/users/date-time) for full behavior details.
 
 ## Skills
 
@@ -301,4 +309,4 @@ community Discord, and ClawHub ([https://clawhub.com](https://clawhub.com)) for 
 discovery. The prompt instructs the model to consult docs first for WednesdayAI behavior,
 commands, configuration, or architecture, and to run `wednesdayai status` itself when
 possible (asking the user only when it lacks access). The `openclaw` binary remains a
-permanent process-level alias.
+legacy process-level alias.

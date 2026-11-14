@@ -19,8 +19,8 @@ This app now ships Sparkle auto-updates. Release builds must be Developer ID–s
     - `APP_STORE_CONNECT_API_KEY_P8`, `APP_STORE_CONNECT_KEY_ID`, `APP_STORE_CONNECT_ISSUER_ID`
     - `echo "$APP_STORE_CONNECT_API_KEY_P8" | sed 's/\\n/\n/g' > /tmp/openclaw-notary.p8`
     - `xcrun notarytool store-credentials "openclaw-notary" --key /tmp/openclaw-notary.p8 --key-id "$APP_STORE_CONNECT_KEY_ID" --issuer "$APP_STORE_CONNECT_ISSUER_ID"`
-- `pnpm` deps installed (`pnpm install --config.node-linker=hoisted`).
-- Sparkle tools are fetched automatically via SwiftPM at `apps/macos/.build/artifacts/sparkle/Sparkle/bin/` (`sign_update`, `generate_appcast`, etc.).
+- `npm` deps installed (`npm ci` from the WednesdayAI-apps checkout root).
+- Sparkle tools are fetched automatically via SwiftPM at `apps/macos/.build/artifacts/sparkle/Sparkle/bin/` in the WednesdayAI-apps checkout (`sign_update`, `generate_appcast`, etc.).
 
 ## Build & package
 
@@ -59,27 +59,37 @@ BUILD_CONFIG=release \
 SIGN_IDENTITY="Developer ID Application: <Developer Name> (<TEAMID>)" \
 scripts/package-mac-dist.sh
 
-# Optional: ship dSYM alongside the release
-ditto -c -k --keepParent apps/macos/.build/release/OpenClaw.app.dSYM dist/OpenClaw-2026.3.2.dSYM.zip
+# Optional: ship dSYM alongside the release.
+# Paths below are from the WednesdayAI-apps checkout root; MACOS_APP is its apps/macos directory.
+MACOS_APP="apps/macos" # WednesdayAI-apps checkout
+ditto -c -k --keepParent "$MACOS_APP/.build/release/OpenClaw.app.dSYM" dist/OpenClaw-2026.3.2.dSYM.zip
 ```
 
 ## Appcast entry
 
-Use the release note generator so Sparkle renders formatted HTML notes:
+App versions equal the synced core version (ADR 0101 D3), so the appcast release notes come from
+WednesdayAI-core's `CHANGELOG.md` section for the same version. Run this from the
+WednesdayAI-apps checkout, pointing `CHANGELOG_FILE` at core's `CHANGELOG.md` as of tag
+`v<version>`:
 
 ```bash
-SPARKLE_PRIVATE_KEY_FILE=/path/to/ed25519-private-key scripts/make_appcast.sh dist/OpenClaw-2026.3.2.zip https://raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml
+CHANGELOG_FILE=/path/to/WednesdayAI-core-checkout-at-v2026.3.2/CHANGELOG.md \
+SPARKLE_PRIVATE_KEY_FILE=/path/to/ed25519-private-key scripts/make_appcast.sh dist/OpenClaw-2026.3.2.zip https://raw.githubusercontent.com/ExpansionX/WednesdayAI-apps/main/appcast.xml
 ```
 
-Generates HTML release notes from `CHANGELOG.md` (via [`scripts/changelog-to-html.sh`](https://github.com/openclaw/openclaw/blob/main/scripts/changelog-to-html.sh)) and embeds them in the appcast entry.
+`make_appcast.sh` generates HTML release notes from that changelog (via
+[`scripts/changelog-to-html.sh`](https://github.com/ExpansionX/WednesdayAI-apps/blob/main/scripts/changelog-to-html.sh)) and embeds them in the appcast entry.
 Commit the updated `appcast.xml` alongside the release assets (zip + dSYM) when publishing.
+
+> **Note**: The end-to-end app release pipeline (Developer ID signing, notarization, Sparkle feed
+> hosting) is not set up yet; it is tracked as a finding in the WednesdayAI-apps repository.
 
 ## Publish & verify
 
 - Upload `OpenClaw-2026.3.2.zip` (and `OpenClaw-2026.3.2.dSYM.zip`) to the GitHub release for tag `v2026.3.2`.
-- Ensure the raw appcast URL matches the baked feed: `https://raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml`.
+- Ensure the raw appcast URL matches the baked feed: `https://raw.githubusercontent.com/ExpansionX/WednesdayAI-apps/main/appcast.xml`.
 - Sanity checks:
-  - `curl -I https://raw.githubusercontent.com/openclaw/openclaw/main/appcast.xml` returns 200.
+  - `curl -I https://raw.githubusercontent.com/ExpansionX/WednesdayAI-apps/main/appcast.xml` returns 200.
   - `curl -I <enclosure url>` returns 200 after assets upload.
   - On a previous public build, run “Check for Updates…” from the About tab and verify Sparkle installs the new build cleanly.
 

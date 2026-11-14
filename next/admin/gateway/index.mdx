@@ -1,0 +1,270 @@
+---
+summary: "Runbook for the Gateway service, lifecycle, and operations"
+read_when:
+  - Running or debugging the gateway process
+title: "Gateway Runbook"
+---
+
+# Gateway runbook
+
+Use this page for day-1 startup and day-2 operations of the Gateway service.
+
+<CardGroup cols={2}>
+  <Card title="Deep troubleshooting" icon="siren" href="/next/admin/gateway/troubleshooting">
+    Symptom-first diagnostics with exact command ladders and log signatures.
+  </Card>
+  <Card title="Configuration" icon="sliders" href="/next/admin/gateway/configuration">
+    Task-oriented setup guide + full configuration reference.
+  </Card>
+  <Card title="Secrets management" icon="key-round" href="/next/admin/gateway/secrets">
+    SecretRef contract, runtime snapshot behavior, and migrate/reload operations.
+  </Card>
+  <Card title="Secrets plan contract" icon="shield-check" href="/next/admin/gateway/secrets-plan-contract">
+    Exact `secrets apply` target/path rules and ref-only auth-profile behavior.
+  </Card>
+</CardGroup>
+
+## 5-minute local startup
+
+<Steps>
+  <Step title="Start the Gateway">
+
+```bash
+wednesdayai gateway --port 18789
+# debug/trace mirrored to stdio
+wednesdayai gateway --port 18789 --verbose
+# force-kill listener on selected port, then start
+wednesdayai gateway --force
+```
+
+  </Step>
+
+  <Step title="Verify service health">
+
+```bash
+wednesdayai gateway status
+wednesdayai status
+wednesdayai logs --follow
+```
+
+Healthy baseline: `Runtime: running` and `RPC probe: ok`.
+
+  </Step>
+
+  <Step title="Validate channel readiness">
+
+```bash
+wednesdayai channels status --probe
+```
+
+  </Step>
+</Steps>
+
+<Note>
+Gateway config reload watches the active config file path (resolved from profile/state defaults, or `OPENCLAW_CONFIG_PATH` when set).
+Default mode is `gateway.reload.mode="hybrid"`.
+</Note>
+
+## Runtime model
+
+- One always-on process for routing, control plane, and channel connections.
+- Single multiplexed port for:
+  - WebSocket control/RPC
+  - HTTP APIs (OpenAI-compatible, Responses, tools invoke)
+  - Control UI and hooks
+- Default bind mode: `loopback`.
+- Auth is required by default (`gateway.auth.token` / `gateway.auth.password`, or `OPENCLAW_GATEWAY_TOKEN` / `OPENCLAW_GATEWAY_PASSWORD`).
+- On Postgres session storage the same binary can also run split into cooperating processes (`--role gateway,scheduler,channels` plus `--role runner` workers). See [Deployment roles](/next/users/cli/gateway#deployment-roles).
+
+### Port and bind precedence
+
+| Setting      | Resolution order                                              |
+| ------------ | ------------------------------------------------------------- |
+| Gateway port | `--port` → `OPENCLAW_GATEWAY_PORT` → `gateway.port` → `18789` |
+| Bind mode    | CLI/override → `gateway.bind` → `loopback`                    |
+
+### Hot reload modes
+
+| `gateway.reload.mode` | Behavior                                   |
+| --------------------- | ------------------------------------------ |
+| `off`                 | No config reload                           |
+| `hot`                 | Apply only hot-safe changes                |
+| `restart`             | Restart on reload-required changes         |
+| `hybrid` (default)    | Hot-apply when safe, restart when required |
+
+<Note>
+Restart-on-reload is gated by config validity: if an edit makes the config file invalid, the in-process restart is refused and the gateway keeps running with the previous valid config. The gateway log names the exact issue path; run `wednesdayai config validate` to confirm, repair with `wednesdayai doctor --fix` or a manual edit, and the next reload applies normally.
+</Note>
+
+## Operator command set
+
+```bash
+wednesdayai gateway status
+wednesdayai gateway status --deep
+wednesdayai gateway status --json
+wednesdayai gateway install
+wednesdayai gateway restart
+wednesdayai gateway stop
+wednesdayai secrets reload
+wednesdayai logs --follow
+wednesdayai doctor
+```
+
+## Remote access
+
+Preferred: Tailscale/VPN.
+Fallback: SSH tunnel.
+
+```bash
+ssh -N -L 18789:127.0.0.1:18789 user@host
+```
+
+Then connect clients to `ws://127.0.0.1:18789` locally.
+
+<Warning>
+If gateway auth is configured, clients still must send auth (`token`/`password`) even over SSH tunnels.
+</Warning>
+
+See: [Remote Gateway](/next/admin/gateway/remote), [Authentication](/next/admin/gateway/authentication), [Tailscale](/next/admin/gateway/tailscale).
+
+## Supervision and service lifecycle
+
+Use supervised runs for production-like reliability.
+
+<Tabs>
+  <Tab title="macOS (launchd)">
+
+```bash
+wednesdayai gateway install
+wednesdayai gateway status
+wednesdayai gateway restart
+wednesdayai gateway stop
+```
+
+LaunchAgent labels are `ai.wednesdayai.gateway` (default) or `ai.wednesdayai.<profile>` (named profile). `wednesdayai doctor` audits and repairs service config drift.
+
+`gateway restart` restarts the LaunchAgent in place when its plist is unchanged; after a plist change it reloads it, waiting up to 40 s for a draining gateway. If `gateway status` reports `Service is installed but not loaded.`, run `wednesdayai gateway start`; the plist is intact and no reinstall is needed. See [macOS restart behavior](/next/users/cli/gateway#macos-restart-behavior).
+
+  </Tab>
+
+  <Tab title="Linux (systemd user)">
+
+```bash
+wednesdayai gateway install
+systemctl --user enable --now wednesdayai-gateway[-<profile>].service
+wednesdayai gateway status
+```
+
+For persistence after logout, enable lingering:
+
+```bash
+sudo loginctl enable-linger <user>
+```
+
+  </Tab>
+
+  <Tab title="Linux (system service)">
+
+Use a system unit for multi-user/always-on hosts.
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now wednesdayai-gateway[-<profile>].service
+```
+
+  </Tab>
+</Tabs>
+
+## Multiple gateways on one host
+
+Most setups should run **one** Gateway.
+Use multiple only for strict isolation/redundancy (for example a rescue profile).
+
+Checklist per instance:
+
+- Unique `gateway.port`
+- Unique `OPENCLAW_CONFIG_PATH`
+- Unique `OPENCLAW_STATE_DIR`
+- Unique `agents.defaults.workspace`
+
+Example:
+
+```bash
+OPENCLAW_CONFIG_PATH=~/.openclaw/a.json OPENCLAW_STATE_DIR=~/.openclaw-a wednesdayai gateway --port 19001
+OPENCLAW_CONFIG_PATH=~/.openclaw/b.json OPENCLAW_STATE_DIR=~/.openclaw-b wednesdayai gateway --port 19002
+```
+
+See: [Multiple gateways](/next/admin/gateway/multiple-gateways).
+
+### Dev profile quick path
+
+```bash
+wednesdayai --dev setup
+wednesdayai --dev gateway --allow-unconfigured
+wednesdayai --dev status
+```
+
+Defaults include isolated state/config and base gateway port `19001`.
+
+## Protocol quick reference (operator view)
+
+- First client frame must be `connect`.
+- Gateway returns `hello-ok` snapshot (`presence`, `health`, `stateVersion`, `uptimeMs`, limits/policy).
+- Requests: `req(method, params)` → `res(ok/payload|error)`.
+- Common events: `connect.challenge`, `agent`, `chat`, `presence`, `tick`, `health`, `heartbeat`, `shutdown`.
+
+Agent runs are two-stage:
+
+1. Immediate accepted ack (`status:"accepted"`)
+2. Final completion response (`status:"ok"|"error"`), with streamed `agent` events in between.
+
+See full protocol docs: [Gateway Protocol](/next/admin/gateway/protocol).
+
+## Operational checks
+
+### Liveness
+
+- Open WS and send `connect`.
+- Expect `hello-ok` response with snapshot.
+
+### Readiness
+
+```bash
+wednesdayai gateway status
+wednesdayai channels status --probe
+wednesdayai health
+```
+
+### Gap recovery
+
+Events are not replayed. On sequence gaps, refresh state (`health`, `system-presence`) before continuing.
+
+## Common failure signatures
+
+| Signature                                                      | Likely issue                                                                          |
+| -------------------------------------------------------------- | ------------------------------------------------------------------------------------- |
+| `refusing to bind gateway ... without auth`                    | Non-loopback bind without token/password                                              |
+| `another gateway instance is already listening` / `EADDRINUSE` | Port conflict                                                                         |
+| `Gateway start blocked: set gateway.mode=local`                | Config set to remote mode                                                             |
+| `unauthorized` during connect                                  | Auth mismatch between client and gateway                                              |
+| `Bootstrap failed: 5: Input/output error` on restart           | Old gateway still draining; CLI retries; if it persists, run `openclaw gateway start` |
+
+For full diagnosis ladders, use [Gateway Troubleshooting](/next/admin/gateway/troubleshooting).
+
+## Safety guarantees
+
+- Gateway protocol clients fail fast when Gateway is unavailable (no implicit direct-channel fallback).
+- Invalid/non-connect first frames are rejected and closed.
+- Graceful shutdown emits `shutdown` event before socket close.
+
+---
+
+Related:
+
+- [Troubleshooting](/next/admin/gateway/troubleshooting)
+- [Background Process](/next/admin/gateway/background-process)
+- [Configuration](/next/admin/gateway/configuration)
+- [Config writes](/next/admin/gateway/config-writes)
+- [Health](/next/admin/gateway/health)
+- [Doctor](/next/admin/gateway/doctor)
+- [Authentication](/next/admin/gateway/authentication)

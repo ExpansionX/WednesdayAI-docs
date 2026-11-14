@@ -37,19 +37,23 @@ Pending requests expire automatically after **5 minutes**.
 ## CLI workflow (headless friendly)
 
 ```bash
-openclaw nodes pending
-openclaw nodes approve <requestId>
-openclaw nodes reject <requestId>
-openclaw nodes status
-openclaw nodes rename --node <id|name|ip> --name "Living Room iPad"
+wednesdayai nodes pending
+wednesdayai nodes approve <requestId>
+wednesdayai nodes reject <requestId>
+wednesdayai nodes status
+wednesdayai nodes rename --node <id|name|ip> --name "Living Room iPad"
 ```
 
 `nodes status` shows paired/connected nodes and their capabilities.
 
-WS nodes pair as **devices** (role `node`), so a paired node can be linked to a person the same way
-as any other device: `openclaw devices link <deviceId> --identity <name>` after approval, or bind
-the identity into the setup code with `--identity` so the first connect links it (see
-[Identities](/gateway/identity)).
+A pure node (a device paired with only the `node` role) has no person, and
+`wednesdayai devices link` refuses it. Devices that also hold `operator` (apps such as WednesdayAI
+Glass) link like any other device, either with `wednesdayai devices link <deviceId> --identity <name>`
+after approval or by binding the identity into the setup code with `--identity` so the first
+connect links it. The person is stored on the device's pairing record and is permanent until the
+device is deregistered: `wednesdayai devices unlink` is the same as `wednesdayai devices remove` (the
+record, its tokens and its person go together, then its connections close), and pairing again is
+the only way back, as a new device record (see [Identities](/admin/gateway/identity)).
 
 ## API surface (gateway protocol)
 
@@ -74,6 +78,13 @@ Notes:
   `node.pair.request`.
 - Requests may include `silent: true` as a hint for auto-approval flows.
 
+Device methods (same gateway, device pairing store):
+
+- `device.bootstrap.issue` — issue a bootstrap enrolment token for a setup code. Requires
+  `operator.admin`. Params `{ profile: { roles, scopes }, identity?, codeChallenge? }`, result
+  `{ token, setupId, expiresAtMs }`. `openclaw qr` calls this method when a gateway owns storage
+  and issues the token locally from the session database otherwise.
+
 ## Auto-approval (macOS app)
 
 The macOS app can optionally attempt a **silent approval** when:
@@ -83,24 +94,50 @@ The macOS app can optionally attempt a **silent approval** when:
 
 If silent approval fails, it falls back to the normal “Approve/Reject” prompt.
 
-## Storage (local, private)
+## Storage
 
-Pairing state is stored under the Gateway state directory (default `~/.openclaw`):
+Device and node pairing state lives in the session database (SQLite worker or Postgres, whichever
+the configuration selects), not in JSON files. The database owns these tables:
+`pairing_devices`, `pairing_device_tokens`, `pairing_device_requests`, `pairing_bootstrap_tokens`,
+`pairing_device_archive`, `pairing_nodes`, `pairing_node_requests`, `pairing_node_archive` and
+`pairing_store_meta` (import receipt).
 
-- `~/.openclaw/nodes/paired.json`
-- `~/.openclaw/nodes/pending.json`
-- `~/.openclaw/nodes/archived.json` (records retired by `openclaw devices prune --stale`; token
-  secrets removed)
+The first process that opens the session database (the gateway, or a CLI command when no gateway
+runs) imports the legacy JSON files once: `devices/paired.json`,
+`devices/pending.json`, `devices/bootstrap.json`, `devices/archived.json`, `nodes/paired.json`,
+`nodes/pending.json` and `nodes/archived.json` under the state directory (default `~/.openclaw`;
+`OPENCLAW_STATE_DIR` moves it). After the import commits, each imported file moves into
+`devices/.imported-<timestamp>/` or `nodes/.imported-<timestamp>/`. A JSON file added or changed
+afterwards is ignored with a warning: the database is the source of truth. A file that fails to
+parse aborts startup, so a partial import is never written.
 
 Paired records carry `firstRegisteredAtMs` and `lastActiveAtMs`. A record inactive longer than
 `gateway.devices.staleAfterDays` (default 90) shows as stale in `openclaw nodes status`.
 
-If you override `OPENCLAW_STATE_DIR`, the `nodes/` folder moves with it.
+CLI commands route automatically: with a gateway running they call the gateway RPC; when no
+gateway owns storage, `devices list/approve/reject/remove`, `devices rotate`, `devices revoke`,
+`nodes pending`, `nodes approve`, `nodes reject` and `nodes rename` open the session database
+locally and apply the change directly. `devices clear`, `devices prune`, `devices link`,
+`devices unlink` and the `device.supersede` confirmation need a running gateway (live connection
+state and config writes).
 
 Security notes:
 
-- Tokens are secrets; treat `paired.json` as sensitive.
+- Tokens are secrets; treat the session database as sensitive.
 - Rotating a token requires re-approval (or deleting the node entry).
+
+## Rollback
+
+To go back to a version that still reads JSON files:
+
+1. Stop the gateway.
+2. Copy the files from the newest `devices/.imported-<ts>/` and `nodes/.imported-<ts>/` back into
+   `devices/` and `nodes/`.
+3. Install the older version.
+
+Pairings and tokens created after the upgrade are lost; records imported at upgrade time come
+back from the restored files. Re-upgrading later keeps the database (the import receipt is
+already stored) and ignores the restored files.
 
 ## Transport behavior
 

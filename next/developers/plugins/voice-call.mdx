@@ -1,0 +1,415 @@
+---
+title: "Voice Call plugin"
+description: "Configure outbound and inbound phone calls through Twilio, Telnyx, or Plivo."
+audience: admin
+component: voice-call
+sources:
+  - extensions/voice-call/openclaw.plugin.json
+  - extensions/voice-call/src/config.ts
+  - extensions/voice-call/src/media-stream.ts
+  - extensions/voice-call/src/providers/stt-openai-realtime.ts
+  - extensions/voice-call/src/manager/events.ts
+generated: 2026-08-26
+summary: "Configure the bundled Voice Call plugin for outbound and inbound telephony"
+read_when:
+  - You want to place an outbound voice call from WednesdayAI
+  - You are configuring or developing the voice-call plugin
+---
+
+# Voice Call (plugin)
+
+Voice calls for WednesdayAI via a bundled plugin. It supports outbound notifications and
+multi-turn conversations with inbound policies.
+
+Current providers:
+
+- `twilio` (Programmable Voice + Media Streams)
+- `telnyx` (Call Control v2)
+- `plivo` (Voice API + XML transfer + GetInput speech)
+- `mock` (dev/no network)
+
+Quick mental model:
+
+- Enable the bundled plugin
+- Restart Gateway
+- Configure under `plugins.entries.voice-call.config`
+- Use `wednesdayai voicecall ...` or the `voice_call` tool
+
+## Where it runs (local vs remote)
+
+The Voice Call plugin runs **inside the Gateway process**.
+
+If you use a remote Gateway, configure the plugin on the **machine running the Gateway**,
+then restart that Gateway.
+
+## Enable the bundled plugin
+
+WednesdayAI ships Voice Call as a bundled extension. Enable that copy rather than installing
+a duplicate managed package:
+
+```bash
+wednesdayai plugins enable voice-call
+wednesdayai plugins info voice-call
+```
+
+The info output should show `Origin: bundled`. Restart the Gateway afterwards. On Linux, run
+`systemctl --user restart openclaw-gateway`; on macOS, run
+`wednesdayai gateway restart --deep`.
+
+Plugin configuration and environment-variable changes also require a Gateway restart; Voice
+Call does not hot-reload them into the running plugin.
+
+### Development copy
+
+Only use a managed local copy when developing a separate plugin build:
+
+```bash
+wednesdayai plugins install ./extensions/voice-call
+```
+
+Do not add the bundled extension path to `plugins.load.paths`.
+
+## Config
+
+Set config under `plugins.entries.voice-call.config`:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "voice-call": {
+        enabled: true,
+        config: {
+          provider: "twilio", // or "telnyx" | "plivo" | "mock"
+          fromNumber: "+15550001234",
+          toNumber: "+15550005678",
+
+          twilio: {
+            accountSid: "ACxxxxxxxx",
+            authToken: "...",
+          },
+
+          telnyx: {
+            apiKey: "...",
+            connectionId: "...",
+            // Telnyx webhook public key from the Telnyx Mission Control Portal
+            // (Base64 string; can also be set via TELNYX_PUBLIC_KEY).
+            publicKey: "...",
+          },
+
+          plivo: {
+            authId: "MAxxxxxxxxxxxxxxxxxxxx",
+            authToken: "...",
+          },
+
+          // Webhook server
+          serve: {
+            port: 3334,
+            path: "/voice/webhook",
+          },
+
+          // Webhook security (recommended for tunnels/proxies)
+          webhookSecurity: {
+            allowedHosts: ["voice.example.com"],
+            trustedProxyIPs: ["100.64.0.1"],
+          },
+
+          // Public exposure (pick one)
+          // publicUrl: "https://example.ngrok.app/voice/webhook",
+          // tunnel: { provider: "ngrok" },
+          // tailscale: { mode: "funnel", path: "/voice/webhook" }
+
+          outbound: {
+            defaultMode: "notify", // notify | conversation
+          },
+
+          streaming: {
+            enabled: false,
+            streamPath: "/voice/stream",
+            preStartTimeoutMs: 5000,
+            maxPendingConnections: 32,
+            maxPendingConnectionsPerIp: 4,
+            maxConnections: 128,
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Notes:
+
+- Twilio/Telnyx require a **publicly reachable** webhook URL.
+- Plivo requires a **publicly reachable** webhook URL.
+- `mock` is a local dev provider (no network calls).
+- Telnyx requires `telnyx.publicKey` (or `TELNYX_PUBLIC_KEY`) unless `skipSignatureVerification` is true.
+- `skipSignatureVerification` is for local testing only.
+- If you use ngrok free tier, set `publicUrl` to the exact ngrok URL; signature verification is always enforced.
+- `tunnel.allowNgrokFreeTierLoopbackBypass: true` allows Twilio webhooks with invalid signatures **only** when `tunnel.provider="ngrok"` and `serve.bind` is loopback (ngrok local agent). Use for local dev only.
+- Ngrok free tier URLs can change or add interstitial behavior; if `publicUrl` drifts, Twilio signatures will fail. For production, prefer a stable domain or Tailscale funnel.
+- Streaming security defaults:
+  - `streaming.preStartTimeoutMs` defaults to `5000` and closes sockets that never send a valid `start` frame.
+  - `streaming.maxPendingConnections` defaults to `32` unauthenticated pre-start sockets.
+  - `streaming.maxPendingConnectionsPerIp` defaults to `4` per source IP.
+  - `streaming.maxConnections` defaults to `128` total pending and active sockets.
+  - Source-IP limits use the socket peer address. Behind a reverse proxy, that may be the proxy address.
+
+## Stale call reaper
+
+Use `staleCallReaperSeconds` to end calls that never receive a terminal webhook
+(for example, notify-mode calls that never complete). The default is `0`
+(disabled).
+
+Recommended ranges:
+
+- **Production:** `120`–`300` seconds for notify-style flows.
+- Keep this value **higher than `maxDurationSeconds`** so normal calls can
+  finish. A good starting point is `maxDurationSeconds + 30–60` seconds.
+
+Example:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "voice-call": {
+        config: {
+          maxDurationSeconds: 300,
+          staleCallReaperSeconds: 360,
+        },
+      },
+    },
+  },
+}
+```
+
+## Webhook security
+
+When a proxy or tunnel sits in front of the Gateway, the plugin reconstructs the
+public URL for signature verification. These options control which forwarded
+headers are trusted.
+
+`webhookSecurity.allowedHosts` allowlists hosts from forwarding headers.
+
+`webhookSecurity.trustForwardingHeaders` trusts forwarded headers without an allowlist.
+
+`webhookSecurity.trustedProxyIPs` only trusts forwarded headers when the request
+remote IP matches the list.
+
+`webhookSecurity.allowedHosts` and `trustedProxyIPs` default to empty lists;
+`trustForwardingHeaders` defaults to `false`.
+
+<Warning>
+Set `trustForwardingHeaders: true` only when every direct connection comes through a trusted
+proxy. Prefer an explicit host allowlist and trusted proxy IP list.
+</Warning>
+
+Webhook replay protection is enabled for Twilio and Plivo. Replayed valid webhook
+requests are acknowledged but skipped for side effects.
+
+Twilio conversation turns include a per-turn token in `<Gather>` callbacks, so
+stale/replayed speech callbacks cannot satisfy a newer pending transcript turn.
+
+Example with a stable public host:
+
+```json5
+{
+  plugins: {
+    entries: {
+      "voice-call": {
+        config: {
+          publicUrl: "https://voice.example.com/voice/webhook",
+          webhookSecurity: {
+            allowedHosts: ["voice.example.com"],
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+## TTS for calls
+
+Voice Call uses the core `messages.tts` configuration (OpenAI or ElevenLabs) for
+streaming speech on calls. You can override it under the plugin config with the
+**same shape** — it deep‑merges with `messages.tts`.
+
+```json5
+{
+  tts: {
+    provider: "elevenlabs",
+    elevenlabs: {
+      voiceId: "pMsXgVXv3BLzUgSXRplE",
+      modelId: "eleven_multilingual_v2",
+    },
+  },
+}
+```
+
+Notes:
+
+- **Edge TTS is ignored for voice calls** (telephony audio needs PCM; Edge output is unreliable).
+- Core TTS is used when Twilio media streaming is enabled; otherwise calls fall back to provider native voices.
+
+### Streaming VAD and interruption
+
+Streaming defaults to disabled. When enabled, OpenAI STT uses model
+`gpt-4o-transcribe`, server VAD threshold `0.5`,
+fixed prefix padding `300` ms, and `silenceDurationMs` `800` ms. These telephony defaults
+are separate from the OpenAI Realtime Talk defaults (threshold `0.5`, prefix padding
+`300` ms, silence duration `500` ms — see [Talk realtime voice](/next/admin/web/talk) and
+[Realtime Voice gateway relay](/next/users/talk/realtime-voice#playback-acknowledgements-and-interruption)). Voice Call's
+`silenceDurationMs` `800` ms is not affected by the Talk preset — the two paths are
+configured independently.
+
+Media-stream speech-start detection and the resulting response-abort/barge-in path are
+currently **Twilio-only**: Twilio's media stream WebSocket carries a real-time VAD
+speech-start event, which aborts the in-flight response generation and clears the
+in-flight TTS audio from Twilio's playback buffer over the Media Streams `clear`
+control frame. Telnyx and Plivo do not open a media-stream WebSocket on this path, so
+they currently have **no** media-stream speech-start/barge-in path and no equivalent
+mid-response interruption. A later generation owns a separate lifecycle, so stale
+audio or transcript output from an aborted Twilio response is not delivered.
+
+The streaming configuration exposes only the existing VAD hint fields
+`streaming.vadThreshold` and `streaming.silenceDurationMs`; the UI may display these
+as advanced tuning hints. Prefix padding is fixed at 300 ms for this telephony path
+and is not configurable.
+
+The STT connection enforces these hard limits:
+
+- 16 MiB maximum inbound provider frame.
+- 1 MiB maximum buffered outbound send data.
+- 10-second connection timeout.
+- Five reconnect attempts with exponential backoff.
+
+An STT connection failure can leave TTS playback available, so callers may still hear output
+while their speech is not transcribed. Verify `OPENAI_API_KEY`, the STT model, and network
+access before debugging TTS. Restart after changing the key.
+
+### More examples
+
+Use core TTS only (no override):
+
+```json5
+{
+  messages: {
+    tts: {
+      provider: "openai",
+      openai: { voice: "alloy" },
+    },
+  },
+}
+```
+
+Override to ElevenLabs just for calls (keep core default elsewhere):
+
+```json5
+{
+  plugins: {
+    entries: {
+      "voice-call": {
+        config: {
+          tts: {
+            provider: "elevenlabs",
+            elevenlabs: {
+              apiKey: "elevenlabs_key",
+              voiceId: "pMsXgVXv3BLzUgSXRplE",
+              modelId: "eleven_multilingual_v2",
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+Override only the OpenAI model for calls (deep‑merge example):
+
+```json5
+{
+  plugins: {
+    entries: {
+      "voice-call": {
+        config: {
+          tts: {
+            openai: {
+              model: "gpt-4o-mini-tts",
+              voice: "marin",
+            },
+          },
+        },
+      },
+    },
+  },
+}
+```
+
+## Inbound calls
+
+Inbound policy defaults to `disabled`.
+
+| Policy      | Behavior                                                                             |
+| ----------- | ------------------------------------------------------------------------------------ |
+| `disabled`  | Reject all inbound calls.                                                            |
+| `allowlist` | Accept only caller IDs in `allowFrom`. Missing or anonymous caller IDs are rejected. |
+| `pairing`   | Currently behaves like `allowlist`; there is no phone-call pairing request flow.     |
+| `open`      | Accept any caller ID.                                                                |
+
+<Warning>
+`open` exposes the voice agent to unsolicited callers and can incur provider charges. Use an
+allowlist unless unrestricted inbound calls are intentional.
+</Warning>
+
+To enable allowlisted inbound calls, set:
+
+```json5
+{
+  inboundPolicy: "allowlist",
+  allowFrom: ["+15550001234"],
+  inboundGreeting: "Hello! How can I help?",
+}
+```
+
+Auto-responses use the agent system. Tune with:
+
+- `responseModel`
+- `responseSystemPrompt`
+- `responseTimeoutMs`
+
+## CLI
+
+```bash
+wednesdayai voicecall call --to "+15555550123" --message "Hello from WednesdayAI"
+wednesdayai voicecall continue --call-id <id> --message "Any questions?"
+wednesdayai voicecall speak --call-id <id> --message "One moment"
+wednesdayai voicecall end --call-id <id>
+wednesdayai voicecall status --call-id <id>
+wednesdayai voicecall tail
+wednesdayai voicecall expose --mode funnel
+```
+
+## Agent tool
+
+Tool name: `voice_call`
+
+Actions:
+
+- `initiate_call` (message, to?, mode?)
+- `continue_call` (callId, message)
+- `speak_to_user` (callId, message)
+- `end_call` (callId)
+- `get_status` (callId)
+
+This repo ships a matching skill doc at `skills/voice-call/SKILL.md`.
+
+## Gateway RPC
+
+- `voicecall.initiate` (`to?`, `message`, `mode?`)
+- `voicecall.continue` (`callId`, `message`)
+- `voicecall.speak` (`callId`, `message`)
+- `voicecall.end` (`callId`)
+- `voicecall.status` (`callId`)

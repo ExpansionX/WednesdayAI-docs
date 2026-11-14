@@ -1,0 +1,543 @@
+---
+summary: "Testing kit: unit/e2e/live suites, Docker runners, and what each test covers"
+read_when:
+  - Running tests locally (the PR verification workflows are archived; ADR 2399)
+  - Looking for the live, Docker, or credentials kit
+  - Debugging gateway + agent behavior
+title: "Testing"
+---
+
+# Testing
+
+WednesdayAI has a default-on `pnpm test` parallel runner, a live Vitest suite, and a small set of Docker runners.
+
+This doc is the live, Docker and provider test kit:
+
+- What each suite covers (and what it deliberately does _not_ cover)
+- How live tests discover credentials and select models/providers
+
+Policy, thresholds, "which suite should I run?" and adding regressions live in [Testing policy](https://docs.wednesdayai.dev/developers/contributing/testing). Lanes and worker settings live in [Tests](/next/developers/reference/test).
+
+## Build prerequisite
+
+`pnpm test` is not self-contained: a few suites exercise the shipped artifacts rather
+than the TypeScript sources, so run `pnpm build` first (the archived CI lane ran
+`pnpm canvas:a2ui:bundle` for the same reason; PR verification workflows are parked in
+`.github/workflows-disabled/` — ADR 0118, ADR 2399).
+
+- `test/gateway.multi.e2e.test.ts` and `test/gateway.restart-recovery.e2e.test.ts` spawn
+  `dist/index.js`.
+- `test/cli-json-stdout.e2e.test.ts` runs `openclaw.mjs`, which boots from `dist/entry.js`.
+- `src/gateway/server.canvas-auth.test.ts` fetches the A2UI assets, which
+  `pnpm canvas:a2ui:bundle` (the first step of `pnpm build`) generates into
+  `src/canvas-host/a2ui/a2ui.bundle.js`. That file is gitignored, so a fresh checkout has
+  no copy and the request answers `503 A2UI assets not found`.
+
+These suites fail (they never skip) when the build output is missing.
+
+## Quick start
+
+Most days:
+
+- Full gate (expected before push): `pnpm build && pnpm check && pnpm test`
+
+When you touch tests or want extra confidence:
+
+- Coverage gate: `pnpm test:coverage`
+- E2E suite: `pnpm test:e2e`
+
+When debugging real providers/models (requires real creds):
+
+- Live suite (models + gateway tool/image probes): `pnpm test:live`
+
+Tip: when you only need one failing case, prefer narrowing live tests via the allowlist env vars described below.
+
+## Test suites (what runs where)
+
+Think of the suites as “increasing realism” (and increasing flakiness/cost):
+
+### Unit / integration (default `pnpm test`)
+
+- Command: `pnpm test`. Lanes, worker and memory environment variables, the `vmForks` opt-in and abort behavior are documented in [Tests](/next/developers/reference/test).
+- Files: `src/**/*.test.ts`, `extensions/**/*.test.ts`, plus e2e files from `vitest.e2e.config.ts`, the web client suite under `apps/web/src/**`, the Control UI v2 suite under `apps/control/src/**`, the gateway-browser-client suite under `packages/gateway-browser-client/src/**`, and the host-bridge suite under `packages/host-bridge/src/**`
+- Scope:
+  - Pure unit tests
+  - In-process integration tests (gateway auth, routing, tooling, parsing, config)
+  - Channel, extension, core, gateway, and e2e smoke as part of the same command
+  - Deterministic regressions for known bugs
+- Expectations:
+  - Runs locally by default (`pnpm test`); no GitHub check runs it, because the PR verification workflows are archived (ADR 0118, ADR 2399)
+  - No real keys required
+
+### Web client
+
+- Command: `pnpm test:web` (also runs as the `web` lane of `pnpm test`)
+- Config: `apps/web/vitest.config.ts` — a single jsdom project, not a browser-mode run
+- Files: `apps/web/src/**/*.test.ts`, `apps/web/src/**/*.test.tsx`
+- Setup: `apps/web/vitest.setup.ts`
+- Scope: the `openclaw-user-client` React app — gateway connection and pairing/setup-code handling, the runs view (grouping/controller/model), the attachments/preferences/voice/runtime-config providers, the theme provider, the app shell, and the native component layer under `apps/web/src/ui/`
+- Run one file on its own with `pnpm --dir apps/web exec vitest run --config vitest.config.ts <file>`
+
+### Control UI v2 app
+
+- Command: `pnpm test:control` (also runs as the `control` lane of `pnpm test`)
+- Config: `apps/control/vitest.config.ts` — a single jsdom project
+- Files: `apps/control/src/**/*.test.ts`, `apps/control/src/**/*.test.tsx`
+- Setup: `apps/control/vitest.setup.ts`
+- Scope: the `openclaw-control-ui` React console (Control UI v2, the default operator console at
+  the gateway root) — the runtime-config parser, the gateway, runs, fleet, approvals and config
+  stores, the shared schema-form config engine (`apps/control/src/config-form/`), the shell
+  (sign-in, sidebar, command palette, theme), and the views across the five navigation groups:
+  Monitor (Overview, Sessions, Runs, Recovery, Usage, Logs, Debug), Configure (Agents, Automations,
+  Channels, Skills, Settings), Fleet (Nodes, Instances, Storage), Learning (Learning, Dreams) and
+  Plugins (pages contributed by plugins).
+  Gateway connection behaviour comes from `packages/gateway-browser-client`, faked
+  with the fake connection and socket its `test-support` export provides.
+- Type-check with `pnpm tsgo:control` (part of `pnpm check`); a coverage report with
+  `pnpm --dir apps/control exec vitest run --coverage` (the repo-wide `pnpm test:coverage` gate
+  counts core `src/` only and excludes `apps/**`).
+- Run one file on its own with `pnpm --dir apps/control exec vitest run --config vitest.config.ts <file>`
+
+### Gateway browser client
+
+- Command: `pnpm test:gateway-browser-client` (also runs as the `gateway-browser-client` lane of `pnpm test`)
+- Config: `packages/gateway-browser-client/vitest.config.ts` — a single jsdom project
+- Files: `packages/gateway-browser-client/src/**/*.test.ts`
+- Setup: `packages/gateway-browser-client/vitest.setup.ts`
+- Scope: the private browser WebSocket client that `apps/web` and `apps/control` share — the
+  connect handshake and device-identity signing, the bounded device-credential store, and the
+  runs controller, model and grouping. Its `gateway-browser-client/test-support` export is the
+  fake connection and socket both app suites import.
+- Run one file on its own with `pnpm --dir packages/gateway-browser-client exec vitest run --config vitest.config.ts <file>`
+
+### Host bridge
+
+- Command: `pnpm test:host-bridge` (also runs as the `host-bridge` lane of `pnpm test`)
+- Config: `packages/host-bridge/vitest.config.ts` — a single node project
+- Files: `packages/host-bridge/src/**/*.test.ts`
+- Scope: the message contract between the web client and an app host (ADR 2242 D2) — envelope
+  and payload validators, snapshot revisions, host detection, posting and request timeouts. The
+  web client's own suite (`apps/web/src/app/AppShell.host-bridge.test.tsx`) drives the adapter.
+- Run one file on its own with `pnpm --dir packages/host-bridge exec vitest run --config vitest.config.ts <file>`
+
+### Web client and brand e2e suites
+
+Component tests in jsdom cannot see scrolling, fonts, `color-scheme`, or the frames the browser
+actually sends. These suites drive the built web client or console in real Chromium against a real
+gateway (harness: `test/helpers/user-client-web-harness.ts`; the packaging suite checks the
+packaged bundle without a browser). They are part of the e2e lane and need
+`pnpm build` first. Suites that check the RPC frames a client sends assert against
+`USER_CLIENT_RPC_ALLOWLIST` (`test/helpers/user-client-web-allowlist.ts`), which derives from the
+gateway's narrow-session method tables; never hand-list methods (ADR 2428).
+
+| File                                                   | Covers                                                                                                                                                                                                                                                                                                  |
+| ------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `test/user-client-web-brand.e2e.test.ts`               | Brand tokens and font loading under the base path, recency grouping and source tags, theme control and `black`/`white` migration, every disabled control, empty state, mobile chrome, and that every RPC frame stays inside the ADR 0077 allowlist                                                      |
+| `test/user-client-web-session-lifecycle.e2e.test.ts`   | First message kept when it creates a chat, other devices' session changes not moving the open chat, chat switching mid-reply leaving a usable composer                                                                                                                                                  |
+| `test/user-client-web-assistant-order.e2e.test.ts`     | The header has no Inbox button and the sidebar Inbox entry opens and closes the Inbox; assistants listed recent-first then alphabetical, frozen while the window stays focused, and re-sorted on window focus and tab return                                                                            |
+| `test/user-client-web-reskin-fixes.e2e.test.ts`        | Thread scrolling the real scroller (bottom on open, follows appends, keeps position on load-older), markdown styling under `.prose`, `color-scheme` following the theme, the composer's live and disabled controls, a long thread kept in the scroller, and quiet token-styled buttons across themes    |
+| `test/user-client-web-attachments.e2e.test.ts`         | HTTP attachment uploads against a real gateway: a 12 MB PDF sent by `uploadId` with visible progress, cancelling an in-flight upload from the chip, and a 12,000-character paste staged as `pasted-text.txt` (ADR 1330, #1340)                                                                          |
+| `test/user-client-web-voice-recovery.e2e.test.ts`      | Voice mode's dead-capture watchdog: a take whose microphone stops sending audio ends visibly with the mic-silent message within seconds, and the next tap starts listening again (#1938)                                                                                                                |
+| `test/user-client-web-voice-thread.e2e.test.ts`        | Cascaded voice turns landing in the thread: the spoken words preview in the composer until the gateway starts the turn, then become a user row with the reply streaming as an assistant bubble; the reply persists exactly once with the voice run id despite a 3 s TTS lag and survives a reload       |
+| `test/user-client-web-voice-toggle-off.e2e.test.ts`    | Turning Voice off mid-reply: the mic and speech stop with no `turn.cancelled`, the reply still finishes and persists in full without `[interrupted]`, a `transcript.persisted` carrying the turn id arrives, and the thread is unchanged after a reload                                                 |
+| `test/user-client-web-voice-layout.e2e.test.ts`        | Voice layout floors: at a 480 px keyboard canvas the realtime captions box stays capped against the shell canvas while the thread keeps a 120 px scrollport with a 10-line draft, and composer growth re-pins a following reader without moving one who scrolled up                                     |
+| `test/user-client-web-voice-reload-scroll.e2e.test.ts` | Scrolling after a reload that follows voice turns: desktop wheel and phone touch gestures scroll the thread up and hold position, scrolling down returns to the bottom, and the scrollport stays hit-testable beneath the composer                                                                      |
+| `test/user-client-web-archive.e2e.test.ts`             | Archiving a chat on one client hides it from a second client and unarchiving restores it (ADR 0083 amendment)                                                                                                                                                                                           |
+| `test/web-client-packaging.e2e.test.ts`                | The packaged web bundle built by `scripts/build-web-app.mjs --app web`: self-hosted brand fonts, no Vite manifest shipped, the initial JS fitting `apps/web/bundle-budget.json` (#1145), and gateway serving at the default mount path                                                                  |
+| `test/control-ui-v2-packaging.e2e.test.ts`             | The packaged console bundle built by `scripts/build-web-app.mjs --app control`: configuration-free (no `config.json`, no baked gateway URL, relative asset URLs) and served by a real gateway at the default root mount                                                                                 |
+| `test/control-ui-v2.e2e.test.ts`                       | The console in real Chromium: gateway-hosted sign-in with a seeded session and gateway-restart recovery; standalone `web serve-control` sign-in from an allowlisted origin with its own `/healthz`; and the sign-in message naming `gateway.controlUi.allowedOrigins` for an origin the gateway refuses |
+
+The unit-level guard `test/brand-tokens-contrast.test.ts` (contrast ratios and `color-scheme` per
+theme) runs in the normal `pnpm test` lane and needs no browser. See
+[Brand tokens](/next/developers/reference/brand-tokens) for what each guard pins.
+
+<Warning>
+Running a whole e2e file that boots many in-process gateways one after another can fail roughly 40%
+of the time with `FatalConfiguredStorageStartError` (tracked in GitHub #653). That is a known flaky
+boot, not evidence of a regression in the code under test. Run one test at a time with a `-t`
+filter, for example:
+
+```bash
+pnpm exec vitest run --config vitest.e2e.config.ts test/user-client-web-brand.e2e.test.ts -t "offers exactly auto"
+```
+
+If a filtered run also fails, treat it as a real failure.
+</Warning>
+
+### E2E (gateway smoke)
+
+- Also runs as the serial e2e lane inside default `pnpm test` unless `OPENCLAW_TEST_INCLUDE_E2E=0`.
+- Command: `pnpm test:e2e`
+- Config: `vitest.e2e.config.ts`
+- Files: `test/**/*.e2e.test.ts`, `src/**/*.e2e.test.ts`, `extensions/**/*.e2e.test.ts`
+- Requires `pnpm build` first (the gateway e2e suites spawn `dist/index.js`).
+- Runtime defaults:
+  - Uses Vitest `forks`, not `vmForks`: vmForks leaked the `vi.mock` module registry across files in the shared worker, so whole-lane runs failed on order-dependent pollution while every file passed in isolation.
+  - 1 worker locally; in CI at most 2 (a quarter of the CPU count, floored at 1).
+  - Runs in silent mode by default to reduce console I/O overhead.
+- Useful overrides:
+  - `OPENCLAW_E2E_WORKERS=<n>` to force worker count (capped at 16).
+  - `OPENCLAW_E2E_VERBOSE=1` to re-enable verbose console output.
+- Scope:
+  - Multi-instance gateway end-to-end behavior
+  - WebSocket/HTTP surfaces, node pairing, and heavier networking
+- Expectations:
+  - Runs locally only; the CI pipeline that ran it is archived (ADR 0118, ADR 2399)
+  - No real keys required
+  - More moving parts than unit tests (can be slower)
+
+### Live (real providers + real models)
+
+- Command: `pnpm test:live`
+- Config: `vitest.live.config.ts`
+- Files: `src/**/*.live.test.ts`
+- Default: **enabled** by `pnpm test:live` (sets `OPENCLAW_LIVE_TEST=1`)
+- Scope:
+  - “Does this provider/model actually work _today_ with real creds?”
+  - Catch provider format changes, tool-calling quirks, auth issues, and rate limit behavior
+- Expectations:
+  - Not CI-stable by design (real networks, real provider policies, quotas, outages)
+  - Costs money / uses rate limits
+  - Prefer running narrowed subsets instead of “everything”
+  - Live runs will source `~/.profile` to pick up missing API keys
+- API key rotation (provider-specific): set `*_API_KEYS` with comma/semicolon format or `*_API_KEY_1`, `*_API_KEY_2` (for example `OPENAI_API_KEYS`, `ANTHROPIC_API_KEYS`, `GEMINI_API_KEYS`) or per-live override via `OPENCLAW_LIVE_*_KEY`; tests retry on rate limit responses.
+
+## Live: Android node capability sweep
+
+- Test: `src/gateway/android-node.capabilities.live.test.ts`
+- Script: `pnpm android:test:integration`
+- Goal: invoke **every command currently advertised** by a connected Android node and assert command contract behavior.
+- Scope:
+  - Preconditioned/manual setup (the suite does not install/run/pair the app).
+  - Command-by-command gateway `node.invoke` validation for the selected Android node.
+- Required pre-setup:
+  - Android app already connected + paired to the gateway.
+  - App kept in foreground.
+  - Permissions/capture consent granted for capabilities you expect to pass.
+- Optional target overrides:
+  - `OPENCLAW_ANDROID_NODE_ID` or `OPENCLAW_ANDROID_NODE_NAME`.
+  - `OPENCLAW_ANDROID_GATEWAY_URL` / `OPENCLAW_ANDROID_GATEWAY_TOKEN` / `OPENCLAW_ANDROID_GATEWAY_PASSWORD`.
+- Full Android setup details: [Android App](/next/admin/platforms/android)
+
+## Live: web client deploy verification
+
+- Script: `node scripts/verify-client-chat-v3-p2-live.mjs --live` (network-free contract test: `scripts/verify-client-chat-v3-p2-live.test.mjs`)
+- Goal: verify a deployed gateway plus its web client against the client-chat-v3-p2 contract end to end: assistant picker and chats, model/Think/reasoning controls, queue and steer, rename and Suggest, reply quotes, history paging and search, the active-leaf guard, narrow-scope patch refusals, assistant colours, and the delivery-mirror dedupe.
+- Run against a real, running gateway; it costs real model calls:
+  - `OPENCLAW_GATEWAY_TOKEN` is required (take it from the gateway unit env; the script never prints it). `OPENCLAW_GATEWAY_URL` overrides the default `ws://127.0.0.1:18789`.
+  - A headless Chromium pairs a throwaway `/v2/client` device (`PLAYWRIGHT_BROWSERS_PATH` overrides `~/.cache/ms-playwright`).
+- Flags:
+  - `--only SC7,SC8` runs a subset (pairing and throwaway chats still happen, unasserted).
+  - `--fix-proof --fix-proof-session <key>` sends three real probe messages through that routed direct chat (required; the script never picks one) and asserts no `active-leaf-changed` refusals, no duplicate mirror rows and a leaf that rests on each turn's own last message.
+  - `--keep` skips cleanup.
+- Safety and cleanup: throwaway sessions are labelled with the run id and deleted on exit, the paired device is removed, and the fix-proof target chat is written but never deleted. SIGINT/SIGTERM/SIGHUP run the same cleanup and exit 130. Operator direct chats other than the fix-proof target are never touched.
+- Exit codes: `0` all selected checks pass, `1` any check fails or cleanup could not remove a resource (`CLEANUP FAIL`), `2` usage error (missing `--live` or token, unknown check id, `--fix-proof` without `--fix-proof-session`) or preflight failure.
+- Output: one `=== SC<id> ===` evidence block per check ending in `SC<id> PASS`, then `VERIFY PASS (<n> checks)` or `VERIFY FAIL: <ids>`.
+
+## Live: model smoke (profile keys)
+
+Live tests are split into two layers so we can isolate failures:
+
+- “Direct model” tells us the provider/model can answer at all with the given key.
+- “Gateway smoke” tells us the full gateway+agent pipeline works for that model (sessions, history, tools, sandbox policy, etc.).
+
+### Layer 1: Direct model completion (no gateway)
+
+- Test: `src/agents/models.profiles.live.test.ts`
+- Goal:
+  - Enumerate discovered models
+  - Use `getApiKeyForModel` to select models you have creds for
+  - Run a small completion per model (and targeted regressions where needed)
+- How to enable:
+  - `pnpm test:live` (or `OPENCLAW_LIVE_TEST=1` if invoking Vitest directly)
+- Set `OPENCLAW_LIVE_MODELS=modern` (or `all`, alias for modern) to actually run this suite; otherwise it skips to keep `pnpm test:live` focused on gateway smoke
+- How to select models:
+  - `OPENCLAW_LIVE_MODELS=modern` to run the modern allowlist (Opus/Sonnet/Haiku 4.5, GPT-5.x + Codex, Gemini 3, GLM 4.7, MiniMax M2.5, Grok 4)
+  - `OPENCLAW_LIVE_MODELS=all` is an alias for the modern allowlist
+  - or `OPENCLAW_LIVE_MODELS="openai/gpt-5.2,anthropic/claude-opus-4-6,..."` (comma allowlist)
+- How to select providers:
+  - `OPENCLAW_LIVE_PROVIDERS="google,google-antigravity,google-gemini-cli"` (comma allowlist)
+- Where keys come from:
+  - By default: profile store and env fallbacks
+  - Set `OPENCLAW_LIVE_REQUIRE_PROFILE_KEYS=1` to enforce **profile store** only
+- Why this exists:
+  - Separates “provider API is broken / key is invalid” from “gateway agent pipeline is broken”
+  - Contains small, isolated regressions (example: OpenAI Responses/Codex Responses reasoning replay + tool-call flows)
+
+### Layer 2: Gateway + dev agent smoke (what “@openclaw” actually does)
+
+- Test: `src/gateway/gateway-models.profiles.live.test.ts`
+- Goal:
+  - Spin up an in-process gateway
+  - Create/patch a `agent:dev:*` session (model override per run)
+  - Iterate models-with-keys and assert:
+    - “meaningful” response (no tools)
+    - a real tool invocation works (read probe)
+    - optional extra tool probes (exec+read probe)
+    - OpenAI regression paths (tool-call-only → follow-up) keep working
+- Probe details (so you can explain failures quickly):
+  - `read` probe: the test writes a nonce file in the workspace and asks the agent to `read` it and echo the nonce back.
+  - `exec+read` probe: the test asks the agent to `exec`-write a nonce into a temp file, then `read` it back.
+  - image probe: the test attaches a generated PNG (cat + randomized code) and expects the model to return `cat <CODE>`.
+  - Implementation reference: `src/gateway/gateway-models.profiles.live.test.ts` and `src/gateway/live-image-probe.ts`.
+- How to enable:
+  - `pnpm test:live` (or `OPENCLAW_LIVE_TEST=1` if invoking Vitest directly)
+- How to select models:
+  - Default: modern allowlist (Opus/Sonnet/Haiku 4.5, GPT-5.x + Codex, Gemini 3, GLM 4.7, MiniMax M2.5, Grok 4)
+  - `OPENCLAW_LIVE_GATEWAY_MODELS=all` is an alias for the modern allowlist
+  - Or set `OPENCLAW_LIVE_GATEWAY_MODELS="provider/model"` (or comma list) to narrow
+- How to select providers (avoid “OpenRouter everything”):
+  - `OPENCLAW_LIVE_GATEWAY_PROVIDERS="google,google-antigravity,google-gemini-cli,openai,anthropic,zai,minimax"` (comma allowlist)
+- Tool + image probes are always on in this live test:
+  - `read` probe + `exec+read` probe (tool stress)
+  - image probe runs when the model advertises image input support
+  - Flow (high level):
+    - Test generates a tiny PNG with “CAT” + random code (`src/gateway/live-image-probe.ts`)
+    - Sends it via `agent` `attachments: [{ mimeType: "image/png", content: "<base64>" }]`
+    - Gateway parses attachments into `images[]` (`src/gateway/server-methods/agent.ts` + `src/gateway/chat-attachments.ts`)
+    - Embedded agent forwards a multimodal user message to the model
+    - Assertion: reply contains `cat` + the code (OCR tolerance: minor mistakes allowed)
+
+Tip: to see what you can test on your machine (and the exact `provider/model` ids), run:
+
+```bash
+wednesdayai models list
+wednesdayai models list --json
+```
+
+## Live: Anthropic setup-token smoke
+
+- Test: `src/agents/anthropic.setup-token.live.test.ts`
+- Goal: verify Claude Code CLI setup-token (or a pasted setup-token profile) can complete an Anthropic prompt.
+- Enable:
+  - `pnpm test:live` (or `OPENCLAW_LIVE_TEST=1` if invoking Vitest directly)
+  - `OPENCLAW_LIVE_SETUP_TOKEN=1`
+- Token sources (pick one):
+  - Profile: `OPENCLAW_LIVE_SETUP_TOKEN_PROFILE=anthropic:setup-token-test`
+  - Raw token: `OPENCLAW_LIVE_SETUP_TOKEN_VALUE=sk-ant-oat01-...`
+- Model override (optional):
+  - `OPENCLAW_LIVE_SETUP_TOKEN_MODEL=anthropic/claude-opus-4-6`
+
+Setup example:
+
+```bash
+wednesdayai models auth paste-token --provider anthropic --profile-id anthropic:setup-token-test
+OPENCLAW_LIVE_SETUP_TOKEN=1 OPENCLAW_LIVE_SETUP_TOKEN_PROFILE=anthropic:setup-token-test pnpm test:live src/agents/anthropic.setup-token.live.test.ts
+```
+
+## Live: CLI backend smoke (Claude Code CLI or other local CLIs)
+
+- Test: `src/gateway/gateway-cli-backend.live.test.ts`
+- Goal: validate the Gateway + agent pipeline using a local CLI backend, without touching your default config.
+- Enable:
+  - `pnpm test:live` (or `OPENCLAW_LIVE_TEST=1` if invoking Vitest directly)
+  - `OPENCLAW_LIVE_CLI_BACKEND=1`
+- Defaults:
+  - Model: `claude-cli/claude-sonnet-4-6`
+  - Command: `claude`
+  - Args: `["-p","--output-format","json","--dangerously-skip-permissions"]`
+- Overrides (optional):
+  - `OPENCLAW_LIVE_CLI_BACKEND_MODEL="claude-cli/claude-opus-4-6"`
+  - `OPENCLAW_LIVE_CLI_BACKEND_MODEL="codex-cli/gpt-5.3-codex"`
+  - `OPENCLAW_LIVE_CLI_BACKEND_COMMAND="/full/path/to/claude"`
+  - `OPENCLAW_LIVE_CLI_BACKEND_ARGS='["-p","--output-format","json","--permission-mode","bypassPermissions"]'`
+  - `OPENCLAW_LIVE_CLI_BACKEND_CLEAR_ENV='["ANTHROPIC_API_KEY","ANTHROPIC_API_KEY_OLD"]'`
+  - `OPENCLAW_LIVE_CLI_BACKEND_IMAGE_PROBE=1` to send a real image attachment (paths are injected into the prompt).
+  - `OPENCLAW_LIVE_CLI_BACKEND_IMAGE_ARG="--image"` to pass image file paths as CLI args instead of prompt injection.
+  - `OPENCLAW_LIVE_CLI_BACKEND_IMAGE_MODE="repeat"` (or `"list"`) to control how image args are passed when `IMAGE_ARG` is set.
+  - `OPENCLAW_LIVE_CLI_BACKEND_RESUME_PROBE=1` to send a second turn and validate resume flow.
+- `OPENCLAW_LIVE_CLI_BACKEND_DISABLE_MCP_CONFIG=0` to keep Claude Code CLI MCP config enabled (default disables MCP config with a temporary empty file).
+
+Example:
+
+```bash
+OPENCLAW_LIVE_CLI_BACKEND=1 \
+  OPENCLAW_LIVE_CLI_BACKEND_MODEL="claude-cli/claude-sonnet-4-6" \
+  pnpm test:live src/gateway/gateway-cli-backend.live.test.ts
+```
+
+### Recommended live recipes
+
+Narrow, explicit allowlists are fastest and least flaky:
+
+- Single model, direct (no gateway):
+  - `OPENCLAW_LIVE_MODELS="openai/gpt-5.2" pnpm test:live src/agents/models.profiles.live.test.ts`
+
+- Single model, gateway smoke:
+  - `OPENCLAW_LIVE_GATEWAY_MODELS="openai/gpt-5.2" pnpm test:live src/gateway/gateway-models.profiles.live.test.ts`
+
+- Tool calling across several providers:
+  - `OPENCLAW_LIVE_GATEWAY_MODELS="openai/gpt-5.2,anthropic/claude-opus-4-6,google/gemini-3-flash-preview,zai/glm-4.7,minimax/minimax-m2.5" pnpm test:live src/gateway/gateway-models.profiles.live.test.ts`
+
+- Google focus (Gemini API key + Antigravity):
+  - Gemini (API key): `OPENCLAW_LIVE_GATEWAY_MODELS="google/gemini-3-flash-preview" pnpm test:live src/gateway/gateway-models.profiles.live.test.ts`
+  - Antigravity (OAuth): `OPENCLAW_LIVE_GATEWAY_MODELS="google-antigravity/claude-opus-4-6-thinking,google-antigravity/gemini-3-pro-high" pnpm test:live src/gateway/gateway-models.profiles.live.test.ts`
+
+Notes:
+
+- `google/...` uses the Gemini API (API key).
+- `google-antigravity/...` uses the Antigravity OAuth bridge (Cloud Code Assist-style agent endpoint).
+- `google-gemini-cli/...` uses the local Gemini CLI on your machine (separate auth + tooling quirks).
+- Gemini API vs Gemini CLI:
+  - API: WednesdayAI calls Google’s hosted Gemini API over HTTP (API key / profile auth); this is what most users mean by “Gemini”.
+  - CLI: WednesdayAI shells out to a local `gemini` binary; it has its own auth and can behave differently (streaming/tool support/version skew).
+
+## Live: model matrix (what we cover)
+
+There is no fixed “CI model list” (live is opt-in), but these are the **recommended** models to cover regularly on a dev machine with keys.
+
+### Modern smoke set (tool calling + image)
+
+This is the “common models” run we expect to keep working:
+
+- OpenAI (non-Codex): `openai/gpt-5.2` (optional: `openai/gpt-5.1`)
+- OpenAI Codex: `openai-codex/gpt-5.3-codex` (optional: `openai-codex/gpt-5.3-codex-codex`)
+- Anthropic: `anthropic/claude-opus-4-6` (or `anthropic/claude-sonnet-4-5`)
+- Google (Gemini API): `google/gemini-3-pro-preview` and `google/gemini-3-flash-preview` (avoid older Gemini 2.x models)
+- Google (Antigravity): `google-antigravity/claude-opus-4-6-thinking` and `google-antigravity/gemini-3-flash`
+- Z.AI (GLM): `zai/glm-4.7`
+- MiniMax: `minimax/minimax-m2.5`
+
+Run gateway smoke with tools + image:
+`OPENCLAW_LIVE_GATEWAY_MODELS="openai/gpt-5.2,openai-codex/gpt-5.3-codex,anthropic/claude-opus-4-6,google/gemini-3-pro-preview,google/gemini-3-flash-preview,google-antigravity/claude-opus-4-6-thinking,google-antigravity/gemini-3-flash,zai/glm-4.7,minimax/minimax-m2.5" pnpm test:live src/gateway/gateway-models.profiles.live.test.ts`
+
+### Baseline: tool calling (Read + optional Exec)
+
+Pick at least one per provider family:
+
+- OpenAI: `openai/gpt-5.2` (or `openai/gpt-5-mini`)
+- Anthropic: `anthropic/claude-opus-4-6` (or `anthropic/claude-sonnet-4-5`)
+- Google: `google/gemini-3-flash-preview` (or `google/gemini-3-pro-preview`)
+- Z.AI (GLM): `zai/glm-4.7`
+- MiniMax: `minimax/minimax-m2.5`
+
+Optional additional coverage (nice to have):
+
+- xAI: `xai/grok-4` (or latest available)
+- Mistral: `mistral/`… (pick one “tools” capable model you have enabled)
+- Cerebras: `cerebras/`… (if you have access)
+- LM Studio: `lmstudio/`… (local; tool calling depends on API mode)
+
+### Vision: image send (attachment → multimodal message)
+
+Include at least one image-capable model in `OPENCLAW_LIVE_GATEWAY_MODELS` (Claude/Gemini/OpenAI vision-capable variants, etc.) to exercise the image probe.
+
+### Aggregators / alternate gateways
+
+If you have keys enabled, we also support testing via:
+
+- OpenRouter: `openrouter/...` (hundreds of models; use `wednesdayai models scan` to find tool+image capable candidates)
+- OpenCode Zen: `opencode/...` (auth via `OPENCODE_API_KEY` / `OPENCODE_ZEN_API_KEY`)
+
+More providers you can include in the live matrix (if you have creds/config):
+
+- Built-in: `openai`, `openai-codex`, `anthropic`, `google`, `google-vertex`, `google-antigravity`, `google-gemini-cli`, `zai`, `openrouter`, `opencode`, `xai`, `groq`, `cerebras`, `mistral`, `github-copilot`
+- Via `models.providers` (custom endpoints): `minimax` (cloud/API), plus any OpenAI/Anthropic-compatible proxy (LM Studio, vLLM, LiteLLM, etc.)
+
+Tip: don’t try to hardcode “all models” in docs. The authoritative list is whatever `discoverModels(...)` returns on your machine + whatever keys are available.
+
+## Credentials (never commit)
+
+Live tests discover credentials the same way the CLI does. Practical implications:
+
+- If the CLI works, live tests should find the same keys.
+- If a live test says “no creds”, debug the same way you’d debug `wednesdayai models list` / model selection.
+
+- Profile store: `~/.openclaw/credentials/` (preferred; what “profile keys” means in the tests)
+- Config: `~/.openclaw/openclaw.json` (or `OPENCLAW_CONFIG_PATH`)
+
+If you want to rely on env keys (e.g. exported in your `~/.profile`), run local tests after `source ~/.profile`, or use the Docker runners below (they can mount `~/.profile` into the container).
+
+## Deepgram live (audio transcription)
+
+- Test: `extensions/deepgram/src/audio.live.test.ts`
+- Enable: `DEEPGRAM_API_KEY=... DEEPGRAM_LIVE_TEST=1 pnpm test:live extensions/deepgram/src/audio.live.test.ts`
+
+## BytePlus coding plan live
+
+- Test: `src/agents/byteplus.live.test.ts`
+- Enable: `BYTEPLUS_API_KEY=... BYTEPLUS_LIVE_TEST=1 pnpm test:live src/agents/byteplus.live.test.ts`
+- Optional model override: `BYTEPLUS_CODING_MODEL=ark-code-latest`
+
+## Live: voice loop (real speech)
+
+- Test: `src/talk/voice-loop.live.test.ts` and script `scripts/voice-live-smoke.mjs` (both drive
+  the same `src/talk/voice-loop-driver.ts` against a deployed gateway; the script is the
+  operator-invoked post-deploy gate).
+- Goal: stream real-speech turns (ElevenLabs-synthesized audio, one of them a mid-thought pause)
+  plus interruptions through real ElevenLabs STT/TTS, then assert the pinned
+  `SC3`/`SC7`/`SC12`/`SC16` `talk.metrics` bounds plus `turnShape` (each normal utterance
+  starts exactly one turn and is never cancelled; the paused turn instead ends exactly once, with
+  any `turn.cancelled` reason `turn-resumed`) and `SC4` (one assistant reply per turn in
+  `chat.history`, no failure reply persisted, the continuation half of the paused utterance kept).
+- Enable (test): `OPENCLAW_GATEWAY_URL=... ELEVENLABS_API_KEY=... LIVE=1 pnpm test:live src/talk/voice-loop.live.test.ts`
+  (20 turns, 5 interruptions). The file runs only under `vitest.live.config.ts`, never in the
+  default lanes. `OPENCLAW_VOICE_LIVE_STT_PROVIDER` / `OPENCLAW_VOICE_LIVE_TTS_PROVIDER` override
+  the provider pair (default `elevenlabs` on both).
+- Operator command:
+
+```bash
+OPENCLAW_GATEWAY_URL=... ELEVENLABS_API_KEY=... \
+  node scripts/voice-live-smoke.mjs --turns 20 --interruptions 5
+```
+
+It prints `PASS` or `FAIL` plus a JSON summary whose `checks` object carries `sc3`, `sc7`,
+`sc12`, `sc16`, and, in speech mode, `turnShape` and `sc4`. `--stt`/`--tts` select the provider
+pair; `--silent-audio` streams silence instead and is only meaningful against a fake-provider
+gateway. Speech synthesis runs client-side and needs `ELEVENLABS_API_KEY` (or `XI_API_KEY`);
+`ELEVENLABS_BASE_URL` overrides the API origin for a region-locked key. The driver sends one
+100 ms audio chunk every 100 ms for the whole session (silence while it waits on a reply), so run
+it from a host under 100 ms RTT to the gateway.
+
+## Docker runners (optional “works in Linux” checks)
+
+These run `pnpm test:live` inside the repo Docker image, mounting your local config dir and workspace (and sourcing `~/.profile` if mounted):
+
+- Direct models: `pnpm test:docker:live-models` (script: `scripts/test-live-models-docker.sh`)
+- Gateway + dev agent: `pnpm test:docker:live-gateway` (script: `scripts/test-live-gateway-models-docker.sh`)
+- Onboarding wizard (TTY, full scaffolding): `pnpm test:docker:onboard` (script: `scripts/e2e/onboard-docker.sh`)
+- Gateway networking (two containers, WS auth + health): `pnpm test:docker:gateway-network` (script: `scripts/e2e/gateway-network-docker.sh`)
+- Plugins (custom extension load + registry smoke): `pnpm test:docker:plugins` (script: `scripts/e2e/plugins-docker.sh`)
+
+Manual ACP plain-language thread smoke (not CI):
+
+- `bun scripts/dev/discord-acp-plain-language-smoke.ts --channel <discord-channel-id> ...`
+- Keep this script for regression/debug workflows. It may be needed again for ACP thread routing validation, so do not delete it.
+
+Useful env vars:
+
+- `OPENCLAW_CONFIG_DIR=...` (default: `~/.openclaw`) mounted to `/home/node/.openclaw`
+- `OPENCLAW_WORKSPACE_DIR=...` (default: `~/.openclaw/workspace`) mounted to `/home/node/.openclaw/workspace`
+- `OPENCLAW_PROFILE_FILE=...` (default: `~/.profile`) mounted to `/home/node/.profile` and sourced before running tests
+- `OPENCLAW_LIVE_GATEWAY_MODELS=...` / `OPENCLAW_LIVE_MODELS=...` to narrow the run
+- `OPENCLAW_LIVE_REQUIRE_PROFILE_KEYS=1` to ensure creds come from the profile store (not env)
+
+## Docs sanity
+
+Run docs checks after doc edits: `pnpm docs:list`.
+
+## Offline regression (CI-safe)
+
+These are “real pipeline” regressions without real providers:
+
+- Gateway tool calling (mock OpenAI, real gateway + agent loop): `src/gateway/gateway.test.ts` (case: "runs a mock OpenAI tool call end-to-end via gateway agent loop")
+- Gateway wizard (WS `wizard.start`/`wizard.next`, writes config + auth enforced): `src/gateway/gateway.test.ts` (case: "runs wizard over ws and writes auth token config")
+
+## Agent reliability evals (skills)
+
+We already have a few CI-safe tests that behave like “agent reliability evals”:
+
+- Mock tool-calling through the real gateway + agent loop (`src/gateway/gateway.test.ts`).
+- End-to-end wizard flows that validate session wiring and config effects (`src/gateway/gateway.test.ts`).
+
+What’s still missing for skills (see [Skills](/next/users/tools/skills)):
+
+- **Decisioning:** when skills are listed in the prompt, does the agent pick the right skill (or avoid irrelevant ones)?
+- **Compliance:** does the agent read `SKILL.md` before use and follow required steps/args?
+- **Workflow contracts:** multi-turn scenarios that assert tool order, session history carryover, and sandbox boundaries.
+
+Future evals should stay deterministic first:
+
+- A scenario runner using mock providers to assert tool calls + order, skill file reads, and session wiring.
+- A small suite of skill-focused scenarios (use vs avoid, gating, prompt injection).
+- Optional live evals (opt-in, env-gated) only after the CI-safe suite is in place.

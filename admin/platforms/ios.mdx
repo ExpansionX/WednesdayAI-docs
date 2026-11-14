@@ -30,7 +30,7 @@ Availability: internal preview. The iOS app is not publicly distributed yet.
 1. Start the Gateway:
 
 ```bash
-openclaw gateway --port 18789
+wednesdayai gateway --port 18789
 ```
 
 2. In the iOS app, open Settings and pick a discovered gateway (or enable Manual Host and enter host/port).
@@ -38,15 +38,15 @@ openclaw gateway --port 18789
 3. Approve the pairing request on the gateway host:
 
 ```bash
-openclaw devices list
-openclaw devices approve <requestId>
+wednesdayai devices list
+wednesdayai devices approve <requestId>
 ```
 
 4. Verify connection:
 
 ```bash
-openclaw nodes status
-openclaw gateway call node.list --params "{}"
+wednesdayai nodes status
+wednesdayai gateway call node.list --params "{}"
 ```
 
 ## Discovery paths
@@ -58,7 +58,7 @@ The Gateway advertises `_openclaw-gw._tcp` on `local.`. The iOS app lists these 
 ### Tailnet (cross-network)
 
 If mDNS is blocked, use a unicast DNS-SD zone (choose a domain; example: `openclaw.internal.`) and Tailscale split DNS.
-See [Bonjour](/gateway/bonjour) for the CoreDNS example.
+See [Bonjour](/admin/gateway/bonjour) for the CoreDNS example.
 
 ### Manual host/port
 
@@ -69,7 +69,7 @@ In Settings, enable **Manual Host** and enter the gateway host + port (default `
 The iOS node renders a WKWebView canvas. Use `node.invoke` to drive it:
 
 ```bash
-openclaw nodes invoke --node "iOS Node" --command canvas.navigate --params '{"url":"http://<gateway-host>:18789/__openclaw__/canvas/"}'
+wednesdayai nodes invoke --node "iOS Node" --command canvas.navigate --params '{"url":"http://<gateway-host>:18789/__openclaw__/canvas/"}'
 ```
 
 Notes:
@@ -82,11 +82,11 @@ Notes:
 ### Canvas eval / snapshot
 
 ```bash
-openclaw nodes invoke --node "iOS Node" --command canvas.eval --params '{"javaScript":"(() => { const {ctx} = window.__openclaw; ctx.clearRect(0,0,innerWidth,innerHeight); ctx.lineWidth=6; ctx.strokeStyle=\"#ff2d55\"; ctx.beginPath(); ctx.moveTo(40,40); ctx.lineTo(innerWidth-40, innerHeight-40); ctx.stroke(); return \"ok\"; })()"}'
+wednesdayai nodes invoke --node "iOS Node" --command canvas.eval --params '{"javaScript":"(() => { const {ctx} = window.__openclaw; ctx.clearRect(0,0,innerWidth,innerHeight); ctx.lineWidth=6; ctx.strokeStyle=\"#ff2d55\"; ctx.beginPath(); ctx.moveTo(40,40); ctx.lineTo(innerWidth-40, innerHeight-40); ctx.stroke(); return \"ok\"; })()"}'
 ```
 
 ```bash
-openclaw nodes invoke --node "iOS Node" --command canvas.snapshot --params '{"maxWidth":900,"format":"jpeg"}'
+wednesdayai nodes invoke --node "iOS Node" --command canvas.snapshot --params '{"maxWidth":900,"format":"jpeg"}'
 ```
 
 ## Voice wake + talk mode
@@ -94,15 +94,39 @@ openclaw nodes invoke --node "iOS Node" --command canvas.snapshot --params '{"ma
 - Voice wake and talk mode are available in Settings.
 - iOS may suspend background audio; treat voice features as best-effort when the app is not active.
 
+## Alerts
+
+When the Gateway has APNs credentials (`OPENCLAW_APNS_TEAM_ID`, `OPENCLAW_APNS_KEY_ID`, and
+`OPENCLAW_APNS_PRIVATE_KEY_P8` or `OPENCLAW_APNS_PRIVATE_KEY_PATH`), it sends alert pushes to a
+registered iOS device for:
+
+- a final reply in a session the device follows (opened in the app);
+- a pending exec approval in a session the device's person owns;
+- a new inbound inbox item on an account the device's person owns (bound with
+  `wednesdayai inbox owners bind`).
+
+Alerts go only to the devices of the person who owns the session or account: the device must be
+linked to that person in `session.identityLinks` (`device:<id>`), and the session must record that
+person as its actor. Sessions with no recorded person (main-scope `session.dmScope`, cron,
+heartbeat) send no reply or approval alerts. A followed session stays followed after the app
+disconnects, so alerts still arrive while it is in the background.
+
+Alerts show "New reply", "Approval needed", or "New inbox item" unless message previews are turned
+on in the app, in which case replies and inbox items show their text (up to 200 characters).
+Approval alerts never show the command. Each device gets at most one alert per session (or inbox
+account) and kind every 30 seconds, and newer alerts replace older ones for the same session.
+If the phone is offline, Apple holds the newest reply or inbox alert for up to a day; an approval
+alert is dropped once the approval expires.
+
 ## Common errors
 
 - `NODE_BACKGROUND_UNAVAILABLE`: bring the iOS app to the foreground (canvas/camera/screen commands require it).
-- `A2UI_HOST_NOT_CONFIGURED`: the Gateway did not advertise a canvas host URL; check `canvasHost` in [Gateway configuration](/gateway/configuration).
-- Pairing prompt never appears: run `openclaw devices list` and approve manually.
+- `A2UI_HOST_NOT_CONFIGURED`: the Gateway did not advertise a canvas host URL; check `canvasHost` in [Gateway configuration](/admin/gateway/configuration).
+- Pairing prompt never appears: run `wednesdayai devices list` and approve manually.
 - Reconnect fails after reinstall: the Keychain pairing token was cleared; re-pair the node.
 
 ## Related docs
 
-- [Pairing](/channels/pairing)
-- [Discovery](/gateway/discovery)
-- [Bonjour](/gateway/bonjour)
+- [Pairing](/admin/channels/pairing)
+- [Discovery](/admin/gateway/discovery)
+- [Bonjour](/admin/gateway/bonjour)

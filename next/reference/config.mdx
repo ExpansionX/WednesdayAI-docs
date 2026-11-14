@@ -1,0 +1,1474 @@
+---
+title: "Gateway configuration reference"
+sidebarTitle: "Config reference"
+description: "Every root configuration key for the WednesdayAI gateway: defaults, enums, restart requirements, and worked examples."
+audience: admin
+---
+
+# Gateway configuration reference
+
+WednesdayAI reads its configuration from `~/.openclaw/openclaw.json` at startup. The file uses **JSON5** syntax: standard JSON plus `//` comments and trailing commas. The config object is **strict** - unknown top-level keys cause the gateway to refuse to start. The only root-level exception is `$schema` (a string).
+
+If the file does not exist, the gateway starts with safe defaults. Run `openclaw doctor` to identify and remove unknown keys.
+
+## Editing configuration
+
+| Method | Use when |
+| ------ | -------- |
+| `openclaw onboard` / `openclaw configure` | Interactive wizard for guided setup |
+| `openclaw config get\|set\|unset` | One-off CLI changes |
+| Control panel Config tab (`http://localhost:18789/`) | Browser-based editing with a raw JSON escape hatch |
+| Direct file edit | Scripted or bulk changes - the gateway hot-reloads automatically |
+
+## Validation and repair
+
+```bash
+openclaw config validate     # validate against the schema without starting the gateway
+openclaw doctor              # identify unknown keys, invalid values
+openclaw doctor --fix        # apply repairs, remove unknown keys (backs up first)
+```
+
+When validation fails, only `openclaw doctor`, `openclaw logs`, `openclaw health`, and `openclaw status` work until the config is fixed.
+
+## Hot reload
+
+The gateway watches the config file and applies most changes without a restart:
+
+| `gateway.reload.mode` | Behaviour |
+| --------------------- | --------- |
+| `"hybrid"` | Hot-apply safe changes; auto-restart for server-level changes (default) |
+| `"hot"` | Hot-apply only; logs a warning when a restart is needed |
+| `"restart"` | Restart on any config change |
+| `"off"` | Manual restarts only |
+
+**Hot-reload without restart:** `channels.*`, `agents.*`, `models`, `bindings`, `hooks`, `cron`, `session`, `messages`, `tools`, `browser`, `skills`, `audio`, `logging`, `ui`.
+
+**Requires restart:** `gateway.*` (port, bind address, auth, TLS, tailscale), `discovery`, `canvasHost`, `plugins`.
+
+```json5
+{
+  gateway: {
+    reload: { mode: "hybrid", debounceMs: 300 },
+  },
+}
+```
+
+## Environment variables
+
+The gateway reads env vars from the parent process, `.env` in the working directory, and `~/.openclaw/.env` (neither file overrides existing env vars).
+
+**Env var substitution in config values** via `${VAR_NAME}`:
+- Only uppercase names matched: `[A-Z_][A-Z0-9_]*`
+- Missing or empty vars throw an error at load time
+- Escape with `$${VAR}` for literal `${VAR}` output
+
+**Inline env vars** and shell import:
+```json5
+{
+  env: {
+    OPENROUTER_API_KEY: "sk-or-...",
+    vars: { GROQ_API_KEY: "gsk-..." },
+    shellEnv: { enabled: true, timeoutMs: 15000 },   // or OPENCLAW_LOAD_SHELL_ENV=1
+  },
+}
+```
+
+## Split config with `$include`
+
+```json5
+{
+  gateway: { port: 18789 },
+  agents: { $include: "./agents.json5" },
+  broadcast: { $include: ["./clients/a.json5", "./clients/b.json5"] },
+}
+```
+
+Single file replaces the containing object; an array deep-merges in order (later wins). Sibling keys merge after includes. Nested includes are supported up to 10 levels deep; relative paths resolve against the including file.
+
+## Root keys at a glance
+
+The strict root object accepts these keys (everything else is rejected). Each has its own section or is summarised below.
+
+| Key | Purpose |
+| --- | ------- |
+| `gateway` | Server: port, bind, auth, TLS, HTTP endpoints, reload, remote |
+| `agents` | Agent defaults, model selection, per-agent list |
+| `models` | Provider/model catalogue, aliases, fallbacks |
+| `channels` | Messaging platform connections |
+| `bindings` | Multi-agent routing rules |
+| `broadcast` | Per-peer broadcast agent fan-out |
+| `tools` | Agent tool policy (profiles, allow/deny, exec, fs) |
+| `approvals` | Exec-approval forwarding |
+| `commands` | Slash-command gating (native, bash, config, debug) |
+| `messages` | Inbound/outbound message behaviour, ack reactions, TTS |
+| `session` | Session scope, thread bindings, reset policy |
+| `cron` | Scheduled job runner |
+| `hooks` | Incoming webhooks + internal lifecycle hooks |
+| `plugins` | Extension enable/deny, load paths, per-plugin config |
+| `skills` | Skill loading and limits |
+| `memory` | Memory backend and citation behaviour |
+| `secrets` | SecretRef providers and resolution |
+| `auth` | Provider auth profiles, order, cooldowns |
+| `talk` | Text-to-speech provider configuration |
+| `audio` | Inbound audio transcription |
+| `media` | Media handling (filename preservation) |
+| `browser` | Headless/attached browser control |
+| `acp` | Agent Client Protocol bridge |
+| `update` | Update channel and auto-update policy |
+| `discovery` | mDNS and wide-area discovery |
+| `canvasHost` | Local canvas static host |
+| `nodeHost` | Node.js host configuration including browser proxy settings |
+| `web` | WhatsApp-web client tuning |
+| `logging` | Log levels, file, redaction |
+| `diagnostics` | OpenTelemetry export, cache tracing |
+| `ui` | Control-panel branding |
+| `cli` | CLI banner styling |
+| `meta` | Bookkeeping (last-touched version/time) |
+| `wizard` | Onboarding wizard bookkeeping |
+| `env` | Inline env vars and shell import |
+| `network` | Global outbound SSRF policy (all requests, not just browser) |
+
+---
+
+## `network` - Global outbound SSRF policy
+
+`network.ssrfPolicy` applies to **all** outbound HTTP requests made by the gateway — agent tool calls, webhook deliveries, plugin fetches, and so on. `browser.ssrfPolicy` is a parallel control scoped only to browser-driven fetches; both share the same shape.
+
+```json5
+{
+  network: {
+    ssrfPolicy: {
+      dangerouslyAllowPrivateNetwork: false,  // allow RFC-1918 / loopback targets
+      hostnameAllowlist: ["example.com"],      // always-allowed hostnames
+      allowedCidrs: ["10.0.0.0/8"],           // CIDR ranges to allow
+      allowRfc2544BenchmarkRange: false,       // allow RFC-2544 benchmark ranges
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `network.ssrfPolicy.dangerouslyAllowPrivateNetwork` | boolean | `false` | Allow outbound requests to RFC-1918 private and loopback addresses |
+| `network.ssrfPolicy.hostnameAllowlist` | string[] | `[]` | Hostnames unconditionally permitted regardless of other policy |
+| `network.ssrfPolicy.allowedCidrs` | string[] | `[]` | CIDR ranges to allow |
+| `network.ssrfPolicy.allowRfc2544BenchmarkRange` | boolean | `false` | Allow RFC-2544 benchmark address ranges |
+
+<Note>
+`network.ssrfPolicy` supports two field aliases: `allowPrivateNetwork` (alias for `dangerouslyAllowPrivateNetwork`) and `allowedHostnames` (alias for `hostnameAllowlist`). Prefer the canonical names in new configs.
+</Note>
+
+<Note>
+For browser-specific SSRF controls see [`browser.ssrfPolicy`](#browser---browser-control). The two policies are evaluated independently — a request that passes `network.ssrfPolicy` but originates from the browser is also checked against `browser.ssrfPolicy`.
+</Note>
+
+---
+
+## `nodeHost` — Browser-proxy settings
+
+`nodeHost` — object — Browser-proxy configuration for this node. Shape: `{ browserProxy?: { enabled?: boolean, allowProfiles?: string[] } }`
+
+---
+
+## `gateway` - Server settings
+
+```json5
+{
+  gateway: {
+    port: 18789,                  // restart required
+    mode: "local",                // local | remote (restart required)
+    bind: "loopback",             // auto | lan | loopback | tailnet | custom (restart required)
+    customBindHost: "10.0.0.5",   // used when bind = "custom"
+    auth: {
+      mode: "token",              // none | token | password | trusted-proxy
+      token: "...",               // or OPENCLAW_GATEWAY_TOKEN
+      password: "...",            // or OPENCLAW_GATEWAY_PASSWORD
+      allowTailscale: false,
+      rateLimit: { maxAttempts: 10, windowMs: 60000, lockoutMs: 300000, exemptLoopback: true },
+      trustedProxy: {
+        userHeader: "x-forwarded-user",      // required in trusted-proxy mode
+        requiredHeaders: ["x-forwarded-by"],
+        allowUsers: ["alice@example.com"],
+      },
+    },
+    trustedProxies: ["127.0.0.1"],   // reverse-proxy IPs that terminate TLS
+    allowRealIpFallback: false,      // accept X-Real-IP when XFF is missing (default fail-closed)
+    controlUi: {
+      enabled: true,
+      basePath: "/",
+      root: "/custom-ui",                 // optional string: custom path for the control UI
+      allowedOrigins: ["https://panel.example.com"],
+      allowInsecureAuth: false,
+      dangerouslyAllowHostHeaderOriginFallback: false,  // use Host header as CORS origin fallback
+      dangerouslyDisableDeviceAuth: false,              // disable device auth for control UI
+    },
+    tailscale: { mode: "off", resetOnExit: false },   // off | serve | funnel (restart required)
+    reload: { mode: "hybrid", debounceMs: 300 },
+    channelHealthCheckMinutes: 5,
+    tls: {
+      enabled: false,
+      autoGenerate: false,
+      certPath: "/etc/openclaw/tls/cert.pem",
+      keyPath: "/etc/openclaw/tls/key.pem",
+      caPath: "/etc/openclaw/tls/ca.pem",
+    },
+    remote: {
+      url: "wss://gateway.example.com",
+      transport: "direct",            // ssh | direct
+      token: "...",
+      password: "...",                // optional: password auth (SecretInputSchema)
+      tlsFingerprint: "sha256/...",
+      sshTarget: "user@gateway-host",
+      sshIdentity: "~/.ssh/id_ed25519",
+    },
+    http: {
+      endpoints: {
+        chatCompletions: { enabled: false },
+        responses: { enabled: false },
+      },
+      securityHeaders: { strictTransportSecurity: false },
+    },
+    tools: { deny: [], allow: [] },   // HTTP /tools/invoke deny/allow overrides
+    nodes: {
+      browser: { mode: "auto", node: "studio-mac" },   // auto | manual | off
+      allowCommands: [],
+      denyCommands: [],
+    },
+  },
+}
+```
+
+| Key | Default | Restart? |
+| --- | ------- | -------- |
+| `gateway.port` | `18789` | Yes |
+| `gateway.mode` | `"local"` | Yes |
+| `gateway.bind` | `"loopback"` | Yes |
+| `gateway.auth.mode` | `"token"` | Yes |
+| `gateway.tailscale.mode` | `"off"` | Yes |
+| `gateway.tls.enabled` | `false` | Yes |
+| `gateway.reload.mode` | `"hybrid"` | No |
+| `gateway.channelHealthCheckMinutes` | provider default | No |
+| `gateway.restartPolicy` | `"drain"` | No |
+| `gateway.restartResilience` | see description | No |
+
+Additional restart-policy keys:
+
+```json5
+{
+  gateway: {
+    restartPolicy: "drain",
+    restartResilience: { mode: "controlled", drainTimeoutMs: 30000, forceMarksRecovery: false },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `gateway.restartPolicy` | string | `"drain"` | `"drain" \| "force" \| "cancel"` — controls auto-restart behaviour |
+| `gateway.restartResilience` | object | — | `GatewayRestartResilienceConfig`: `mode` (`"controlled" \| "immediate"`), `drainTimeoutMs` (number), `forceMarksRecovery` (boolean) |
+
+<Warning>
+Non-loopback `bind` requires auth. The gateway refuses to start with `bind: "lan"`, `"tailnet"`, or `"custom"` if no token or password is set. See [Gateway authentication](/next/admin/gateway/authentication).
+</Warning>
+
+### Control UI (`gateway.controlUi`)
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `gateway.controlUi.enabled` | boolean | `true` | Enable or disable the control UI entirely |
+| `gateway.controlUi.basePath` | string | `"/"` | URL path prefix for the control UI |
+| `gateway.controlUi.root` | string | — | Optional path override: serve the control UI at this path instead of `basePath` |
+| `gateway.controlUi.allowedOrigins` | string[] | `[]` | Explicit CORS origin allowlist |
+| `gateway.controlUi.allowInsecureAuth` | boolean | `false` | Allow auth over plain HTTP (not just HTTPS) |
+| `gateway.controlUi.dangerouslyAllowHostHeaderOriginFallback` | boolean | `false` | Use the `Host` header as the CORS origin when no `Origin` header is present |
+| `gateway.controlUi.dangerouslyDisableDeviceAuth` | boolean | `false` | Disable device authentication for the control UI |
+
+<Warning>
+`dangerouslyDisableDeviceAuth: true` removes the device-pairing check from the control UI. Only use this in a fully trusted, isolated environment — enabling it on a network-exposed gateway allows unauthenticated access to the admin interface.
+</Warning>
+
+### HTTP endpoints
+
+Both OpenAI-compatible endpoints are **disabled by default** and grant full operator access when enabled. See the [API reference](/next/reference/api) for request/response details.
+
+```json5
+{
+  gateway: {
+    http: {
+      endpoints: {
+        chatCompletions: { enabled: true },   // POST /v1/chat/completions
+        responses: {                          // POST /v1/responses
+          enabled: true,
+          maxBodyBytes: 5242880,
+          maxUrlParts: 16,
+          files: {
+            allowUrl: true,
+            urlAllowlist: ["https://example.com"],
+            allowedMimes: ["application/pdf"],
+            maxBytes: 10485760,
+            maxChars: 200000,
+            pdf: { maxPages: 50, maxPixels: 4000000, minTextChars: 16 },
+          },
+          images: {
+            allowUrl: true,
+            urlAllowlist: ["https://example.com"],
+            maxBytes: 10485760,
+          },
+        },
+      },
+      securityHeaders: {
+        // Set only for HTTPS origins you control; false disables the header.
+        strictTransportSecurity: "max-age=63072000; includeSubDomains",
+      },
+    },
+  },
+}
+```
+
+---
+
+## `agents` - Agent and model configuration
+
+```json5
+{
+  agents: {
+    defaults: {
+      workspace: "~/.openclaw/workspace",
+      model: {
+        primary: "anthropic/claude-sonnet-4-6",
+        fallbacks: ["openai/gpt-4o"],
+      },
+      imageModel: { primary: "openai/gpt-image-1" },
+      sandbox: { mode: "off", scope: "agent" },   // mode: off | non-main | all
+      heartbeat: { every: "0m", target: "last" },
+    },
+    list: [
+      { id: "default", default: true, workspace: "~/.openclaw/workspace" },
+    ],
+  },
+}
+```
+
+Model refs use `provider/model` format. `agents.defaults.model.primary` is set by `openclaw models set`; the image model by `openclaw models set-image`.
+
+### Model shorthand aliases
+
+The following shorthands can be used anywhere a model ref is expected and resolve to their current default:
+
+| Alias | Resolves to |
+|-------|-------------|
+| `opus` | `anthropic/claude-opus-4-6` |
+| `sonnet` | `anthropic/claude-sonnet-4-6` |
+| `gpt` | `openai/gpt-5.2` |
+| `gpt-mini` | `openai/gpt-5-mini` |
+| `gemini` | `google/gemini-3-pro-preview` |
+| `gemini-flash` | `google/gemini-3-flash-preview` |
+
+Aliases resolve at runtime; the underlying model ID may change with gateway updates. Use the full `provider/model` ref if you need to pin to a specific version.
+
+### `agents.defaults.subagents` — Subagent limits
+
+| Key | Type | Range | Description |
+|-----|------|-------|-------------|
+| `agents.defaults.subagents.maxConcurrent` | integer | — | Max subagents running concurrently per parent agent |
+| `agents.defaults.subagents.maxSpawnDepth` | integer | 1–5 | Max nesting depth for spawned subagent chains |
+| `agents.defaults.subagents.maxChildrenPerAgent` | integer | 1–20 | Max total subagents a single agent can spawn in one turn |
+| `agents.defaults.subagents.archiveAfterMinutes` | integer | — | Archive completed subagent sessions after this many minutes |
+| `agents.defaults.subagents.runTimeoutSeconds` | integer | — | Timeout for each subagent run |
+| `agents.defaults.subagents.announceTimeoutMs` | integer | — | Timeout to wait for subagent announce before proceeding |
+
+Values outside the validated ranges (1–5 for `maxSpawnDepth`, 1–20 for `maxChildrenPerAgent`) cause the gateway to reject the config on startup.
+
+---
+
+## `models` - Provider/model catalogue
+
+### `models.bedrockDiscovery` — Automatic Bedrock model discovery
+
+```json5
+{
+  models: {
+    bedrockDiscovery: {
+      enabled: false,
+      region: "us-east-1",
+      providerFilter: ["anthropic", "amazon"],
+      refreshInterval: 3600,
+      defaultContextWindow: 200000,
+      defaultMaxTokens: 8192,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `models.bedrockDiscovery.enabled` | boolean | `false` | Enable automatic discovery of available Bedrock models |
+| `models.bedrockDiscovery.region` | string | — | AWS region to query for available models |
+| `models.bedrockDiscovery.providerFilter` | string[] | — | Limit discovery to these model providers (e.g. `["anthropic", "amazon"]`) |
+| `models.bedrockDiscovery.refreshInterval` | integer | — | Seconds between rediscovery polls |
+| `models.bedrockDiscovery.defaultContextWindow` | integer | — | Assumed context window size for discovered models lacking metadata |
+| `models.bedrockDiscovery.defaultMaxTokens` | integer | — | Assumed max output tokens for discovered models lacking metadata |
+
+### `models.providers.*` — Provider and model config
+
+Each provider entry under `models.providers` follows this shape:
+
+```json5
+{
+  models: {
+    providers: {
+      "my-provider": {
+        baseUrl: "https://api.example.com/v1",
+        apiKey: "MY_PROVIDER_API_KEY",
+        auth: "api-key",        // api-key | aws-sdk | oauth | token
+        api: "openai-completions",
+        models: [
+          {
+            id: "my-model-id",
+            name: "My Model",
+            reasoning: false,
+            input: ["text", "image"],
+            contextWindow: 128000,
+            maxTokens: 4096,
+            cost: { input: 0.000003, output: 0.000015 },
+            compat: {
+              maxTokensField: "max_tokens",  // max_tokens | max_completion_tokens
+              thinkingFormat: "openai",       // openai | zai | qwen
+              supportsStrictMode: true,
+              supportsReasoningEffort: false,
+              requiresToolResultName: false,
+              requiresMistralToolIds: false,
+            },
+          },
+        ],
+      },
+    },
+  },
+}
+```
+
+| Key | Type | Description |
+|-----|------|-------------|
+| `models.providers.<id>.baseUrl` | string | Base URL for API requests |
+| `models.providers.<id>.apiKey` | string | Env var name or secret ref for the API key |
+| `models.providers.<id>.auth` | string | Auth method: `api-key` \| `aws-sdk` \| `oauth` \| `token` |
+| `models.providers.<id>.api` | string | API type: `openai-completions` \| `openai-responses` \| `anthropic-messages` \| `google-generative-ai` \| `bedrock-converse-stream` \| `ollama` \| `github-copilot` |
+| `models.providers.<id>.models[].id` | string | Provider-side model ID |
+| `models.providers.<id>.models[].name` | string | Display name |
+| `models.providers.<id>.models[].reasoning` | boolean | Whether the model supports extended reasoning |
+| `models.providers.<id>.models[].input` | string[] | Accepted input types: `"text"`, `"image"` |
+| `models.providers.<id>.models[].contextWindow` | integer | Context window in tokens |
+| `models.providers.<id>.models[].maxTokens` | integer | Max output tokens |
+| `models.providers.<id>.models[].cost.input` | number | Cost per input token in USD |
+| `models.providers.<id>.models[].cost.output` | number | Cost per output token in USD |
+| `models.providers.<id>.models[].compat.maxTokensField` | string | Field name to use for max tokens: `max_tokens` \| `max_completion_tokens` |
+| `models.providers.<id>.models[].compat.thinkingFormat` | string | Thinking tag format for reasoning models: `openai` \| `zai` \| `qwen` |
+| `models.providers.<id>.models[].compat.supportsStrictMode` | boolean | Whether the model supports strict tool-schema mode |
+| `models.providers.<id>.models[].compat.supportsReasoningEffort` | boolean | Whether the model accepts a reasoning-effort parameter |
+| `models.providers.<id>.models[].compat.requiresToolResultName` | boolean | Whether tool result messages must include a `name` field |
+| `models.providers.<id>.models[].compat.requiresMistralToolIds` | boolean | Whether the Mistral-style tool ID convention is required |
+
+---
+
+## `tools` - Agent tool policy
+
+```json5
+{
+  tools: {
+    profile: "messaging",          // minimal | coding | messaging | full
+    allow: ["web_search", "image"],
+    alsoAllow: ["pdf"],
+    deny: ["exec"],
+    byProvider: { anthropic: { profile: "full" } },
+    sessions: { visibility: "agent" },   // self | tree | agent | all
+    message: { allowCrossContextSend: false },
+    agentToAgent: { enabled: false, allow: [] },
+    elevated: { enabled: false },
+    exec: { /* exec tool policy */ },
+    fs: { /* filesystem tool policy */ },
+  },
+}
+```
+
+<Note>
+Set either `allow` or `alsoAllow` in a scope, not both. `alsoAllow` extends the profile; `allow` replaces it.
+</Note>
+
+---
+
+## `approvals` - Exec-approval forwarding
+
+```json5
+{
+  approvals: {
+    exec: {
+      enabled: true,
+      mode: "both",                // session | targets | both
+      agentFilter: ["main"],
+      targets: [
+        { channel: "telegram", to: "123456789", accountId: "default" },
+      ],
+    },
+  },
+}
+```
+
+---
+
+## `commands` - Slash-command gating
+
+```json5
+{
+  commands: {
+    native: "auto",                // auto | on | off (native channel commands)
+    nativeSkills: "auto",
+    text: true,                    // text-form /commands
+    bash: false,                   // off by default - enables `! ` / `/bash`
+    config: true,                  // /config persisted changes
+    debug: false,                  // /debug runtime overrides
+    restart: true,                 // allow /restart
+    ownerDisplay: "raw",           // raw | hash
+  },
+}
+```
+
+Additional commands keys:
+
+```json5
+{
+  commands: {
+    aliases: {
+      gm: "greet morning",
+    },
+    disabled: [],
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `commands.aliases` | object | `{}` | Custom slash-command aliases mapping alias → real command |
+| `commands.disabled` | string[] | `[]` | Command names to disable globally |
+
+---
+
+## `messages` - Message behaviour
+
+```json5
+{
+  messages: {
+    messagePrefix: "",
+    responsePrefix: "",
+    ackReaction: "👀",
+    ackReactionScope: "group-mentions",   // group-mentions | group-all | direct | all | off | none
+    removeAckAfterReply: false,
+    statusReactions: { enabled: true },
+    suppressToolErrors: false,
+    queue: { /* per-peer queue tuning */ },
+    inbound: { /* debounce */ },
+    groupChat: { /* group reply rules */ },
+    tts: { /* see talk */ },
+  },
+}
+```
+
+---
+
+## `channels` - Messaging platform connections
+
+Built-in channels: `whatsapp`, `telegram`, `discord`, `slack`, `signal`, `imessage`, `bluebubbles`, `googlechat`, `msteams`, `irc`. Additional channels (Matrix, Zalo, Mattermost, Nostr, and others) are provided by extensions and configured under the same `channels` object.
+
+### Common DM policy values
+
+| `dmPolicy` | Effect |
+| ---------- | ------ |
+| `"pairing"` | New senders get a pairing code; ignored until approved (default) |
+| `"allowlist"` | Only `allowFrom` entries can initiate conversations |
+| `"open"` | Any sender (requires `allowFrom: ["*"]`) |
+| `"disabled"` | Agent does not respond to DMs |
+
+### WhatsApp
+
+```json5
+{
+  channels: {
+    whatsapp: {
+      enabled: true,
+      dmPolicy: "pairing",
+      allowFrom: ["+15555550123"],
+      groupPolicy: "allowlist",
+      groups: { "<jid>@g.us": true },
+      textChunkLimit: 4000,
+      ackReaction: { emoji: "👀", direct: "always", group: "mentions" },
+      accounts: { work: { authDir: "~/.openclaw/credentials/whatsapp/work" } },
+    },
+  },
+}
+```
+
+Login: `openclaw channels login --channel whatsapp [--account work]`
+
+### Telegram
+
+```json5
+{
+  channels: {
+    telegram: {
+      enabled: true,
+      botToken: "123:abc",            // or TELEGRAM_BOT_TOKEN
+      dmPolicy: "pairing",
+      allowFrom: ["123456789"],
+      groupPolicy: "allowlist",
+      groups: {
+        "*": { requireMention: true },
+        "-1001234567890": { requireMention: false, groupPolicy: "open" },
+      },
+      streaming: "partial",           // off | partial | block | progress
+      textChunkLimit: 4000,
+    },
+  },
+}
+```
+
+### Discord
+
+```json5
+{
+  channels: {
+    discord: {
+      enabled: true,
+      token: "YOUR_BOT_TOKEN",        // or DISCORD_BOT_TOKEN
+      dmPolicy: "pairing",
+      groupPolicy: "allowlist",
+      guilds: {
+        "123456789012345678": {
+          requireMention: true,
+          users: ["987654321098765432"],
+          roles: ["111222333444555666"],
+        },
+      },
+      streaming: "off",
+    },
+  },
+}
+```
+
+### Slack
+
+```json5
+{
+  channels: {
+    slack: {
+      enabled: true,
+      mode: "socket",                 // socket | http
+      appToken: "xapp-...",           // Socket Mode only
+      botToken: "xoxb-...",
+      dmPolicy: "pairing",
+      groupPolicy: "allowlist",
+      channels: { "C0123456789": { requireMention: false, users: ["U0123456789"] } },
+      streaming: "partial",
+      nativeStreaming: true,
+    },
+  },
+}
+```
+
+### Signal
+
+```json5
+{
+  channels: {
+    signal: {
+      enabled: true,
+      account: "+15551234567",
+      cliPath: "signal-cli",
+      autoStart: true,
+      dmPolicy: "pairing",
+      allowFrom: ["+15557654321"],
+    },
+  },
+}
+```
+
+### iMessage and BlueBubbles
+
+```json5
+{
+  channels: {
+    bluebubbles: {                    // recommended modern iMessage path
+      enabled: true,
+      serverUrl: "http://127.0.0.1:1234",
+      password: "...",
+      dmPolicy: "pairing",
+    },
+    imessage: { enabled: false },     // legacy imsg stdio adapter
+  },
+}
+```
+
+---
+
+## `session` - Session scope and reset
+
+```json5
+{
+  session: {
+    dmScope: "per-channel-peer",      // main | per-peer | per-channel-peer | per-account-channel-peer
+    threadBindings: { enabled: true, idleHours: 24, maxAgeHours: 0 },
+    reset: { mode: "daily", atHour: 4, idleMinutes: 120 },   // daily | idle
+  },
+}
+```
+
+Additional session keys:
+
+```json5
+{
+  session: {
+    storage: {
+      backend: "sqlite",       // "fs-jsonl" | "sqlite" | "postgres"
+      sqlitePath: "",          // path to .db file (sqlite only)
+      databaseUrl: "",         // connection string (postgres only)
+      cache: "none",           // "none" | "redis" — redis cache requires backend "postgres"
+      redisUrl: "",            // redis:// connection string (redis cache only)
+      redis: { keyPrefix: "ctx", ttlSeconds: 300 },
+    },
+    maintenance: {
+      mode: "warn",              // "enforce" | "warn"
+      pruneAfter: "30d",         // prune entries older than this ("30d", "12h", or days number)
+      maxEntries: 500,           // max session entries
+      rotateBytes: "10mb",       // rotate sessions store after this size
+      // resetArchiveRetention: "30d",  // defaults to pruneAfter; false disables
+      // maxDiskBytes: "500mb",         // per-agent disk budget; enforce cleans oldest-first
+      // highWaterBytes: "400mb",       // target after cleanup; default 80% of maxDiskBytes
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `session.storage.backend` | string | `"sqlite"` | `"fs-jsonl" \| "sqlite" \| "postgres"` — backing store for session data |
+| `session.storage.sqlitePath` | string | — | Path to the SQLite `.db` file (sqlite only) |
+| `session.storage.databaseUrl` | string | — | Connection string (postgres only) |
+| `session.storage.cache` | string | `"none"` | `"none" \| "redis"` — Redis read-through cache for session context. `"redis"` requires `backend: "postgres"` and `session.storage.redisUrl`; otherwise the gateway logs a warning and continues without a cache |
+| `session.storage.redisUrl` | string | — | Redis connection string (redis cache only) |
+| `session.storage.redis.keyPrefix` | string | `"ctx"` | Prefix applied to Redis cache keys |
+| `session.storage.redis.ttlSeconds` | integer | `300` | Time-to-live for Redis cache entries (seconds) |
+| `session.maintenance.mode` | string | `"warn"` | `"enforce" \| "warn"` — warn only, or enforce cleanup limits |
+| `session.maintenance.pruneAfter` | string \| number | `"30d"` | Age at which session entries are pruned (e.g. `"30d"`, `"12h"`, or a day count) |
+| `session.maintenance.maxEntries` | integer | `500` | Max session entries to keep |
+| `session.maintenance.rotateBytes` | integer \| string | `"10mb"` | Rotate the sessions store when it exceeds this size |
+| `session.maintenance.resetArchiveRetention` | string \| number \| `false` | same as `pruneAfter` | Retention for archived reset transcripts; `false` disables cleanup |
+| `session.maintenance.maxDiskBytes` | integer \| string | — | Per-agent sessions-directory disk budget (e.g. `"500mb"`). When exceeded: warn (`mode=warn`) or oldest-first cleanup (`mode=enforce`) |
+| `session.maintenance.highWaterBytes` | integer \| string | 80% of `maxDiskBytes` | Target size after disk-budget cleanup (e.g. `"400mb"`) |
+
+---
+
+## `cron` - Scheduled jobs
+
+```json5
+{
+  cron: {
+    enabled: true,
+    maxConcurrentRuns: 2,
+    sessionRetention: "24h",          // duration, or false to keep sessions
+    retry: { maxAttempts: 3, backoffMs: [1000, 5000], retryOn: ["rate_limit", "network"] },
+    runLog: { maxBytes: "2mb", keepLines: 2000 },
+    failureAlert: { enabled: true, after: 3, mode: "announce" },   // announce | webhook
+    failureDestination: {
+      channel: "telegram",
+      to: "123456789",
+      accountId: "default",
+      mode: "announce",
+    },
+  },
+}
+```
+
+Additional cron keys:
+
+```json5
+{
+  cron: {
+    webhook: "https://example.com/cron-trigger",   // HttpUrl — plain URL
+    webhookToken: "shared-secret",
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `cron.store` | string | — | Optional named store identifier for cron job persistence |
+| `cron.webhook` | string (HttpUrl) | — | URL to receive cron trigger notifications |
+| `cron.webhookToken` | string | — | Authentication token for the cron webhook |
+| `cron.failureAlert.cooldownMs` | number | — | Minimum milliseconds between repeated failure alerts; prevents alert storms |
+| `cron.failureDestination` | object | — | Separate routing target for failure alerts: `{ channel?, to?, accountId?, mode? }`. Distinct from `cron.failureAlert` (which controls triggering); this sets where alerts go |
+
+---
+
+## `hooks` - Incoming webhooks and lifecycle hooks
+
+```json5
+{
+  hooks: {
+    enabled: true,
+    token: "shared-secret",
+    path: "/hooks",
+    defaultSessionKey: "hook:ingress",
+    allowRequestSessionKey: false,
+    allowedSessionKeyPrefixes: ["hook:"],
+    maxBodyBytes: 1048576,
+    mappings: [
+      { match: { path: "gmail" }, action: "agent", agentId: "main", deliver: true },
+    ],
+    allowedAgentIds: ["main"],          // optional: restrict hook delivery to these agent IDs
+    gmail: { /* Gmail hooks integration config */ },
+    internal: { enabled: true, entries: { "boot-md": { enabled: true } } },
+  },
+}
+```
+
+<Warning>
+Treat all webhook payload content as untrusted. Keep unsafe-content bypass flags disabled unless debugging.
+</Warning>
+
+See the [Hooks catalogue](/next/reference/hooks-catalogue) for bundled `internal` hooks.
+
+Additional hooks keys:
+
+```json5
+{
+  hooks: {
+    presets: [],
+    transformsDir: "",
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hooks.presets` | string[] | `[]` | Preset names to load: `"safety"`, `"productivity"`, `"audit"` |
+| `hooks.transformsDir` | string | — | Path to a directory of transform scripts applied to all hook payloads |
+| `hooks.allowedAgentIds` | string[] | — | Optional allowlist of agent IDs that can receive hook deliveries |
+
+### `hooks.gmail` — Gmail push notification integration
+
+Receives Gmail push notifications via Google Cloud Pub/Sub and routes them as hook events.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `hooks.gmail.account` | string | — | Gmail account address to monitor |
+| `hooks.gmail.label` | string | — | Gmail label to filter (e.g. `"INBOX"`) |
+| `hooks.gmail.topic` | string | — | Google Cloud Pub/Sub topic name |
+| `hooks.gmail.subscription` | string | — | Pub/Sub subscription name |
+| `hooks.gmail.pushToken` | string | — | Secret token used to validate incoming Pub/Sub pushes |
+| `hooks.gmail.hookUrl` | string | — | Public URL that Google will push notifications to |
+| `hooks.gmail.includeBody` | boolean | `false` | Whether to include the email body in the hook payload |
+| `hooks.gmail.maxBytes` | integer | — | Maximum bytes to include from the email body |
+| `hooks.gmail.renewEveryMinutes` | integer | — | How often to renew the Pub/Sub push subscription |
+| `hooks.gmail.allowUnsafeExternalContent` | boolean | `false` | Pass raw email content to the agent (use with caution) |
+| `hooks.gmail.serve.bind` | string | — | Bind address for the local Pub/Sub push receiver |
+| `hooks.gmail.serve.port` | integer | — | Port for the local Pub/Sub push receiver |
+| `hooks.gmail.serve.path` | string | — | URL path for the local Pub/Sub push receiver |
+| `hooks.gmail.tailscale.mode` | string | `"off"` | Expose the receiver via Tailscale: `off` \| `serve` \| `funnel` |
+| `hooks.gmail.model` | string | — | Model to use for agent turns triggered by Gmail events |
+| `hooks.gmail.thinking` | string | `"off"` | Thinking level: `off` \| `minimal` \| `low` \| `medium` \| `high` |
+
+---
+
+## `plugins` - Extensions
+
+```json5
+{
+  plugins: {
+    enabled: true,
+    allow: ["brave-search"],
+    deny: [],
+    load: { paths: ["~/.openclaw/extensions/my-plugin"] },
+    slots: { memory: "my-memory-plugin" },
+    entries: { "brave-search": { enabled: true, config: { apiKey: "..." } } },
+  },
+}
+```
+
+Most plugin changes require a gateway restart.
+
+Additional plugins keys:
+
+```json5
+{
+  plugins: {
+    installs: {
+      "@wednesdayai/voice-openai": { version: "^1.0" },
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `plugins.installs` | object | `{}` | Plugin specifiers auto-installed on gateway start. Keyed by plugin name: `{ "<plugin-name>": { version } }` |
+
+---
+
+## `skills` - Skill loading
+
+```json5
+{
+  skills: {
+    allowBundled: ["status", "memory-search"],
+    load: { extraDirs: ["~/.openclaw/skills"], watch: true, watchDebounceMs: 300 },
+    install: { preferBrew: false, nodeManager: "pnpm" },   // npm | pnpm | yarn | bun
+    limits: { maxSkillsInPrompt: 30, maxSkillsPromptChars: 20000 },
+    entries: {
+      "my-skill": {
+        enabled: true,
+        apiKey: "...",
+        env: { MY_KEY: "value" },           // env vars injected when the skill runs
+        config: { theme: "dark" },          // arbitrary skill-specific config
+      },
+    },
+  },
+}
+```
+
+Additional skills keys:
+
+```json5
+{
+  skills: {
+    limits: {
+      maxSkillFileBytes: 524288,
+      maxCandidatesPerRoot: 100,
+      maxSkillsLoadedPerSource: 50,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `skills.load.watchDebounceMs` | number | — | Debounce delay (ms) before reloading after a skills file change (requires `skills.load.watch: true`) |
+| `skills.limits.maxSkillFileBytes` | integer | `524288` | Max SKILL.md file size in bytes (512 KB) |
+| `skills.limits.maxCandidatesPerRoot` | integer | — | Max skill candidates per root directory |
+| `skills.limits.maxSkillsLoadedPerSource` | integer | — | Max skills loaded per source |
+| `skills.entries.<id>.enabled` | boolean | `true` | Enable or disable this skill entry |
+| `skills.entries.<id>.apiKey` | string | — | API key passed to the skill |
+| `skills.entries.<id>.env` | `Record<string, string>` | — | Environment variables injected when the skill runs |
+| `skills.entries.<id>.config` | `Record<string, unknown>` | — | Arbitrary skill-specific configuration object |
+
+---
+
+## `memory` - Memory backend
+
+```json5
+{
+  memory: {
+    backend: "builtin",               // builtin | qmd | external
+    citations: "auto",                // auto | on | off
+    qmd: { searchMode: "search" },    // query | search | vsearch
+  },
+}
+```
+
+---
+
+## `secrets` - SecretRef resolution
+
+```json5
+{
+  secrets: {
+    providers: {
+      "env": { source: "env" },
+      "vault": { source: "exec", command: "/usr/local/bin/vault-fetch" },
+    },
+    defaults: { env: "env", file: "file", exec: "vault" },
+    resolution: { maxProviderConcurrency: 4, maxRefsPerProvider: 256 },
+  },
+}
+```
+
+Sensitive values throughout the config (`gateway.auth.token`, `channels.*.botToken`, `talk.apiKey`, and so on) accept a SecretRef instead of a plaintext string. Run `openclaw secrets reload` after changing providers.
+
+---
+
+## `auth` - Provider auth profiles
+
+```json5
+{
+  auth: {
+    profiles: {
+      "anthropic:work": { provider: "anthropic", mode: "oauth", email: "you@example.com" },
+    },
+    order: { anthropic: ["anthropic:work", "anthropic:personal"] },
+    cooldowns: { billingBackoffHours: 6, failureWindowHours: 1 },
+  },
+}
+```
+
+Auth profile mode is one of `api_key`, `oauth`, or `token`. Managed via `openclaw models auth ...`.
+
+Additional auth keys:
+
+```json5
+{
+  auth: {
+    cooldowns: {
+      billingBackoffHoursByProvider: { anthropic: 6 },
+      billingMaxHours: 24,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `auth.cooldowns.billingBackoffHoursByProvider` | object | `{}` | Per-provider billing backoff hours (record keyed by provider name) |
+| `auth.cooldowns.billingMaxHours` | number | — | Maximum billing backoff hours |
+
+---
+
+## `talk` and `audio` - Voice
+
+```json5
+{
+  talk: {
+    provider: "elevenlabs",
+    voiceId: "...",
+    modelId: "...",
+    apiKey: "...",
+    interruptOnSpeech: true,
+    providers: { elevenlabs: { voiceId: "...", apiKey: "..." } },
+  },
+  audio: {
+    transcription: { /* inbound audio transcription settings */ },
+  },
+}
+```
+
+---
+
+## `browser` - Browser control
+
+```json5
+{
+  browser: {
+    enabled: true,
+    evaluateEnabled: false,
+    headless: false,
+    defaultProfile: "chrome",
+    ssrfPolicy: { dangerouslyAllowPrivateNetwork: false, hostnameAllowlist: ["example.com"] },
+    snapshotDefaults: { mode: "efficient" },   // controls default snapshot strategy
+    // Remote CDP / executable overrides
+    cdpUrl: "ws://127.0.0.1:9222/json/version",  // connect to a remote CDP endpoint
+    remoteCdpTimeoutMs: 10000,                    // timeout for remote CDP connection
+    remoteCdpHandshakeTimeoutMs: 5000,            // timeout for CDP handshake
+    executablePath: "/usr/bin/chromium-browser",  // override auto-detected browser binary
+    noSandbox: false,                             // disable sandbox (for containers)
+    attachOnly: false,                            // attach to existing browser, do not launch
+    cdpPortRangeStart: 9222,                      // starting port for CDP port allocation
+    extraArgs: ["--disable-gpu"],                 // extra browser launch arguments
+    profiles: {
+      "work": { cdpPort: 9222, driver: "clawd", color: "#4A90D9" },   // driver: clawd | extension; color: hex for UI distinction
+    },
+  },
+}
+```
+
+Additional browser SSRF policy keys:
+
+```json5
+{
+  browser: {
+    ssrfPolicy: {
+      dangerouslyAllowPrivateNetwork: false,
+      hostnameAllowlist: [],
+      allowedCidrs: [],
+      allowRfc2544BenchmarkRange: false,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `browser.ssrfPolicy.dangerouslyAllowPrivateNetwork` | boolean | `false` | Allow the browser to fetch RFC-1918 private addresses |
+| `browser.ssrfPolicy.hostnameAllowlist` | string[] | `[]` | Hostnames to allow |
+| `browser.ssrfPolicy.allowedCidrs` | string[] | `[]` | CIDR ranges to allow |
+| `browser.ssrfPolicy.allowRfc2544BenchmarkRange` | boolean | `false` | Allow RFC-2544 benchmark address ranges |
+| `browser.snapshotDefaults.mode` | string | — | Default snapshot strategy for browser tool calls: `"efficient"` |
+
+<Note>
+`browser.ssrfPolicy` supports two field aliases: `allowPrivateNetwork` (alias for `dangerouslyAllowPrivateNetwork`) and `allowedHostnames` (alias for `hostnameAllowlist`). Prefer the canonical names in new configs.
+</Note>
+
+### Additional browser keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `browser.cdpUrl` | string | — | Connect to a remote CDP endpoint instead of launching a browser (e.g. `ws://127.0.0.1:9222/json/version`) |
+| `browser.remoteCdpTimeoutMs` | number | — | Timeout (ms) for establishing a remote CDP connection |
+| `browser.remoteCdpHandshakeTimeoutMs` | number | — | Timeout (ms) for the CDP handshake after connecting |
+| `browser.executablePath` | string | — | Path to the browser executable; overrides auto-detection |
+| `browser.noSandbox` | boolean | `false` | Disable the browser sandbox (required in some containerized environments) |
+| `browser.attachOnly` | boolean | `false` | Attach to an already-running browser instead of launching a new one |
+| `browser.cdpPortRangeStart` | number | — | Starting port number for CDP port allocation |
+| `browser.extraArgs` | string[] | `[]` | Additional arguments passed to the browser on launch |
+| `browser.profiles[*].color` | string | — | Hex color (`#RRGGBB`) used to visually distinguish this profile in the UI |
+
+---
+
+## `acp` - Agent Client Protocol bridge
+
+```json5
+{
+  acp: {
+    enabled: true,
+    defaultAgent: "main",
+    allowedAgents: ["main"],
+    maxConcurrentSessions: 4,
+    stream: { deliveryMode: "live" },   // live | final_only
+  },
+}
+```
+
+Additional ACP streaming keys:
+
+```json5
+{
+  acp: {
+    stream: {
+      coalesceIdleMs: 50,
+      maxChunkChars: 2000,
+      repeatSuppression: true,
+      hiddenBoundarySeparator: "none",    // "none" | "space" | "newline" | "paragraph"
+      maxOutputChars: 10000,              // positive integer; omit for unlimited
+      maxSessionUpdateChars: 4000,        // positive integer; omit for unlimited
+      tagVisibility: { "thinking": false },   // Record<string, boolean>
+    },
+    dispatch: { /* dispatch configuration */ },
+    backend: "custom-backend",            // optional string identifier
+    runtime: { /* runtime configuration */ },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `acp.stream.coalesceIdleMs` | integer | `50` | Idle time before flushing a partial stream chunk (ms) |
+| `acp.stream.maxChunkChars` | integer | — | Max characters per stream chunk |
+| `acp.stream.repeatSuppression` | boolean | `true` | Suppress repeated identical chunks |
+| `acp.stream.hiddenBoundarySeparator` | enum | `"none"` | Separator at hidden chunk boundaries: `"none" \| "space" \| "newline" \| "paragraph"` |
+| `acp.stream.maxOutputChars` | integer | — | Max total output characters; omit for unlimited (must be positive integer if set) |
+| `acp.stream.maxSessionUpdateChars` | integer | — | Max chars per session update; omit for unlimited (must be positive integer if set) |
+| `acp.stream.tagVisibility` | `Record<string, boolean>` | — | Per-tag visibility overrides, e.g. `{ "thinking": false }` |
+| `acp.dispatch` | object | — | Dispatch sub-object (see extended config) |
+| `acp.backend` | string | — | Optional string identifier for the backend |
+| `acp.runtime` | object | — | Runtime environment config: `{ ttlMinutes?: number, installCommand?: string }`. `ttlMinutes` sets the runtime TTL; `installCommand` is run to install runtime dependencies before the session starts |
+
+---
+
+## `update` - Update policy
+
+```json5
+{
+  update: {
+    channel: "stable",                  // stable | beta | dev
+    checkOnStart: true,
+    auto: {
+      enabled: false,
+      stableDelayHours: 6,
+      stableJitterHours: 12,
+      betaCheckIntervalHours: 1,
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `update.auto.stableDelayHours` | number | `6` | Hours to delay applying a stable update after release (max `168`) |
+| `update.auto.stableJitterHours` | number | `12` | Random jitter (hours) added to update checks (max `168`) |
+| `update.auto.betaCheckIntervalHours` | number | `1` | How often (hours) the beta channel is checked (max `24`) |
+
+---
+
+## `discovery` and `canvasHost`
+
+```json5
+{
+  discovery: {
+    mdns: { mode: "minimal" },          // off | minimal | full
+    wideArea: { enabled: false },
+  },
+  canvasHost: {
+    enabled: true,
+    root: "~/.openclaw/canvas",
+    port: 18793,
+    liveReload: true,
+  },
+}
+```
+
+---
+
+## `web` - WhatsApp Web client
+
+Controls the WhatsApp Web client's connection behaviour and reconnection strategy. This is the WhatsApp channel transport - not to be confused with `tools.web`, which configures the agent's web search/fetch tools.
+
+```json5
+{
+  web: {
+    enabled: true,
+    heartbeatSeconds: 30,
+    reconnect: {
+      initialMs: 1000,      // initial reconnect delay
+      maxMs: 30000,         // maximum reconnect delay (ms)
+      factor: 2,            // exponential backoff multiplier
+      jitter: 0.2,          // fractional jitter applied to each delay
+      maxAttempts: 0,       // 0 = unlimited retries
+    },
+  },
+}
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `web.enabled` | boolean | `true` | Enable or disable the WhatsApp Web client |
+| `web.heartbeatSeconds` | number | — | Interval (seconds) between keep-alive heartbeats |
+| `web.reconnect.initialMs` | number | — | Initial reconnect delay in milliseconds |
+| `web.reconnect.maxMs` | number | — | Maximum reconnect delay in milliseconds |
+| `web.reconnect.factor` | number | — | Exponential backoff multiplier applied after each failed attempt |
+| `web.reconnect.jitter` | number | — | Fractional jitter (0–1) added to each computed delay to spread reconnects |
+| `web.reconnect.maxAttempts` | number | — | Maximum reconnect attempts before giving up (`0` = unlimited) |
+
+---
+
+## `broadcast` - Broadcast fan-out
+
+```json5
+{
+  broadcast: {
+    "team-peer-id": ["main", "work"],   // agent ids that receive a broadcast
+  },
+}
+```
+
+Each agent id listed must exist in `agents.list`.
+
+---
+
+## `logging` - Log levels and output
+
+```json5
+{
+  logging: {
+    level: "info",                      // silent | fatal | error | warn | info | debug | trace
+    file: "/tmp/openclaw/openclaw-YYYY-MM-DD.log",
+    consoleLevel: "info",
+    consoleStyle: "pretty",             // pretty | compact | json
+    redactSensitive: "tools",           // off | tools
+    redactPatterns: ["sk-.*"],
+    maxFileBytes: 10485760,             // rotate log file after 10 MB
+    maxBackups: 3,                      // number of rotated log files to keep
+    fileLogs: {                         // per-profile file logging
+      defaults: { file: "/tmp/openclaw/openclaw.log", maxFileBytes: 10485760, maxBackups: 3 },
+      profiles: {
+        "verbose": { file: "/tmp/openclaw/verbose.log", maxFileBytes: 5242880, compress: "gzip" },
+      },
+    },
+  },
+}
+```
+
+`OPENCLAW_LOG_LEVEL=debug` overrides both `level` and `consoleLevel`.
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `logging.level` | string | `"info"` | Global log level: `silent \| fatal \| error \| warn \| info \| debug \| trace` |
+| `logging.file` | string | — | Path template for the log file; `YYYY-MM-DD` is substituted with the current date |
+| `logging.consoleLevel` | string | `"info"` | Log level for console (stdout) output |
+| `logging.consoleStyle` | string | `"pretty"` | Console format: `pretty \| compact \| json` |
+| `logging.redactSensitive` | string | `"tools"` | Redaction scope: `off \| tools` |
+| `logging.redactPatterns` | string[] | `[]` | Additional regex patterns whose matches are redacted from logs |
+| `logging.maxFileBytes` | integer | — | Max log file size in bytes before rotation (e.g. `10485760` = 10 MB) |
+| `logging.maxBackups` | integer | — | Number of rotated log files to retain |
+| `logging.fileLogs` | object | — | Per-profile file logging config. Contains `defaults` (base log config) and `profiles` (named overrides) sub-objects |
+
+---
+
+## `diagnostics` - OpenTelemetry export and session capture
+
+```json5
+{
+  diagnostics: {
+    enabled: true,
+    otel: {
+      enabled: true,
+      endpoint: "http://otel-collector:4318",
+      protocol: "http/protobuf",        // http/protobuf | grpc
+      traces: true,
+      metrics: true,
+      logs: false,
+      sampleRate: 1.0,
+      tracesEndpoint: "http://otel-collector:4318/v1/traces",   // per-signal override
+      metricsEndpoint: "http://otel-collector:4318/v1/metrics",
+      logsEndpoint: "http://otel-collector:4318/v1/logs",
+      serviceName: "wednesdayai-gateway",
+      flushIntervalMs: 5000,
+      captureContent: false,            // or object with granular flags
+      headers: {},                      // auth/custom headers for OTLP exporter
+      langfuse: {
+        host: "https://cloud.langfuse.com",
+        publicKey: "pk-lf-...",
+        secretKey: "sk-lf-...",
+        filterInfraSpans: true,
+        sessionSpans: true,
+        sessionIdleTimeoutMs: 1800000,
+      },
+      runtime: {
+        enabled: false,
+        intervalMs: 30000,
+        collectProc: false,
+      },
+      modelPricing: {
+        // Record<provider, Record<model, { inputPerMToken, outputPerMToken }>>
+        "anthropic": {
+          "claude-sonnet-4-6": { inputPerMToken: 3.0, outputPerMToken: 15.0 },
+        },
+      },
+    },
+    capture: { mode: "off" },           // off | manual | always | schedule
+    cacheTrace: {
+      enabled: false,
+      filePath: "/tmp/openclaw/cache-trace.jsonl",
+      includeMessages: false,
+      includePrompt: false,
+      includeSystem: false,
+    },
+    modelPayloadLog: {
+      enabled: false,
+      usageSummaries: true,
+      rawPayloads: false,
+      captureContent: false,
+      providers: [],
+      file: "",
+      maxQueuedBytes: 0,
+    },
+    stuckSessionWarnMs: 60000,
+    stuckSessionAbortMs: 300000,
+  },
+}
+```
+
+### `diagnostics.otel` keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `diagnostics.otel.enabled` | boolean | `false` | Enable OTLP export |
+| `diagnostics.otel.endpoint` | string | — | Base OTLP collector endpoint (used when per-signal endpoints are not set) |
+| `diagnostics.otel.tracesEndpoint` | string | — | Per-signal OTLP endpoint for traces; overrides `endpoint` for traces |
+| `diagnostics.otel.metricsEndpoint` | string | — | Per-signal OTLP endpoint for metrics; overrides `endpoint` for metrics |
+| `diagnostics.otel.logsEndpoint` | string | — | Per-signal OTLP endpoint for logs; overrides `endpoint` for logs |
+| `diagnostics.otel.protocol` | string | `"http/protobuf"` | `"http/protobuf" \| "grpc"` |
+| `diagnostics.otel.traces` | boolean | `true` | Export trace spans |
+| `diagnostics.otel.metrics` | boolean | `true` | Export metrics |
+| `diagnostics.otel.logs` | boolean | `false` | Export logs via OTLP |
+| `diagnostics.otel.sampleRate` | number | `1.0` | Trace sample rate (`0.0`–`1.0`) |
+| `diagnostics.otel.serviceName` | string | — | Service name tag attached to all telemetry |
+| `diagnostics.otel.flushIntervalMs` | integer | — | How often (ms) buffered telemetry is flushed to the collector |
+| `diagnostics.otel.captureContent` | boolean \| object | `false` | Capture message content in trace spans. Pass `true` to capture all, or an object with granular flags per signal type |
+| `diagnostics.otel.headers` | object | `{}` | HTTP headers sent with every OTLP request (e.g. `Authorization`) |
+| `diagnostics.otel.langfuse` | object | — | Langfuse integration — see sub-table below |
+| `diagnostics.otel.runtime` | object | — | Runtime metrics collection: `{ enabled?: boolean (default false), intervalMs?: number, collectProc?: boolean }` |
+| `diagnostics.otel.modelPricing` | `Record<string, Record<string, { inputPerMToken: number, outputPerMToken: number }>>` | — | Per-provider model pricing overrides for cost tracking |
+
+**`diagnostics.otel.langfuse` sub-keys:**
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `langfuse.host` | string | `"https://cloud.langfuse.com"` | Langfuse instance URL |
+| `langfuse.publicKey` | string | — | Langfuse project public key |
+| `langfuse.secretKey` | string | — | Langfuse project secret key |
+| `langfuse.filterInfraSpans` | boolean | `true` | Exclude internal infrastructure spans from Langfuse traces |
+| `langfuse.sessionSpans` | boolean | `true` | Group spans by gateway session |
+| `langfuse.sessionIdleTimeoutMs` | integer | `1800000` | Idle timeout (ms) before a Langfuse session is closed (default 30 min) |
+
+### Top-level `diagnostics` keys
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `diagnostics.capture` | object | — | Session capture config: `{ mode: "off" \| "manual" \| "always" \| "schedule", ... }` |
+| `diagnostics.cacheTrace` | object | — | Cache trace config: `{ enabled?: boolean, filePath?: string, includeMessages?: boolean, includePrompt?: boolean, includeSystem?: boolean }` |
+| `diagnostics.modelPayloadLog` | object | — | Model payload logging config: `{ enabled?: boolean, usageSummaries?: boolean, rawPayloads?: boolean, captureContent?: boolean, providers?: string[], file?: string, maxQueuedBytes?: number }` |
+| `diagnostics.stuckSessionWarnMs` | integer | `60000` | Emit a warning if a session has not advanced for this many milliseconds |
+| `diagnostics.stuckSessionAbortMs` | integer | `300000` | Abort a session that has been stuck longer than this many milliseconds |
+| `diagnostics.flags` | string[] | `[]` | Debug flag strings for internal diagnostic tracing (e.g. `["rpc-trace", "session-gc"]`) |
+
+<Warning>
+`modelPayloadLog.enabled: true` writes usage summaries to disk. To capture unredacted payloads, also set `rawPayloads: true` or `captureContent: true`. Never enable raw payload capture in production — logs will contain user messages and model responses in plaintext.
+</Warning>
+
+---
+
+## `ui`, `cli`, `meta`, `wizard`
+
+```json5
+{
+  ui: { seamColor: "#FF5A2D", assistant: { name: "Wednesday", avatar: "https://..." } },
+  cli: { banner: { taglineMode: "random" } },        // random | default | off
+  meta: { lastTouchedVersion: "2026.3.2" },          // bookkeeping; usually agent-managed
+  wizard: { lastRunMode: "local" },                  // bookkeeping
+}
+```
+
+---
+
+## `bindings` - Multi-agent routing
+
+```json5
+{
+  agents: {
+    list: [
+      { id: "home", default: true, workspace: "~/.openclaw/workspace-home" },
+      { id: "work", workspace: "~/.openclaw/workspace-work" },
+    ],
+  },
+  bindings: [
+    { agentId: "home", match: { channel: "whatsapp", accountId: "personal" } },
+    { agentId: "work", match: { channel: "whatsapp", accountId: "biz" } },
+  ],
+}
+```
+
+---
+
+## Config RPC (programmatic updates)
+
+Rate-limited to 3 requests per 60 seconds per `deviceId+clientIp`. Pass `baseHash` from `config.get` to prevent conflicting writes.
+
+**Full replace:**
+```bash
+openclaw gateway call config.get --params '{}'  # capture payload.hash
+openclaw gateway call config.apply --params '{
+  "raw": "{ agents: { defaults: { workspace: \"~/.openclaw/workspace\" } } }",
+  "baseHash": "<hash>"
+}'
+```
+
+**Partial update** (JSON merge patch - `null` deletes a key, objects merge recursively, arrays replace):
+```bash
+openclaw gateway call config.patch --params '{
+  "raw": "{ channels: { telegram: { groups: { \"*\": { requireMention: false } } } } }",
+  "baseHash": "<hash>"
+}'
+```
+
+## Related
+
+- [CLI reference](/next/reference/cli)
+- [Gateway API reference](/next/reference/api)
+- [Gateway authentication](/next/admin/gateway/authentication)
+- [Gateway remote access](/next/admin/gateway/remote-access)
+- [Health checks](/next/admin/gateway/health-checks)

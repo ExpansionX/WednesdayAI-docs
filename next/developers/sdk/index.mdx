@@ -1,0 +1,335 @@
+---
+title: "Plugin SDK"
+description: "The stable API surface for WednesdayAI plugins: the register entry, api.register* methods, api.runtime sub-APIs, and typed exports."
+audience: developer
+---
+
+# Plugin SDK
+
+The plugin SDK is the stable API surface for WednesdayAI extensions. Plugins import from `openclaw/plugin-sdk` — never from core internals or relative paths into `src/`.
+
+## Installation
+
+Add `openclaw` as a dev/peer dependency. Use `wednesdayai` (the primary package name) or `openclaw` (the backward-compatible alias — both resolve to the same package):
+
+```json
+{
+  "type": "module",
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "devDependencies": {
+    "openclaw": "^0.4.0"
+  }
+}
+```
+
+Never add `openclaw` to `dependencies` — the gateway provides it at runtime.
+
+## The plugin entry
+
+A plugin module exports a default `register` function (sync or async) that receives the `OpenClawPluginApi`:
+
+```ts
+import type { OpenClawPluginApi } from "openclaw/plugin-sdk";
+
+export default function register(api: OpenClawPluginApi): void {
+  // register tools, hooks, channels, routes, etc.
+}
+```
+
+A plugin may instead export an `OpenClawPluginDefinition` object with a `register` (or `activate`) method and optional `id` / `name` / `configSchema` / `ownsCompaction` fields. Both forms are accepted.
+
+## The `api` object
+
+`OpenClawPluginApi` is what your `register` function receives. Key fields and methods:
+
+| Member | Purpose |
+| ------ | ------- |
+| `api.id`, `api.name`, `api.version` | Plugin identity |
+| `api.source` | Source/origin of this plugin (e.g. npm package name or local path) |
+| `api.description` | Optional human-readable plugin description |
+| `api.config` | The resolved `OpenClawConfig` |
+| `api.pluginConfig` | This plugin's config (`Record<string, unknown> \| undefined`) |
+| `api.logger` | `PluginLogger` (`info` / `warn` / `error` / `debug?`) |
+| `api.runtime` | Runtime sub-APIs (see below) |
+| `api.registerTool(tool, opts?)` | Register an agent tool ([guide](/next/developers/agent-tools)) |
+| `api.on(name, handler, opts?)` | Register a lifecycle hook ([guide](/next/developers/hooks)) |
+| `api.registerHook(events, handler, opts?)` | Lower-level hook registration |
+| `api.registerChannel(reg)` | Register a channel ([guide](/next/developers/channel-adapters)) |
+| `api.registerHttpRoute(params)` | Register a gateway HTTP route |
+| `api.registerGatewayMethod(method, handler)` | Register a gateway RPC method |
+| `api.registerCli(registrar, opts?)` | Add CLI commands |
+| `api.registerCommand(command)` | Register a chat command that bypasses the LLM |
+| `api.registerService(service)` | Register a start/stop background service |
+| `api.registerProvider(provider)` | Register a model provider |
+| `api.registerWebSearchProvider(provider)` | Register a web-search provider |
+| `api.registerRealtimeVoiceProvider(definition)` | Register a real-time voice provider (`RealtimeVoiceProviderPlugin`) |
+| `api.resolvePath(input)` | Resolve a path relative to the plugin |
+
+## `api.runtime` sub-APIs
+
+`api.runtime` exposes vetted runtime capabilities so plugins never reach into core internals:
+
+| Sub-API | Key methods | Notes |
+| ------- | ----------- | ----- |
+| `runtime.identity` | `resolveCanonicalIdentity(params: { channel?: string; senderId?: string }): string \| undefined` | Resolve the canonical identity string for a channel/sender pair |
+| `runtime.analysis` | `run(params: AnalysisRunParams): Promise<AnalysisResult>`, `enqueue(params: AnalysisRunParams, onComplete?: (result: AnalysisResult) => void): AnalysisJob` | Plugin-owned focused LLM analysis. See [Analysis runtime](/next/developers/analysis-runtime). |
+| `runtime.signals` | `publish(signal)`, `subscribe(filter, handler)`, `getAvailability()`, `requestWake()`, `nudge(agentId, message)` | Agent Signals bus. See [Agent signals](/next/developers/agent-signals). |
+| `runtime.state` | `resolveStateDir(agentId?)` | Resolve the plugin/agent on-disk state directory |
+| `runtime.config` | `loadConfig()`, `writeConfigFile(patch)` | Read or write the gateway config at runtime |
+| `runtime.media` | `loadWebMedia(url)`, `detectMime(buf)`, `getImageMetadata(buf)`, `resizeToJpeg(buf, opts)`, `mediaKindFromMime(mime)`, `isVoiceCompatibleAudio(mime)` | Media fetch, detection, and transform utilities |
+| `runtime.tts` | `textToSpeechTelephony(text, opts)` | Text-to-speech for voice/telephony channels |
+| `runtime.stt` | `transcribeAudioFile(path, opts)` | Audio file transcription |
+| `runtime.tools` | `createMemoryGetTool()`, `createMemorySearchTool()`, `registerMemoryCli(api)` | Built-in memory tool factories |
+| `runtime.events` | `onAgentEvent(handler)`, `onSessionTranscriptUpdate(handler)` | Subscribe to agent lifecycle and transcript events |
+| `runtime.system` | `enqueueSystemEvent(event)`, `requestHeartbeatNow()`, `runCommandWithTimeout(cmd, opts)`, `formatNativeDependencyHint(dep)` | System-level actions |
+| `runtime.logging` | `getChildLogger(bindings?: Record<string, unknown>, opts?: { level?: LogLevel })`, `shouldLogVerbose()` | Scoped logger and verbosity check |
+| `runtime.channel` | Channel-level utilities (chunking, routing, pairing, media, sessions, reactions, groups) | Internal channel runtime — use only when building channel adapters |
+
+<Warning>
+  `resolveStateDir` is **no longer exported** as a top-level SDK symbol. Resolve the state
+  directory via `api.runtime.state.resolveStateDir()` instead.
+</Warning>
+
+## Tool parameter schemas (typebox)
+
+Tool `parameters` use `@sinclair/typebox`. Pin it to exactly `0.34.48`:
+
+```json
+{
+  "dependencies": {
+    "@sinclair/typebox": "0.34.48"
+  }
+}
+```
+
+Schema constraints:
+
+- No `Type.Union`, `anyOf`, `oneOf`, or `allOf`.
+- Use `Type.Optional(...)` instead of `... | null`.
+- Use `stringEnum` / `optionalStringEnum` (exported from the SDK) for string enumerations.
+- Never use `format` as a raw property name.
+
+```ts
+import { Type } from "openclaw/plugin-sdk";
+import { stringEnum, optionalStringEnum } from "openclaw/plugin-sdk";
+
+const parameters = Type.Object({
+  mode: stringEnum(["fast", "thorough"]),
+  region: optionalStringEnum(["us", "eu"]),
+});
+```
+
+## Commonly used exports
+
+These are exported from `openclaw/plugin-sdk` and are safe to depend on:
+
+- **Types** — `OpenClawPluginApi`, `OpenClawPluginDefinition`, `AnyAgentTool`, `ChannelPlugin` (and the `Channel*Adapter` family), `PluginRuntime`, `OpenClawConfig`, the `Analysis*` types, the `AgentSignal*` types, `AgentAvailability`, `RealtimeVoiceProviderPlugin`, `RealtimeVoiceBridge` (direct return type of `createBridge()`), `RealtimeVoiceBridgeSession`, `ProviderPlugin`, `GatewayRequestHandler`, `GatewayRequestHandlerOptions`, `RespondFn`, `WebSearchProviderPlugin`, `WebSearchProviderToolDefinition`, `WebSearchProviderContext`.
+- **Hook payload types** — `PluginHookMessageReceivedEvent`, `PluginHookBeforeContextSendEvent`, `PluginHookBeforeContextSendResult`, `PluginHookStorageAfterAppendEvent`, `PluginHookCompactionPlanEvent`, `PluginHookCompactionPlanResult`, `PluginHookContextCollectEvent`, `PluginHookContextCollectResult`, `PluginHookContextProjectEvent`, `PluginHookContextProjectResult`, `PluginHookContextPruneEvent`, `PluginHookContextPruneResult`, `PluginHookTransformLlmInputEvent`, `PluginHookTransformLlmInputResult`, `PluginHookTransformLlmOutputEvent`, `PluginHookTransformLlmOutputResult`, `PluginHookModelCallEndedEvent`, `PluginHookAgentEndEvent`, and more. The SDK exports event and result types for most of the 33 hook points. **Exception:** `PluginHookSubagentSpawningEvent` is **not** exported from `openclaw/plugin-sdk`; use `import type` from core types directly, or derive the type with the `Parameters<...>` pattern.
+- **Tool helpers** — `jsonResult`, `readStringParam`, `readNumberParam`, `readReactionParams`, `createActionGate`, `ToolAuthorizationError`.
+- **Schema helpers** — `stringEnum`, `optionalStringEnum`, `emptyPluginConfigSchema`.
+- **Logging** — `createSubsystemLogger`, `getChildLogger`, `appendFileLog`, `createFileLogWriter`.
+- **Config/secrets** — `loadConfig`, `isSecretRef`, `SecretInput` / `SecretRef` types.
+- **HTTP/webhooks** — `registerPluginHttpRoute`, `registerWebhookTarget`, `registerWebhookTargetWithPluginRoute` (standalone function — not an `api` method), request-guard helpers (`fetchWithSsrFGuard`, `GuardedFetchOptions`, `GuardedFetchResult`).
+- **Diagnostics builders** — `taskDiagnostic`, `dreamDiagnostic` (input-shaped; no `ts`/`seq`). Prefer these over casting loose objects into `emitDiagnosticEvent`. Live fields: `passId` (not `passName`), `attempts` (not `attempt`). OTel exports `openclaw.task.*` / `openclaw.dream.*` spans when `diagnostics-otel` is enabled.
+
+<Note>
+  `ToolDefinition`, `inputSchema`, `run()`, `HookContext`, and `PluginDefinition.tools[]`
+  do **not** exist in this SDK. Tools are `AnyAgentTool` objects with `parameters` and
+  `execute(_id, params)`, registered via `api.registerTool(...)`. Hooks are registered via
+  `api.on(...)`.
+</Note>
+
+## Type reference
+
+Full definitions for types introduced in this SDK. Import all of these from `openclaw/plugin-sdk`.
+
+### Plugin registration types
+
+```typescript
+import type {
+  RealtimeVoiceProviderPlugin,
+  RealtimeVoiceBridge,
+  RealtimeVoiceBridgeSession,
+  OpenClawConfig,
+  RealtimeVoiceProviderConfig,
+  RealtimeVoiceProviderCapabilities,
+  RealtimeVoiceBridgeCreateRequest,
+  RealtimeVoiceBrowserSession,
+} from "openclaw/plugin-sdk"
+
+interface RealtimeVoiceProviderPlugin {
+  id: string
+  label: string
+  isConfigured(ctx: { cfg?: OpenClawConfig; providerConfig: RealtimeVoiceProviderConfig }): boolean
+  createBridge(req: RealtimeVoiceBridgeCreateRequest): RealtimeVoiceBridge
+  aliases?: string[]
+  defaultModel?: string
+  models?: readonly string[]
+  autoSelectOrder?: number
+  capabilities?: RealtimeVoiceProviderCapabilities
+  resolveConfig?: (ctx) => RealtimeVoiceProviderConfig
+  createBrowserSession?: (req) => Promise<RealtimeVoiceBrowserSession>
+}
+```
+
+### Config helpers
+
+```typescript
+import { emptyPluginConfigSchema } from "openclaw/plugin-sdk"
+// Returns a Typebox schema validating as an empty object — use when your plugin has no config
+```
+
+### File log utilities
+
+```typescript
+import { appendFileLog, createFileLogWriter } from "openclaw/plugin-sdk"
+
+// Types used by these utilities (imported the same way if needed):
+// FileLogAppendOptions, FileLogAppendResult
+
+// Append a single line:
+appendFileLog(line: string, options: FileLogAppendOptions): Promise<FileLogAppendResult> | FileLogAppendResult
+
+// Create a writer for repeated use:
+const writer = createFileLogWriter({ file: string, profileId: string })
+// Note: rotation is controlled by maxFileBytes/maxBackups in the logging config, not here.
+writer.append(line: string): Promise<FileLogAppendResult> | FileLogAppendResult
+writer.diagnostics(): unknown
+```
+
+### AgentAvailability
+
+```typescript
+interface AgentAvailability {
+  available: boolean
+  reason?: string         // shown to users when unavailable
+  nextAvailableAt?: string  // ISO-8601
+  timezone?: string
+}
+```
+
+### Gateway types
+
+```typescript
+import type { GatewayRequestHandlerOptions, RespondFn } from "openclaw/plugin-sdk"
+
+type GatewayRequestHandler = (opts: GatewayRequestHandlerOptions) => Promise<void> | void
+
+interface GatewayRequestHandlerOptions {
+  req: {
+    method: string
+    path: string
+    headers: Record<string, string>
+    body: unknown
+    query: Record<string, string>
+  }
+  respond: RespondFn
+}
+
+type RespondFn = (response: {
+  status?: number
+  headers?: Record<string, string>
+  body: unknown
+}) => void
+```
+
+### Web search provider types
+
+```typescript
+import type { WebSearchProviderPlugin, WebSearchProviderToolDefinition, WebSearchProviderContext } from "openclaw/plugin-sdk"
+
+interface WebSearchProviderPlugin {
+  id: string;
+  label: string;
+  hint: string;
+  envVars: string[];
+  autoDetectOrder?: number;
+  createTool(ctx: WebSearchProviderContext): WebSearchProviderToolDefinition | null;
+}
+
+interface WebSearchProviderContext {
+  config?: OpenClawConfig;
+}
+
+interface WebSearchProviderToolDefinition {
+  description: string;
+  parameters: Record<string, unknown>;
+  execute(args: Record<string, unknown>, context?: { signal?: AbortSignal }): Promise<Record<string, unknown>>;
+}
+```
+
+### Hook payload types
+
+```typescript
+import type {
+  PluginHookMessageReceivedEvent,
+  PluginHookBeforeContextSendEvent,
+  PluginHookBeforeContextSendResult,
+  PluginHookStorageAfterAppendEvent,
+  PluginHookCompactionPlanEvent,
+  PluginHookCompactionPlanResult,
+  PluginHookContextCollectEvent,
+  PluginHookContextCollectResult,
+  PluginHookContextProjectEvent,
+  PluginHookContextProjectResult,
+  PluginHookContextPruneEvent,
+  PluginHookContextPruneResult,
+  PluginHookTransformLlmInputEvent,
+  PluginHookTransformLlmInputResult,
+  PluginHookTransformLlmOutputEvent,
+  PluginHookTransformLlmOutputResult,
+  PluginHookModelCallEndedEvent,
+  PluginHookAgentEndEvent,
+  // ... event and result types for all 33 hook points are exported
+} from "openclaw/plugin-sdk"
+
+// PluginHookSubagentSpawningEvent is NOT exported from openclaw/plugin-sdk.
+// Import it from core types directly, or derive it:
+// type SpawningEvent = Parameters<Parameters<typeof api.on<"subagent_spawning">>[1]>[0]
+```
+
+### Provider plugin family
+
+```typescript
+// Abridged — shows the most commonly used fields.
+interface ProviderPlugin {
+  id: string
+  label: string
+  auth: ProviderAuthMethod[]   // required — authentication methods the provider supports
+  docsPath?: string
+  aliases?: string[]
+  hookAliases?: string[]       // hook-name aliases for this provider
+  envVars?: string[]
+  models?: ModelProviderConfig // model listing / capability metadata
+  // Functional extension points (omitted here for brevity):
+  // prepareExtraParams?, createStreamFn?, wrapStreamFn?
+}
+```
+
+## Manifest vs package.json key
+
+Two related-but-distinct things both use the word "openclaw":
+
+- **`openclaw.plugin.json`** — the manifest at the plugin root. Carries `id` and `configSchema` and is used to validate config **without executing plugin code**. Required for every plugin. See the [manifest reference](/next/developers/plugins/manifest).
+- **`package.json` `"openclaw"` key** — used for workspace/pack discovery (for example the `id`, or `extensions` for a multi-plugin pack).
+
+A typical published plugin ships both: the `package.json` `"openclaw"` key for discovery, and `openclaw.plugin.json` for config validation.
+
+## Extending the SDK surface
+
+When you need a type or contract that is not yet exported:
+
+1. Do not import it from core internals — that creates a hard coupling that breaks on upgrade.
+2. Open an issue or PR to add it to `src/plugin-sdk/` with documentation.
+3. Keep exports typed. No `any` in the SDK surface.
+
+See [Contributing](/next/developers/contributing) for the workflow.
+
+## What's next
+
+- [Agent tools](/next/developers/agent-tools)
+- [Hooks](/next/developers/hooks)
+- [Channel adapters](/next/developers/channel-adapters)
+- [Analysis runtime](/next/developers/analysis-runtime) and [Agent signals](/next/developers/agent-signals)

@@ -14,28 +14,28 @@ Use this page for scheduler and delivery issues (`cron` + `heartbeat`).
 ## Command ladder
 
 ```bash
-openclaw status
-openclaw gateway status
-openclaw logs --follow
-openclaw doctor
-openclaw channels status --probe
+wednesdayai status
+wednesdayai gateway status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai channels status --probe
 ```
 
 Then run automation checks:
 
 ```bash
-openclaw cron status
-openclaw cron list
-openclaw system heartbeat last
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai system heartbeat last
 ```
 
 ## Cron not firing
 
 ```bash
-openclaw cron status
-openclaw cron list
-openclaw cron runs --id <jobId> --limit 20
-openclaw logs --follow
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai logs --follow
 ```
 
 Good output looks like:
@@ -47,20 +47,25 @@ Good output looks like:
 Common signatures:
 
 - `cron: scheduler disabled; jobs will not run automatically` → cron disabled in config/env.
+- `[cron] failed to start: value "..." is out of range for type integer` → Postgres
+  `cron_jobs` still has 32-bit `integer` on an epoch-ms column. Restart on a build
+  that widens those columns to `BIGINT`. See [Where cron jobs are stored](/users/automation/cron-jobs#where-cron-jobs-are-stored).
 - `cron: timer tick failed` → scheduler tick crashed; inspect surrounding stack/log context.
-- `reason: not-due` in run output → `openclaw cron run <jobId> --due` or Web UI **Run if due** was used and the job is not due yet.
+- `reason: not-due` in run output → `wednesdayai cron run <jobId> --due` or Web UI **Run if due** was used and the job is not due yet.
 - `main job requires payload.kind="systemEvent"` → the job is stored as a main-session job with an incompatible payload. Use the Web UI **Timeline message** or **Check first, then nudge** job type, or recreate the job with a matching `sessionTarget`/`payload.kind`.
 - `isolated job requires payload.kind=agentTurn` → the job is stored as an isolated job without an assistant-task payload. Use the Web UI **Assistant task** job type or recreate the job with `--session isolated --message ...`.
-- `wake-gate-empty` → the wake-gate check ran and found no work. This is a valid skipped result, not a scheduler failure.
-- `already running` or `already-running` → the previous run or target lane is still active. Wait for it to finish, then inspect `openclaw cron runs --id <jobId> --limit 20`.
+- `wake-gate-empty` → the **job-level** wake-gate check ran and found no work. This is a valid skipped result, not a scheduler failure. A main-session Timeline message (`wakeMode=now`) must **not** inherit this from `heartbeat.wakeGate`. If a due main cron is skipped as `wake-gate-empty`, the job itself has a wake-gate payload — it is not waiting on the periodic heartbeat email-gate.
+- `main cron enqueueAgentTurn not wired` → the Gateway is an older build without the agent-turn producer wiring. Restart on a build that includes H2 (`enqueueAgentTurn` on CronService).
+- `already running` or `already-running` → the previous run or target lane is still active. Wait for it to finish, then inspect `wednesdayai cron runs --id <jobId> --limit 20`.
+- `cron: disabled job <id>: malformed payload_json` (or `schedule_json`) → the stored job was unreadable and was disabled on load. See [A job turned itself off](/users/automation/cron-jobs#a-job-turned-itself-off-or-lost-its-delivery-settings).
 
 ## Cron fired but no delivery
 
 ```bash
-openclaw cron runs --id <jobId> --limit 20
-openclaw cron list
-openclaw channels status --probe
-openclaw logs --follow
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai cron list
+wednesdayai channels status --probe
+wednesdayai logs --follow
 ```
 
 Good output looks like:
@@ -75,14 +80,15 @@ Common signatures:
 - Delivery target missing/invalid (`channel`/`to`) → run may succeed internally but skip outbound.
 - Channel auth errors (`unauthorized`, `missing_scope`, `Forbidden`) → delivery blocked by channel credentials/permissions.
 - Web UI shows `Not delivered` on an internal run → delivery was not requested. Set result delivery to `announce` or `webhook` when you expect an outbound message.
+- `cron: dropped malformed delivery_json on job <id>` → the stored delivery settings were unreadable and were dropped. Set them again with `wednesdayai cron edit <jobId>`.
 
 ## Heartbeat suppressed or skipped
 
 ```bash
-openclaw system heartbeat last
-openclaw logs --follow
-openclaw config get agents.defaults.heartbeat
-openclaw channels status --probe
+wednesdayai system heartbeat last
+wednesdayai logs --follow
+wednesdayai config get agents.defaults.heartbeat
+wednesdayai channels status --probe
 ```
 
 Good output looks like:
@@ -100,11 +106,11 @@ Common signatures:
 ## Timezone and activeHours gotchas
 
 ```bash
-openclaw config get agents.defaults.heartbeat.activeHours
-openclaw config get agents.defaults.heartbeat.activeHours.timezone
-openclaw config get agents.defaults.userTimezone || echo "agents.defaults.userTimezone not set"
-openclaw cron list
-openclaw logs --follow
+wednesdayai config get agents.defaults.heartbeat.activeHours
+wednesdayai config get agents.defaults.heartbeat.activeHours.timezone
+wednesdayai config get agents.defaults.userTimezone || echo "agents.defaults.userTimezone not set"
+wednesdayai cron list
+wednesdayai logs --follow
 ```
 
 Quick rules:
@@ -121,7 +127,7 @@ Common signatures:
 
 Related:
 
-- [/automation/cron-jobs](/automation/cron-jobs)
-- [/gateway/heartbeat](/gateway/heartbeat)
-- [/automation/cron-vs-heartbeat](/automation/cron-vs-heartbeat)
-- [/concepts/timezone](/concepts/timezone)
+- [/automation/cron-jobs](/users/automation/cron-jobs)
+- [/gateway/heartbeat](/admin/gateway/heartbeat)
+- [/automation/cron-vs-heartbeat](/users/automation/cron-vs-heartbeat)
+- [/concepts/timezone](/developers/concepts/timezone)

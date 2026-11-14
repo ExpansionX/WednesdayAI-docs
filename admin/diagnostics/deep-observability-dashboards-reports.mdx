@@ -1,0 +1,223 @@
+---
+summary: "Dashboard, alert, recording-rule, and report guide for deep observability"
+audience: admin | developer
+sources:
+  - docs/diagnostics/deep-observability-stack-handoff.md
+  - /srv/shared/grafana/dashboards-wednesdayai
+  - /srv/shared/config/alert_rules.yml
+generated: 2026-06-18
+read_when:
+  - Designing Grafana dashboards for WednesdayAI runtime and process diagnostics
+  - Adding alert rules for deep observability signals
+  - Creating daily or weekly Markdown and JSON performance reports
+title: "Deep Observability Dashboards and Reports"
+---
+
+# Deep Observability Dashboards and Reports
+
+This guide defines the panels, alerts, recording rules, and report outputs expected after the stack handoff is applied in `/srv/shared`. It avoids hard-coded Grafana UIDs for new dashboards; create UIDs in the stack repository when the JSON is implemented.
+
+Existing `/srv/shared/grafana/dashboards-wednesdayai` coverage includes overview, gateway health, request analysis, session queue, LLM performance, token usage, and Langfuse trace views. Deep observability adds runtime/process, profiling, plugin-boundary, and release-comparison views.
+
+## Dashboard Panels
+
+### Runtime and process health
+
+Add a runtime/process row to the WednesdayAI gateway health dashboard:
+
+- Event loop utilization and event loop delay p99.
+- GC pause duration p50/p95/p99 by GC type, plus GC count rate.
+- V8 heap used, heap available, heap limit, and heap-space breakdown.
+- RSS, heap used, external memory, and array buffers.
+- Process CPU user/system rate and CPU saturation.
+- File descriptor count, `/proc/self/io` read/write bytes, and `process.runtime.nodejs.resource_usage.delta` trends.
+- Process RSS/CPU for the gateway and child agent processes from `hostmetrics` or process-exporter.
+
+These panels should use low-cardinality labels only: service, host, process name, PID when needed for live troubleshooting, GC type, and heap space. Do not group by `runId`, `sessionKey`, `userId`, or `chatId`.
+
+### Plugin hook and boundary attribution
+
+Add a boundary attribution dashboard or row:
+
+- Plugin hook latency p50/p95/p99 by `openclaw.component.id`, `openclaw.operation`, `hook.name`, and status.
+- Plugin hook error rate by plugin and hook.
+- Top slow plugins over one hour and one day.
+- Boundary event rate by kind: plugin, channel, provider, tool, routing, memory, search, runtime.
+- Links from high-latency plugin panels to Tempo traces filtered by the same `openclaw.component.id` and `openclaw.operation`.
+
+The dashboard should answer which extension or boundary is slow without turning plugin IDs into unbounded labels. Unknown or high-cardinality IDs should be dropped by the app metric attribute policy before data reaches Prometheus.
+
+### Queue, session, and stuck-work pressure
+
+Extend the existing session queue dashboard:
+
+- Queue depth by channel and lane.
+- Queue wait p50/p95/p99.
+- Active sessions and processing sessions.
+- Stuck-session candidate count, but keep alerting disabled until the stuck-session detector is verified against current lifecycle behavior.
+- Session recovery requested/completed rates.
+- Child process churn: process start/exit rate, active child agent count, and restart loops.
+
+### Provider and model health
+
+Extend LLM performance and token usage views:
+
+- Provider/model request count, error rate, TTFB, and operation duration.
+- Token usage by provider/model/token type.
+- Context pressure where available: used tokens, limit tokens, and headroom.
+- Provider health score or rolling failure windows when model health tracking is implemented.
+- Links from provider error panels to Langfuse traces and Tempo spans.
+
+### Disk I/O and network I/O
+
+Use process-level metrics when available and host/container metrics as baseline:
+
+- Per-process disk read/write bytes and IOPS for gateway and child agent processes.
+- Host disk saturation, filesystem free space, and container I/O for correlation.
+- Network receive/transmit bytes and errors for the host.
+- Optional eBPF/Beyla HTTP or gRPC RED panels: request rate, error rate, duration, and peer/service labels.
+
+The application cannot attribute kernel disk/network usage to a plugin inside one Node.js process. Use plugin hook wall-time and traces for attribution, and process/eBPF metrics for host-level confirmation.
+
+### Traces, logs, and profiles
+
+Every dashboard row that can point to an investigation should carry links:
+
+- Prometheus metric panel to Tempo traces by service, operation, plugin, provider, or status.
+- Tempo trace to Loki logs using trace ID fields.
+- Tempo trace to Pyroscope profile when Pyroscope is enabled.
+- Loki log panel for `openclaw-gateway.service` journald entries and OTLP logs.
+- Langfuse trace links for model-call and token-cost investigation.
+
+### Release sweep comparison
+
+Add a release comparison dashboard or row once the release performance sweep exists:
+
+- Before/after runtime snapshot deltas: RSS, heap, CPU, resource usage.
+- Optional CPU profile window markers.
+- Heap snapshot/report artifact links where the operator stores them.
+- Request latency, queue wait, token rate, and provider error-rate deltas across release windows.
+- A table of regressions above thresholds, sorted by severity and confidence.
+
+## Alerts
+
+Start with warning alerts and tune thresholds during an always-on profiling burn-in:
+
+- Event loop p99 or utilization sustained above target for five minutes.
+- GC pause p99 spikes or major-GC rate increase.
+- RSS growth slope sustained over 30-60 minutes.
+- Heap used near V8 heap limit.
+- Gateway process missing or child process churn above baseline.
+- Queue wait or queue depth sustained above normal.
+- Stuck sessions only after detector validation; until then, keep as dashboard-only or warning-only.
+- Provider/model error rate, high TTFB, or high operation duration.
+- OTel collector dropped spans, metrics, or logs.
+- Pyroscope ingestion missing during `always` or scheduled windows.
+- Promtail journald scrape missing `openclaw-gateway.service`.
+
+Alert annotations should include links to the relevant Grafana dashboard, Tempo trace query, Loki query, Pyroscope profile query, and the release/report artifact when available.
+
+## Recording Rules
+
+Create recording rules for expensive or repeated queries:
+
+- `wednesdayai:process_cpu_seconds:rate5m` by host and process.
+- `wednesdayai:process_rss_bytes:max5m` by host and process.
+- `wednesdayai:process_io_bytes:rate5m` by host, process, and direction.
+- `wednesdayai:event_loop_utilization:avg5m`.
+- `wednesdayai:gc_duration_seconds:p99_5m` by GC type.
+- `wednesdayai:plugin_hook_duration_seconds:p95_5m` by plugin, hook, and status.
+- `wednesdayai:plugin_hook_errors:rate5m` by plugin and hook.
+- `wednesdayai:provider_operation_duration_seconds:p95_5m` by provider and model.
+- `wednesdayai:queue_wait_seconds:p95_5m` by channel and lane.
+- `wednesdayai:token_usage:rate5m` by provider, model, and token type.
+
+Keep recording-rule outputs bounded. If a candidate rule includes raw user, chat, run, session, prompt, path, or payload labels, reject it.
+
+## Daily and Weekly Reports
+
+Generate both Markdown for humans and JSON for agentic review.
+
+### Markdown shape
+
+```markdown
+# WednesdayAI Deep Observability Report
+
+- Window: 2026-06-17T00:00:00Z to 2026-06-18T00:00:00Z
+- Mode: diagnostics.capture.mode=always; profiling=stack-managed
+- Stack: Prometheus, Loki, Tempo, Pyroscope, Langfuse
+
+## Executive Summary
+
+- Overall health:
+- Biggest regression:
+- Highest-confidence next investigation:
+
+## Top Consumers
+
+| Rank | Area     | Signal     | Value      | Link              |
+| ---- | -------- | ---------- | ---------- | ----------------- |
+| 1    | plugin   | hook p95   | 0 ms       | Grafana/Tempo     |
+| 2    | provider | tokens     | 0          | Langfuse/Grafana  |
+| 3    | process  | RSS growth | 0 MiB/hour | Grafana/Pyroscope |
+
+## Regressions
+
+| Severity | Signal | Current | Baseline | Delta | Link |
+| -------- | ------ | ------- | -------- | ----- | ---- |
+
+## Recommended Next Investigations
+
+1. Investigation:
+   Evidence:
+   Suggested change:
+   Validation:
+```
+
+### JSON shape
+
+```json
+{
+  "schemaVersion": 1,
+  "window": {
+    "start": "2026-06-17T00:00:00Z",
+    "end": "2026-06-18T00:00:00Z"
+  },
+  "mode": "always",
+  "topConsumers": [
+    {
+      "area": "plugin",
+      "id": "example-plugin",
+      "signal": "hook_p95_ms",
+      "value": 0,
+      "links": {
+        "grafana": "",
+        "tempo": "",
+        "loki": "",
+        "pyroscope": ""
+      }
+    }
+  ],
+  "regressions": [],
+  "recommendations": [
+    {
+      "priority": "medium",
+      "target": "plugin:example-plugin",
+      "reason": "p95 hook latency increased from baseline",
+      "nextStep": "Inspect linked traces and profiles before changing code"
+    }
+  ]
+}
+```
+
+Reports must not include secrets, prompts, raw user IDs, chat IDs, session keys, credentials, or unredacted config. Use stable bounded component names, provider/model names, and links to systems where access control and redaction already apply.
+
+## Triage Workflow
+
+1. Start with the daily report's top regression.
+2. Open the Grafana panel for the signal and confirm the time window.
+3. Jump to Tempo traces for the same operation/component.
+4. Jump to Loki logs by trace ID or service unit.
+5. If CPU is involved and profiling was enabled, inspect Pyroscope for the same window.
+6. Decide whether the change belongs in WednesdayAI code, plugin code, provider routing/config, or `/srv/shared` stack rules.
+7. Record the recommended fix with the metric that will prove improvement.

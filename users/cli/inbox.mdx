@@ -1,0 +1,371 @@
+---
+summary: "CLI reference for `wednesdayai inbox` (query the unified inbox message store)"
+read_when:
+  - You want to inspect ingested inbox messages from the terminal
+  - You are debugging inbox storage or the Gmail ingest pipeline
+title: "inbox"
+audience: admin
+---
+
+# `wednesdayai inbox`
+
+Query the local inbox message store — the unified, per-source replica of external messages
+(Gmail via the `gog` watch pipeline, BlueBubbles (iMessage), Discord, and WhatsApp; BlueBubbles
+and Discord also backfill history through pull scanners while the gateway runs, and WhatsApp
+feeds the store live from the linked account when `inbox.sources["whatsapp-web"].enabled` is
+set).
+
+`list` and `correct` read the store directly from disk; the gateway does not need to be
+running. `backfill --source whatsapp` fetches history from the linked phone through the
+running gateway.
+
+## Usage
+
+```bash
+wednesdayai inbox list [--source <source>] [--direction in|out] [--account <accountId>] [--limit <n>]
+wednesdayai inbox correct <id> <category>
+wednesdayai inbox prefilter-score [--source <source>] [--since <iso>] [--min-precision <ratio>] [--min-support <n>] [--json]
+wednesdayai inbox ms365 login
+wednesdayai inbox backfill --source <source> [--account <id>] [--since <iso> | --all | --convert]
+wednesdayai inbox owners list [--json]
+wednesdayai inbox owners bind <identity> <source:accountId>...
+wednesdayai inbox owners unbind <source:accountId>...
+```
+
+## Flags
+
+| Flag                      | Effect                                                                |
+| ------------------------- | --------------------------------------------------------------------- |
+| `--source <source>`       | Filter by source (e.g. `gmail`).                                      |
+| `--direction <direction>` | Filter by direction: `in` or `out`.                                   |
+| `--account <accountId>`   | Filter by account id (e.g. `me@example.com`).                         |
+| `--limit <n>`             | Maximum rows to return (positive integer; the store defaults to 200). |
+
+Rows render as a table with id, source, direction, sender, subject, preview, and the source
+event timestamp (ms epoch). Newest first. By default, `inbox list` excludes archived items
+and items the source has deleted (tombstoned in the store; the inbox never erases rows).
+
+`inbox backfill` pulls older history from a source into the store; `--convert` instead
+re-renders stored gmail/ms365 rows whose body predates markdown rendering, from stored data
+with no source fetch. Flags, checkpoints and per-source behaviour are in
+[Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill).
+A precondition or fetch failure — source not enabled, source not configured, unknown source,
+account not enabled for the source, invalid `--since`, or a missing transport — prints one
+line to stderr with no stack trace and exits with status 1 (for example,
+`inbox source bluebubbles is not enabled`); committed pages stay checkpointed for the next run.
+
+## `ms365 login`
+
+```bash
+wednesdayai inbox ms365 login
+```
+
+Signs the Microsoft 365 inbox source in (delegated mode) through a device-code flow. It prints
+a verification URL and a code; open the URL, enter the code and sign in as the mailbox user.
+Run it on the gateway host: the tokens go to `inbox.ms365.tokenStorePath`, and the running
+gateway picks them up on its next eligible poll, normally within 15 minutes. An existing
+failure cooldown can delay that poll.
+
+Sign-in always starts from an operator: this command, the Control UI (**Channels → Microsoft
+365 inbox → Start sign-in**), or the approval-gated `inbox.ms365_signin` agent tool. The
+gateway never starts one in the background. While signed out it makes no calls to Microsoft
+and sends a single nudge that names these options. In app-only mode it silently loads a token,
+using an unexpired cache when available; it does not start device authorization or force a
+client-secret check. Requires the `inbox.ms365` config block (`tenantId`, `clientId`). See
+[Microsoft 365 inbox source](/developers/reference/inbox-ms365#4-sign-in-delegated).
+
+## `owners`
+
+```bash
+wednesdayai inbox owners list [--json]
+wednesdayai inbox owners bind <identity> <source:accountId>...
+wednesdayai inbox owners unbind <source:accountId>...
+```
+
+Lists, binds and unbinds which person owns each inbox account. An account has at most one
+owner; `<identity>` is an existing `session.identityLinks` key (create one with
+`wednesdayai identity add <name>`) and an account is written as `<source>:<accountId>` (for
+example `ms365:default`). Binding an account to a person removes it from any previous owner,
+and both commands take effect immediately — no gateway restart. Requires admin scope.
+
+`list` renders every connected `source:accountId` with its owner (`—` when unbound) and, when
+anything is unbound, a footer naming the `bind` command. A `Config` column appears only when
+an `inbox.owners` config entry differs from the stored owner (`—` when null); `--json` prints
+the raw result.
+
+`bind` prints `Bound <entry> to <identity>.` per account, with ` (moved from <previous>)` when
+it changed hands and `<entry> already bound to <identity>.` otherwise; `unbind` prints
+`Unbound <entry> from <person>.`, or `<entry> was not bound.` Unbind deletes the stored
+binding.
+
+The web client's Inbox names this command when a signed-in person has no accounts bound.
+
+## `digest-gate`
+
+```bash
+wednesdayai inbox digest-gate
+```
+
+The heartbeat **wakeGate** command: a cheap check that wakes the agent only when a digest
+candidate exists. Wire it as a command-kind gate:
+
+```json5
+{
+  agents: {
+    defaults: {
+      heartbeat: {
+        wakeGate: { kind: "command", command: "wednesdayai inbox digest-gate" },
+      },
+    },
+  },
+}
+```
+
+The **last stdout line** is the JSON payload (all diagnostics go to stderr):
+
+- `{"wakeAgent":false}` — nothing actionable; the heartbeat stays silent.
+- `{"wakeAgent":true,"text":"...","data":{"candidateCursor":"<ts>:<id>"}}` — a digest of the
+  eligible items. `text` is sender-controlled content wrapped as untrusted context, so it is
+  never rendered as trusted gateway text.
+
+Eligible items are inbound rows in the digest categories (`Newsletter`, `Notifications` until
+the classifier lands) with no policy flag, newer than the stored cursor. A fresh uncategorized
+row inside the 30-minute settlement grace clamps the digest so a soon-to-be-classified item is
+never double-surfaced.
+
+The command is **read-only against the main cursor**: it never advances
+`inbox_cursors(source='digest', scope='heartbeat')`. On a wake it durably writes the candidate
+to the `heartbeat_pending` scope, and the inbox plugin advances the main cursor only when the
+heartbeat outcome was actually delivered (`sent` / `ok-empty` / `ok-token`); `failed` and
+`skipped` outcomes clear the pending candidate so the next run re-includes the same items.
+Oversized digests are item-capped and the cursor clamps to the last rendered item, so the
+backlog drains over consecutive heartbeats instead of overflowing the gate's output budget.
+
+Related nudge tiers (no CLI surface): operator matchers under `inbox.urgent[]` nudge the
+agent's main session for urgent items, and remaining actionable items surface as one-line
+system events on the next user turn. See the config schema help for `inbox.urgent`.
+
+## Urgent rules
+
+`inbox.urgent` is a list of matchers; a matching **inbound** item nudges the agent's main
+session exactly once (durable dedupe). Rules OR — one match is enough; within one rule every
+set field must match:
+
+```json5
+{
+  inbox: {
+    urgent: [
+      { from: "alice@x.com" }, // case-insensitive substring on the sender
+      { source: "gmail", subjectIncludes: "invoice" }, // source exact; subject substring
+      { label: "IMPORTANT" }, // source-native label membership
+    ],
+  },
+}
+```
+
+An empty list (the default) stays silent. A nudge that fails to enqueue recovers through the
+next-turn FYI surface; a denied grant never surfaces (grant-policy silence). Mutating mailbox
+actions stay behind `plugins.entries.inbox.grants.inbox.actions` and operator approval — the
+nudge tiers themselves never send anything.
+
+## Example
+
+```text
+Inbox (2)
+┌───────────────────────┬────────┬─────┬──────────────────────┬──────────────────┬────────────────┬───────────────┐
+│ ID                    │ Source │ Dir │ Sender               │ Subject          │ Preview        │ Ts            │
+├───────────────────────┼────────┼─────┼──────────────────────┼──────────────────┼────────────────┼───────────────┤
+│ gmail:me%40x.com:m1 │ gmail  │ in  │ Alice <alice@x.com>  │ Hi               │ hello body     │ 1731213600000 │
+└───────────────────────┴────────┴─────┴──────────────────────┴──────────────────┴────────────────┴───────────────┘
+```
+
+## Classification
+
+Inbound items are classified on ingest through the analysis runtime; `inbox.classify` selects
+the provider/model and the output budget:
+
+```json5
+{
+  inbox: {
+    classify: {
+      provider: "bifrost", // default
+      // model: "…", // explicit override — wins over both tiers
+      smallModel: "low", // default; prompts under tierThresholdChars
+      mediumModel: "medium", // default; prompts at or over the threshold
+      tierThresholdChars: 32768, // default; prompt-length boundary between the tiers
+      // maxOutputTokens: 2048, // explicit budget — wins over the vocabulary rule
+    },
+  },
+}
+```
+
+- Prompts shorter than `tierThresholdChars` (default 32 768 chars) use `smallModel` (default
+  `"low"`); prompts at or over the threshold use `mediumModel` (default `"medium"`). An
+  explicit `model` overrides both tiers.
+- The classifier prompt carries sender, subject and, for gmail/ms365 rows with a rendered
+  body, a markdown excerpt of the body: images become their alt text, `data:` URIs are
+  dropped, link targets longer than 80 characters shrink to their hostname, and bare and
+  `<…>` URLs longer than 80 characters shrink to their hostname; the compacted body keeps
+  its first 3,000 and last 1,000 characters when it is longer than 4,000. Bodies whose
+  compacted text is empty use the preview, as do other rows.
+- The output budget defaults to the enabled-rule vocabulary:
+  `max(longest enabled rule name + 256, 1024)` tokens, so a verdict always fits in one
+  response. An explicit `maxOutputTokens` wins.
+- A verdict cut off by the provider's length stop is never coerced to `Unclear` /
+  `low-confidence`: the item keeps `category = NULL`, is flagged `classify-truncated`, and
+  the retry sweep re-attempts it. Databases created before the flag existed are migrated on
+  first open (#2251), so the flag write succeeds there too.
+
+See the config schema help for `inbox.classify`.
+
+### Prefilter
+
+Before the LLM call, a deterministic pre-classifier (the "prefilter", ADR 2443) evaluates
+structural signals computed from the stored row only. `inbox.classify.prefilter` selects the
+mode:
+
+- `off` — the prefilter is skipped entirely.
+- `shadow` (default) — prefilter verdicts are computed and logged for tuning, but every item
+  is still classified by the LLM.
+- `on` — a matching structural signal (calendar invite, bounce, auto-reply, tool
+  notification, Gmail Promotions, Discord bot) or a consistent sender history sets the
+  category without an LLM call. The result is stored with `category_source='prefilter'` and
+  the matched signal in `category_signal`.
+
+| Signal              | Verdict                                                     |
+| ------------------- | ----------------------------------------------------------- |
+| `imip`              | `Calendar/Meeting`                                          |
+| `delivery-report`   | `Notifications`                                             |
+| `mailer-daemon`     | `Notifications`                                             |
+| `auto-replied`      | `FYI`                                                       |
+| `auto-generated`    | `Notifications`                                             |
+| `tool-notification` | `Notifications`                                             |
+| `discord-bot`       | `Notifications`                                             |
+| `gmail-promotions`  | `Marketing/Cold`                                            |
+| `sender-memory`     | the sender's prior verdict                                  |
+| `bulk`              | no category — removes `Needs Reply` from the LLM vocabulary |
+
+The prefilter is conservative by design:
+
+- It **never preempts** an enabled user or correction-learned rule — any such rule disables
+  every short-circuit (and the bulk hint); shadow logging continues.
+- It **never overwrites** a non-NULL category, so a manually corrected item stays manual.
+- `sender-memory` replays a sender's earlier verdicts only when they are unanimous (≥ 3
+  verdicts, one category) and never replays `Needs Reply`, `Awaiting Reply` or `Unclear`.
+- In `on` mode, `inbox.classify.prefilterSignals` allowlists which signals may
+  short-circuit (unset = all). Add a signal only after `inbox prefilter-score` reports
+  PASS for it — the bar is precision ≥ 0.8 over ≥ 50 scored rows.
+
+Data limits: Gmail watch-push rows carry no message headers, so header-based signals fire
+only for full-fetched Gmail rows. A Gmail reconcile pass adds the headers to the watch rows
+whose history it replays, and `inbox backfill --source gmail --all` adds them to every
+stored row. ms365 rows keep an allowlisted subset of the `internetMessageHeaders` that
+`MS365_MESSAGE_SELECT` requests. A `List-Id` header alone is never a signal.
+
+## Scoring prefilter signals: `inbox prefilter-score`
+
+```bash
+wednesdayai inbox prefilter-score [--source <source>] [--since <iso>]
+                                  [--min-precision <ratio>] [--min-support <n>] [--json]
+```
+
+Scores every prefilter signal offline against the verdicts already in the store: it replays
+each signal over inbound history and compares the signal's fixed verdict with the truth on
+each row (an LLM `rule` verdict or a `manual` correction; `low-confidence` rows and other
+prefilter rows are never truth). Use it to decide which signals meet the enablement bar
+before turning the prefilter on.
+
+| Flag                      | Effect                                                              |
+| ------------------------- | ------------------------------------------------------------------- |
+| `--source <source>`       | Score one source only (e.g. `gmail`).                               |
+| `--since <iso>`           | Only rows at or after this time.                                    |
+| `--min-precision <ratio>` | Minimum precision for a signal to PASS (default 0.8; range (0, 1]). |
+| `--min-support <n>`       | Minimum scored rows for a signal to PASS (default 50).              |
+| `--json`                  | Print the report as one JSON line on stdout.                        |
+
+The output is one row per signal:
+
+- how often it fired;
+- how many rows are **evaluable**, meaning they carry the evidence the signal reads;
+- how many fired rows carry a truth, and how many of those agree;
+- the precision (two decimals, `-` when nothing was scored);
+- the **recall**: agreeing fires divided by the evaluable truth rows of the signal's
+  verdict (`-` when there are none);
+- the manual agreement (`agree/scored`);
+- the most common disagreeing category;
+- PASS or FAIL against `--min-precision` over `--min-support` scored rows. Recall does not
+  affect the result.
+
+A signal with 0 evaluable rows has no data to read; its 0 fires are not proof that the
+messages are absent. A signal with evaluable rows and 0 fires never fired on that data.
+For `bulk`, the verdict class is any category except `Needs Reply`.
+For `sender-memory`, it is any category that memory can replay.
+
+`--json` adds `evaluable`, `notEvaluable`, `recallBase`, and `recall` to each signal.
+
+To add headers to rows stored before a source persisted them, run
+`wednesdayai inbox backfill --source ms365 --all` (or `--source gmail --all`). A re-fetch
+adds missing evidence fields to `raw_json` and never replaces a stored value.
+
+`sender-memory` replays only each row's earlier history. Corrections are applied **as of
+now**, not as of each row's time. This is an approximation, because `correctedFrom`
+reflects today's corrections.
+
+Like `inbox list`, the command opens the store directly from disk, so it applies pending
+schema migrations on open and never needs the gateway running.
+
+## Reclassifying an item: `inbox correct`
+
+```bash
+wednesdayai inbox correct <id> <category>
+```
+
+Manually reclassify one stored item (id as shown by `inbox list`). `<category>` must be an
+**enabled** inbox rule name; it is validated against the enabled rules before anything is
+written. On success the command prints `Corrected <id> → <category>` and the correction:
+
+- appends a row to `inbox_corrections` — the retrain signal: recent corrections are carried
+  in the next classification prompts for similar items, inside a fence that marks the corrected
+  item's sender, subject and preview as data rather than instructions,
+- flips the item to the new category with `category_source='manual'`, and clears any
+  `policy_flag` (the item leaves the review queue).
+
+Errors are loud and write nothing: an unknown item id fails with
+`no inbox item with id "<id>"`; an unknown or disabled category fails before any write —
+the item is unchanged and no correction row is written.
+
+## Storage configuration
+
+The store location follows `session.storage` unless overridden under `inbox.storage`
+(same driver, separate database — inbox data never shares the session database):
+
+```json5
+{
+  inbox: {
+    storage: {
+      backend: "sqlite", // "sqlite" (default) or "postgres"
+      sqlitePath: "/var/lib/wednesdayai/inbox.sqlite", // default: <stateDir>/inbox.sqlite
+      // databaseUrl: "postgres://…", // required when backend is "postgres" (or OPENCLAW_INBOX_DATABASE_URL)
+      sqlite: {
+        wal: true, // default: on
+        busyTimeoutMs: 5000, // default: 5000
+        walAutocheckpointPages: 1000, // default: 1000
+      },
+    },
+  },
+}
+```
+
+Notes:
+
+- `inbox.storage.databaseUrl` is treated as a sensitive config value (redacted from
+  diagnostics).
+- A postgres `databaseUrl` pointing at the session storage database is rejected — the inbox
+  requires its own database.
+- The SQLite database file is created `0600`; a custom `sqlitePath` may point into a
+  directory that does not exist yet (it is created).
+
+## Related
+
+- Gmail push ingest setup: [Gmail Pub/Sub](/users/automation/gmail-pubsub)
+- Webhook endpoints that feed the inbox: [Webhooks](/users/automation/webhook)

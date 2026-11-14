@@ -46,7 +46,7 @@ normally (breaking or `feat` changes move to 0.7.0).
 - [ ] Native apps version with the core version they sync (`CORE_VERSION` in WednesdayAI-apps); no app stamping happens in this repository (ADR 0101).
 
 - [ ] Confirm package metadata: root package name is `wednesdayai` (currently `0.4.11`), `bin` exposes both `wednesdayai` and the compatibility `openclaw` command, and WhatsApp package name is `@wednesdayai/whatsapp`.
-- [ ] Publication runs only from `.github/workflows/npm-publish.yml` using the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). There is no second publish path.
+- [ ] Stable publication runs only from `.github/workflows/npm-publish.yml` using the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). The one sanctioned local path is dev-only: `pnpm release:local-install --publish-dev` publishes a core and `@wednesdayai/whatsapp` pair built from one commit under the `dev` dist-tag when Actions is unavailable (ADR 2523).
 - [ ] If dependencies changed, run `pnpm install` so `pnpm-lock.yaml` is current.
 
 2. **Build & artifacts**
@@ -63,7 +63,7 @@ normally (breaking or `feat` changes move to 0.7.0).
 
   It also requires `docs/reference/templates/AGENTS.md` and `BOOTSTRAP.md`. A plain `pnpm release:check` does not inspect a packed tarball. Separately, `pnpm test` runs `npm pack --dry-run --ignore-scripts` for both packages (`scripts/release-pack-contents.test.ts`) and checks the listed files against the same policy. That dry run builds no tarball and skips `prepack`, so it does not replace sealed-inventory validation.
 
-- [ ] Confirm `dist/build-info.json` exists and includes the expected `commit` hash (CLI banner uses this for npm installs).
+- [ ] Confirm `dist/build-info.json` exists and includes the expected `commit` hash (CLI banner uses this for npm installs), and that `extensions/whatsapp/dist/build-info.json` carries the same commit (the publish rails assert it with `scripts/release-lockstep-build-info.ts`).
 - [ ] Optional: `npm pack --pack-destination /tmp` after the build; inspect the tarball contents and keep it handy for the GitHub release (do **not** commit it).
 
 3. **Changelog & docs**
@@ -111,7 +111,7 @@ gh workflow run npm-publish.yml --ref main -f release_tag=vX.Y.Z -f source_sha=<
 pnpm release:approve vX.Y.Z
 ```
 
-This restores tag↔registry parity so downstream lockfiles can pin the release immutably. It is not a substitute for the vendoring recipe when the deployed artifact came from a branch build — see [Deployment artifact parity and vendoring](/reference/trusted-npm-publishing-developer#deployment-artifact-parity-and-vendoring).
+This restores tag↔registry parity so downstream lockfiles can pin the release immutably. It is not a substitute for the vendoring recipe when the deployed artifact came from a branch build — see [Deployment artifact parity and vendoring](/developers/reference/trusted-npm-publishing-developer#deployment-artifact-parity-and-vendoring).
 
 ### Troubleshooting
 
@@ -130,10 +130,12 @@ This restores tag↔registry parity so downstream lockfiles can pin the release 
 - [ ] Attach artifacts: `npm pack` tarball (optional). Native app artifacts ship from the WednesdayAI-apps release flow.
 - [ ] From a clean temp directory (no `package.json`), run `npx -y wednesdayai@X.Y.Z send --help` to confirm install/CLI entrypoints work.
 - [ ] Announce/share release notes.
+- [ ] Cut the docs release: `scripts/docs-sync.sh --release vX.Y.Z` from the repo root. It snapshots the previous minor (keeping four minors in total), opens the `docs: WednesdayAI vX.Y.Z` PR against WednesdayAI-docs, and merges it only once the GitHub release is published (not draft). Rerun the same command after publishing; while Actions is billing-blocked, run the script locally. Never merge docs PRs by hand.
+- [ ] Check docs.wednesdayai.dev: the version dropdown shows vX.Y.Z as the default (Latest) alongside `next` and the pinned older minors, and the banner names vX.Y.Z with a working release-notes link.
 
 ## Trusted npm publishing
 
-Publication runs only from `.github/workflows/npm-publish.yml` through the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). Step 5 above is the operator flow. For the architecture and the vendoring recipe, see [Trusted npm publishing for contributors](/reference/trusted-npm-publishing-developer).
+Stable publication runs only from `.github/workflows/npm-publish.yml` through the `npm-publish` GitHub environment (OIDC trusted publishing; npm staged publishes for stable). Step 5 above is the operator flow; the dev-only local exception is `pnpm release:local-install --publish-dev` (ADR 2523). For the architecture and the vendoring recipe, see [Trusted npm publishing for contributors](/developers/reference/trusted-npm-publishing-developer).
 
 ## Version locations
 
@@ -157,7 +159,7 @@ The release `CHANGELOG.md` is generated by release-please from Conventional Comm
 
 ## Deprecation policy
 
-Config keys, CLI flags, and SDK exports are never removed immediately when renamed or replaced. Ship a deprecated alias for at least one release cycle, then remove it in a later release with an explicit announcement. For kernel contracts, CI enforces this through `pnpm lint:contracts:surface`, which fails a removal that never shipped a `@deprecated` alias (see [Versioned kernel contracts](/plugins/contracts)).
+Config keys, CLI flags, and SDK exports are never removed immediately when renamed or replaced. Ship a deprecated alias for at least one release cycle, then remove it in a later release with an explicit announcement. For kernel contracts, CI enforces this through `pnpm lint:contracts:surface`, which fails a removal that never shipped a `@deprecated` alias (see [Versioned kernel contracts](/developers/plugins/contracts)).
 
 - A rename plus alias is backward-compatible, so use a `feat:` or `fix:` commit, not `BREAKING CHANGE`.
 - Reserve `BREAKING CHANGE` or `!` for hard removals and incompatibilities with no migration path.
@@ -187,7 +189,7 @@ Release notes must also call out **new optional bundled plugins** that are **not
 
 ## Related
 
-- [Trusted npm publishing for contributors](/reference/trusted-npm-publishing-developer)
-- [How WednesdayAI updates reach you](/install/trusted-npm-publishing-user)
-- [Release channels](/install/development-channels)
-- [macOS release](/platforms/mac/release)
+- [Trusted npm publishing for contributors](/developers/reference/trusted-npm-publishing-developer)
+- [How WednesdayAI updates reach you](/admin/install/trusted-npm-publishing-user)
+- [Release channels](/admin/install/development-channels)
+- [macOS release](/admin/platforms/mac/release)

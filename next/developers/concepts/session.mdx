@@ -1,0 +1,638 @@
+---
+summary: "Session management rules, keys, and persistence for chats"
+read_when:
+  - Modifying session handling or storage
+title: "Session Management"
+audience: admin
+sources:
+  - src/config/sessions/storage-types.ts
+  - src/config/sessions/storage-config.ts
+  - src/config/sessions/backend-transcript-read.ts
+  - src/config/sessions/transcript.ts
+  - src/config/sessions/store.ts
+  - src/config/sessions/sqlite-backup.ts
+  - src/config/sessions/legacy-import/owner.ts
+  - src/config/sessions/legacy-import/path-containment.ts
+  - src/plugins/types.ts
+  - src/plugins/provider-runtime-identity.ts
+generated: 2026-10-14
+---
+
+# Session Management
+
+WednesdayAI treats **one direct-chat session per agent** as primary. Direct chats collapse to `agent:<agentId>:<mainKey>` (default `main`), while group/channel chats get their own keys. `session.mainKey` is honored.
+
+Use `session.dmScope` to control how **direct messages** are grouped:
+
+- `main` (default): all DMs share the main session for continuity.
+- `per-peer`: isolate by sender id across channels.
+- `per-channel-peer`: isolate by channel + sender (recommended for multi-user inboxes).
+- `per-account-channel-peer`: isolate by account + channel + sender (recommended for multi-account inboxes).
+  Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each account to the person with `wednesdayai identity link <name> <value>` (or the self-service `/link` code) so their web chats resolve to the same identity. See [Identities](/next/admin/gateway/identity).
+
+## Secure DM mode (recommended for multi-user setups)
+
+> **Security Warning:** If your agent can receive DMs from **multiple people**, you should strongly consider enabling secure DM mode. Without it, all users share the same conversation context, which can leak private information between users.
+
+**Example of the problem with default settings:**
+
+- Alice (`<SENDER_A>`) messages your agent about a private topic (for example, a medical appointment)
+- Bob (`<SENDER_B>`) messages your agent asking "What were we talking about?"
+- Because both DMs share the same session, the model may answer Bob using Alice's prior context.
+
+**The fix:** Set `dmScope` to isolate sessions per user:
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    // Secure DM mode: isolate DM context per channel + sender.
+    dmScope: "per-channel-peer",
+  },
+}
+```
+
+**When to enable this:**
+
+- You have pairing approvals for more than one sender
+- You use a DM allowlist with multiple entries
+- You set `dmPolicy: "open"`
+- Multiple phone numbers or accounts can message your agent
+
+Notes:
+
+- Default is `dmScope: "main"` for continuity (all DMs share the main session). This is fine for single-user setups.
+- Local CLI onboarding writes `session.dmScope: "per-channel-peer"` by default when unset (existing explicit values are preserved).
+- For multi-account inboxes on the same channel, prefer `per-account-channel-peer`.
+- If the same person contacts you on multiple channels, link all of their accounts to one identity (`wednesdayai identity link <name> <value>`; see [Identities](/next/admin/gateway/identity)) so their DM sessions collapse into that canonical identity.
+- You can verify your DM settings with `wednesdayai security audit` (see [security](/next/users/cli/security)).
+- Session isolation and [Workspace Lanes](/next/developers/concepts/workspace-lanes) solve different problems. `dmScope` separates conversation history; workspace lanes separate user-specific workspace files for multi-user-capable personas.
+
+## Gateway is the source of truth
+
+All session state is **owned by the gateway**. UI clients (macOS app, WebChat, etc.) must query the gateway for session lists and token counts instead of reading local files.
+
+- In **remote mode**, the session store you care about lives on the remote gateway host, not your Mac.
+- Token counts shown in UIs come from the gateway’s store fields (`inputTokens`, `outputTokens`, `totalTokens`, `contextTokens`). Clients do not read stored transcripts to “fix up” totals.
+
+## Where state lives
+
+- On the **gateway host**:
+  - Session database: `<state-dir>/sessions.db` (SQLite by default; override with
+    `session.storage.backend: "postgres"` plus `session.storage.databaseUrl`).
+  - Per-agent store path: `~/.openclaw/agents/<agentId>/sessions/sessions.json`. Under SQL session
+    storage this path is an **identity** for the agent's index and the place the one-time import
+    looks for legacy JSON session files; it is not a file the gateway writes or reads afterwards.
+- The session index and every conversation entry live in the database; there are no transcript
+  files and no `sessions.json` shadow copy while the gateway runs.
+- Ownership of the database is exclusive: the running gateway holds it (SQLite:
+  `<sessions.db>.owner.lock` plus an `<sessions.db>.owner.json` holder sidecar; Postgres: an
+  advisory lock plus a `ctx_storage_owner` row). A CLI command that needs session data goes over
+  the gateway when one runs, or takes ownership itself when none does.
+- The session index is a map `sessionKey -> { sessionId, updatedAt, ... }` in the database.
+  Deleting an entry tombstones it; it is recreated on demand.
+- Group entries may include `displayName`, `channel`, `subject`, `room`, and `space` to label sessions in UIs.
+- Session entries include `origin` metadata (label + routing hints) so UIs can explain where a session came from.
+- WednesdayAI does **not** read legacy Pi/Tau session folders.
+
+## Maintenance
+
+WednesdayAI applies session maintenance to bound the **session index** over time. Conversation
+history is append-only and **never deleted**: maintenance (`warn`/`enforce`, `pruneAfter`,
+`maxEntries`) only retires idle or over-cap sessions from the session index (tombstones, based on
+the index entry's last update); the conversation rows stay and remain readable. There is no
+automatic space reclamation (ADR 0098, `dev-docs/adr/0098-conversation-history-is-never-deleted.md`).
+
+### Defaults
+
+- `session.maintenance.mode`: `warn`
+- `session.maintenance.pruneAfter`: `30d`
+- `session.maintenance.maxEntries`: `500`
+
+The file-only controls (`rotateBytes`, `maxDiskBytes`, `highWaterBytes`, `resetArchiveRetention`)
+are retired: they applied to JSONL transcript files, which SQL session storage never writes. Configs
+that still set them are migrated automatically on load (see
+[Upgrading from JSON session files](#upgrading-from-json-session-files)).
+
+### How it works
+
+Maintenance only ever touches the session index, and never at startup: gateway activation runs
+only the startup backfill chains (user ids, session identity / actor columns, token counts, usage
+columns) — no index retirement, even in `enforce` mode. Index upkeep happens when the index is
+written:
+
+- **Index upkeep on writes.** Ordinary session-index writes (and `wednesdayai sessions cleanup`)
+  maintain the index record itself: in `enforce` mode they drop index rows whose `updatedAt` is
+  older than `pruneAfter` and cap the index at `maxEntries` rows (a tombstone per dropped row);
+  the session being written is never dropped. In `warn` mode they only warn when the active
+  session would be evicted. Because capping rides on writes, restarting with a lower
+  `maxEntries` applies it on the next index write (or manual cleanup), not at startup.
+
+Retirement is index-granular: a session that receives a new entry gets a fresh `updatedAt`, so it
+no longer qualifies when maintenance runs. Reset (`/new`, `/reset`) and `sessions.delete` also
+only tombstone the index row; the conversation rows stay and remain readable (ADR 0098).
+
+### Performance caveat for large stores
+
+Large stores are common in high-volume setups. Retirement rides on index writes, so the first
+write after switching `mode: "enforce"` on pays the whole batch: on a very large store that write
+can take a while.
+
+What increases cost most:
+
+- long `pruneAfter` windows that keep many index entries eligible for retirement
+- very high `session.maintenance.maxEntries` values
+
+What to do:
+
+- start in `mode: "warn"`, then switch to `"enforce"` once the thresholds look right
+- set both time and count limits (`pruneAfter` + `maxEntries`), not just one
+- run `wednesdayai sessions cleanup --dry-run --json` after config changes to verify projected impact
+  before enforcing
+- to check whether a busy session would be evicted, pass `--active-key <key>` to a warn-mode
+  `wednesdayai sessions cleanup` and read the warning
+
+### Customize examples
+
+Use a conservative enforce policy:
+
+```json5
+{
+  session: {
+    maintenance: {
+      mode: "enforce",
+      pruneAfter: "45d",
+      maxEntries: 800,
+    },
+  },
+}
+```
+
+Tune for larger installs (example):
+
+```json5
+{
+  session: {
+    maintenance: {
+      mode: "enforce",
+      pruneAfter: "14d",
+      maxEntries: 2000,
+    },
+  },
+}
+```
+
+Preview or force maintenance from CLI:
+
+```bash
+wednesdayai sessions cleanup --dry-run
+wednesdayai sessions cleanup --enforce
+```
+
+## Plugin correlation and privacy
+
+Plugins can receive resolved runtime identity and turn correlation fields so they can log, dedupe, and run background analysis without parsing session keys or reading raw identity configuration.
+
+For operators, the important boundary is:
+
+- `session.identityLinks` remains configuration used by core identity resolution. Plugin contexts expose resolved fields such as `canonicalIdentity` and `senderIsOwner`; they do not expose raw `identityLinks`. Plugins additionally see `identitySource` (`"sender"` | `"parent-session"` | `"job-config"`) describing how the identity was resolved — raw `identityLinks` are still never exposed.
+- `channelConversationId` identifies the transport conversation or thread. Legacy plugin fields named `conversationId` refer to this channel identity.
+- `providerConversationId` is an opaque provider/cache correlation id derived by WednesdayAI for model calls. It is not a session storage column and should be stored only as an opaque value.
+- `turn.turnId` identifies one user turn and is the same string value as `runId` in the v1 plugin contract.
+- `sessionId` and `sessionKey` may be absent during very early `message_received` hooks. WednesdayAI omits them when no real session exists instead of fabricating a session value.
+
+If a plugin captures storage append events, user and assistant entries for the same exchange share one `turnId`. Dedupe append fan-out with the turn id plus the entry id, cursor entry id, or raw entry hash.
+
+This feature does not make untrusted plugins safe. Plugins still run in-process with gateway trust, but the public SDK now gives them resolved identity and opaque correlation fields instead of requiring them to read private config or reverse-engineer session key formats.
+
+## Session storage
+
+By default, the session index and every conversation entry are stored in a local SQLite database at
+`<state-dir>/sessions.db` (normally `~/.openclaw/sessions.db`) on the gateway host. For shared
+Postgres storage with an optional Redis hot cache, configure `session.storage`. See the
+`session.storage` section in [Gateway configuration](/next/admin/gateway/configuration).
+
+SQL session storage is the only session storage: there is no JSONL backend and no file fallback.
+The per-agent `sessions.json` paths survive only as (a) the identity of each agent's index and
+(b) import sources for the one-time legacy upgrade described in
+[Upgrading from JSON session files](#upgrading-from-json-session-files).
+
+### Backends
+
+- **`sqlite`** (default): entries are read and written through the SQLite `ctx_session_entries`
+  table via a worker thread; the write-ahead log plus DB transactions are the durability story.
+- **`postgres`**: entries are read and written through the Postgres `ctx_session_entries` table.
+  `cache: "redis"` adds a write-through hot cache that is **never authoritative** — the database
+  always wins.
+
+The gateway converges the database schema automatically on every startup (additive only:
+`CREATE TABLE/INDEX IF NOT EXISTS`, idempotent column adds); no manual migrations are required.
+If Postgres is unreachable at boot, the gateway exits with the probe cause instead of serving a
+degraded view; the service manager restarts it. The wait is bounded by
+`session.storage.recovery.startupProbeTimeoutMs` (default `600s`).
+
+**Planner statistics (#2239).** A fresh (or freshly-migrated) Postgres store has empty planner
+statistics until autoanalyze kicks in; on a large import the planner then mis-costs session-index
+reads — the observed symptom is 100% DB CPU and multi-second session lists. The one-line
+mitigation on an affected host is `ANALYZE ctx_sessions;`. Stores now self-ANALYZE: after schema
+creation on a fresh database, after a legacy-import sweep or pre-publish index import that
+ingested entries, and (inbox store) after schema open and each bulk-ingest pass, debounced.
+SQLite stores run the cheap `PRAGMA optimize` at open and a full `ANALYZE` after bulk loads.
+An owner open that hits its startup deadline, or a shutdown, while the post-import Postgres
+`ANALYZE` runs cancels that statement on the server (`pg_cancel_backend`) instead of waiting
+for it. The gateway logs `post-import ANALYZE failed` with `aborted: true`, and statistics
+catch up at the next import that ingests entries or at autoanalyze.
+
+### Single owner
+
+The running gateway is the **single owner** of the session database, enforced by a storage-owner
+lock keyed to the database (SQLite: `<sessions.db>.owner.lock` with an `<sessions.db>.owner.json`
+holder sidecar; Postgres: `pg_try_advisory_lock` plus a `ctx_storage_owner` row).
+
+- While a gateway runs, every CLI storage operation — reads included — goes over the gateway RPC
+  and never opens the database. A `gateway.mode: "remote"` config always routes to the remote
+  gateway the same way.
+- With no gateway, a CLI command takes ownership as `cli` for the duration of the command:
+  index import on open, on-access transcript import, no automatic retention, no background sweep.
+- A second owner is refused with the holder's host and pid. `wednesdayai agent --local` refuses while
+  a gateway owns the database. Only `wednesdayai session-storage restore` needs the gateway stopped.
+
+### Append-only history
+
+Conversation entries are append-only: no code path updates or deletes stored content. Compaction
+appends a compaction entry and keeps the pre-compaction entries. Derived views (tool-output
+trimming, history limits, thinking stripping) are computed per request and never persisted.
+Maintenance never deletes conversation rows — it only retires session index entries (see
+[Maintenance](#maintenance)).
+
+### Sub-agent and announce output
+
+Sub-agent runs (`sessions_spawn`) and their announce step read the same database the run wrote to,
+so sub-agent output renders correctly.
+
+## Upgrading from JSON session files
+
+Installs that keep history in legacy `sessions.json` / `*.jsonl` files upgrade **online, with no
+operator step**. The first gateway start after upgrading:
+
+1. Auto-migrates retired config keys on load (`session.storage.backend: "fs-jsonl"`,
+   `session.storage.mode`, `session.storage.fallbackToJsonlOnError`, obsolete
+   `session.storage.recovery.*` and file-only `session.maintenance.*` keys, prune-only
+   `session.storage.consumerClaims.progressWindowMs` and `maxRetentionBackstopMs`, learning-core
+   `fs-jsonl` backend) and logs each change.
+2. Takes storage ownership and, before the gateway publishes storage, imports every agent's
+   `sessions.json` index. Database rows and tombstones always win: a legacy index entry never
+   changes the current session for a key that already exists or was deleted in the database.
+   This first start also writes **one pre-import snapshot** of the SQLite database to
+   `<state-dir>/backups/sessions-pre-legacy-import-<timestamp>.db`; because the snapshot runs
+   before storage is published, that first startup takes longer once.
+3. Publishes storage and starts the gateway. From then on: a legacy session's transcript is
+   imported the first time that session is accessed, and a throttled background sweep imports the
+   rest newest-first, archiving each source under
+   `<state-dir>/legacy-session-archive/<agentId>/` (files `0600`, dirs `0700`).
+
+Import is receipted in the database and therefore resumable: a failing source never fails startup,
+and the next owner open retries it (up to five attempts; after that only an explicit
+`wednesdayai session-storage import` retries). If an on-access import fails, the turn still proceeds
+— availability over completeness — and the failure stays visible in
+`wednesdayai session-storage status` and `wednesdayai doctor` until a retry succeeds. Containment
+compares symlink-resolved paths, so a state dir reached through a symlink (for example the macOS
+`/var` -> `/private/var` link) imports the same transcripts as a plain path.
+
+Only the importer moves legacy source transcripts. Session reset, delete, and corruption
+recovery leave those source files untouched so an in-flight or failed import cannot lose its
+only copy. One-shot slug/journal generation, voice consult, plugin analysis, and wake-gate
+helpers run without persisting extra session history.
+
+Legacy **unqualified session keys under a non-default agent** keep their stored identity.
+An ID-only agent request cannot target those sessions safely: it is rejected with
+`INVALID_REQUEST` naming the stored key instead of guessing an alias or choosing another agent.
+Use the explicit session key with the owning agent, not `--session-id` alone. This restriction
+does not discard the imported history.
+
+### Status and manual import
+
+```bash
+wednesdayai session-storage status          # backend, readiness, legacy import progress
+wednesdayai session-storage status --json
+wednesdayai session-storage import          # run the sweep to completion now (retries failures)
+```
+
+`status` reports the import state (`none | pending | running | completed | error`), how many
+sources are done, and the pre-import snapshot path when one exists.
+
+### Archives
+
+- Import sources are **archived, not deleted**: `<state-dir>/legacy-session-archive/<agentId>/`.
+  Reset, deleted and replayed transcript archives, `session-runs.jsonl`, and old `recovery/**`
+  manifests are archived **without import** and kept — the archive is their only copy.
+- Purge rule: a gateway sweep deletes an archived copy after 30 days only when its source was
+  **fully imported with zero rejected lines**. Archive-only sources, failed sources, and sources
+  with rejected lines are kept indefinitely.
+
+### Backups and rollback
+
+- `wednesdayai session-storage backup` writes an online SQLite backup (`VACUUM INTO` on a separate
+  read-only connection, so appends never wait); default output
+  `<state-dir>/backups/sessions-<timestamp>.db` (`0600`). Under a running gateway the file is
+  written under `<state-dir>/backups/`. The backup connection waits up to 5 seconds for a lock,
+  so a backup no longer fails immediately with `database is locked` when it races another backup
+  or the pre-import snapshot on a cold WAL database.
+- `wednesdayai session-storage restore <file>` is offline: stop the gateway, then the CLI replaces
+  `sessions.db` (the previous file is kept as `sessions.db.pre-restore-<timestamp>`).
+- Rollback means restoring a backup **with a SQL-capable build** of WednesdayAI. There is no
+  downgrade to JSONL serving.
+
+<Warning>
+Restoring an older backup (for example the pre-import snapshot) after the import ran rolls the
+database back to a state with fewer or no import receipts, while the imported files remain in
+`legacy-session-archive/` — and the census scans live session directories, not the archive. To
+make that history available again, return every archived copy to the distinct original path its
+receipt recorded (divergent same-name copies each have their own receipt row):
+
+1. Stop the gateway and restore the backup. `wednesdayai session-storage restore` refuses to run
+   under a live gateway and preserves the replaced database as
+   `<state-dir>/sessions.db.pre-restore-<timestamp>` — the live WAL is checkpointed into that
+   archived copy first, so it is self-contained (sidecar archives survive only when the
+   checkpoint itself failed or the main file was missing, and a failed restore keeps every
+   `.pre-restore-*` archive and names them in its error).
+2. Read the mapping from THAT preserved database — it is the one that recorded the imports and
+   archivals. The preserved copy sits next to the configured database file, which may differ from
+   `sessions.db` when `session.storage.sqlitePath` is set:
+
+   ```bash
+   DB="<state-dir>/sessions.db.pre-restore-<timestamp>"
+   sqlite3 -json "$DB" \
+     'SELECT source_path, archive_path FROM ctx_legacy_imports WHERE archive_path IS NOT NULL;'
+   ```
+
+3. With the gateway still stopped, move each `archive_path` back to its `source_path`. The query
+   runs first and the procedure aborts if it fails, so a missing table or the wrong database can
+   never masquerade as an empty result; the JSON then goes to this script, which creates missing
+   parent directories, never overwrites an existing destination, and survives spaces, `|`, and
+   newlines in paths:
+
+   ```bash
+   MAP="$(sqlite3 -json "$DB" \
+     'SELECT source_path, archive_path FROM ctx_legacy_imports WHERE archive_path IS NOT NULL;')" \
+     || { echo "reading ctx_legacy_imports from $DB failed" >&2; exit 1; }
+   printf '%s' "$MAP" | node -e '
+   let raw = "";
+   process.stdin.on("data", (chunk) => (raw += chunk));
+   process.stdin.on("end", () => {
+     const fs = require("node:fs");
+     const path = require("node:path");
+     const db = process.argv[1];
+     const rows = raw.trim() ? JSON.parse(raw) : [];
+     if (rows.length === 0) {
+       console.error(`no receipts found in ${db} — wrong database?`);
+       process.exit(1);
+     }
+     let failed = 0;
+     for (const { source_path: source, archive_path: archive } of rows) {
+       try {
+         if (fs.existsSync(source)) {
+           console.error(`SKIP (destination exists): ${source}`);
+           failed += 1;
+           continue;
+         }
+         fs.mkdirSync(path.dirname(source), { recursive: true, mode: 0o700 });
+         try {
+           fs.renameSync(archive, source);
+         } catch (error) {
+           if (error.code !== "EXDEV") throw error;
+           fs.copyFileSync(archive, source);
+           fs.unlinkSync(archive);
+         }
+         fs.chmodSync(source, 0o600);
+         console.log(`restored: ${archive} -> ${source}`);
+       } catch (error) {
+         console.error(`FAILED: ${archive} -> ${source}: ${error.message}`);
+         failed += 1;
+       }
+     }
+     process.exit(failed > 0 ? 1 : 0);
+   });
+   ' "$DB"
+   ```
+
+   The script exits non-zero when any row failed; fix the reported rows and re-run it (already
+   restored rows then hit the `SKIP (destination exists)` guard and are reported, not overwritten).
+
+4. Start the gateway (or run `wednesdayai session-storage import`). The census reclassifies the
+   returned files at their original paths: a source with **no receipt row** in the restored
+   database imports fresh; one with a **settled receipt whose fingerprint still matches**
+   (`completed` or `archived_only`) is skipped because its rows are already in the restored
+   database — nothing duplicates.
+
+Any archived copy deliberately left in place has no receipt in the restored database, so it is
+never auto-purged; the archive stays a safety copy either way.
+</Warning>
+
+### Data retention after upgrade
+
+History imported from JSONL follows the same rules as native history: append-only and never
+deleted. `session.maintenance` (`session.maintenance.mode: "enforce"` plus
+`pruneAfter`/`maxEntries`) only retires idle or over-cap sessions from the session index
+(tombstones); the conversation rows stay readable. Set `"enforce"` only after
+previewing with `wednesdayai sessions cleanup --dry-run`.
+
+## Session pruning
+
+WednesdayAI trims **old tool results** from the in-memory context right before LLM calls by default.
+This never rewrites stored history. See [/concepts/session-pruning](/next/developers/concepts/session-pruning).
+
+## Pre-compaction memory flush
+
+When a session nears auto-compaction, WednesdayAI can run a **silent memory flush**
+turn that reminds the model to write durable notes to disk. This only runs when
+the workspace is writable. See [Memory](/next/developers/concepts/memory) and
+[Compaction](/next/developers/concepts/compaction).
+
+## Mapping transports → session keys
+
+- Direct chats follow `session.dmScope` (default `main`).
+  - `main`: `agent:<agentId>:<mainKey>` (continuity across devices/channels).
+    - Multiple phone numbers and channels can map to the same agent main key; they act as transports into one conversation.
+  - `per-peer`: `agent:<agentId>:direct:<peerId>`.
+  - `per-channel-peer`: `agent:<agentId>:<channel>:direct:<peerId>`.
+  - `per-account-channel-peer`: `agent:<agentId>:<channel>:<accountId>:direct:<peerId>` (accountId defaults to `default`).
+  - If `session.identityLinks` matches a provider-prefixed peer id (for example `telegram:123`), the canonical key replaces `<peerId>` so the same person shares a session across channels.
+  - An inbound, unlinked sender whose raw peer id equals an `identityLinks` canonical key is contained instead of merged: it gets its own bucket with a `raw~` peer prefix (for example `agent:main:direct:raw~alice`). The `raw~` prefix is reserved — canonical keys starting with `raw~` are rejected at config load. Sessions merged before this containment landed stay merged.
+  - Because a contained `raw~` bucket is a distinct session key, peer-specific `sendPolicy` rules (and any other per-key config) do not carry over automatically: a rule matching `agent:<agentId>:direct:<canonicalKey>` does not match `agent:<agentId>:direct:raw~<peerId>` or vice versa. Add separate `keyPrefix`/`rawKeyPrefix` rules for contained senders, and keep canonical-identity rules separate.
+- Group chats isolate state: `agent:<agentId>:<channel>:group:<id>` (rooms/channels use `agent:<agentId>:<channel>:channel:<id>`).
+  - Telegram forum topics append `:topic:<threadId>` to the group id for isolation.
+  - Legacy `group:<id>` keys are still recognized for migration.
+- Inbound contexts may still use `group:<id>`; the channel is inferred from `Provider` and normalized to the canonical `agent:<agentId>:<channel>:group:<id>` form.
+- Other sources:
+  - Isolated cron assistant-task jobs: `cron:<job.id>`
+  - Webhooks: `hook:<uuid>` (unless explicitly set by the hook)
+  - Node runs: `node-<nodeId>`
+
+## Lifecycle
+
+- Reset policy: sessions are reused until they expire, and expiry is evaluated on the next inbound message.
+- Daily reset: defaults to **4:00 AM local time on the gateway host**. A session is stale once its last update is earlier than the most recent daily reset time.
+- Idle reset (optional): `idleMinutes` adds a sliding idle window. When both daily and idle resets are configured, **whichever expires first** forces a new session.
+- Legacy idle-only: if you set `session.idleMinutes` without any `session.reset`/`resetByType` config, WednesdayAI stays in idle-only mode for backward compatibility.
+- Per-type overrides (optional): `resetByType` lets you override the policy for `direct`, `group`, and `thread` sessions (thread = Slack/Discord threads, Telegram topics, Matrix threads when provided by the connector).
+- Per-channel overrides (optional): `resetByChannel` overrides the reset policy for a channel (applies to all session types for that channel and takes precedence over `reset`/`resetByType`).
+- Reset triggers: exact `/new` or `/reset` (plus any extras in `resetTriggers`) start a fresh session id and pass the remainder of the message through. `/new <model>` accepts a model alias, `provider/model`, or provider name (fuzzy match) to set the new session model. If `/new` or `/reset` is sent alone, WednesdayAI runs a short “hello” greeting turn to confirm the reset.
+- Manual reset: delete specific keys from the store; the next message recreates them. The deleted
+  session's conversation rows stay in the database forever — maintenance only retires index
+  entries and never deletes conversation rows (see [Maintenance](#maintenance)).
+- Isolated cron assistant-task jobs always mint a fresh `sessionId` per run (no idle reuse).
+  Main-session cron jobs enqueue an `agent.turn` (`kind` cron) on the existing main session,
+  except that main-session jobs with `payload.kind === "wakeGate"` route through `requestNudge`
+  (a `kind=nudge` turn) instead. They do not create a `cron:<job.id>` chat session and do not run
+  through the heartbeat tick.
+
+## Delivery routes go stale
+
+A session entry stores the last external delivery route (`lastChannel`,
+`lastAccountId`, and the peer id) so follow-up replies can be sent back without
+re-resolving the target. That route is not validated when it is stored, so it can
+outlive the account it points at: a bot account removed from
+`channels.<channel>.accounts` leaves the session entry behind as a dead route.
+
+Every stored-route consumer treats a dead route as **no route** rather than
+falling back to the channel's default account. A route counts as dead when it
+names a non-default account and the channel lists a non-empty set of configured
+accounts that doesn't include it; routes on the default account, and channels
+that don't list accounts, are left alone:
+
+- Heartbeat and system-event output (cron `--system-event`, ACP nudges) is
+  appended to the session chat instead (see
+  [Heartbeat](/next/admin/gateway/heartbeat#delivery-behavior) for the fallback reason shown
+  in `wednesdayai status --deep`).
+- Sub-agent completion announces run inside the requester session with no
+  external send, and session notices are queued as a system event (see
+  [Sub-agents](/next/users/tools/subagents#announce)).
+- `chat.send` replies from the web clients stay in the session chat and are not
+  mirrored to the dead route.
+
+The route row stays in the session store and becomes inert; no migration is
+needed. Re-adding the account to the channel config makes stored routes live
+again on the next delivery.
+
+## Send policy (optional)
+
+Block delivery for specific session types without listing individual ids.
+
+`channel` and `chatType` match the session's stored identity (the channel and peer kind recorded
+when the conversation arrived, or the session's recorded channel), never the session key text.
+`keyPrefix` and `rawKeyPrefix` match the key itself.
+
+```json5
+{
+  session: {
+    sendPolicy: {
+      rules: [
+        { action: "deny", match: { channel: "discord", chatType: "group" } },
+        { action: "deny", match: { keyPrefix: "cron:" } },
+        // Match the raw session key (including the `agent:<id>:` prefix).
+        { action: "deny", match: { rawKeyPrefix: "agent:main:discord:" } },
+      ],
+      default: "allow",
+    },
+  },
+}
+```
+
+Runtime override (owner only):
+
+- `/send on` → allow for this session
+- `/send off` → deny for this session
+- `/send inherit` → clear override and use config rules
+  Send these as standalone messages so they register.
+
+## Configuration (optional rename example)
+
+```json5
+// ~/.openclaw/openclaw.json
+{
+  session: {
+    scope: "per-sender", // keep group keys separate
+    dmScope: "main", // DM continuity (set per-channel-peer/per-account-channel-peer for shared inboxes)
+    identityLinks: {
+      alice: ["telegram:123456789", "discord:987654321012345678", "device:6abfaeda…"],
+    },
+    reset: {
+      // Defaults: mode=daily, atHour=4 (gateway host local time).
+      // If you also set idleMinutes, whichever expires first wins.
+      mode: "daily",
+      atHour: 4,
+      idleMinutes: 120,
+    },
+    resetByType: {
+      thread: { mode: "daily", atHour: 4 },
+      direct: { mode: "idle", idleMinutes: 240 },
+      group: { mode: "idle", idleMinutes: 120 },
+    },
+    resetByChannel: {
+      discord: { mode: "idle", idleMinutes: 10080 },
+    },
+    resetTriggers: ["/new", "/reset"],
+    // Per-agent store identity; also where legacy JSON session files are found for the one-time import.
+    store: "~/.openclaw/agents/{agentId}/sessions/sessions.json",
+    mainKey: "main",
+  },
+}
+```
+
+## Inspecting
+
+- `wednesdayai status` — shows store path and recent sessions.
+- `wednesdayai sessions --json` — dumps every entry (filter with `--active <minutes>`).
+- `wednesdayai gateway call sessions.list --params '{}'` — fetch sessions from the running gateway (use `--url`/`--token` for remote gateway access).
+- Send `/status` as a standalone message in chat to see whether the agent is reachable, how much of the session context is used, current thinking/verbose toggles, and when your WhatsApp web creds were last refreshed (helps spot relink needs).
+- Send `/context list` or `/context detail` to see what’s in the system prompt and injected workspace files (and the biggest context contributors).
+- Send `/stop` (or standalone abort phrases like `stop`, `stop action`, `stop run`, `stop openclaw`) to abort the current run, clear queued followups for that session, and stop any sub-agent runs spawned from it (the reply includes the stopped count).
+- Send `/compact` (optional instructions) as a standalone message to summarize older context and free up window space. See [/concepts/compaction](/next/developers/concepts/compaction).
+- To review full turns, page the transcript with the gateway `sessions.export` method (the macOS app's "Open session log" uses it), or use `wednesdayai sessions --json` for index metadata.
+
+## Tips
+
+- Keep the primary key dedicated to 1:1 traffic; let groups keep their own keys.
+- When automating cleanup, delete individual keys instead of the whole store to preserve context elsewhere.
+
+## Troubleshooting
+
+**Two different people share context in DMs (privacy leak)**
+`dmScope: "main"` is the default and routes all direct messages into one session. Set `dmScope: "per-channel-peer"` (or `"per-account-channel-peer"` for multi-account inboxes) so each sender gets an isolated context. Run `wednesdayai security audit` to confirm your DM isolation settings.
+
+**Session does not reset at the expected daily time**
+The daily reset uses the gateway host's local time (default 4:00 AM). If the gateway host is in a different timezone than expected, the reset fires at the wrong wall-clock time. Adjust `session.reset.atHour` to match your preferred local time, or set the gateway host's timezone. Also verify the gateway restarted after the config change.
+
+**Session database grows very large**
+By default history is kept forever and is never deleted automatically — there is no automatic
+space reclamation. `session.maintenance` (`warn`/`enforce`, `pruneAfter`, `maxEntries`) only
+retires idle or over-cap sessions from the session index (tombstones); the conversation rows stay.
+Use `wednesdayai sessions cleanup --dry-run --json` to preview which index entries would be retired.
+
+## Related
+
+- [Session pruning](/next/developers/concepts/session-pruning)
+- [Compaction](/next/developers/concepts/compaction)
+- [Gateway configuration](/next/admin/gateway/configuration)
+
+## Session origin metadata
+
+Each session entry records where it came from (best-effort) in `origin`:
+
+- `label`: human label (resolved from conversation label + group subject/channel)
+- `provider`: normalized channel id (including extensions)
+- `from`/`to`: raw routing ids from the inbound envelope
+- `accountId`: provider account id (when multi-account)
+- `threadId`: thread/topic id when the channel supports it
+  The origin fields are populated for direct messages, channels, and groups. If a
+  connector only updates delivery routing (for example, to keep a DM main session
+  fresh), it should still provide inbound context so the session keeps its
+  explainer metadata. Extensions can do this by sending `ConversationLabel`,
+  `GroupSubject`, `GroupChannel`, `GroupSpace`, and `SenderName` in the inbound
+  context and calling `recordSessionMetaFromInbound` (or passing the same context
+  to `updateLastRoute`).
+
+A stored origin route can outlive the account it points at. Delivery consumers
+treat a route whose account the channel no longer lists as no route instead of
+falling back to a default account; see [Delivery routes go stale](#delivery-routes-go-stale).

@@ -1,0 +1,141 @@
+---
+title: "Contributing"
+summary: "How to contribute to WednesdayAI: workflow, dev setup, PR gate"
+audience: developer
+read_when:
+  - Opening your first pull request
+---
+
+
+Welcome! WednesdayAI is a hard fork of OpenClaw at `v2026.3.2`, maintained by [ExpansionX Partners](https://www.expansionx.com.au) and the open-source community. The fork exists because we needed a **stable foundation** to build on — one where breaking changes stay out of core and extensions are how you add power.
+
+## Quick Links
+
+- **GitHub:** https://github.com/ExpansionX/WednesdayAI-core
+- **Docs:** https://docs.wednesdayai.dev
+- **Discord:** https://discord.gg/wednesdayai
+- **Vision, roadmap, architecture:** `VISION.md`, `ROADMAP.md`, `ARCHITECTURE.md` (repo root)
+- **Domain vocabulary:** `CONTEXT.md`
+- **Brand guidelines:** `docs/brand/BRAND-GUIDELINES.md`
+
+## Maintainers
+
+- **David Rudduck** — ExpansionX Partners, project lead
+  - GitHub: [@davidrudduck](https://github.com/davidrudduck) · Email: [hello@expansionx.com.au](mailto:hello@expansionx.com.au)
+
+We're a small team. If you want to take on a maintenance role, see [Becoming a Maintainer](#becoming-a-maintainer) below.
+
+## Fork Philosophy
+
+WednesdayAI does not track upstream OpenClaw wholesale: upstream is a read-only reference, changes are cherry-picked on their merits, and stability beats feature parity. The reasoning lives in `VISION.md`.
+
+**Naming:** use **WednesdayAI** in docs, headings, and user-facing text. The npm package, CLI binary, and plugin SDK import (`wednesdayai/plugin-sdk`) are `wednesdayai`; `openclaw` remains a backward-compatible legacy alias for all of them, under staged removal. Config keys, `OPENCLAW_*` environment variables, and internal code identifiers stay `openclaw`. The decision is recorded in ADR 0030 (`dev-docs/adr/0030-wednesdayai-namespace-primary.md`), amended by ADR 2057 (`dev-docs/adr/2057-openclaw-legacy-with-removal.md`).
+
+## Development Principles
+
+These apply to every change, human- or agent-authored.
+
+1. **Reuse before you build.** If a maintained package already solves the problem, use it, especially if it's already in the stack. Check `package.json` first. Don't hand-roll parsers, protocol clients, date or URL handling, retry logic, and similar. Adding a new dependency needs a reason (maintenance, license, size, security surface); reusing an existing one needs none.
+2. **Fix the class, not the instance.** If the same component produces a second bug of the same kind, stop patching cases and replace the approach. Regex over structured formats (Markdown, HTML, YAML, shell) is the usual culprit: use a real parser.
+3. **Tests assert causes, not guesses.** Assert on signals that prove behavior (state, emitted events, attributes the app already exposes, controlled timers), not on heuristics such as request shape, timing windows, or sleeps.
+4. **Scope serves the outcome.** A change delivers its stated goal plus anything needed for a working build. Adjacent improvements and findings that don't affect correctness, security, or the build go into tracked follow-up issues, not the same PR.
+5. **Reviews block on in-scope correctness and security.** Style, polish, and out-of-scope edge cases are non-blocking comments or follow-ups. Approve a change once it improves the codebase; don't hold it for perfection.
+6. **Prefer boring and small.** Simplest design that meets the requirement. Less code and fewer moving parts beat clever generality.
+
+## Current Priorities
+
+What we are working on now is tracked in `ROADMAP.md` (see its current-focus section). Check [GitHub Issues](https://github.com/ExpansionX/WednesdayAI-core/issues) for `good first issue` labels.
+
+## How to Contribute
+
+1. **Bugs and small fixes** → open a PR directly
+2. **New features or architecture changes** → open a [GitHub Discussion](https://github.com/ExpansionX/WednesdayAI-core/discussions) or ask in Discord first
+3. **Plugin / extension work** → follow the plugin SDK contract in `src/plugin-sdk/`; see the extension rules in `.agents/reference/plugins.md`. For changes to a public contract surface, see `docs/plugins/contracts.md` (run `pnpm contracts:update` and bump the version constant).
+4. **Questions** → [Discord](https://discord.gg/wednesdayai)
+
+## Set up a dev environment
+
+Requires Node.js ≥ 24 and pnpm.
+
+```bash
+git clone https://github.com/ExpansionX/WednesdayAI-core.git
+cd WednesdayAI-core
+
+pnpm install
+pnpm build
+pnpm control:build:packaged
+
+pnpm openclaw onboard --install-daemon
+
+# Dev loop (auto-reload on TS changes)
+pnpm gateway:watch
+```
+
+`pnpm openclaw` runs the CLI from source through `scripts/run-node.mjs`. Per-topic guides:
+
+- [Coding style](https://docs.wednesdayai.dev/developers/contributing/coding-style)
+- [Testing](https://docs.wednesdayai.dev/developers/contributing/testing)
+- [Secure development](https://docs.wednesdayai.dev/developers/contributing/secure-development)
+- [Performance](https://docs.wednesdayai.dev/developers/contributing/performance)
+- [Documentation](https://docs.wednesdayai.dev/developers/contributing/documentation)
+- [Release](https://docs.wednesdayai.dev/developers/contributing/release)
+
+## Before you PR
+
+Run the full local gate:
+
+```bash
+pnpm check        # format, type-check, lint, custom lint scripts (incl. the extension core-table, sessionKey identity-parse and ADR unique-numbers guards)
+pnpm build
+pnpm test
+pnpm check:docs   # docs format, lint, and link audit
+```
+
+Performance-sensitive changes: after `pnpm build && pnpm web:build:packaged && pnpm control:build:packaged`, run `pnpm check:perf` — the advisory runtime-budget gate documented in [Performance](https://docs.wednesdayai.dev/developers/contributing/performance).
+
+Keep PRs focused — one concern per PR; do not mix unrelated refactors. Describe **what** changed and **why**. Fill in the PR template (`.github/pull_request_template.md`).
+
+For commits, use the `scripts/committer` helper and Conventional Commit messages:
+
+```sql
+feat(channels): add IRC reconnect backoff
+fix(gateway): correct token persistence on CLI override
+docs(contributing): update fork identity
+```
+
+## Extension Development
+
+Bundled extensions follow the rules in `.agents/reference/plugins.md`.
+
+## AI-Assisted PRs Welcome
+
+Built with Claude, Codex, or other AI tools? Great — just mark it.
+
+Please include in your PR:
+
+- [ ] Mark as AI-assisted in the PR title or description
+- [ ] Note the degree of testing (untested / lightly tested / fully tested)
+- [ ] Include prompts or session logs if useful
+- [ ] Confirm you understand what the code does
+
+AI PRs are first-class citizens here. We ask for transparency so reviewers know what to look for.
+
+## Becoming a Maintainer
+
+We're selectively expanding the maintainer team. If you're an experienced contributor who wants to help shape WednesdayAI's direction — through code, docs, or community — we'd like to hear from you.
+
+Being a maintainer is a responsibility, not an honorary title. We expect active, consistent involvement: triaging issues, reviewing PRs, and helping move the project forward.
+
+Email [hello@expansionx.com.au](mailto:hello@expansionx.com.au) with:
+
+- Links to your PRs on WednesdayAI (if you don't have any yet, start there first)
+- Links to open source projects you maintain or actively contribute to
+- Your GitHub and Discord handles
+- A brief intro: background, experience, and areas of interest
+- How much time you can realistically commit
+
+We review every application carefully and add maintainers slowly and deliberately. Please allow a few weeks for a response.
+
+## Report a Vulnerability
+
+Report vulnerabilities privately via GitHub Security Advisories or email [security@expansionx.com.au](mailto:security@expansionx.com.au). Reporting requirements and the trust model are in `SECURITY.md`.

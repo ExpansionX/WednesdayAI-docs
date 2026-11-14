@@ -1,0 +1,102 @@
+---
+summary: "Install WednesdayAI declaratively with Nix"
+read_when:
+  - You want reproducible, rollback-able installs
+  - You're already using Nix/NixOS/Home Manager
+  - You want everything pinned and managed declaratively
+title: "Nix"
+---
+
+# Nix Installation
+
+The recommended way to run WednesdayAI with Nix is via **[nix-openclaw](https://github.com/openclaw/nix-openclaw)** — a batteries-included Home Manager module.
+
+## Quick Start
+
+Paste this to your AI agent (Claude, Cursor, etc.):
+
+```text
+I want to set up nix-wednesdayai on my Mac.
+Repository: github:openclaw/nix-openclaw
+
+What I need you to do:
+1. Check if Determinate Nix is installed (if not, install it)
+2. Create a local flake at ~/code/openclaw-local using templates/agent-first/flake.nix
+3. Help me create a Telegram bot (@BotFather) and get my chat ID (@userinfobot)
+4. Set up secrets (bot token, model provider API key) - plain files at ~/.secrets/ is fine
+5. Fill in the template placeholders and run home-manager switch
+6. Verify: launchd running, bot responds to messages
+
+Reference the nix-openclaw README for module options.
+```
+
+> **📦 Full guide: [github.com/openclaw/nix-openclaw](https://github.com/openclaw/nix-openclaw)**
+>
+> The nix-wednesdayai repo is the source of truth for Nix installation. This page is just a quick overview.
+
+## What you get
+
+- Gateway + macOS app + tools (whisper, spotify, cameras) — all pinned
+- Launchd service that survives reboots
+- Plugin system with declarative config
+- Instant rollback: `home-manager switch --rollback`
+
+---
+
+## Nix Mode Runtime Behavior
+
+When `OPENCLAW_NIX_MODE=1` is set (automatic with nix-openclaw):
+
+WednesdayAI supports a **Nix mode** that makes configuration deterministic and disables auto-install flows.
+Enable it by exporting:
+
+```bash
+OPENCLAW_NIX_MODE=1
+```
+
+On macOS, the GUI app does not automatically inherit shell env vars. You can
+also enable Nix mode via defaults:
+
+```bash
+defaults write ai.openclaw.mac openclaw.nixMode -bool true
+```
+
+### Config + state paths
+
+WednesdayAI reads JSON5 config from `OPENCLAW_CONFIG_PATH` and stores mutable data in `OPENCLAW_STATE_DIR`.
+When needed, you can also set `OPENCLAW_HOME` to control the base home directory used for internal path resolution.
+
+- `OPENCLAW_HOME` (default precedence: `HOME` / `USERPROFILE` / `os.homedir()`)
+- `OPENCLAW_STATE_DIR` (default: `~/.openclaw`)
+- `OPENCLAW_CONFIG_PATH` (default: `$OPENCLAW_STATE_DIR/openclaw.json`)
+
+When running under Nix, set these explicitly to Nix-managed locations so runtime state and config
+stay out of the immutable store.
+
+### Runtime behavior in Nix mode
+
+- Auto-install and self-mutation flows are disabled
+- Missing dependencies surface Nix-specific remediation messages
+- UI surfaces a read-only Nix mode banner when present
+- Retired config keys never block startup. A Nix-managed config is immutable, so the gateway
+  cannot rewrite it; instead it drops retired keys in memory and logs one warning naming them, so
+  an upgrade that retires a key your config still carries still boots. Remove the named keys from
+  your Nix configuration to clear the warning.
+- Legacy keys that need a real migration still refuse startup, because the gateway cannot apply
+  the migration for you. Run [`wednesdayai doctor --fix`](/next/admin/gateway/doctor) against a writable
+  copy of the config to see the rewrite, then port it into your Nix configuration.
+
+## Packaging note (macOS)
+
+The macOS app lives in the
+[WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository. Its packaging flow
+expects a stable Info.plist template at `apps/macos/Sources/OpenClaw/Resources/Info.plist` in that WednesdayAI-apps checkout;
+[`scripts/package-mac-app.sh`](https://github.com/ExpansionX/WednesdayAI-apps/blob/main/scripts/package-mac-app.sh) copies this template into the app bundle and patches dynamic fields
+(bundle ID, version/build, Git SHA, Sparkle keys). This keeps the plist deterministic for SwiftPM
+packaging and Nix builds (which do not rely on a full Xcode toolchain).
+
+## Related
+
+- [nix-openclaw](https://github.com/openclaw/nix-openclaw) — full setup guide
+- [Wizard](/next/users/start/wizard) — non-Nix CLI setup
+- [Docker](/next/admin/install/docker) — containerized setup

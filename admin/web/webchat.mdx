@@ -1,0 +1,62 @@
+---
+summary: "Loopback WebChat static host and Gateway WS usage for chat UI"
+read_when:
+  - Debugging or configuring WebChat access
+title: "WebChat"
+---
+
+# WebChat (Gateway WebSocket UI)
+
+Status: the macOS/iOS SwiftUI chat UI talks directly to the Gateway WebSocket.
+
+## What it is
+
+- A native chat UI for the gateway (no embedded browser and no local static server).
+- Uses the same sessions and routing rules as other channels.
+- Deterministic routing: replies always go back to WebChat.
+
+## Quick start
+
+1. Start the gateway.
+2. Open the WebChat UI (macOS/iOS app) or the [web client](/admin/web/using-the-web-client) at `/v2/client/` (the default chat surface in a browser).
+3. Ensure gateway auth is configured (required by default, even on loopback).
+
+## How it works (behavior)
+
+- The UI connects to the Gateway WebSocket and uses `chat.history`, `chat.send`, and `chat.inject`.
+- `chat.history` is bounded for stability: Gateway may truncate long text fields, omit heavy metadata, and replace oversized entries with `[chat.history omitted: message too large]`. Oversized tool calls and tool results keep their call id, tool name and error flag, with only the oversized arguments or output replaced by a marker, or left out when only the bare identities fit the size cap. An entry whose identities alone exceed the cap comes back as several consecutive placeholder rows.
+- `chat.inject` appends an assistant note directly to the transcript and broadcasts it to the UI (no agent run).
+- Aborted runs can keep partial assistant output visible in the UI.
+- An aborted run's partial assistant output is saved to transcript history exactly once, as an assistant message with `stopReason: "aborted"`. The run saves it itself while it stops; the `aborted` event and the answer to `chat.abort` come only once that is done, so a re-read of `chat.history` on the event already has the partial. Gateway writes the partial itself (with `openclawAbort` metadata, before the event) only for runs that have no embedded agent run.
+- History is always fetched from the gateway (no local file watching).
+- If the gateway is unreachable, WebChat is read-only.
+
+## Console agents tools panel
+
+- The console's **Agents → Tools** panel (Control UI v2: **Configure → Agents → Tools** tab)
+  fetches a runtime catalog via `tools.catalog` and labels
+  each tool as `core` or `plugin:<id>` (plus `optional` for optional plugin tools).
+- If `tools.catalog` is unavailable, the panel falls back to a built-in static list.
+- The panel edits profile and override config, but effective runtime access still follows policy
+  precedence (`allow`/`deny`, per-agent and provider/channel overrides).
+
+## Remote use
+
+- Remote mode tunnels the gateway WebSocket over SSH/Tailscale.
+- You do not need to run a separate WebChat server.
+
+## Configuration reference (WebChat)
+
+Full configuration: [Configuration](/admin/gateway/configuration)
+
+Channel options:
+
+- No dedicated `webchat.*` block. WebChat uses the gateway endpoint + auth settings below.
+
+Related global options:
+
+- `gateway.port`, `gateway.bind`: WebSocket host/port.
+- `gateway.auth.mode`, `gateway.auth.token`, `gateway.auth.password`: WebSocket auth (token/password).
+- `gateway.auth.mode: "trusted-proxy"`: reverse-proxy auth for browser clients (see [Trusted Proxy Auth](/admin/gateway/trusted-proxy-auth)).
+- `gateway.remote.url`, `gateway.remote.token`, `gateway.remote.password`: remote gateway target.
+- `session.*`: session storage and main key defaults.

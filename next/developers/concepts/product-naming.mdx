@@ -1,0 +1,83 @@
+---
+audience: admin
+component: concepts/product-naming
+sources:
+  - src/agents/system-prompt.ts
+  - src/agents/system-prompt-report.ts
+  - package.json
+  - dev-docs/adr/0051-system-prompt-markers-wednesdayai.md
+  - docs/superpowers/specs/2026-08-09-wednesdayai-openclaw-context-rename.md
+generated: 2026-08-11
+title: "Product naming (WednesdayAI vs openclaw)"
+summary: "Operator guide to model-visible WednesdayAI branding vs stable openclaw paths, env, and config"
+---
+
+# Product naming (WednesdayAI vs openclaw)
+
+WednesdayAI is the **product name**. A large set of **operator surfaces still use the openclaw identifier** on purpose so existing installs, scripts, and state directories keep working.
+
+## Two layers
+
+| Layer                         | Name                            | Examples                                                                                                                                                                                                                               |
+| ----------------------------- | ------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Model-visible / teaching      | **WednesdayAI** / `wednesdayai` | System prompt identity, section headings, tool descriptions the model reads, skill prose, seeded workspace templates, docs URLs taught to the model (`docs.wednesdayai.dev`), primary CLI spelling taught in prompts (`wednesdayai …`) |
+| Operator / on-disk / protocol | **openclaw** (unchanged)        | `~/.openclaw/`, `openclaw.json`, `OPENCLAW_*` env vars, systemd/launchd unit names, legacy `openclaw/plugin-sdk` import alias, legacy `openclaw` bin alias, internal types, transcript sentinels, inbound-meta schema ids              |
+
+Both layers are correct. Do not “fix” operator paths to WednesdayAI names unless a future migration explicitly says so.
+
+## CLI binaries
+
+- Primary: `wednesdayai`
+- Legacy alias: `openclaw` (same entrypoint). It keeps working; removal is staged under ADR 2057 and announced in advance.
+
+Prefer documenting `wednesdayai` for new runbooks. Existing scripts that call `openclaw` remain valid.
+
+## Prompt structure markers
+
+Assembled system prompts embed HTML-comment markers (ADR 0051):
+
+- `<!-- WEDNESDAYAI_CACHE_BOUNDARY -->` — splits the cache-stable prefix from the per-turn suffix when `agents.defaults.systemPrompt.cache.boundary` is `auto` (default).
+- `<!-- WEDNESDAYAI_PROJECT_CONTEXT_END -->` — ends the Project Context / workspace-file block.
+
+Assembler and system-prompt report parser share the same exported constants (`SYSTEM_PROMPT_CACHE_BOUNDARY`, `SYSTEM_PROMPT_PROJECT_CONTEXT_END` in `src/agents/system-prompt.ts`). They ship in lockstep in one binary.
+
+### Upgrade impact
+
+Changing the cache-boundary marker text invalidates provider prompt-cache prefixes. After upgrading across this rename:
+
+- Expect a **one-time cold cache** on the first turn of each session/model (higher latency and cache-write cost once).
+- No config change is required for markers.
+- Out-of-tree tools that grepped the old `OPENCLAW_*` marker strings need updating.
+
+See [Prompt Caching](/next/developers/reference/prompt-caching) and [System Prompt](/next/developers/concepts/system-prompt).
+
+## What stays byte-identical (do not rename)
+
+Keep these as `openclaw` / `OPENCLAW` even when they appear near model-visible text:
+
+- All `OPENCLAW_*` environment variables
+- State dir `~/.openclaw/` and config file `openclaw.json`
+- Service names, socket names, canvas route prefixes
+- Legacy plugin SDK alias `openclaw/plugin-sdk`, legacy package-pack manifest key `openclaw`, and legacy manifest filename `openclaw.plugin.json` (canonical `wednesdayai/plugin-sdk` specifier, `wednesdayai` key, and `wednesdayai.plugin.json` filename; legacy forms still load per ADR 2057)
+- Transcript sentinel `__OPENCLAW_REDACTED__`, schema id `openclaw.inbound_meta.v1`, provenance `provider: "openclaw"`
+- Browser profile name `profile="openclaw"` (prose around it may still say WednesdayAI)
+
+## Workspace seed files
+
+New workspaces and the bundled templates under `docs/reference/templates/` ship WednesdayAI prose. Existing workspaces are **not** rewritten on upgrade — edit `AGENTS.md` / `IDENTITY.md` (and friends) yourself if old OpenClaw wording remains in operator-owned files.
+
+## Verify after upgrade
+
+```bash
+wednesdayai --version   # or openclaw --version
+wednesdayai gateway status --deep
+```
+
+In a fresh chat session, confirm the model-visible identity line is WednesdayAI (session transcript under `~/.openclaw/agents/<id>/sessions/`). Use `/context list` to confirm cache boundary / Project Context sizing still report cleanly.
+
+## Related
+
+- User-facing summary: [What is WednesdayAI?](/next/developers/concepts/product-naming-user)
+- Developer contract: [Product naming for contributors](/next/developers/concepts/product-naming-developer)
+- Brand voice (marketing): [Brand Guidelines](https://github.com/ExpansionX/WednesdayAI-core/blob/main/docs/brand/BRAND-GUIDELINES.md)
+- ADR: `dev-docs/adr/0051-system-prompt-markers-wednesdayai.md`

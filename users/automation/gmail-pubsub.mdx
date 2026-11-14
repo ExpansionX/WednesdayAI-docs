@@ -1,20 +1,20 @@
 ---
-summary: "Gmail Pub/Sub push wired into OpenClaw webhooks via gogcli"
+summary: "Gmail Pub/Sub push wired into WednesdayAI webhooks via gogcli"
 read_when:
-  - Wiring Gmail inbox triggers to OpenClaw
+  - Wiring Gmail inbox triggers to WednesdayAI
   - Setting up Pub/Sub push for agent wake
 title: "Gmail PubSub"
 ---
 
-# Gmail Pub/Sub -> OpenClaw
+# Gmail Pub/Sub -> WednesdayAI
 
-Goal: Gmail watch -> Pub/Sub push -> `gog gmail watch serve` -> OpenClaw webhook.
+Goal: Gmail watch -> Pub/Sub push -> `gog gmail watch serve` -> WednesdayAI webhook.
 
 ## Prereqs
 
 - `gcloud` installed and logged in ([install guide](https://docs.cloud.google.com/sdk/docs/install-sdk)).
 - `gog` (gogcli) installed and authorized for the Gmail account ([gogcli.sh](https://gogcli.sh/)).
-- OpenClaw hooks enabled (see [Webhooks](/automation/webhook)).
+- WednesdayAI hooks enabled (see [Webhooks](/users/automation/webhook)).
 - `tailscale` logged in ([tailscale.com](https://tailscale.com/)). Supported setup uses Tailscale Funnel for the public HTTPS endpoint.
   Other tunnel services can work, but are DIY/unsupported and require manual wiring.
   Right now, Tailscale is what we support.
@@ -87,25 +87,28 @@ Notes:
 - Gmail hook content is wrapped with external-content safety boundaries by default.
   To disable (dangerous), set `hooks.gmail.allowUnsafeExternalContent: true`.
 
+Inbox enablement: Gmail is a dedicated inbox-only source — the `hooks.gmail` config block
+itself IS the inbox enablement. No `inbox.sources.gmail` key is required or read.
+
 To customize payload handling further, add `hooks.mappings` or a JS/TS transform module
-under `~/.openclaw/hooks/transforms` (see [Webhooks](/automation/webhook)).
+under `~/.openclaw/hooks/transforms` (see [Webhooks](/users/automation/webhook)).
 
 ## Wizard (recommended)
 
-Use the OpenClaw helper to wire everything together (installs deps on macOS via brew):
+Use the WednesdayAI helper to wire everything together (installs deps on macOS via brew):
 
 ```bash
-openclaw webhooks gmail setup \
+wednesdayai webhooks gmail setup \
   --account openclaw@gmail.com
 ```
 
 Defaults:
 
 - Uses Tailscale Funnel for the public push endpoint.
-- Writes `hooks.gmail` config for `openclaw webhooks gmail run`.
+- Writes `hooks.gmail` config for `wednesdayai webhooks gmail run`.
 - Enables the Gmail hook preset (`hooks.presets: ["gmail"]`).
 
-Path note: when `tailscale.mode` is enabled, OpenClaw automatically sets
+Path note: when `tailscale.mode` is enabled, WednesdayAI automatically sets
 `hooks.gmail.serve.path` to `/` and keeps the public path at
 `hooks.gmail.tailscale.path` (default `/gmail-pubsub`) because Tailscale
 strips the set-path prefix before proxying.
@@ -129,7 +132,7 @@ Gateway auto-start (recommended):
 Manual daemon (starts `gog gmail watch serve` + auto-renew):
 
 ```bash
-openclaw webhooks gmail run
+wednesdayai webhooks gmail run
 ```
 
 ## One-time setup
@@ -194,10 +197,17 @@ gog gmail watch serve \
 Notes:
 
 - `--token` protects the push endpoint (`x-gog-token` or `?token=`).
-- `--hook-url` points to OpenClaw `/hooks/gmail` (mapped; isolated run + summary to main).
-- `--include-body` and `--max-bytes` control the body snippet sent to OpenClaw.
+- `--hook-url` points to WednesdayAI `/hooks/gmail` (mapped; isolated run + summary to main).
+- `--include-body` and `--max-bytes` control the body snippet sent to WednesdayAI.
 
-Recommended: `openclaw webhooks gmail run` wraps the same flow and auto-renews the watch.
+Deletion delivery: the watcher WednesdayAI spawns passes
+`--history-types messageAdded,messageDeleted`, and the Gmail hook ingests
+`deletedMessageIds` from the push payload. If you run `gog gmail watch serve` yourself you
+must add that flag too — a gog version carrying `--history-types` is required (upgrade via
+Homebrew: `brew upgrade gogcli`). Without it the default `history-types` set is
+`messageAdded` only, and deletions are never pushed.
+
+Recommended: `wednesdayai webhooks gmail run` wraps the same flow and auto-renews the watch.
 
 ## Expose the handler (advanced, unsupported)
 
@@ -240,6 +250,45 @@ Check watch state and history:
 gog gmail watch status --account openclaw@gmail.com
 gog gmail history --account openclaw@gmail.com --since <historyId>
 ```
+
+Note: `gog gmail history` is `messageAdded`-only upstream (the command hardcodes its
+history types and exposes no flag), so reconcile history replay cannot observe deletions.
+The watch payload above is the only deletion channel; the periodic resync sweep is the
+backstop for anything it missed.
+
+## Backfill history
+
+`wednesdayai inbox backfill --source gmail [--account <address>] [--since <iso>] [--all]`
+pulls Gmail history into the inbox store — manual, resumable, per-page checkpointed (see
+[Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill)). Gmail specifics:
+
+- **Query** — `in:anywhere` (full history) or `in:anywhere after:YYYY/MM/DD` (ranged).
+  Gmail's `after:` operator is day-granular, and Gmail interprets date bounds at
+  midnight **PST**, while the fetcher builds the bound as a **UTC** calendar date and
+  forwards it without timezone conversion. The server-side window can therefore open up
+  to 8 hours after the UTC day start: for `--since 2024-01-02T00:00:00Z`, a message at
+  `04:00Z` on Jan 2 can be excluded server-side, and the client-side timestamp filter
+  cannot recover it — it only drops items older than the exact epoch, never adds them
+  back. Near-boundary coverage around the since day is therefore approximate; the
+  full-history walk (no `--since`) is unaffected.
+- **Pages** — up to 500 **thread results** per page (`--max 500` on the same gog
+  snapshot search the full resync uses), with every returned thread expanded into all
+  of its messages — a page containing multi-message threads can therefore hold
+  substantially more than 500 messages. The resume token is gog's opaque
+  `nextPageToken` (thread-level). Thread expansion returns every message of a matching
+  thread, including ones older than the exact since boundary — the timestamp filter
+  drops those.
+- **Accounts** — the enabled-account list merges `hooks.gmail.account` (only when it is
+  a plain email address, not a gog selector such as `auto`) with the account cursors
+  already tracked for the source; deduped and sorted.
+- **Deletions** — backfill never drains the reconcile deletion guard; deletion pushes on
+  the watch payload above and pending tombstone intents apply exactly as during live
+  ingestion.
+
+Gmail has no separate `inbox.sources` gate: the enabled-account list is derived from the
+`hooks.gmail` config plus tracked account cursors (a previously active account remains
+backfillable even with no `hooks.gmail` block), and an empty list reports the source as
+not enabled.
 
 ## Troubleshooting
 

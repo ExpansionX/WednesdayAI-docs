@@ -1,0 +1,133 @@
+---
+summary: "Troubleshoot cron and heartbeat scheduling and delivery"
+read_when:
+  - Cron did not run
+  - Cron ran but no message was delivered
+  - Heartbeat seems silent or skipped
+title: "Automation Troubleshooting"
+---
+
+# Automation troubleshooting
+
+Use this page for scheduler and delivery issues (`cron` + `heartbeat`).
+
+## Command ladder
+
+```bash
+wednesdayai status
+wednesdayai gateway status
+wednesdayai logs --follow
+wednesdayai doctor
+wednesdayai channels status --probe
+```
+
+Then run automation checks:
+
+```bash
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai system heartbeat last
+```
+
+## Cron not firing
+
+```bash
+wednesdayai cron status
+wednesdayai cron list
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai logs --follow
+```
+
+Good output looks like:
+
+- `cron status` reports enabled and a future `nextWakeAtMs`.
+- Job is enabled and has a valid schedule/timezone.
+- `cron runs` shows `ok` or explicit skip reason.
+
+Common signatures:
+
+- `cron: scheduler disabled; jobs will not run automatically` → cron disabled in config/env.
+- `[cron] failed to start: value "..." is out of range for type integer` → Postgres
+  `cron_jobs` still has 32-bit `integer` on an epoch-ms column. Restart on a build
+  that widens those columns to `BIGINT`. See [Where cron jobs are stored](/next/users/automation/cron-jobs#where-cron-jobs-are-stored).
+- `cron: timer tick failed` → scheduler tick crashed; inspect surrounding stack/log context.
+- `reason: not-due` in run output → `wednesdayai cron run <jobId> --due` or Web UI **Run if due** was used and the job is not due yet.
+- `main job requires payload.kind="systemEvent"` → the job is stored as a main-session job with an incompatible payload. Use the Web UI **Timeline message** or **Check first, then nudge** job type, or recreate the job with a matching `sessionTarget`/`payload.kind`.
+- `isolated job requires payload.kind=agentTurn` → the job is stored as an isolated job without an assistant-task payload. Use the Web UI **Assistant task** job type or recreate the job with `--session isolated --message ...`.
+- `wake-gate-empty` → the **job-level** wake-gate check ran and found no work. This is a valid skipped result, not a scheduler failure. A main-session Timeline message (`wakeMode=now`) must **not** inherit this from `heartbeat.wakeGate`. If a due main cron is skipped as `wake-gate-empty`, the job itself has a wake-gate payload — it is not waiting on the periodic heartbeat email-gate.
+- `main cron enqueueAgentTurn not wired` → the Gateway is an older build without the agent-turn producer wiring. Restart on a build that includes H2 (`enqueueAgentTurn` on CronService).
+- `already running` or `already-running` → the previous run or target lane is still active. Wait for it to finish, then inspect `wednesdayai cron runs --id <jobId> --limit 20`.
+- `cron: disabled job <id>: malformed payload_json` (or `schedule_json`) → the stored job was unreadable and was disabled on load. See [A job turned itself off](/next/users/automation/cron-jobs#a-job-turned-itself-off-or-lost-its-delivery-settings).
+
+## Cron fired but no delivery
+
+```bash
+wednesdayai cron runs --id <jobId> --limit 20
+wednesdayai cron list
+wednesdayai channels status --probe
+wednesdayai logs --follow
+```
+
+Good output looks like:
+
+- Run status is `ok`.
+- Delivery mode/target are set for isolated jobs.
+- Channel probe reports target channel connected.
+
+Common signatures:
+
+- Run succeeded but delivery mode is `none` → no external message is expected.
+- Delivery target missing/invalid (`channel`/`to`) → run may succeed internally but skip outbound.
+- Channel auth errors (`unauthorized`, `missing_scope`, `Forbidden`) → delivery blocked by channel credentials/permissions.
+- Web UI shows `Not delivered` on an internal run → delivery was not requested. Set result delivery to `announce` or `webhook` when you expect an outbound message.
+- `cron: dropped malformed delivery_json on job <id>` → the stored delivery settings were unreadable and were dropped. Set them again with `wednesdayai cron edit <jobId>`.
+
+## Heartbeat suppressed or skipped
+
+```bash
+wednesdayai system heartbeat last
+wednesdayai logs --follow
+wednesdayai config get agents.defaults.heartbeat
+wednesdayai channels status --probe
+```
+
+Good output looks like:
+
+- Heartbeat enabled with non-zero interval.
+- Last heartbeat result is `ran` (or skip reason is understood).
+
+Common signatures:
+
+- `heartbeat skipped` with `reason=quiet-hours` → outside `activeHours`.
+- `requests-in-flight` → main lane busy; heartbeat deferred.
+- `empty-heartbeat-file` → interval heartbeat skipped because `HEARTBEAT.md` has no actionable content and no tagged cron event is queued.
+- `alerts-disabled` → visibility settings suppress outbound heartbeat messages.
+
+## Timezone and activeHours gotchas
+
+```bash
+wednesdayai config get agents.defaults.heartbeat.activeHours
+wednesdayai config get agents.defaults.heartbeat.activeHours.timezone
+wednesdayai config get agents.defaults.userTimezone || echo "agents.defaults.userTimezone not set"
+wednesdayai cron list
+wednesdayai logs --follow
+```
+
+Quick rules:
+
+- `Config path not found: agents.defaults.userTimezone` means the key is unset; heartbeat falls back to host timezone (or `activeHours.timezone` if set).
+- Cron without `--tz` uses gateway host timezone.
+- Heartbeat `activeHours` uses configured timezone resolution (`user`, `local`, or explicit IANA tz).
+- ISO timestamps without timezone are treated as UTC for cron `at` schedules.
+
+Common signatures:
+
+- Jobs run at the wrong wall-clock time after host timezone changes.
+- Heartbeat always skipped during your daytime because `activeHours.timezone` is wrong.
+
+Related:
+
+- [/automation/cron-jobs](/next/users/automation/cron-jobs)
+- [/gateway/heartbeat](/next/admin/gateway/heartbeat)
+- [/automation/cron-vs-heartbeat](/next/users/automation/cron-vs-heartbeat)
+- [/concepts/timezone](/next/developers/concepts/timezone)

@@ -1,6 +1,6 @@
 ---
 title: "Auto-Reply Pipeline"
-summary: "How OpenClaw routes inbound messages through transcription, enrichment, dispatch, and reply"
+summary: "How WednesdayAI routes inbound messages through transcription, enrichment, dispatch, and reply"
 read_when:
   - You want to understand the full message lifecycle from receipt to reply
   - You are building a plugin that intercepts or transforms messages
@@ -47,7 +47,7 @@ flowchart LR
 
 **Hook events.** After transcription and media understanding complete, `message:transcribed` fires (audio only) and `message:preprocessed` always fires. See [Hook events](#hook-events).
 
-**Envelope wrap.** The normalized body is wrapped with a metadata header: `[Channel From Timestamp] body`. The format is controlled by `agents.defaults.envelopeTimezone`, `agents.defaults.envelopeTimestamp`, and `agents.defaults.envelopeElapsed`. The envelope is applied for the current turn only; the stored transcript keeps the raw message text, and past turns render as a timestamp stamp plus that raw text (see [Date & Time](/date-time)).
+**Envelope wrap.** The normalized body is wrapped with a metadata header: `[Channel From Timestamp] body`. The format is controlled by `agents.defaults.envelopeTimezone`, `agents.defaults.envelopeTimestamp`, and `agents.defaults.envelopeElapsed`. The envelope is applied for the current turn only; the stored transcript keeps the raw message text, and past turns render as a timestamp stamp plus that raw text (see [Date & Time](/users/date-time)).
 
 **Agent run.** The finalized message context is passed to `getReplyFromConfig`, which resolves session state, system prompt, model, and runs the agent loop. Directives embedded inline (e.g. `/model gpt-4o` or `/think high`) are extracted from the message before the loop starts.
 
@@ -69,14 +69,14 @@ Plugins and hook files can subscribe to these `message:*` events. All are fired 
 
 `senderId` in these payloads is the raw sender of the turn. On gateway turns (web client, Control
 UI) it is `device:<deviceId>` when the connection has a verified device, otherwise the app id (for
-example `openclaw-user-client`); see [Workspace Lanes](/concepts/workspace-lanes) for how devices
+example `openclaw-user-client`); see [Workspace Lanes](/developers/concepts/workspace-lanes) for how devices
 link to people. For a linked device, `senderName` is the person (ADR 0104). System agent-turns
 (cron systemEvent/wake, nudge, work, announce) report `trigger` of `cron`/`heartbeat` — never
 `user` — and carry the run's configured identity.
 
-Hooks are registered via `api.registerHook(event, handler, opts)` in a plugin, or as hook files using event keys `message:received`, `message:transcribed`, and `message:preprocessed`. See [Hooks](/automation/hooks) for the full hook authoring guide.
+Hooks are registered via `api.registerHook(event, handler, opts)` in a plugin, or as hook files using event keys `message:received`, `message:transcribed`, and `message:preprocessed`. See [Hooks](/users/automation/hooks) for the full hook authoring guide.
 
-Hook names in plugin registrations are validated: a name the typed hook runner dispatches (`api.on` names), or one no internal emitter produces, produces a `PLUGIN_HOOK_NOT_DISPATCHED` warning — visible in `wednesdayai plugins doctor`, `wednesdayai plugins status`, and the gateway startup report, with the plugin shown as `degraded` in `wednesdayai plugins list` — while the plugin keeps loading. See the [hook parity map](/plugins/hook-parity).
+Hook names in plugin registrations are validated: a name the typed hook runner dispatches (`api.on` names), or one no internal emitter produces, produces a `PLUGIN_HOOK_NOT_DISPATCHED` warning — visible in `wednesdayai plugins doctor`, `wednesdayai plugins status`, and the gateway startup report, with the plugin shown as `degraded` in `wednesdayai plugins list` — while the plugin keeps loading. See the [hook parity map](/developers/plugins/hook-parity).
 
 Example — log every transcribed voice message:
 
@@ -108,7 +108,7 @@ The command registry maps text aliases (e.g. `/reset`, `/model`, `/think`) and n
 
 Commands are matched in two modes: **text** (the message body equals `/commandname`) and **native** (a Telegram, Discord, or Slack native slash command). Some commands are text-only (e.g. `/bash`, `/allowlist`); others are native-only; most support both.
 
-**Plugin commands.** Plugins can register commands via `api.registerCommand({ name, description, handler })`. Plugin commands execute before built-in commands and before the agent. See [Register auto-reply commands](/tools/plugin#register-auto-reply-commands).
+**Plugin commands.** Plugins can register commands via `api.registerCommand({ name, description, handler })`. Plugin commands execute before built-in commands and before the agent. See [Register auto-reply commands](/users/tools/plugin#register-auto-reply-commands).
 
 **Enabling/disabling commands.** `/config` and `/debug` can be restricted via `commands.config` and `commands.debug` config flags. The `/bash` command is gated by `commands.bash`.
 
@@ -132,7 +132,7 @@ Config can set a default policy per-session via the session store; there is no g
 
 ## Voice note loop
 
-`voiceNoteLoop` closes the voice ↔ voice loop: when the user sends a voice message, OpenClaw replies with a voice message instead of text.
+`voiceNoteLoop` closes the voice ↔ voice loop: when the user sends a voice message, WednesdayAI replies with a voice message instead of text.
 
 Configure it under `tts`:
 
@@ -157,7 +157,7 @@ The relevant implementation is in `src/auto-reply/reply/dispatch-from-config.ts`
 
 ## Heartbeat
 
-Heartbeat runs are periodic background agent turns that fire independently of inbound messages. They are configured under `agents.defaults.heartbeat` (or per-agent under `agents.list[*].heartbeat`).
+Heartbeat runs are periodic background agent turns that fire independently of inbound messages. They are configured under `agents.defaults.heartbeat` (or per-agent under `agents.list[*].heartbeat`). Once any `agents.list[*]` entry has a `heartbeat` block, **only those agents** run heartbeats (`isHeartbeatEnabledForAgent` in `src/infra/heartbeat-runner.config.ts`) — an explicit block on one agent turns heartbeats off for every other agent.
 
 ```json5
 {
@@ -166,7 +166,7 @@ Heartbeat runs are periodic background agent turns that fire independently of in
       heartbeat: {
         every: "30m", // interval (default: 30m)
         target: "last", // delivery target
-        prompt: "", // override the default prompt
+        prompt: "", // custom prompt body (empty string = default prompt)
         lightContext: true, // bootstrap from HEARTBEAT.md only
         // toolsAllow: ["session_status"], // optional: bound the isolated heartbeat tool surface (requires isolatedSession: true)
       },
@@ -177,52 +177,53 @@ Heartbeat runs are periodic background agent turns that fire independently of in
 
 **Delivery targets.** The `target` field controls where heartbeat output is sent:
 
-| Value              | Behavior                                                 |
-| ------------------ | -------------------------------------------------------- |
-| `"none"` (default) | Run silently; no output is delivered                     |
-| `"last"`           | Deliver to the most recent conversation for this session |
-| `"whatsapp"`       | Deliver to WhatsApp (requires `to` field)                |
-| `"telegram"`       | Deliver to Telegram (requires `to` field)                |
-| `"discord"`        | Deliver to Discord (requires `to` field)                 |
-| Any channel id     | Deliver to that channel plugin (requires `to` field)     |
+| Value              | Behavior                                                                         |
+| ------------------ | -------------------------------------------------------------------------------- |
+| `"none"` (default) | Run silently; no output is delivered                                             |
+| `"last"`           | Deliver to the most recent conversation for this session                         |
+| `"webchat"`        | Append to the session chat (web client/Control UI) and push to connected clients |
+| `"whatsapp"`       | Deliver to WhatsApp (requires `to` field)                                        |
+| `"telegram"`       | Deliver to Telegram (requires `to` field)                                        |
+| `"discord"`        | Deliver to Discord (requires `to` field)                                         |
+| Any channel id     | Deliver to that channel plugin (requires `to` field)                             |
 
 **Suppressing empty heartbeats.** If the agent replies with `HEARTBEAT_OK` (or a short acknowledgement under `ackMaxChars` characters, default 300), the pipeline strips the token and suppresses delivery. This prevents noise when there is nothing to report.
 
-**Heartbeat prompt.** The default prompt is: `"Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."` Override it with `heartbeat.prompt`.
+**Heartbeat prompt.** The default prompt is: `"Read HEARTBEAT.md if it exists (workspace context). Follow it strictly. Do not infer or repeat old tasks from prior chats. If nothing needs attention, reply HEARTBEAT_OK."` Override it with `heartbeat.prompt`. With `lightContext: true`, the _default_ prompt is the shorter light wording instead ("Follow the HEARTBEAT.md instructions in your context strictly. Do not infer or repeat old tasks. If nothing needs attention, reply HEARTBEAT_OK."); a configured `heartbeat.prompt` always wins over both.
 
 ### Bootstrap context and cache stability
 
-Which bootstrap files are assembled into the system prompt is normally derived from the session key: a dedicated `:heartbeat` session gets the `heartbeat` run kind, everything else gets `default`. The run kind only narrows the file set when lightweight context is requested (`lightContext: true`): `heartbeat` then keeps HEARTBEAT.md alone, while `default` keeps nothing. With `lightContext: false` both run kinds load the full bootstrap set, and `heartbeat` additionally keeps run-kind-gated files such as HEARTBEAT.md. Callers that run a scheduled turn inside a _shared_ session can pin the bootstrap with the `bootstrapContextRunKind` reply option (`"default" | "heartbeat" | "cron"` on `GetReplyOptions`, threaded through to the embedded runner). The heartbeat runner uses this to keep shared-session heartbeats on the session's normal `default` bootstrap — the heartbeat checklist is inlined into the trigger message instead, unless that bootstrap already injects it — so the system prompt stays byte-identical to user turns and the provider prefix cache survives every heartbeat (see [Prompt caching](/reference/prompt-caching#byte-stability-across-trigger-kinds)). ACP cron execution pins `"cron"` the same way. You only need to care about this option when writing a custom trigger that enqueues agent turns into shared sessions; channel messages and the built-in heartbeat/cron paths already do the right thing.
+Which bootstrap files are assembled into the system prompt is normally derived from the session key: a dedicated `:heartbeat` session gets the `heartbeat` run kind, everything else gets `default`. The run kind only narrows the file set when lightweight context is requested (`lightContext: true`): `heartbeat` then keeps HEARTBEAT.md alone, while `default` keeps nothing. With `lightContext: false` both run kinds load the full bootstrap set, and `heartbeat` additionally keeps run-kind-gated files such as HEARTBEAT.md. Callers that run a scheduled turn inside a _shared_ session can pin the bootstrap with the `bootstrapContextRunKind` reply option (`"default" | "heartbeat" | "cron"` on `GetReplyOptions`, threaded through to the embedded runner). The heartbeat runner uses this to keep shared-session heartbeats on the session's normal `default` bootstrap — the heartbeat checklist is inlined into the trigger message instead, unless that bootstrap already injects it — so the system prompt stays byte-identical to user turns and the provider prefix cache survives every heartbeat (see [Prompt caching](/developers/reference/prompt-caching#byte-stability-across-trigger-kinds)). ACP cron execution pins `"cron"` the same way. You only need to care about this option when writing a custom trigger that enqueues agent turns into shared sessions; channel messages and the built-in heartbeat/cron paths already do the right thing.
 
-For a comparison between heartbeats and cron jobs, see [Heartbeat vs Cron](/automation/cron-vs-heartbeat).
+For a comparison between heartbeats and cron jobs, see [Heartbeat vs Cron](/users/automation/cron-vs-heartbeat).
 
 ## Troubleshooting
 
 **Message received but no reply.**
 
-1. Check `openclaw channels status --probe` — confirm the channel is connected and the session key resolves.
+1. Check `wednesdayai channels status --probe` — confirm the channel is connected and the session key resolves.
 2. Check the gateway log for `send_policy_deny` — the session's send policy may be `deny` (run `/send on` from that conversation).
 3. Check whether a debounce is swallowing rapid messages: lower or zero `messages.inbound.debounceMs`.
 4. Confirm the session's allowlist includes the sender (`/allowlist list`).
 5. Check for a `duplicate` skip in the log — the same message id may have been delivered twice by the provider.
-6. For a message queued behind an active run, check the log for `Followup reply failed after the agent run` or `dropped a follow-up`. A followup turn is never re-run after its agent has run; see [Command Queue](/concepts/queue#when-a-followup-turn-fails).
+6. For a message queued behind an active run, check the log for `Followup reply failed after the agent run` or `dropped a follow-up`. A followup turn is never re-run after its agent has run; see [Command Queue](/developers/concepts/queue#when-a-followup-turn-fails).
 
 **Reply sent, but immediately followed by an unexpected heartbeat.**
 
-Heartbeats fire on a timer regardless of recent activity. If you want heartbeats to pause when a conversation is active, use `heartbeat.activeHours` to restrict the window, or set `heartbeat.target: "none"` and trigger heartbeats only from cron jobs that check session state. See [Heartbeat vs Cron](/automation/cron-vs-heartbeat).
+Heartbeats fire on a timer regardless of recent activity. If you want heartbeats to pause when a conversation is active, use `heartbeat.activeHours` to restrict the window, or set `heartbeat.target: "none"` and trigger heartbeats only from cron jobs that check session state. See [Heartbeat vs Cron](/users/automation/cron-vs-heartbeat).
 
 **Media attachment not understood.**
 
-Verify that a media-understanding provider extension is enabled (`plugins.entries.<vendor>.enabled: true` — vendor extensions are disabled by default) and configured (e.g. `tools.media.audio` for audio, or a vision-capable model for images). Audio transcription requires a local CLI (Whisper) or an enabled provider extension. Check the gateway log for `media-understanding` errors, including the auto-selection-exhausted warning naming the remedy. If the attachment arrives as a URL rather than a local file, confirm that `tools.media.downloadMedia` is enabled so the pipeline can fetch it before processing.
+Verify that a media-understanding provider extension is enabled (`plugins.entries.<vendor>.enabled: true` — vendor extensions are disabled by default) and configured (e.g. `tools.media.audio` for audio, or a vision-capable model for images). Audio transcription requires a local CLI (Whisper) or an enabled provider extension; a config-provided OpenAI-compatible proxy (`models.providers.<id>` with `api: "openai-completions"` or `"openai-responses"`) needs no plugin extension, but voice notes are never auto-detected on it — name a speech-to-text model in `tools.media.audio.models` (see [Config-provided proxy bindings](/users/nodes/media-understanding#config-provided-proxy-bindings-openai-compatible)). Check the gateway log for `media-understanding` errors, including the auto-selection-exhausted warning naming the remedy. If the attachment arrives as a URL rather than a local file, confirm that `tools.media.downloadMedia` is enabled so the pipeline can fetch it before processing.
 
 **Command not detected.**
 
-Run `/commands` in the conversation to list active commands. Check whether text commands are disabled for this surface (`commands.text: false` combined with a native-command surface like Discord). Verify that the command body starts with `/` after trimming — the normalizer strips colon syntax and bot-username suffixes but will not match a command buried in prose. If you added a plugin command, confirm the plugin loaded (`openclaw plugins list` and check for errors).
+Run `/commands` in the conversation to list active commands. Check whether text commands are disabled for this surface (`commands.text: false` combined with a native-command surface like Discord). Verify that the command body starts with `/` after trimming — the normalizer strips colon syntax and bot-username suffixes but will not match a command buried in prose. If you added a plugin command, confirm the plugin loaded (`wednesdayai plugins list` and check for errors).
 
 ## Related
 
-- [Hooks](/automation/hooks)
-- [Cron jobs](/automation/cron-jobs)
-- [Heartbeat vs Cron](/automation/cron-vs-heartbeat)
-- [Agent loop](/concepts/agent-loop)
-- [Sessions](/concepts/session)
+- [Hooks](/users/automation/hooks)
+- [Cron jobs](/users/automation/cron-jobs)
+- [Heartbeat vs Cron](/users/automation/cron-vs-heartbeat)
+- [Agent loop](/developers/concepts/agent-loop)
+- [Sessions](/developers/concepts/session)

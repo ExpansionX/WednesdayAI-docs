@@ -1,0 +1,368 @@
+---
+summary: "Inbox client API: versioned inbox.v1.* gateway methods, params/results, ownership, versioning"
+read_when:
+  - Building a client that lists or actions inbox items over the gateway
+  - Changing the inbox.v1.* wire contract
+title: "Inbox API"
+---
+
+# Inbox API
+
+The inbox plugin exposes a versioned, consumer-grade client API over the gateway WebSocket:
+`inbox.v1.list`, `inbox.v1.thread`, `inbox.v1.action`, and `inbox.v1.capabilities`. The
+methods are registered by the inbox plugin (`extensions/inbox`) via
+`api.registerGatewayMethod` and dispatched like any other gateway method.
+
+- Wire payloads are camelCase; pagination cursors are opaque strings.
+- Item ids are deterministic `<source>:<account_id>:<source_id>` composites.
+- `availableActions` (a string array) rides on every serialized item; clients must gate
+  their triage UI on it — a source without an action adapter reports fewer or no actions.
+- The wire `PROTOCOL_VERSION` handshake is unaffected by this API.
+
+## Scopes and ownership
+
+- `inbox.v1.list`, `inbox.v1.thread`, and `inbox.v1.capabilities` require
+  `operator.sessions.read` (narrow) or operator scopes; `inbox.v1.action` requires
+  `operator.sessions.write` or operator scopes. Unclassified methods fail closed to
+  `operator.admin`.
+- Ownership follows the authorization-binding decision (D8): the inbox store is
+  session-less, so each ingesting `(source, account_id)` is bound to a user principal in
+  `inbox_account_owners`. Bindings are managed with `wednesdayai inbox owners bind|unbind`
+  (the `inbox.owners.bind` / `inbox.owners.unbind` gateway RPCs, `operator.admin`) and take
+  effect immediately; the `inbox.owners` config key is a load-time seed kept in sync by the
+  CLI, and a hand edit applies at the next gateway start. Narrow-scope callers
+  (`openclaw-user-client`, e.g. apps/web and
+  WednesdayAI-glass) resolve to their user and may list, read, and action only items whose
+  `(source, account_id)` they own. The check binds to the item's stored
+  `(source, account_id)`, never to request params — guessing another user's item id is
+  denied. Unowned accounts stay operator-visible only; operator/system sees everything.
+  Enforcement sits in the method handler, never client-side.
+- A narrow caller with no owned accounts gets an empty result, not an error.
+
+## Methods
+
+### `inbox.v1.list`
+
+Lists inbox items, newest first, filtered and paginated.
+
+Params:
+
+| Param             | Type              | Notes                                                             |
+| ----------------- | ----------------- | ----------------------------------------------------------------- |
+| `source`          | string, optional  | e.g. `"gmail"`, `"slack"`                                         |
+| `accountId`       | string, optional  | omitted = all owned accounts for the source                       |
+| `threadKey`       | string, optional  | scope the list to one thread                                      |
+| `unreadOnly`      | boolean, optional | inbound items not yet agent-read                                  |
+| `category`        | string, optional  | rule category filter                                              |
+| `policyFlag`      | string, optional  | `financial`, `legal`, `safety`, `low-confidence`                  |
+| `reviewQueueOnly` | boolean, optional | items where `category='Unclear'` or `policyFlag` is set           |
+| `includeArchived` | boolean, optional | also return archived items (default: excluded)                    |
+| `includeDeleted`  | boolean, optional | also return source-deleted (tombstoned) items (default: excluded) |
+| `limit`           | number, optional  | page size                                                         |
+| `before`          | string, optional  | opaque composite cursor `"<ts>:<id>"` from a previous page        |
+
+Result: `{ items, nextBefore?, unreadTotal? }` — `items` is an array of serialized items,
+each including `availableActions`. `unreadTotal` is the caller's authoritative unread count
+(ownership-scoped, independent of the list's own filters): client badges must read it
+rather than deriving a count from loaded pages. `nextBefore` is present only when the page
+truncated; pass it back as `before` to fetch the next page. Cursors are opaque: clients
+must not construct or parse them, and an unparseable `before` fails with `INVALID_REQUEST`
+rather than resetting the page.
+
+### `inbox.v1.thread`
+
+Reads one thread with its items, interleaved by timestamp (sent + received).
+
+Params: `source` (required), `threadKey` (required), `accountId` (optional).
+
+Result: `{ thread, items, itemsTruncated? }` — `thread` is the thread row (title,
+participant, reply state, last-seen markers); `items` is the complete ordered item list
+with `availableActions`. There is no thread-level cursor; completeness is exact up to the
+server's hard cap of 1000 items, past which the response is cut and `itemsTruncated` is
+`true`.
+
+Account ambiguity: when `accountId` is omitted and the source has exactly one configured
+account, that account is the default. Several configured accounts → the request fails with
+an `INVALID_REQUEST` ambiguity error rather than silently merging accounts.
+
+### `inbox.v1.action`
+
+Performs a triage action on one item by id.
+
+Params:
+
+| Param      | Type             | Notes                                                                                             |
+| ---------- | ---------------- | ------------------------------------------------------------------------------------------------- |
+| `id`       | string           | item id (`<source>:<account_id>:<source_id>`)                                                     |
+| `action`   | string           | one of `archive`, `label`, `mark-read`, `mark-unread`, `reply`, `convert-to-task`, `recategorize` |
+| `label`    | string, optional | required for `action: "label"`                                                                    |
+| `text`     | string, optional | the composed message for `action: "reply"`                                                        |
+| `category` | string, optional | the target category for `action: "recategorize"`                                                  |
+
+Result: `{ ok, reason? }` — `reason` is set when `ok` is false.
+
+Action semantics:
+
+- `reply` carries a `text` payload, requires the `reply` grant, and is confirmed through a
+  server-side operator-approval flow before the outward send. Denial surfaces as
+  `{ ok: false, reason: "confirmation-denied" }`; an approval timeout surfaces as
+  `{ ok: false, reason: "confirmation-timeout" }`.
+- `convert-to-task` returns `{ ok: false, reason: "unsupported until the task bridge lands" }`.
+- `recategorize` is store-level: it writes an inbox correction, sets
+  `category_source='manual'`, and clears the policy flag. It needs no source adapter and
+  never touches the source.
+- The other mutating actions dispatch to the registered source adapter; a source without
+  adapter support for the action returns an unsupported-action error.
+
+Failure semantics: a dispatch failure inside the source adapter or in the core channel
+fallback returns a gateway error with code `UNAVAILABLE` and message
+`"<source> action failed: <cause>"` (for example,
+`gmail action failed: gog binary not found on PATH; gmail ingest requires gog (openclaw/gogcli)`).
+Store failures return a gateway error with code `UNAVAILABLE` and message
+`inbox store unavailable`, including a store write inside a source adapter, which stays a
+store failure and does not surface as a source failure. Authorization, unsupported-action and
+unknown-category errors return code `INVALID_REQUEST`. These are gateway errors, not
+`{ ok: false, reason }` results.
+
+### `inbox.v1.capabilities`
+
+Params: none (empty object).
+
+Result: `{ sources: Array<{ source, actions: string[] }>, caller: Caller }` — per source,
+the mutating actions its adapter currently supports (intersection of the adapter's
+declared actions with the supported action set). Clients use this to hide triage
+affordances up front, alongside per-item `availableActions`.
+
+`Caller` describes the caller's posture and mailbox scope:
+
+- `posture`: `"operator"` for operator/system connections, `"narrow"` for user clients.
+- `personResolved`: whether the narrow identity resolved to a person (operator callers
+  are always resolved). A narrow caller whose device is not in `session.identityLinks`
+  reports `false` and owns nothing.
+- `accounts`: `Array<{ source, accountId, unread }>` — for a narrow caller, the accounts
+  bound to its person in `inbox_account_owners`; for an operator, every ingested account. `unread`
+  uses the same predicate as `unreadTotal`.
+
+Wire-schema note: the `caller` result field is additive on the wire but not yet declared
+in the strict protocol schema — any declared registry change forces a protocol major, so
+declaration waits for the next one. Tolerant readers must accept the field's presence
+(and treat an absent `caller` as `null` — older gateways never send it); validators pinned
+to the generated schema cannot read the new field until then.
+
+## Item shape
+
+Every serialized item includes: `id`, `source`, `accountId`, `sourceId`, `threadKey`,
+`direction` (`in` / `out`), `sender`, `recipient`, `subject`, `preview`, `labels`
+(source-native label names, e.g. Gmail's — distinct from `category`, the inbox
+classification taxonomy), `ts` (ms epoch), `sourceReadState`, `category`, `policyFlag`,
+`deleted` (boolean — the source deleted this item; the row is retained as a tombstone,
+never erased), `deletedAt` (first tombstone timestamp, ms epoch, or `null`), `archived`
+(boolean — this item is archived; archived items are excluded from `unreadTotal` and
+`caller.accounts[].unread`), and `availableActions: string[]`.
+
+`sender`, `recipient`, `subject`, and `preview` are raw sender-controlled UTF-8. Any
+consumer feeding them into a model context MUST apply its own untrusted-content fencing —
+the agent tool surface does this server-side; the client API does not.
+
+### Message bodies
+
+Email bodies (gmail, ms365) are stored as markdown rendered from the message's HTML part,
+or from its plain-text part when there is no HTML. Links, headings, lists, quotes, and data
+tables survive; scripts, styles, tracking pixels, and layout tables do not. The raw HTML and
+plain-text variants are kept alongside the rendering. Chat sources (WhatsApp, Discord,
+iMessage, …) store message text unchanged. Search matches against the markdown.
+
+The agent `inbox.read` tool returns the markdown body by default; `variant: "html"` or
+`variant: "text"` returns the stored raw variant instead (`null` when the source delivered
+none). A body that `inbox.read` fetches on demand keeps its raw variants even when it
+renders to no markdown (an image-only message), so the variant reads still work. Rows
+ingested before markdown rendering keep their original body until a re-ingest or
+`wednesdayai inbox backfill --convert` re-renders them.
+
+A rendering is replaced at most once: when gmail's push delivers only the plain-text body
+and a later re-ingest of the same message brings its HTML part, the HTML rendering
+supersedes the plain-text one. An HTML rendering is final. Each raw variant is stored once:
+a later ingest can add a missing HTML or plain-text variant but never changes a stored one.
+
+Wire-schema note: `includeArchived` / `includeDeleted` and the `deleted` / `deletedAt` /
+`archived` item fields are additive on the wire but not yet declared in the strict
+protocol schema — any declared registry change forces a protocol major, so declaration
+waits for the next one. Tolerant readers must accept the fields' presence; validators pinned to the generated
+schema cannot send the new params until then.
+
+## Retention and deletion
+
+The inbox never erases ingested data. When a source reports an item deleted (Gmail
+deletion pushes, Microsoft 365 deletion notifications), the row is marked, not removed:
+`deleted` is set to `true` with the first tombstone timestamp kept in `deletedAt`, and the
+row is retained permanently.
+
+Item state machine:
+
+- `active ↔ archived` — archiving is reversible through source truth; there is no unarchive
+  action.
+- `active | archived → deleted` — deletion is terminal. Deleted dominates archived: a
+  deleted item keeps its archived state underneath, but archived has no visibility effect
+  while deleted.
+
+Visibility:
+
+- Default list views (`inbox.v1.list`, the agent `inbox.list` tool, the CLI), unread
+  counts, and search exclude deleted items.
+- `includeDeleted: true` on `inbox.list` / `inbox.v1.list` opts in to tombstoned rows,
+  returned with their `deleted` / `deletedAt` mark.
+- The thread view (`inbox.v1.thread`) is the historical view: it always includes deleted
+  rows with their mark.
+
+Rows are never dropped anywhere in the pipeline. Disabling a source's inbox ingestion never
+removes existing rows.
+
+## Source enablement
+
+Inbox ingestion is opt-in: dual-capable channel sources (e.g. bluebubbles, discord,
+whatsapp-web) ingest into the inbox only with `inbox.sources.<id>.enabled: true`; dedicated
+inbox-only sources (gmail, ms365) are enabled by their existing `hooks.gmail` /
+`inbox.ms365` config block — no `inbox.sources` key is required or read for them.
+
+For whatsapp-web specifically: with the source enabled, every chat on the linked account
+(both live messages and history batches) is ingested, `unread` state tracks the phone
+(read receipts stop for history and group traffic; phone `chats.update` unread-count
+clears are mirrored as chat-level read marks), and `reply` / `mark-read` become available
+once listed under `plugins.entries.inbox.grants.inbox.actions` (both default-deny). `reply` always goes through the operator
+approval flow and honours the WhatsApp channel's outbound `allowFrom` policy; `mark-read`
+sends a read receipt on the phone (`sock.readMessages` on the stored native message key).
+Read state is one-way for whatsapp-web: once a row is read, a re-delivered message never
+returns it to unread (WhatsApp mark-unread is not mirrored).
+Thread keys are E.164 for resolved DMs, the group JID for groups, and the raw JID
+(including LID-only chats) as fallback; replies always target the thread key, so a group
+reply goes to the group.
+
+## Backfill
+
+Backfill pulls source history into the inbox store so `inbox.search` answers over
+multi-year mailboxes, not just first-run forward. It is manual and resumable: an operator
+runs `wednesdayai inbox backfill`, or the agent drives the `inbox.backfill` tool. Backfill
+reuses the live write path — every page upserts through the same store machinery that
+live ingestion uses, so dedupe identity, pending tombstone intents, and thread rollups
+apply unchanged — but never fans out as live ingest signal (no urgent nudges, no
+classify-on-ingest, no next-turn side effects).
+
+### `wednesdayai inbox backfill`
+
+| Flag        | Notes                                                                            |
+| ----------- | -------------------------------------------------------------------------------- |
+| `--source`  | required: `gmail`, `ms365`, `bluebubbles`, or `whatsapp-web` (alias: `whatsapp`) |
+| `--account` | backfill one account (default: all enabled accounts, walked sequentially)        |
+| `--since`   | ISO timestamp lower bound; only items newer than it are pulled                   |
+| `--all`     | force a fresh full walk (any persisted checkpoint is overwritten)                |
+| `--convert` | re-render stored rows from stored data instead of fetching (gmail, ms365 only)   |
+
+`--since`, `--all`, and `--convert` are mutually exclusive. Flag semantics:
+
+- `--since X` resumes an existing checkpoint only when its anchor equals X; a checkpoint
+  for a different anchor is abandoned and a fresh ranged walk starts.
+- `--all` forces a fresh full walk regardless of any persisted checkpoint.
+- With neither flag the walk is full history (`since = null`) and resumes an unfinished
+  checkpoint whose anchor is also null.
+
+The whatsapp-web fetcher walks each stored chat backwards from its oldest stored message
+through the gateway (`whatsapp.history.fetch`, on-demand history on the linked phone): a
+chat whose phone fetch times out (phone offline) is skipped for that run without failing
+the walk. Only chats with stored messages are walked — live traffic or pairing-time history
+seeds a chat with no rows. The anchor is the oldest row's native message key; a row written
+before the feed existed (no native key) anchors on a key rebuilt from its
+`<threadKey>:<message id>` source id, and only legacy rows keyed by a bare uuid are skipped
+with a warning. A chat counts as exhausted when the phone returns fewer native history
+entries than the page size, counting entries the inbox does not store (reactions, protocol
+messages). Rows upsert on the same `<threadKey>:<message id>` source id the live feed writes, so a
+re-run over the same history inserts nothing new.
+
+Interruption (including Ctrl-C) needs no special handling: each committed page advances
+the checkpoint, so the next run resumes where the walk stopped. The CLI prints a live
+progress line per account (`pages`, `scanned`, `inserted`) and a final summary per
+account (`scanned`, `inserted`, `updated`, `tombstoned`, `resumed` vs `fresh walk`).
+
+A precondition or fetch failure — source not enabled, source not configured, unknown source,
+account not enabled for the source, invalid `--since`, or a missing transport — prints one
+line to stderr with no stack trace and exits with status 1 (for example,
+`inbox source bluebubbles is not enabled`). Each committed page advances the checkpoint, so
+the next run resumes where the walk stopped.
+
+### Conversion mode
+
+`--convert` (tool: `mode: "convert"`) fetches nothing from the source. It walks the stored
+gmail or ms365 rows of each enabled account whose body has not been rendered to markdown,
+recovers the raw HTML/text from the stored source payload (or, for gmail rows hydrated
+before rendering existed, from the stored body), renders it, and writes the markdown and the
+raw variants in place. A row that live ingest renders while the conversion runs is left
+alone. There is no checkpoint: converted rows never qualify again, so an interrupted run
+simply continues on the next invocation, and a second run converts nothing. Rows with no
+recoverable body (a gmail body gog truncated) count as skipped; `inbox.read` still hydrates
+them on demand. The summary per account reads
+`Convert <source> <account>: <scanned> scanned, <converted> converted, <skipped> skipped`.
+
+### `inbox.backfill` tool
+
+The agent surface is a plugin tool — no gateway method and no grant (backfill is
+source-read plus store-local write, the same class as the read-side tools). Ops:
+
+| `op`              | Params                                                                                         | Result                                                                                                                       |
+| ----------------- | ---------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
+| `start` (default) | `source` (required), `accountId`, `since` (ISO), `all`, `mode` (`fetch` default, or `convert`) | `{ runId, mode, accounts, resumedSpec }`; the walk runs in the background over the enabled accounts                          |
+| `status`          | `runId` (required)                                                                             | `{ run }` snapshot: `runId`, `source`, `status`, `startedAt`, `finishedAt?`, `error?`, and per-account `accounts[]` progress |
+| `cancel`          | `runId` (required)                                                                             | `{ runId, cancelled: true }`; aborts the run between pages                                                                   |
+
+Run status is `running`, `done`, `error`, or `cancelled`; the snapshot carries `mode`.
+Per-account progress counters: `pages`, `scanned`, `inserted`, `updated`, `tombstoned`,
+plus `resumed` and `done`; convert runs also report `converted` and `skipped`.
+Mutual exclusion is per `(source, accountId)` across both modes: different pairs may run
+concurrently, the same pair may not (two runs would race the same rows, and two fetch walkers
+the same checkpoint). Finished runs stay queryable; the last 20 are retained.
+
+Errors: unknown source (names the supported ids), source not enabled, an `accountId`
+outside the enabled list (names the enabled accounts), an invalid `since` timestamp,
+`since`+`all` together, `mode: "convert"` with `since` or `all`, `mode: "convert"` on a
+source other than gmail or ms365, and a conflict error when the `(source, accountId)` pair
+already has a running run.
+
+### Checkpoints and resume
+
+Checkpoints ride the existing inbox cursor rows — no new table, no schema change — under
+the scope `backfill:<accountId>` (collision-free with the existing bare account scopes,
+`reconcile:<account>`, and `ms365-delta:<folderId>`). The value is JSON
+`{"v":1,"since":<epoch-ms|null>,"position":<opaque string|null>,"done":<bool>}`;
+`position` is fetcher-opaque and persisted verbatim.
+
+Per-page atomicity mirrors the live scanner contract: inside one per-account ingest lock
+the runner upserts the page item by item, then advances the cursor. A throw skips the
+cursor advance; the resumed run re-fetches that page and the deduped upserts converge. A
+corrupt checkpoint warns and starts a fresh walk (same convergence argument). A
+`next === position` no-progress guard terminates a walk whose fetcher keeps returning its
+own resume token.
+
+### Tombstones and classification
+
+Deletion receipts that beat the ingest still win: a pending tombstone intent recorded
+before a backfilled id is inserted applies at upsert, so the row lands deleted with its
+tombstone timestamp (counted as `tombstoned` in progress). Backfill itself never calls
+source deletion APIs.
+
+Backfilled inbound rows land unclassified and are picked up by the existing classify
+retry sweep — unchanged: rows older than 60 seconds become eligible, whole-backlog
+passes keyset-page 200 rows at a time, and a full analysis queue ends a pass without
+consuming any item's attempt budget. After a large backfill, live classification
+degrades to the sweep's cadence until the backlog drains; no item is lost.
+
+## Versioning
+
+Method names are versioned. A breaking change ships a new `inbox.v2.*` family registered
+side-by-side with `inbox.v1.*`; nothing is mutated in place. Clients discover which
+methods the connected gateway serves via the hello-ok `features.methods` advertisement and
+should feature-detect rather than assume.
+
+## Consumers
+
+- First consumer: the apps/web v2 client chat (narrow `openclaw-user-client` identity).
+- Second consumer: WednesdayAI-glass — server-side action execution there sidesteps
+  iOS app-to-app restrictions.
+- apps/control is not an inbox UI surface.

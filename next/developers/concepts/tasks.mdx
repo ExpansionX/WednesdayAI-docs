@@ -1,0 +1,303 @@
+---
+summary: "Task pipeline architecture: durable task runs, co-commit claims, budgets, preemption, retry, and recovery"
+read_when:
+  - You are building or debugging a background task pass
+  - You need to understand task run states, budgets, or crash recovery
+audience: developer
+component: task-pipeline
+sources:
+  - src/backbone/task-registry.ts
+  - src/backbone/task-dispatcher.ts
+  - src/backbone/task-governor.ts
+  - src/backbone/task-recovery.ts
+  - src/backbone/retry-policy.ts
+  - src/config/sessions/task-run-store.ts
+  - src/config/sessions/task-run-types.ts
+  - src/config/sessions/task-run-time.ts
+  - src/config/sessions/cron-job-schema.ts
+  - src/backbone/passes/cron-run.ts
+  - src/backbone/passes/heartbeat-tick.ts
+  - src/backbone/plugin-task-passes.ts
+  - src/backbone/pass-measurement.ts
+  - src/config/sessions/pass-measurement-schema.ts
+  - src/config/sessions/task-work-completion.ts
+generated: "2026-08-20"
+title: "Task pipeline"
+---
+
+# Task pipeline
+
+The task pipeline runs registered background task passes through the Gateway work queue with
+durable run records, unit budgets, preemption, and crash recovery. It is the Tier 2
+execution substrate: work item claims and run records commit in one transaction, so a crash
+can never strand a claim without a matching run record.
+
+Operator commands: [`wednesdayai task`](/next/users/cli/task). Configuration and operations:
+[Task operations](/next/admin/gateway/tasks).
+
+## Architecture
+
+- **Task registry** (`src/backbone/task-registry.ts`): passes register a plain object
+  (`id`, `priority`, `scope`, `costClass`, `run(ctx)`, optional `rollback(ctx)` and
+  `retryPolicy`). Dispatch order is priority ascending, stable for ties.
+- **Dispatcher** (`src/backbone/task-dispatcher.ts`): each tick claims ready work items per
+  pass topic (`task.<passId>`), governs the claim against budgets, then runs the pass with an
+  `AbortSignal`. Concurrency is shared across pass topics (round-robin slots).
+- **Governor** (`src/backbone/task-governor.ts`): units-only budget enforcement at
+  admission, per run (`taskRunId`), lane (`tenantOrLaneKey`, default `lane:<passId>`), and
+  global (`global`) scopes over a rolling window, plus a hard global monthly ceiling read from
+  the same scope key the dispatcher writes (`global`). Attempts count toward the cap, not
+  only successful completions. `costUsd` caps are not checked. A restart-loop detector defers
+  `llm`-class passes when the gateway restarts too often.
+- **Stores** (`src/config/sessions/`): `task_runs` and `task_run_events` tables plus
+  `task_budget_entries` and `task_budget_totals`, implemented for SQLite and Postgres. The
+  JSONL store is dev-only and refuses transactional claims. Run rows carry `stage` (the
+  pass's declared stage label, if any) and `trigger_source` (`task-dispatcher` for ordinary
+  enqueues, `cron` / `heartbeat` for the core cron and heartbeat passes, or the trigger named
+  by the enqueuing plugin — the idle monitor path produces `idle` / `schedule`). This
+  `task_runs.trigger_source` is a different column from the
+  session-analytics `trigger_source` on `ctx_session_entries` and has different values.
+- **Plugin seam** (`src/backbone/plugin-task-passes.ts`): plugins register passes via
+  `api.registerTaskPass` during `register()` (buffered, drained into the registry at Gateway
+  boot, namespaced `<pluginId>.<passId>`) and enqueue governed work via
+  `api.enqueueTaskWork` once the pipeline is running. See
+  [Background task passes](/next/users/tools/plugin#background-task-passes).
+
+## Core cron and heartbeat passes
+
+The Gateway registers two core passes at boot (`src/gateway/task-pipeline-boot.ts`):
+
+| Pass id          | `trigger_source` | Role                                                                                                                                           |
+| ---------------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------- |
+| `cron-run`       | `cron`           | Executes a claimed cron job (`payload.jobId`). Retry policy is `{ maxAttempts: 1 }` so public `cron.retry` stays the operator-visible backoff. |
+| `heartbeat-tick` | `heartbeat`      | Runs one heartbeat interval. Skip results complete the pass; they are not failures.                                                            |
+
+Cron job _definitions_ live in the sibling `cron_jobs` table (`migrated` is the
+cutover bit). `claimCronJobForPipeline` flips `migrated` and inserts the
+`task_runs` row in one storage transaction. See [Cron jobs](/next/users/automation/cron-jobs#where-cron-jobs-are-stored)
+and ADR 0055.
+
+Do not replace crontab `cron.retry` with `DEFAULT_TASK_RETRY_POLICY`. Do not put
+heartbeat rows in `cron_jobs`.
+
+**What not to do:**
+
+```ts
+// invent a second retry language for cron-run
+retryPolicy: DEFAULT_TASK_RETRY_POLICY;
+```
+
+**Do this instead:**
+
+```ts
+retryPolicy: { maxAttempts: 1, backoff: "fixed", baseMs: 1000, maxMs: 1000 };
+```
+
+## Run lifecycle (FSM)
+
+`pending → running → completed | failed | retrying | dlq | preempted | deferred |
+preempted_ceiling | rolled_back | cancelled`
+
+- **Co-commit:** `startTaskRunFromWork` claims the work item and inserts the `running` run
+  row in one transaction, and mints a claim token for that attempt. `completeTaskWorkGuarded`
+  closes the claim and, in one transaction, writes the run status, the outcome event (with any
+  budget denial and preemption reason), the pass measurement rows, and any successors. It is
+  fenced on the claim token: it returns `committed`, `already_committed` (a replay of the same
+  completion), `stale` (the claim was reclaimed; nothing is written), or `conflict` (another
+  completion already finalized the run). A stale completion therefore never overwrites the
+  attempt that replaced it. `completeTaskWork` is deprecated and delegates to it.
+- **Preemption** consumes no attempt: an aborted pass requeues with `preemptionCount + 1`.
+  At the preemption ceiling the run is deferred for a cool-down; at twice the ceiling it
+  terminates as `preempted_ceiling` (distinct from failure, never DLQ). The outcome row records
+  the reason: `lease`, `reclaim`, or `shutdown`. A cooperative shutdown preemption does not
+  advance `preemptionCount` or the ceiling.
+- **Crash reclaim:** when a new claim takes over expired work whose run is still `running`
+  (the process died mid-pass), the same transaction finalizes the old run as `preempted` with
+  reason `reclaim` and `recovered: true`, advances its preemption count, and starts the new run
+  from that count. The old run gets no `pass.metrics` row, because its in-memory measurement
+  died with the process.
+- **Retry policy is data:** a JSON policy (`maxAttempts`, `backoff` fixed or exponential,
+  `baseMs`, `maxMs`) rides on the work item and is validated with strict integer bounds;
+  exhaustion sends the run to `dlq`.
+- **Budget denials** defer the run (`deferred`, `budget_denials + 1`) with a retry time; they
+  never consume attempts.
+
+## Recovery and retention
+
+On boot, `recoverTaskRuns` classifies every recoverable run. It does not pre-mark every
+`running` row interrupted before classification:
+
+| Classification                  | Next status | Notes                                                                     |
+| ------------------------------- | ----------- | ------------------------------------------------------------------------- |
+| running on current instance     | `retrying`  | resume-interrupt: marks status only (no checkpoint, no attempt increment) |
+| running on stale instance       | `retrying`  | requeue; **consumes an attempt**                                          |
+| `retrying` within age threshold | `retrying`  | requeue-after-backoff; **consumes an attempt**                            |
+| `preempted`                     | `retrying`  | requeue-immediate; does **not** consume an attempt                        |
+| `deferred`                      | `deferred`  | wait-idle                                                                 |
+| terminal                        | unchanged   | completed / failed / dlq / …                                              |
+
+`dry_run` mode is preserved across recovery. `updateRunStatus` accepts an optional `attempts`
+field so attempt-consuming requeues can persist the counter across jsonl, SQLite, and Postgres
+backends.
+
+### Recovery ceiling (age stall + attempt exhaustion)
+
+Runs selected for recovery do not loop forever. `listRecoverableRuns` yields
+`running` / `retrying` / `preempted` / `deferred` (not ordinary `pending` work). Before the
+status-specific arm, recovery applies a ceiling using that run's `retry_policy` when
+present, otherwise the default (`maxAttempts: 5`, `maxMs: 300_000`):
+
+1. **Attempt exhaustion** — if `status !== "preempted"` and `attempts >= maxAttempts`, the run
+   goes to `dlq` with reason `retry exhausted (max attempts reached)`.
+2. **Age stall** — if status is `retrying` and age since `updatedAt` (else `startedAt`) exceeds
+   `maxAttempts * maxMs` (default **25 minutes**), the run goes to `dlq` with reason
+   `stalled beyond age threshold`. Age is computed with `parseTaskRunTimeMs` (UTC-safe).
+   A missing or unparseable timestamp skips this arm and falls through to
+   `requeue-after-backoff` — do not treat garbage dates as already-stalled.
+
+Either exhaust path emits a `task.recovery_exhausted` diagnostic (`taskId`, `taskRunId`,
+`attempts`, `reason`) so OTel/Langfuse surfaces the terminal transition. Operator view:
+[Task operations](/next/admin/gateway/tasks#shutdown-and-recovery).
+
+The bundled `task-runlog-retention` pass prunes `task_run_events` older than 30 days. In
+`dry_run` mode it reports the would-prune count without deleting.
+
+## Timestamp conventions
+
+`TaskRunRecord` timestamps (`startedAt`, `updatedAt`, `completedAt`) are ISO-8601 UTC with a
+`Z` suffix at the record boundary. Every backend normalizes on read through
+`toTaskRunTimeIso` / `parseTaskRunTimeMs`:
+
+- **Postgres** stores ISO-8601 text and compares as text (never cast a TEXT column to
+  `timestamp`).
+- **SQLite** stores space-separated UTC (`YYYY-MM-DD HH:MM:SS.mmm` via `formatSqliteTime`).
+  The worker still writes that on-disk form; `rowToTaskRunRecord` converts it to ISO-Z
+  before the classifier or any other consumer sees the row.
+- **JSONL** (dev-only) stores ISO-Z and re-normalizes on read. `markRunningRunsInterrupted`
+  writes status `retrying`.
+
+Age-stall and any other duration math must use `parseTaskRunTimeMs`. Do not call
+`Date.parse` on a raw SQLite value: ECMAScript treats the space-format string as local
+time, which inflates age by the host TZ offset and can send a just-interrupted run to
+`dlq`. Offset-less ISO date-times (`2026-08-12T11:31:13.402`) are also unparseable —
+`Date.parse` would treat them as local. Calendar-invalid values (`2026-02-30`, and
+the same date in space-format or ISO-offset) return `null` so `Date.parse` cannot
+overflow them to a later real day and false-DLQ the run.
+
+**What not to do:**
+
+```ts
+const ageMs = Date.now() - Date.parse(run.updatedAt); // host-local on space-format UTC
+```
+
+**Do this instead:**
+
+```ts
+const refIso = run.updatedAt ?? run.startedAt;
+const refMs = refIso ? parseTaskRunTimeMs(refIso) : null;
+if (refMs === null) {
+  // skip age logic; treat as not stalled
+}
+```
+
+## Writing a pass
+
+Core passes register directly on the registry; plugins use the identical shape through
+`api.registerTaskPass` (which namespaces the id as `<pluginId>.<passId>` and buffers the
+registration until Gateway boot). The id you pass in must be bare: a `.` throws
+`PLUGIN_REGISTER_ERROR` and the plugin does not load.
+
+```ts
+registry.registerTaskPass({
+  id: "my-maintenance",
+  stage: "light", // optional stage label, stamped onto task_runs.stage
+  priority: 100,
+  scope: "global",
+  costClass: "deterministic", // or "llm" (subject to restart-loop denial)
+  timeoutMs: 30_000, // optional per-pass override of the dispatcher timeout
+  retryPolicy: DEFAULT_TASK_RETRY_POLICY,
+  run: async (ctx) => {
+    // ctx.signal (abort/preemption), ctx.taskRunId, ctx.mode ("normal" | "dry_run"),
+    // ctx.payload (the claimed work payload), ctx.storage.taskRuns (narrow store surface),
+    // ctx.log, ctx.emitDiagnostic (DiagnosticEventInput — use taskDiagnostic/dreamDiagnostic)
+  },
+  rollback: async (ctx) => {
+    // optional compensating action, invoked by `wednesdayai task rollback`
+  },
+});
+```
+
+Passes must honor `ctx.signal` (preemption aborts long work), be idempotent across replay
+(the same work item can run again after a crash), and respect `ctx.mode === "dry_run"` by
+skipping side effects. The same idempotency contract applies to `rollback`: execution is
+at-least-once — if the durable `rolled_back` marker fails to persist, an operator retry
+re-invokes the handler.
+
+A pass that needs follow-on work returns it: `run` resolves to `{ successors: [...] }` (each
+`{ taskId, triggerFingerprint, payload?, mode?, availableAt?, triggerSource? }`, `taskId` a bare
+pass id of the same owner). The dispatcher inserts the successors under their normal
+idempotency keys inside the same guarded transaction that completes the run, so a successor
+exists only if its predecessor completed and a stale completion (after a reclaim) inserts none.
+Dry-runs, failed runs, and preempted runs return no successors; a retry returns them again.
+
+### Recording pass measurement
+
+Every run gets a measurement buffer on its `PassContext`. The SDK helpers write into it; the
+dispatcher commits it with the run's outcome as `pass.metrics` and `pass.phase` rows (see
+[Run measurement](/next/admin/gateway/tasks#run-measurement) for the row fields):
+
+```ts
+import {
+  createPassUsageAccumulator,
+  recordPassMetrics,
+  withPassPhase,
+} from "wednesdayai/plugin-sdk";
+
+run: async (ctx) => {
+  const usage = createPassUsageAccumulator();
+  const selected = await withPassPhase(ctx, "select", () => loadWork());
+  await withPassPhase(ctx, "judge", async () => {
+    for (const item of selected) {
+      usage.add(await api.runtime.analysis.run({ purpose: "judge", input: item, signal: ctx.signal }));
+    }
+  });
+  recordPassMetrics(ctx, { ...usage.toMetricsInput(), items: { judged: selected.length } });
+},
+```
+
+- `withPassPhase(ctx, name, fn)` times `fn` as a named phase (`ok`, `error`, or `aborted`) and
+  rethrows its error unchanged. Ordinals follow call order, so a repeated name stays distinct.
+  At most 190 phases are kept; extra phases are counted in `phasesDropped`.
+- `recordPassMetrics(ctx, input)` buffers the run's metrics; the last call wins. Invalid input
+  is dropped with a warning. It never throws and does no I/O. `items` holds at most 64 keys;
+  keys and phase names must be identifiers and never `Object.prototype` member names.
+- `createPassUsageAccumulator()` rolls up `AnalysisResult`s into `costSource`, tokens,
+  `costUsd`, and call counts. A `not_attempted` call is not a model call; an `unavailable`
+  call makes tokens and cost unknown while keeping the known sums.
+- Once the dispatcher settles the run, the buffer is frozen and later records are ignored. A
+  pass that ignores `ctx.signal` past its timeout gets a synthetic row with
+  `measurementState: "unavailable"` and `measurementReason: "handler_unsettled"` instead of
+  whatever it recorded.
+
+### Emitting task diagnostics from a pass
+
+`PassContext.emitDiagnostic` accepts `DiagnosticEventInput` (the closed input union). Prefer
+the builders so the event type and `action` stay aligned and OTel can export the span:
+
+```ts
+import { taskDiagnostic } from "wednesdayai/plugin-sdk";
+
+// inside run(ctx):
+ctx.emitDiagnostic(
+  taskDiagnostic("completed", {
+    taskId: "my-maintenance",
+    taskRunId: ctx.taskRunId,
+    passId: "my-maintenance",
+    durationMs: 12,
+  }),
+);
+```
+
+Do not cast ad-hoc objects through `as Parameters<typeof emitDiagnosticEvent>[0]`. Builders
+are input-shaped (no `ts`/`seq`); `emitDiagnosticEvent` stamps those fields. Live field names
+matter: use `passId` (not `passName`) and `attempts` (not `attempt`).

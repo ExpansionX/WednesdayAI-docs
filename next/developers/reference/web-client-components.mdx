@@ -1,0 +1,1284 @@
+---
+summary: "Conventions for the apps/web component layer: cl- classes, DisabledControl, session vocabulary, state and provider seams, the chat control hooks, and the ADR 0077 allowlist"
+read_when:
+  - You are adding or changing a component under apps/web/src/ui
+  - You are adding a control whose backing feature ships in a later phase
+  - You need to know where the web client keeps state and how it talks to the gateway
+title: "Web client components"
+description: "Developer contracts for WednesdayAI web-client components, chat history reconciliation, session lists, and transcript display."
+audience: developer
+component: web-client-components
+sources:
+  - apps/web/src/app/AppShell.tsx
+  - apps/web/src/state/types.ts
+  - apps/web/src/ui/DisabledControl.tsx
+  - apps/web/src/providers/web-client-runtime.ts
+  - packages/gateway-browser-client/src/connection.ts
+  - apps/web/src/providers/run-stall-monitor.ts
+  - apps/web/src/providers/send-outbox.ts
+  - apps/web/src/providers/send-retry.ts
+  - apps/web/src/app/completed-history-boundary.ts
+  - apps/web/src/app/completed-history-matching.ts
+  - apps/web/src/app/completed-history-reconcile.ts
+  - apps/web/src/app/completed-history-placement.ts
+  - apps/web/src/app/use-chat-history.ts
+  - apps/web/src/app/use-chat-send.ts
+  - apps/web/src/app/use-outbox-restore.ts
+  - apps/web/src/ui/Composer.tsx
+  - apps/web/src/ui/use-composer-paste.ts
+  - apps/web/src/ui/use-dictate-autosend.ts
+  - apps/web/src/ui/clipboard-html.ts
+  - apps/web/src/ui/markdown/html-to-markdown.ts
+  - apps/web/src/providers/image-resize.ts
+  - apps/web/src/providers/auto-read-preference.ts
+  - apps/web/src/providers/auto-send-delay-preference.ts
+  - apps/web/src/ui/AutoSendDelayMenu.tsx
+  - apps/web/src/providers/read-aloud-stream.ts
+  - apps/web/src/app/auto-read-driver.ts
+  - apps/web/src/app/use-screen-wake-lock.ts
+  - apps/web/src/providers/device-location.ts
+  - apps/web/src/app/use-device-location.ts
+  - packages/talk-client/src/silence-endpointer.ts
+  - apps/web/src/state/chat.ts
+  - apps/web/src/state/thread-order.ts
+  - apps/web/src/state/tool-step-rows.ts
+  - apps/web/src/gateway/message-text.ts
+  - apps/web/src/gateway/chat-activity-frame.ts
+  - apps/web/src/providers/session-list-runtime.ts
+  - apps/web/src/providers/navigation-preferences.ts
+  - apps/web/src/providers/events.tsx
+  - apps/web/src/providers/reply-notifications.ts
+  - apps/web/src/providers/unread-state.ts
+  - apps/web/src/providers/attention-runtime.ts
+  - apps/web/src/app/use-busy-sessions.ts
+  - apps/web/src/app/use-reply-notifications.ts
+  - packages/gateway-browser-client/src/runs/runs-model.ts
+  - apps/web/src/ui/DisplayMenu.tsx
+  - apps/web/src/ui/ToolDisplay.tsx
+  - apps/web/src/ui/TypingIndicator.tsx
+  - apps/web/src/ui/Thread.tsx
+  - apps/web/src/ui/Sidebar.tsx
+  - apps/web/src/ui/assistant-avatar.ts
+  - apps/web/src/ui/AccountMenu.tsx
+  - apps/web/src/ui/AssistantMessage.tsx
+  - apps/web/src/ui/assistant-turns.ts
+  - apps/web/src/ui/EmptyState.tsx
+  - apps/web/src/ui/AttentionMenu.tsx
+  - src/gateway/session-utils.ts
+generated: 2026-10-27
+---
+
+# Web client components
+
+`apps/web` is the end-user web client (client id `openclaw-user-client`). Its view layer is a small
+native React component layer under `apps/web/src/ui/`, styled over the shared
+[Brand tokens](/next/developers/reference/brand-tokens). This page is the contract for changing it. For hosting and
+configuration see [Web client hosting](/next/admin/web/user-client).
+
+## Layout
+
+```text
+apps/web/src/
+  app/         App (boot phases), AppShell (connected shell) and the use-chat-* hooks it composes, onboarding and config-error views
+  ui/          the component layer: Shell, Sidebar, TopBar, Thread, Composer, ... + client.css
+  state/       chat.ts (zustand store), types.ts
+  providers/   gateway and events seams, WebClientRuntime, theme, attachments, preferences, and the chat runtime modules (leaf tracking, queued turns, chat list)
+  runs/        RunsController and the projection of in-flight runs
+  gateway/     connection, device identity, setup-code parsing
+```
+
+The components in `ui/` are `Shell`, `Sidebar`, `NavigationMenus`, `TopBar`, `ModelMenu`, `ThinkMenu`,
+`DisplayMenu`, `ToolDisplay`, `AssistantPicker`, `AccountMenu`, `AttentionMenu` (the top-bar unread
+bell), `Thread`, `TypingIndicator`,
+`AssistantMessage`, `UserMessage`, `EmptyState`, `Composer`, `RightPanel`, `DisabledControl`,
+`Icon` and `markdown/MarkdownRenderer`. `Shell` owns layout mechanics (mobile
+breakpoint at 860px, sidebar open and collapsed state) so `AppShell` supplies data, not chrome. The
+assistant and chat controls client-chat-v3 P2 made live (model, Think, assistant picker, queue,
+reply, rename) are covered under [Chat controls and hooks](#chat-controls-and-hooks).
+`MarkdownRenderer` memoises the parsed markdown subtree on the content string (`MarkdownBody`), so
+each streamed delta parses the markdown once and re-renders of unchanged rows skip the parse.
+Streaming content renders urgently, not through `useDeferredValue`. A deferred prose pass can
+still be rendering when the next frame's tool-step chip commits, which would show the chip before
+the sentence it interrupts (#2014). Keep prose and chip commits in frame order when touching the
+renderer.
+
+## Styling conventions
+
+- Every class in `apps/web/src/ui/client.css` is prefixed `cl-` (`cl-sidebar`, `cl-composer`,
+  `cl-msg`). There is no shadow DOM and no CSS-in-JS. Boot views (loading, pairing, configuration
+  error) live in `app/app.css` with a `boot-` prefix.
+- Colours, spacing, radii, motion and fonts come from `brand-tokens` custom properties. Never
+  hard-code a colour or font family. Text on an accent fill uses `--accent-foreground`.
+- A token only this app needs (`--personalise-subtle`, `--composer`, `--shadow-md`) is declared at
+  the top of `client.css`, not in the shared package.
+- Icons are inline SVG paths in `ui/Icon.tsx` (Lucide-style, ISC notice in `apps/web/NOTICE`). Add a
+  glyph to `IconName` rather than an icon-library dependency.
+- Markdown replies render under a `.prose` wrapper. Style prose elements under `.prose`, not by
+  element selector on the page.
+- Wide content never widens the chat column. `.cl-conv-col`, `.cl-thread`, `.cl-msg-body` and
+  `.cl-bubble` carry `min-width: 0`, and `.prose` wraps (`overflow-wrap: anywhere`); code blocks
+  and tables scroll inside their own boxes (`.prose pre`, `.prose [data-table-wrap]` get
+  `overflow-x: auto`) and images cap at `max-width: 100%`. Any new message-level content must
+  contain its own width, or the phone layout overflows horizontally.
+- Honour `prefers-reduced-motion`: entrance animation is disabled under it.
+- Tests and e2e suites select by `data-testid` and `data-role`, never by `cl-` class. Keep an
+  existing hook stable when you restyle; rename it in the same change as the suites that use it.
+
+## DisabledControl and the phase contract
+
+A control whose backing feature ships later renders through `DisabledControl`
+(`apps/web/src/ui/DisabledControl.tsx`), visible but inert:
+
+```ts
+type DisabledPhase = "P4";
+
+type DisabledControlProps = {
+  label: string;
+  icon?: IconName;
+  className?: string;
+  testId?: string;
+  dataAttrs?: Record<string, string>;
+  children?: ReactNode;
+} & (
+  | { phase: DisabledPhase; finding?: never; reason?: never }
+  // tooltip: "<label> — coming in phase <phase>"
+  | { phase?: never; finding: string; reason?: never }
+  // tooltip: "<label> — coming with the extension panel SDK (<finding>)"
+  | { phase?: never; finding?: never; reason: string } // tooltip: "<label> — <reason>"
+);
+```
+
+The contract:
+
+- It renders a `<button type="button" aria-disabled="true">` with a `title` tooltip. It uses
+  `aria-disabled`, not the `disabled` attribute, so it stays focusable and the tooltip is reachable
+  from the keyboard.
+- The click handler only calls `preventDefault()`. A disabled control must never reach a gateway
+  RPC, whatever capability flag is set. `features.voice` is deprecated and ignored: it never
+  enabled Dictate or Voice mode, and now has no reader at all — both controls' live/disabled state
+  is `talk.catalog`-driven (ADR 0088 item 12, amended): Dictate needs a configured streaming
+  transcription provider and the gate on, Voice additionally needs a configured streaming speech
+  provider.
+- The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `finding` for controls that wait on a tracked finding rather
+  than a phase: Calendar and Memory cite `"F1, GitHub #634"` (their fallback while no chat UI
+  plugin provides those panels), Add extension cites the extension marketplace item
+  `"F1, GitHub #1331"`, and the P2 retags (message
+  feedback, message regenerate, account-menu settings, account-menu keyboard shortcuts, composer
+  search) each cite their own finding (`"F-2026-09-29-1x, GitHub #69x"`, ADR 0085 M9); the
+  `finding` tooltip wording is fixed, so it reads "coming with the extension panel SDK" whichever
+  finding it cites. Memory and Calendar render as live sidebar buttons instead when a chat UI
+  plugin registers those slots; the DisabledControl is the fallback while no plugin is
+  allowlisted (see [Chat UI plugins](/next/developers/plugins/chat-ui)). Use `reason` for capability-driven
+  unavailability that is not roadmap work:
+  the `reason` text is rendered verbatim after the label, so it names why this connection cannot
+  use the control — Dictate and Voice mode pass `"unavailable on this gateway"` when `talk.catalog`
+  does not offer them, Read aloud passes the same reason strings when the gateway gate is off or
+  the client is offline ([Read aloud](#read-aloud)), and the account
+  menu's notifications toggle passes `"Not supported in this browser"` where there is no
+  `Notification` constructor.
+- Give it a `testId`. The brand e2e asserts that each disabled control has `aria-disabled="true"`,
+  a tooltip naming its phase, finding or reason, and sends no gateway frame when activated.
+
+```tsx
+// Do this: the TopBar Canvas toggle is live while the Assistant UI plugin may be available
+// (canvasEnabled !== false), and a DisabledControl carrying the availability reason when the
+// feature is off.
+{
+  canvasEnabled === false ? (
+    <DisabledControl
+      label="Canvas"
+      icon="canvas"
+      className="cl-tb-btn"
+      testId="top-bar-canvas"
+      reason="Assistant UI is off"
+    />
+  ) : (
+    <button
+      type="button"
+      className="cl-tb-btn cl-tb-canvas"
+      data-testid="top-bar-canvas"
+      aria-pressed={canvasOpen}
+      title="Canvas"
+      onClick={onToggleCanvas}
+    >
+      <Icon name="canvas" />
+      <span className="cl-tb-btn__label">Canvas</span>
+    </button>
+  );
+}
+
+// Not this: a live-looking button that calls a method this client is refused
+<button onClick={() => gateway.request("talk.metrics", {})}>Metrics</button>;
+```
+
+To enable a control when its phase ships, replace the `DisabledControl` with a real element, update
+the allowlist ADR if it needs a new method, and update the disabled-control e2e in the same change.
+
+## Assistant UI surfaces and the renderer registry
+
+The assistant can compose inline UI (`show_ui`, the `ui-surfaces` plugin, ADR 0106) using the 14
+declarative components from the shared contract catalog. The renderer that maps those component
+names to React lives under `apps/web/src/ui/surface/` (registry in `SurfaceView.tsx`,
+components in `components/`).
+
+**Import rule.** `apps/web` imports only `ui-contract/types` — never the zod-bearing modules and
+never another validator library. The contract package owns the shape and the budgets; the browser
+only consumes the parsed snapshot.
+
+**How to add a component.**
+
+1. Add the component to the catalog in `packages/ui-contract/src/types.ts` (`COMPONENT_NAMES` and
+   the node interface) and its prop checks to `packages/ui-contract/src/catalog.ts` and
+   `surface.ts`.
+2. Map it to a React component in `apps/web/src/ui/surface/components/` and register it in the
+   registry in `apps/web/src/ui/surface/SurfaceView.tsx` under the same `component` name.
+3. Add tests: the contract package test proves the catalog + validation, per-component tests
+   `apps/web/src/ui/surface/components/*.test.tsx` prove keyboard operability and axe
+   accessibility (SC11), and the web e2e proves the render (`test/user-client-web-surfaces.e2e.test.ts`
+   via `test/helpers/user-client-web-harness.ts`).
+
+**Transcript carriers.** Surfaces and actions ride two transcript carriers, never free-form
+markdown: `__openclaw.ui` = `{surfaceId, revision}` is projected from the `show_ui` tool result's
+`details.ui` at `chat.history` read time, and the snapshot itself is fetched via
+`chat.surfaces.get`. `__openclaw.uiAction` = `{surfaceId, revision, actionId, label, title}` rides
+the user turn (stored as the `openclaw:ui-action` custom entry) and renders as the
+"You submitted" chip; the submitted data is not in it — it reaches the model only in the composed
+`[ui-action]` text. Both must survive a reload, which is why they persist as history rows rather
+than in a scratch store.
+
+Rendering follows the same identity: `Thread` builds a `surfaceByCall` map keyed by
+`toolCallIdentity` (run key plus call id), stored refs first, and `AssistantMessage` renders a
+surface inside its turn right after the tool block that published it, in every tool display mode.
+A live ref (`LiveSurfaceRef` in `state/surfaces.ts`) carries the `runId` and `toolCallId` from
+`chat.activity`; a live ref whose tool step is not drawn in the thread (another device's run, or
+the run a `uiAction` form submission starts, which the runtime does not track as its own) does not
+render until the turn lands from history.
+
+## Session vocabulary
+
+The UI says **chat**; the code says **session**. The gateway's `sessions.*` rows are what the user
+sees as chats.
+
+| User-facing                  | Code                                                                                                                                                                                                                                                         |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Session, Sessions            | `ChatSession`, `sessions`, `activeSessionKey`                                                                                                                                                                                                                |
+| Open a session               | `sessions.direct {agentId?}` → `{key}`; picking an assistant calls it; a first send with no active session resolves it too                                                                                                                                   |
+| Switch chat                  | `switchSession(key)`, `sidebar-session` rows with `data-session-key`                                                                                                                                                                                         |
+| Switch chat locked           | `navigationLockReason` / `onNavigationBlocked` / `onNavigationLockChanged` (`web-client-runtime.ts`); notice `chat-switch-blocked` while Dictate or Voice is live                                                                                            |
+| Chat list page               | `SESSIONS_LIST_LIMIT` (100 per page); `session-list-runtime.ts` pages with `offset`/`hasMore`, `load-more-chats`                                                                                                                                             |
+| Source tag on a row          | the row's stored channel (`row.actor?.channel ?? row.channel`) mapped in `providers/gateway-mappers.ts` (`sourceTag`)                                                                                                                                        |
+| Assistant                    | `AgentSummary` from `agents.list`; `deriveAgentIdFromSessionKey(key)`; `sidebar-agent`, `assistant-picker-option`                                                                                                                                            |
+| Model, Think, Send reasoning | `ModelMenu` (`top-bar-model-menu`), `ThinkMenu` (`composer-think`); `sessions.patch` `model`, `thinkingLevel`, `reasoningLevel`                                                                                                                              |
+| Mobile header session key    | `TopBar` (`top-bar-session-key`): the active session key shows under the model menu on mobile only (≤ 860px header buttons are icon-only; `cl-tb-btn__label` stays readable by assistive tech); the title (and rename) render on desktop widths              |
+| Transcript display           | `DisplayMenu` (`display-menu-trigger`); browser-local `showReasoning` and `tools: hide / minimum / collapsed / full`                                                                                                                                         |
+| Rename, Suggest a title      | `top-bar-title-input`, `rename-suggest`; `sessions.patch` `label`, `sessions.title.prepare`                                                                                                                                                                  |
+| Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                                                                                                                 |
+| Picked assistants            | `SessionListRuntime.selectAgent` records `pickedAgentIds` (session-only); `Sidebar` always lists them past the activity window                                                                                                                               |
+| Assistant order              | `ui/assistant-order.ts`: `sortAssistants` (`RECENT_ASSISTANT_WINDOW_MS` 24 h, `Intl.Collator` base sensitivity, id fallback), `useAssistantOrder` freezes the order; `SessionListState.assistantOrderEpoch`                                                  |
+| Inbox                        | Sidebar entry `sidebar-inbox` (badge `sidebar-inbox-unread`) is the only entry point; `AppShell.openInboxPanel` opens `InboxPanel` in the shared right-panel slot and `inbox-panel-close` closes it; hidden unless hello-ok advertises the `inbox.v1` family |
+| Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                                                                                                                |
+| This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`                                                                                                     |
+
+Do not reintroduce "Space" or "Spaces" in UI copy or identifiers; that word is reserved for a
+possible external Spaces extension, and the brand e2e asserts the rendered page contains neither. Session keys
+look like `agent:<id>:<rest>`; `session-key-shape.ts` parses them client-side without importing core
+code, and `ui/recency.ts` groups rows into Today, Yesterday and Earlier by local midnight.
+
+## State and provider seams
+
+Data flows in one direction.
+
+```text
+GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zustand store --> ui/*
+                    ^                |
+                    +--- requests ---+  (gateway seam: sendMessage, switchSession, ...)
+```
+
+- `providers/web-client-runtime.ts` (`WebClientRuntime`) owns the connection and implements both
+  seams: the `GatewayContextValue` (`providers/gateway.tsx`, request-style calls such as
+  `sendMessage`, `switchSession`, `listSessions`, `uploadFile`, `abortMessage`) and the
+  `EventsContextValue` (`providers/events.tsx`, subscriptions such as `onChatChunk`,
+  `onSessionChanged`, `onSessionsList`, `onConnectionStatus`). It also has WednesdayAI-native
+  members the vendored seams have no room for, which the `app/` hooks call directly: `listAgents`,
+  `listModels`, `patchSession`, `prepareSessionTitle`, `resolveDirectSession`, `sendChatMessage`
+  (the one `chat.send` seam), `steerMessage`, `queueMessage`, `listActiveRunIds`,
+  `adoptRestoredRun`, the `sessionList` runtime, and the `onSidebarSessionsChange`,
+  `onActiveSessionRowChange`, `onQueuedRunStarted`, `onRunResumed`, `onToolStep`,
+  `onOwnTurnStarted`, `onOwnTurnQueued`, `onSteerTurnSettled`, `onAssistantReply` and
+  `onActiveLeafConflict` subscriptions. `onToolStep` turns each `chat.activity` frame of a run
+  this client owns into a tool row in the reply (`useChatStore.appendToolStep`); a start frame's
+  optional `verb`/`detail` (redacted, length-capped display strings resolved from the shared
+  tool-display spec; the wire contract is the `chat.activity` bullet in
+  [Protocol](/next/admin/gateway/protocol#assistant-ui-surfaces)) are stored with the row and never cleared
+  by a later frame of the same call, and `ToolDisplay` renders them as the live chip's label —
+  for a call with no stored arguments yet, full mode shows the same title/verb/detail line
+  instead of an invented `{}` dump. `onRunResumed`
+  restores the typing indicator on the first live frame of a run adopted after a reload;
+  `ui/assistant-turns.ts` groups a run's rows into one reply block for `ui/Thread.tsx`.
+  `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
+  (`data-testid="tool-step-announcer"`): the tool name only, no status cues, and nothing while
+  the display hides tools.
+- `app/AppShell.tsx` subscribes to the events seam once per runtime, writes into the store
+  (`state/chat.ts`, `useChatStore`) and composes the hooks described under
+  [Chat controls and hooks](#chat-controls-and-hooks). Components read the store or receive props;
+  they do not subscribe to the connection themselves.
+- The seam interfaces are kept in the shape of their upstream Saturday origin, including members
+  the web client no-ops (desktop context, accessibility). Provenance is in `apps/web/NOTICE`.
+  The Saturday-era seams with no web client consumer are gone, not no-oped: the events seam's
+  `onContextUpdate`, `onSSEStatus`, `onCanvasUpdate` and `onCanvasSync`, their payload types in
+  `state/types.ts` (`ContextUpdatePayload`, `SSEStatus`, the Canvas shapes), and the store fields
+  and actions they fed (`sseStatus`/`setSSEStatus`, `contextEnabled`/`setContextEnabled`,
+  `currentContext`/`setCurrentContext`) are deleted. The wire and preference shapes
+  (`StatusResponse.context_enabled`, `Preferences.context_enabled`) stay — they describe gateway
+  data, not UI state.
+- Runs live in `runs/` behind `RunsController`. Its `start()` and `stop()` are one boolean, so
+  components take a **reference-counted lease** with `useRunsLease(controller)`
+  (`ui/use-runs-lease.ts`); the busy-state projection in `app/use-busy-sessions.ts` holds one so
+  the sidebar's busy dots stay live.
+
+```ts
+// Do this: the busy-state projection holds a lease for the shell's lifetime
+useRunsLease(runsController); // Sidebar busy dots stay live
+
+// Not this: an unbalanced start/stop would stop the controller under other readers
+useEffect(() => {
+  controller.start();
+  return () => controller.stop();
+}, []);
+```
+
+- `Thread` does not scroll itself. The scrolling element is the `.cl-scroll` wrapper `AppShell`
+  places around it, so scroll code must drive that element. Auto-follow applies only while the
+  reader is within 80px of the bottom.
+
+## Reconnect and send integrity
+
+A socket drop or gateway restart during a turn must not show a reply twice, lose a sent message, or
+return the user to onboarding. The contracts live in `gateway/connection.ts` (transport) and
+`providers/web-client-runtime.ts` (recovery), and the store guarantees live in
+`state/chat.ts` and `gateway/message-text.ts`:
+
+- **Socket identity.** Every listener in `openSocket` is bound to its own socket, and
+  `handleClose(ws)` returns immediately when the closing socket is no longer the current one.
+  A late `close` from an old socket therefore cannot reject the new socket's pending requests, and
+  `forceReconnect` (which closes the socket itself and runs the close path) schedules exactly one
+  reconnect even though the browser also fires its own `close` event.
+- **Liveness watchdog.** `hello-ok`'s `policy.tickIntervalMs` (default 30 000) arms a chained
+  `setTimer` check: no frame for two tick intervals closes the socket with code `4000`
+  (`tick timeout`) and reconnects, mirroring `src/gateway/client.ts`. `online`, `pageshow` and
+  `visibilitychange` (to visible) retry immediately while `reconnecting`, and force a reconnect
+  when the resumed page's socket is stale. A resumed page (also the Page Lifecycle `resume`
+  event) whose connected socket has been silent for more than 5 s is probed with `verifyLive()`:
+  one `health` request, and no answer within 5 s closes the socket with `4000`
+  (`liveness probe timeout`) and reconnects. There is no per-RPC response timeout; the watchdog
+  and the probe bound every hang on a dead socket.
+- **Transient connect classification.** `isTransientConnectFailure` treats anything that is not a
+  `GatewayRequestError`, an `error.retryable` flag, `UNAVAILABLE`, `RECOVERY_NOT_READY`, or a detail
+  code in `TRANSIENT_CONNECT_DETAIL_CODES` (`AUTH_RATE_LIMITED`, `DEVICE_AUTH_SIGNATURE_EXPIRED`,
+  `DEVICE_AUTH_NONCE_REQUIRED`, `DEVICE_AUTH_NONCE_MISMATCH`) as transient. After onboarding, a
+  transient failure keeps the device credential and only reschedules the reconnect, honouring
+  `retryAfterMs` (`AUTH_RATE_LIMITED` backs off to `MAX_BACKOFF_MS`). Any other `connect`
+  refusal — a credential the gateway no longer accepts (`AUTH_DEVICE_TOKEN_MISMATCH`) is the
+  common example — clears the credential and re-runs onboarding.
+- **Idempotent sends.** `sendChatMessage` generates one `idempotencyKey` per logical send and
+  `requestWithSendRetry` (`providers/send-retry.ts`) re-sends the identical params until the ack
+  arrives, the turn stops being this client's pending one (session switch, stop, abandon),
+  `connection.isStopped()`, or `SEND_RETRY_DEADLINE_MS` (60 s) has elapsed. `sessions.steer`
+  (also on `CONFLICT/duplicate_in_flight`, and voided by Stop) and the empty-state
+  `sessions.direct` use the same loop. A send is retryable when the socket died with the
+  request in flight (not a `GatewayRequestError`), `error.retryable` is set, or the code is
+  `RECOVERY_NOT_READY`; the delay between attempts is `Math.max(250, retryAfterMs)`. The gateway's
+  dedupe answers a repeat whose first attempt landed with `in_flight` or the cached result instead
+  of a second run, and a cached result for a turn whose final was missed settles the run locally
+  through `settleRunMissedDuringGap`.
+- **Dispatch guard.** `request(type, params, { canDispatch })`
+  (`packages/gateway-browser-client/src/connection.ts`) re-checks a caller's precondition after the
+  readiness wait and immediately before dispatch: `false` rejects with `gateway connection closed`
+  instead of sending. A precondition that died while the request waited for reconnect readiness
+  must not still fire - the steer path passes `() => !preSteer.cancelled`, so a Stop that lands
+  during the wait voids the steer (`web-client-runtime.ts`).
+- **Run reconcile.** `reconcileOwnRuns(trigger)` lists the open chat's runs
+  (`sessions.runs.list`) and settles every locally-owned run: `running` or `queued` keeps tracking
+  and streaming, `terminal` or absent settles against the transcript, and `action-needed`
+  (interrupted by a restart) settles as aborted and emits the restart notice as a `chatError`.
+  It runs after every reconnect (`"reconnect"`), when a tracked run's frames go quiet for 15 s
+  (`"stall"`, `RunStallMonitor` in `providers/run-stall-monitor.ts` - a single re-armable timer the
+  runtime touches on own-run registration and on every live frame of a tracked run, fired after a
+  `verifyLive()` probe), and when the tab returns with an
+  own run in flight (`"resume"`). A `final` settlement first reads the transcript and replays the
+  run's durable assistant text through the live stream path before `done`, so the bubble (and
+  auto read aloud) get the whole reply at once. A failed status read changes nothing: tracking and
+  streaming continue and Stop remains the user's escape hatch. Queued follow-ups and an unacked
+  pending turn are left to the existing `loadHistory` and send-retry paths.
+- **Store and stream dedupe.** `prependMessages` drops incoming rows whose `entryId` or `id`
+  already exists and sorts the merge with `orderThread`. `addSyncedMessage` positions the run
+  before it dedupes (`applyPositionRun`: the run's queued turn un-queues and `turnSeq` anchors the
+  rows that have no stored position), and a deduped sync still returns `orderThread(base)`, so the
+  positioning lands even when the row does not. The sync is dropped only when the answer itself is
+  already on screen: the run's live text row carrying identical content (a final that extends the
+  streamed prose updates the bubble in place, one with new text after a tool step appends after
+  the step), or a provenance match — same-run assistant prose, or an earlier sync of the same
+  event; the run's question, its tool rows and a still-queued turn never suppress it.
+  `streamUpdate` (`gateway/message-text.ts`) opens no second bubble when the final text differs
+  from the streamed text only in leading or trailing whitespace.
+- **Draft safety.** Every outgoing `chat.send` and `sessions.steer` text is recorded in a
+  `localStorage` send outbox (`apps/web/src/providers/send-outbox.ts`, key
+  `openclaw-user-client:outbox:v1`, 24 h expiry) before the RPC leaves, and removed when the RPC
+  answers. Each entry carries the text, its session key, the run ids its send attempts used, and
+  a lease the sending tab renews every 5 s while the RPC is pending. A failed send restores its
+  text to the composer from the outbox (or, with no entry, the
+  in-hand text) in the chat it was sent from, next to the failure's own error row, and consumes
+  only that send's own settled entry (`restoreAfterFailure` plus `consumeOutboxEntry` in
+  `apps/web/src/app/use-outbox-restore.ts`). Entries left behind by a
+  reload, crash or gateway restart are restored after the chat's next history load
+  (`restoreUnsent`, "Restored a message that was not sent."); entries whose run id appears in the
+  loaded history are dropped silently, and entries still pending (this tab's in-flight set, or a
+  live lease another tab renewed) are left untouched. Queued follow-ups that have not started yet
+  are deliberately not restored after a reload: the gateway's own followup queue holds them across
+  connection resets, and an unconfirmed record is not evidence of loss, so restoring would invite
+  a duplicate send (`dropUnconfirmedPendingQueuedTurns`). The composer persists its text per
+  session key under
+  `openclaw-user-client:draft:<sessionKey>` in `localStorage` (the empty state uses `@new`; 300 ms
+  debounce plus a flush on `pagehide` and on hide, removed when emptied, dropped after 7 days),
+  reads it back on mount, and merges a restore behind text typed meanwhile instead of clobbering
+  it. Logout clears every draft and the outbox (`clearAllComposerDrafts`). Attachments are not
+  persisted.
+
+## Chat controls and hooks
+
+client-chat-v3 P2 made the assistant and chat controls live and split `AppShell.tsx` into one hook or
+provider module per concern, each testable without a gateway connection.
+
+| Concern                          | Code                                                                                                                                                                     | Gateway calls                                                                                              |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------- |
+| Assistant picker                 | `ui/AssistantPicker.tsx`                                                                                                                                                 | `agents.list`, `sessions.direct`                                                                           |
+| Model menu                       | `ui/ModelMenu.tsx`, `app/use-chat-controls.ts`                                                                                                                           | `models.list`, `sessions.patch {model}`                                                                    |
+| Think menu, Send reasoning       | `ui/ThinkMenu.tsx`, `app/use-chat-controls.ts`                                                                                                                           | `sessions.patch {thinkingLevel}` and `{reasoningLevel}`                                                    |
+| Transcript display               | `ui/DisplayMenu.tsx`, `ui/ToolDisplay.tsx`, `ui/Thread.tsx`                                                                                                              | none; browser-local preferences                                                                            |
+| Rename, Suggest a title          | `ui/TopBar.tsx`, `app/use-chat-controls.ts`                                                                                                                              | `sessions.patch {label}`, `sessions.title.prepare`                                                         |
+| Send, Stop, Reply                | `ui/Composer.tsx`, `ui/UserMessage.tsx`, `ui/AssistantMessage.tsx`, `app/use-chat-send.ts`                                                                               | `chat.send {replyToId, expectedLeafEntryId, location?}`, `chat.abort`                                      |
+| Steer, Queue                     | `app/use-chat-queue.ts`, `providers/chat-queue-runtime.ts`, `providers/pending-queued-turns.ts`                                                                          | `sessions.steer {location?}`, `sessions.runs.list`                                                         |
+| History, older pages, chat leaf  | `app/use-chat-history.ts`, `app/completed-history-matching.ts`, `app/completed-history-reconcile.ts`, `app/completed-history-placement.ts`, `providers/leaf-tracking.ts` | `chat.history {before}`                                                                                    |
+| Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                                               | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
+| Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                                                  | `agents.list` `identity.color`                                                                             |
+| Assistant names and avatars      | `app/AppShell.tsx`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                                                 | `agents.list` `identity.name`, `identity.emoji`                                                            |
+| Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                                               | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
+| Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                                                         | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
+| Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                                                     | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts`                               | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Dictation auto-send pause        | `ui/AutoSendDelayMenu.tsx`, `providers/auto-send-delay-preference.ts`, `app/use-dictate.ts`                                                                              | none; browser-local preference                                                                             |
+| Screen wake lock                 | `app/use-screen-wake-lock.ts`                                                                                                                                            | none; browser Screen Wake Lock API                                                                         |
+| Share location                   | `providers/device-location.ts`, `app/use-device-location.ts`, `ui/Composer.tsx` (`composer-share-location`)                                                              | none; location rides `chat.send` / `sessions.steer`                                                        |
+| Paste, rich copy, image prep     | `ui/use-composer-paste.ts`, `ui/markdown/html-to-markdown.ts`, `ui/clipboard-html.ts`, `providers/image-resize.ts`                                                       | none (browser clipboard and canvas APIs)                                                                   |
+| Menu dismissal                   | `ui/use-dismissible-menu.ts`                                                                                                                                             | none                                                                                                       |
+
+### Completed history boundary and transcript controls
+
+These contracts keep completed runs, session-list responses, and browser-local presentation state
+from overwriting newer or connection-specific state.
+
+```ts
+type CompletedRunOutcome = "final" | "aborted";
+
+declare function resolveCompletedHistoryBoundary(
+  current: ChatMessage[],
+  loaded: ChatMessage[],
+  currentMatches: ReadonlyMap<number, number>,
+  completedRunId: string,
+  outcome: CompletedRunOutcome,
+): {
+  loadedBoundary: number;
+  completedAssistantAdopted: boolean;
+  hasCompletedMatch: boolean;
+  pageCoversCompletedRun: boolean;
+};
+```
+
+`ChatMessage` is the client-owned message type in `state/types.ts`; the map relates current row
+indexes to loaded row indexes. This is an internal client contract, not a plugin SDK export.
+
+`resolveCompletedHistoryBoundary` accepts a terminal `outcome` of `"final"` or `"aborted"`. It
+finds the last loaded row matched to the completed run. When there is no completed-run match, it
+falls back to the loaded row matched to the user message that preceded that run's assistant turn.
+If the completed assistant was not adopted, the outcomes diverge:
+
+- For `"final"`, the resolver advances `loadedBoundary` through subsequent loaded rows until the
+  next user turn. This admits the server's completed assistant output into the loaded boundary.
+- For `"aborted"`, it stops at the existing `loadedBoundary` and does not scan forward. The merge
+  therefore preserves the stopped text observed in local state instead of adopting a durable
+  server suffix that was ahead of the stream when the abort landed.
+
+```ts
+const boundary = resolveCompletedHistoryBoundary(
+  currentMessages,
+  loadedMessages,
+  currentMatches,
+  completedRunId,
+  "aborted",
+);
+```
+
+An unmatched local assistant from another run is protected only when it occurs after the completed
+run in the current transcript, or the completed run has no current boundary. This protects newer
+live output from an older run's history reload without retaining an older stopped partial after a
+subsequent run finishes and adopts the durable transcript.
+
+`pageCoversCompletedRun` reports whether the loaded page actually reaches the completed run's
+durable assistant row: true when the run's assistant output was adopted from the page, or when the
+run's turn is anchored in the page (its preceding user row matched) and the rows after that anchor
+reach an assistant row. A `final` page that ends at the run's user row — which is what the gateway
+delivered before ADR 0089 made terminal events post-durable — does not cover it. When the outcome
+is `final` and the page does not cover the run, `reconcileCompletedHistory` treats the streamed
+assistant reply as still live instead of dropping it as already-represented; the next re-read whose
+page contains the durable row replaces it through the ordinary entry and content matching. An
+`aborted` run keeps the observed stopped text regardless, as above.
+
+`SessionListRuntime` tags each request with a monotonically increasing `seq`. A response is applied
+only while its captured `mySeq` equals the current sequence; otherwise it is silently dropped as
+stale after a newer filter, search, sort, or page request. `dispose()` clears the pending 250 ms
+search debounce and increments `seq`, preventing an in-flight Gateway response from landing on a
+torn-down component. On `sessions.changed`, `refetchLoadedWindow()` starts at offset 0 and uses
+`limit = Math.max(sessions.length, pageSize)`, preserving every page the user already loaded.
+
+Navigation and transcript preferences are per connection:
+
+- Navigation uses
+  `openclaw.web.navigation:<encodedGatewayUrl>:<clientId>`, where the storage scope contains both
+  `gatewayUrl` and `clientId`. Defaults are `assistantSort: "newest"`, `activityWindowHours: 4`,
+  `includeInternal: false`, `chatSortBy: "updatedAt"`, `chatSortOrder: "desc"`,
+  `selectedAgentId: null`, and `lastChatByAgent: {}`.
+- Transcript display uses the `openclaw.web.transcript-display.v1` object, keyed within that object
+  by `<gatewayUrl>|<clientId>`. Defaults are `showReasoning: false` and `tools: "minimum"`. A stored
+  legacy `tools: "minimal"` preference loads as `"collapsed"`.
+
+Display is not delivery. `showReasoning` and `tools: "hide" | "minimum" | "collapsed" | "full"` are
+strictly browser-local presentation state in `DisplayMenu`; they do not alter Gateway execution or the
+session's `reasoningLevel`. Tool detail strings render through the shared `shortenHomePaths` helper
+(`src/agents/tool-display-common.ts`), which shortens absolute user-home paths to `~` (POSIX and
+Windows) without Node-only APIs; both this app and the TUI `ui` package import it. Tool failures
+remain visible even in `"hide"` mode:
+
+```tsx
+<div className="cl-tool-error" role="alert">
+  {result.error}
+</div>
+```
+
+A wholly hidden tool call renders `null`, so a tool-only assistant turn must not leave an empty
+assistant bubble.
+
+Web-client-specific footguns and their safe patterns:
+
+- Do not apply a late session-list response after a filter or sort changes, or after unmount. Keep
+  the `mySeq === seq` guard and invalidate the sequence in `dispose()`.
+- Do not refetch only `pageSize` rows on `sessions.changed`; doing so drops an already loaded second
+  or later page. Refetch the full loaded window from offset 0.
+- Do not treat aborted and final reconciliation as equivalent. Advancing an aborted boundary can
+  replace the exact stopped text the user saw with a durable suffix they never observed.
+- Do not persist navigation or display preferences under an unscoped key. The same browser can
+  connect to multiple gateways or client identities.
+- Do not mutate the active row optimistically for model, thinking, reasoning, or label changes.
+  Wait for the patch and refreshed session row; otherwise a refusal can leak one chat's pending
+  state into another.
+- Do not hide tool errors with ordinary tool details. Error output is an alert even when tool
+  display is hidden.
+
+```ts
+// Do this: preserve the loaded window and invalidate work during teardown.
+runtime.refetchLoadedWindow();
+return () => runtime.dispose();
+```
+
+```ts
+// Not this: a one-page refresh drops loaded rows, and an empty cleanup admits stale responses.
+runtime.reload();
+return () => {};
+```
+
+Contracts worth keeping when you change them:
+
+- **Settings are not optimistic.** `ModelMenu`, `ThinkMenu` and the rename field patch the open chat
+  through `WebClientRuntime.patchSession` and only ever show that chat's own row (`sessions.describe`,
+  refreshed on every `sessions.changed` for it). A refused patch therefore needs no rollback:
+  nothing on screen changed, and the control shows the gateway's message (`chat-controls-error`).
+  "Assistant default" in the model menu sends `model: null`; Think sends `off`, `low`, `medium` or
+  `high`; Send reasoning sends `reasoningLevel` `on` or `off`. `ThinkMenu` is inert (`aria-disabled`,
+  a tooltip naming the model, no frame sent) when `models.list` reports `reasoning: false` for the
+  chat's model.
+- **Suggest never saves.** `rename-suggest` sends `sessions.title.prepare` with the chat's assistant
+  id and the first user message currently loaded (its first 1000 characters), and only fills the
+  field (60 characters at most). Enter or blur saves through `sessions.patch {label}`. A refusal, the
+  rate limit or a `null` title shows `rename-error`.
+- **Assistant picker.** `AssistantPicker` is opened by `sidebar-browse-assistants`. A pick sends
+  exactly one `sessions.direct {agentId}` (a ref guard, not just React state, stops a double
+  click); the gateway returns the caller's dmScope-correct direct session key (ADR 0109). There is
+  no model select and no create step.
+- **History and the chat leaf.** `useChatHistory` loads the newest page (`HISTORY_PAGE_SIZE`, 50)
+  and pages older with the returned `cursor`. When that page starts inside a reply (its oldest row
+  carries a run id and the page holds no user row of that run), the load keeps paging older —
+  capped at `MAX_BISECTED_HEAD_EXTRA_PAGES` (20 extra pages, 1,000 rows); beyond the cap it
+  publishes what it read with the cursor of the last page read, so "Load older" continues from
+  there — until it reaches the reply's user row, a row of another run, or the start of the
+  history, and publishes the combined rows at once, so a reload never shows a reply without its
+  question.
+  `WebClientRuntime` records the chat's leaf from its newest-page `chat.history` reads (the
+  thinking reconcile opts out with `noteLeaf: false`); a `before` page never updates it.
+  `LeafTracker` tells "never learned" (`undefined`: the send omits
+  `expectedLeafEntryId`) from "known empty" (`null`: the send asserts an empty chat). After a
+  final, aborted or error event for a run this client owns, `readLeafUntilStable` re-reads with
+  `limit: 1` until two reads agree (every 25 ms, at most 40 attempts) and a send waits for it. A
+  final for a run this client did not start never settles the leaf directly; it schedules a
+  transcript re-read (`settleThenRefreshRows`), and that `foreign-turn` /
+  `foreign-turn-preserve-local` page does note the leaf — only the own-run `completed-turn`
+  reconcile opts out (`AppShell` sets `skipLeafNoteRef` for `completed-turn` alone) — so a client
+  that has shown the other device's turn stops tripping the guard, while an unseen turn is still
+  caught. Returning to a visible tab with a tracked leaf, an active chat and no own turn in flight
+  reads the leaf once and emits `foreign-turn` when it moved. On a first `active-leaf-changed`
+  refusal the send is still accepted (VAL-LEAF-002 reversal): the runtime re-learns the leaf
+  (`refreshAfterUnseenChanges`), merges the unseen rows while keeping the optimistic user row
+  (`foreign-turn-preserve-local`, no notice), and resends once automatically with a fresh
+  `idempotencyKey` (`sendChatMessageOnce(params, "leaf-retry")`); switching chats while that
+  refresh is in flight cancels the resend (`selectionSupersededError`) and the caller restores the
+  draft. Only a second consecutive refusal takes the pre-reversal path —
+  `recoverFromActiveLeafConflict`, the thread reload, `activeLeafConflict` (the
+  `chat-changed-notice` banner) and `ActiveLeafChangedError`, whose draft restore `useChatSend`
+  owns — so two back-to-back foreign appends cannot loop.
+- **Steer and Queue.** While a reply streams, or a queued turn is still waiting, Enter or Send
+  steers into the current turn via `sessions.steer` with `mode: "inject"` and `fallback: "queue"`
+  (unless attachments are staged, which inject refuses, in which case it sends `mode: "queue"`).
+  The send menu item "Send after reply" (`composer-send-menu-queue`) and desktop Ctrl/Cmd+Enter send
+  `sessions.steer` with `mode: "queue"` and show the turn at once with `message-queued-badge`. Both
+  send `fallback: "queue"`. The badge is presentation only; the turn's place in the thread is
+  `orderThread`'s derived tail until the run's first frame clears it (see the order bullet below).
+  Neither can carry a reply: the composer refuses both while a reply chip is set,
+  because `sessions.steer` has no `replyToId`. On touch-primary devices (coarse pointer), plain Enter
+  inserts a native newline, and Ctrl/Cmd+Enter runs the primary action (steer while streaming, queue
+  with a staged file, send when idle) instead of queueing. A queued turn is saved in `sessionStorage`
+  (`openclaw.web.pendingQueuedTurns.v1`, dropped after 24 hours) until its run drains, so it
+  survives a reload or reconnect; `useChatHistory` shows it again only when `sessions.runs.list`
+  still reports its run.
+- **Replies.** Only a message with a real entry id (`__openclaw.id`) offers Reply. It sets the
+  `replyChip` in the store (`composer-reply`, excerpt up to 140 characters), and the next `chat.send`
+  carries its entry id as `replyToId` and clears the chip, whether or not the send succeeds. The
+  quote renders from `__openclaw.replyTo` as `message-reply-quote`, live and after a reload.
+- **Chat list.** `SessionListRuntime` owns the assistant filter, the search (debounced 250 ms),
+  `loadMore` (the next `offset` is the number of rows already loaded) and the `sessions.changed`
+  refetch, which re-reads offset 0 up to the rows already loaded so later pages are not dropped.
+  Every request carries a sequence number and a superseded response is dropped. The open chat's own
+  row is fetched separately, so the top bar stays live when a filter or search hides the chat from
+  the list.
+  Rows show the exact session key instead of a message preview; the client no longer requests
+  unused last-message previews. `sessions.list` rows carry `internal: true` for internal sessions
+  (cron, hook, heartbeat, subagent and acp keys), and the Sidebar groups those rows under an
+  **Internal** label. They are hidden by default (`includeInternal: false`); the toggle includes
+  them again.
+  Gateway sorting precedes pagination; title sort uses labels before derived titles. Global title
+  enrichment caps transcript reads at 16 at a time and yields between batches; normalized sort keys
+  are computed once and are not returned. `includeDerivedTitles` remains opt-in: callers displaying
+  the effective sorted titles should request it explicitly.
+  `agentActivity` aggregates the newest eligible session timestamp before
+  assistant, search, activity-window and pagination narrowing. The assistant list defaults to a
+  4-hour window, pins the selected assistant, and refreshes its cutoff once per minute.
+  An agent-filtered page merges its `agentActivity` into the existing map (only the requested
+  agent's slot is refreshed) instead of replacing it, so filtering never blanks the other
+  assistants' activity. `selectAgent` also records the id in `pickedAgentIds`, a session-only
+  list that is never written to preferences; the `Sidebar` always lists picked assistants past
+  the activity cutoff, whatever the current filter, and only a reload clears the record.
+  The default **Recent** sort (`assistantSort: "newest"`) lists assistants whose activity falls
+  within `RECENT_ASSISTANT_WINDOW_MS` (24 h) newest first, then everyone else alphabetically
+  (case-insensitive, locale-aware, id as the last tie-break); equal timestamps sort by name.
+  `useAssistantOrder` freezes the rendered order: `sessions.changed` refetches update the map
+  without moving rows. It re-sorts on the first loaded page, a window `focus`, a
+  `visibilitychange` to visible, the resume refetch landing (`refetchForResume` bumps
+  `assistantOrderEpoch`), and a sort or activity-window menu change. Between re-sorts, newcomers
+  append at the bottom and removed rows drop without moving the rest.
+- **Assistant navigation.** Clicking an assistant scopes Sessions and opens that assistant's
+  dmScope direct session (`sessions.direct { agentId }`). The resolved key becomes the remembered
+  session that startup restore reopens. Re-clicking while already on that key re-affirms the filter
+  without a history reload. A failed resolve clears the selection and shows `Could not open that
+assistant: …`. Picking an assistant in the picker and first-send `sessions.direct` resolution
+  keep the assistant selected too. Every actual activation invalidates older restoration
+  callbacks, so delayed startup lookups cannot replace a newly selected session.
+  The selection is visible during lookup; the draft remains editable, but submission waits for
+  lookup to finish or be superseded. Changing visibility only refilters a settled chat; an already
+  pending assistant lookup restarts with the new eligibility rules. Creation revisions reject late
+  creation replies. Separate send-navigation revisions invalidate leaf-gated sends on genuine
+  navigation, but not on `All assistants`, the already-selected assistant, or the same open chat.
+  `All assistants` explicitly clears the scope. Navigation preferences and remembered selections
+  are scoped by gateway URL and client ID in browser storage; malformed remembered entries are discarded.
+- **Display is not delivery.** `DisplayMenu` stores `showReasoning: false` and `tools: "minimum"`
+  by default, separately from `reasoningLevel`. `extractTranscriptBlocks` preserves ordered text,
+  thinking, tool calls, results and media; `Thread` pairs calls and results by their run-scoped
+  identity (run key plus call id) across loaded pages.
+  Legacy `tool` roles and snake_case result metadata remain tools, not assistant prose.
+  Hidden tool details retain errors, and wholly hidden execution turns leave no empty assistant
+  row. Local final/aborted turns trigger a `completed-turn` reconciliation after the leaf settles,
+  even while a newer local or queued run exists. The completed run ID and terminal outcome bound
+  that snapshot: a final replaces its stale partial, while an aborted run keeps the observed stopped
+  text rather than an ahead-of-stream durable suffix. `completed-history-boundary.ts` excludes newer
+  assistant/execution data but admits matched newer durable users. Those rows keep their client IDs
+  and run ownership; the queued marker clears on the run's first frame (`positionRun`), not on
+  storage adoption.
+  The merge retains newer partials, optimistic users, queued turns, older pages and errors without
+  advancing the leaf guard. Reconcile decides only which current rows survive the merge:
+  `placeUnmatchedRows` returns `kept` in arrival order and places nothing. The assembled page is
+  `orderThread([...reconciledLoaded, ...kept])`, so a kept client notice (run error, failed send)
+  lands right after the run it reports on through its `anchorRunId`/`anchorSeq`, never below a
+  later reply of that run.
+  Legacy identity-less matches are one-to-one FIFO within durable-entry anchor intervals, so
+  identical distinct turns remain distinct. Scoped loaded-history and older-page IDs distinguish
+  replaceable heads from optimistic rows and preserve imported legacy entries. Superseded
+  older-page responses cannot splice into a replacement load.
+  Events received before `chat.send` acknowledges its run are buffered for exact attribution.
+  A rejected send recovers the foreign question/reply through the non-destructive merge, including
+  first-send-created chats, without deleting its own optimistic question or refusal. A durable foreign
+  terminal event clears the fresh-empty-chat skip guard just like a local completion.
+  Send failures belong to their original optimistic turn: an obsolete rejection cannot rewrite a
+  newer chat or foreign reply. Distinct assistant message IDs remain distinct even with identical text.
+  Media links and derived attachments share `normalizeMediaUrl`: HTTP(S) and inline raster
+  images/WAV are allowed; unsupported schemes and data types remain non-interactive metadata.
+- **Order is server sequence.** The thread order is a pure function of gateway positions, never of
+  insertion order. `gateway-mappers.ts` stamps each history row's transcript position onto
+  `ChatMessage.seq` (`__openclaw.seq`, falling back to the integer form of `__openclaw.rowId`);
+  live `chat` and `chat.activity` frames carry `turnSeq`, the transcript position of the run's
+  first user entry, which `web-client-runtime.ts` copies into every store write. One comparator
+  owns placement, `orderThread(messages)` in `state/thread-order.ts`: a row with its own `seq`
+  sorts there; a still-queued turn sorts into the derived tail (after every positioned row, in
+  send order among themselves); a live user row whose run's reply is loaded but whose stored row
+  sits on an older page sorts just above the run's first positioned row; any other unpositioned
+  row follows its run's last positioned row with `anchorSeq` as the fallback; a client notice
+  follows the run named by `anchorRunId`; a row with no positioning input keeps its arrival slot.
+  Every store action that changes `messages` returns `orderThread(next)`, and an already-ordered
+  input returns the same array reference (render isolation). `seqWatermark` anchors new optimistic
+  rows after everything positioned. A sent message therefore always renders above its reply and
+  above later turns, through streaming, queue and steer, reconnects and reloads. "Queued" is a
+  badge only: it clears on any frame of that run (`positionRun`), when a history load carries the
+  stored message, or when a later own turn takes its transcript position (the gateway drains
+  queued turns first in, first out, so a positioned turn proves the turns queued before it
+  started).
+- **Colours.** `ui/assistant-color.ts` maintains a browser-safe palette identical, in order, to
+  `ASSISTANT_IDENTITY_COLORS` in
+  `src/shared/assistant-identity-values.ts`. A configured `identity.color` wins; otherwise FNV-1a
+  32-bit of the agent id modulo 8 picks one, so an unconfigured assistant keeps its colour across
+  reloads and devices. The `--wai-assistant-<name>` and `-fg` tokens are in
+  `packages/brand-tokens/tokens.css`; ADR 0084 section 6 records the contrast guarantee.
+- **Names and avatars follow the open chat.** `AppShell` derives the active chat's assistant once
+  (`activeAssistantName`/`activeAssistantAvatar`): the top bar, the thread's bubbles and typing
+  indicator, the empty state, both composers and the reply-chip sender all take it, and an agent
+  with no configured name shows its id. While the chat's assistant cannot be resolved
+  (`agents.list` still loading, or a session key with no agent id) those surfaces fall back to the
+  brand name, and the turn avatar falls back to the brand logo image. The avatar glyph comes from
+  `ui/assistant-avatar.ts` (`assistantAvatarText`: the configured `emoji`, else the name's first
+  two graphemes uppercased) — the one source the `Sidebar` and `AssistantPicker` render too. It
+  reaches a turn through the optional `assistantAvatar` prop on `Thread` and `AssistantMessage`:
+  a coloured, aria-hidden `cl-msg-avatar cl-agent-av` span (`data-testid="assistant-avatar"`)
+  when set, the logo `img` when undefined. Do not inline `slice(0, 2)` initials or read the brand
+  constant in a chat-scoped component; take the props.
+- **Menus.** `useDismissibleMenu` closes a menu on an outside mousedown and on Escape, returning
+  focus to its trigger. `ModelMenu`, `ThinkMenu` and the Composer send menu all use it; do not copy
+  its body into a new menu.
+
+## Dictate and Voice
+
+Dictate and Voice mode are Composer controls (test ids `composer-dictate` and `composer-voice`),
+not phase placeholders. When `talk.catalog` does not offer a control it renders through
+`DisabledControl` with `reason="unavailable on this gateway"`; when it is offered it is a real
+toggle button: `aria-pressed` plus the `cl-composer-btn--active` style while it is on
+(`recording` for Dictate; `listening`, `thinking` or `speaking` for Voice mode), and a
+`data-dictate-status` / `data-voice-status` attribute mirroring the hook state — the `error` value
+gets the danger outline from `client.css`, and the next click retries. `features.voice` is
+ignored.
+
+Availability comes from `talk.catalog`, and updates on reconnect:
+
+- Dictate is live when `conversationEnabled` is true and `streamingTranscription` has a
+  `configured: true` row.
+- Voice follows `conversationEngine`. With `"stt-tts"` (the default, also used when the field is
+  absent) Voice is live only when Dictate's conditions hold and `speech` also has a configured row.
+  With `"realtime"` Voice is live when `conversationEnabled` is true and `realtime.activeProvider`
+  is not null; `talk.session.create` then sends `mode: "realtime"` and capture runs at the
+  result's `inputSampleRateHz` (24 kHz).
+
+`useDictate` returns `status` `unavailable | idle | recording | transcribing | error`, a live cumulative
+`transcript` while recording, `commit: { text: string; nonce: number; autoSend: boolean } | null`,
+`consumeCommit(): void`,
+and `errorMessage` (mic denied or no input device, a microphone that stops sending audio, or a
+transcription relay that ended the take). The live transcript previews in the textarea as a
+read-only draft with an accent border and muted text (`.cl-composer--dictating`), without breaking the
+textarea height cap. When dictation stops or encounters a capture error, `commit` receives the final or
+last-captured transcript and commits into the draft at the caret position via `insertDictation`; the composer
+calls `onDictateCommitConsumed` to clear the commit.
+
+`VoiceSeam` (`providers/voice.ts`) starts the mic inside the toggle click and requests the session
+concurrently: `capture.start` runs before any await, so `AudioContext` creation and `resume()`
+happen while the tap's user activation is fresh (`packages/talk-client/src/audio-capture.ts`
+constructs and resumes the context before the `getUserMedia` await — a context created after it
+can stay suspended on a slow phone link and produce zero frames). Frames captured before the
+session id lands and `session.ready` arrives buffer in order and are sent once ready, so the relay
+never drops a take's first words; stopping a not-yet-ready session waits up to 10 s
+(`SESSION_READY_TIMEOUT_MS`) before it closes, so the buffered frames are not lost. A dead take
+ends visibly: a 3 s frame-silence watchdog (`CAPTURE_SILENCE_TIMEOUT_MS`, re-armed per frame)
+retires the session with `talk.session.cancelTurn` and reports **Your microphone stopped sending
+audio. Tap Dictate to try again.**, and a `session.closed` that arrives mid-take with no stop in
+flight reports **Transcription stopped unexpectedly. Tap Dictate to try again.** without closing
+the session. A rejected `talk.session.create` stops the capture it already owns without waiting
+for its acquisition, so a hung `getUserMedia` cannot leave the take recording; the next tap issues
+a fresh create.
+
+**One-tap dictation (`useDictate(runtime, { autoSend, autoSendDelayMs })`).** Both options are
+take-start snapshots: `autoSend` is the auto-read preference (`AppShell` passes
+`readAloud.autoRead`) and `autoSendDelayMs` is the persisted auto-send pause
+(`providers/auto-send-delay-preference.ts`). `DictateCommit.autoSend` records that value, so
+toggling either option mid-take cannot change what happens to text the take already produced.
+While `autoSend` is true at take start:
+
+- `packages/talk-client`'s `createSilenceEndpointer` (exported from the package index) ends the take
+  without a second tap. `providers/voice.ts` creates it per recording with the take's `silenceMs`
+  and feeds every PCM16 capture frame; it fires `onEndpoint` once, after at least 250 ms of
+  above-threshold speech (`pcm16RmsDbfs` at the same −45 dBFS threshold the barge-in detector
+  uses) is followed by the configured silence window. A burst shorter than the minimum never
+  endpoints, and `reset()` re-arms for a fresh utterance. The endpointer is advisory capture-side
+  timing only - the transcription stream and the gateway session are untouched.
+- The silence window is the composer's **auto-send pause** choice
+  (`ui/AutoSendDelayMenu.tsx`, chip `data-testid="composer-auto-send-delay"`, menu
+  `composer-auto-send-delay-menu`, options `composer-auto-send-delay-option-1500|2500|4000`),
+  rendered right after the **Read replies aloud** toggle and only while that toggle is on. The
+  choice is 1.5 s, 2.5 s (default) or 4 s, stored per gateway URL and client id under
+  `openclaw.web.auto-send-delay:<encodedGatewayUrl>:<clientId>`; anything else in storage loads
+  the default. It is browser-local only; there is no operator default.
+- `ui/use-dictate-autosend.ts` submits the committed text exactly once per commit, and only when three
+  things hold: the commit's text is non-empty and not whitespace (a denied mic or an empty take never
+  sends, and never sends the user's pre-existing draft), the dictated text is observable in the draft
+  (the insertion is staged asynchronously, so the armed send waits for the re-render that contains it),
+  and the composer can deliver it - while a reply is streaming the commit routes through
+  `submitWhileStreaming`, the same path Enter takes (steer into the current turn, or queue when
+  attachments are staged) instead of stalling in the draft, while `submissionDisabled` or
+  `uploading` leave the text in the draft.
+- The composer marks the draft dictated before the auto-send runs, so the send carries
+  `{ dictated: true }` provenance like a manual send after dictation.
+
+**Barge-in pauses read aloud.** Pressing **Dictate** while a reply is being read aloud pauses the
+read instead of stopping it: `AppShell`'s dictate toggle runs `readAloud.unlock()` inside the
+click (the AudioContext gesture unlock, which auto-read also needs) and then, when a take is
+starting and a read is active, `readAloud.pause()`. Stopping the take never touches playback, so
+the read stays paused; only the message control's **Resume reading**, or starting another read,
+continues it.
+
+**Screen wake lock.** While any voice path is live — a dictate take that is `recording` or
+`transcribing`, active Voice mode, or read-aloud playback that is not paused —
+`app/use-screen-wake-lock.ts` holds a best-effort `navigator.wakeLock` request. A missing
+`wakeLock` (unsupported browsers, iOS home-screen apps before 18.4, insecure contexts) is a plain
+no-op, request rejections (for example Low Power Mode) are swallowed, and the lock re-acquires on
+`visibilitychange` when the page becomes visible again.
+
+`useVoice` returns `status` `unavailable | idle | listening | thinking | speaking | error`,
+`captions: { user, assistant }`, and `engine: "stt-tts" | "realtime"` (the voice engine the
+gateway resolved). Toggle starts or stops the session; `thinking` counts as on. A start rejection
+is swallowed here; the seam's `error` status is what the button shows.
+
+**Cascaded stt-tts turns render as chat turns.** The gateway opens an agent run for each spoken
+utterance and the client registers that run as its own, so when the turn starts the spoken words
+become a normal user row in the thread and the reply streams as a normal assistant bubble - no
+browser `chat.send` is issued for a voice turn. Until then the live user transcript previews
+inside the composer textarea with Dictate's read-only preview styling: a display-only composition
+over the untouched draft, never written to the draft or its storage, cleared when the turn starts
+and the user row commits. stt-tts renders no caption box, and reply text never echoes into the
+composer. Turning Voice off mid-reply stops the microphone and the speech, but the agent run
+still finishes: the full reply persists to the chat exactly once and appears in the thread. A
+reload or disconnect mid-reply keeps the heard prefix plus an `[interrupted]` marker instead.
+
+With `engine: "realtime"`, while Voice is `listening`, `thinking` or `speaking`, the Composer
+renders `VoiceCaptions`
+(`ui/VoiceCaptions.tsx`, `data-testid="voice-captions"`, `aria-live="polite"`) above the input
+row: an orb `cl-voice-orb` with a `--listening`, `--thinking` or `--speaking` modifier (its pulse
+stops under `prefers-reduced-motion`), the status label, and two caption lines,
+`cl-voice-caption--user` and `cl-voice-caption--assistant` (rendered only while its text is
+non-empty). The caption region
+(`cl-voice-captions__scroll`) is height-capped against the shell canvas
+(`--shell-canvas-height`), not the layout viewport, so a shrunken keyboard canvas still leaves
+the thread a scrollable floor; it scrolls instead of growing the composer, and its
+`column-reverse` layout pins the scroll origin to the newest line, so an active conversation
+stays in view without yanking a reader who scrolled up. The user caption is replaced by each
+`transcript.delta`/`transcript.done`; the assistant caption is cleared on `turn.started` and
+appended from `output.text.delta` (realtime deltas are raw increments concatenated verbatim).
+`tool.call` sets `thinking`. On `transcript.persisted` the
+runtime re-reads the active chat, so the persisted turns appear in the thread without a reload.
+
+While either feature is live, switching chats is locked. The runtime derives the lock
+synchronously from the live talk seams (`navigationLockReason`: a dictate take from its first
+toggle click, including the lazy create of a first chat, until its stop settles, whether the
+stop succeeds, fails, or the gateway drops; a Voice conversation while `listening` or
+`speaking` (or `thinking`); dictation wins when both are live), so a guard holds in the same tick the feature
+starts — no React effect latency. A user-initiated switch — a `sidebar-session` row, the unread
+bell, an assistant chip or the assistant picker — is then refused: no session change and no
+`sessions.direct`/history traffic, plus a `role="alert"` notice (`chat-switch-blocked`) saying
+exactly what to stop: "Stop dictation to switch chats." or "Turn off voice to switch chats.".
+The runtime emits `onNavigationBlocked` for every refusal and `onNavigationLockChanged` when the
+lock changes; the notice's reason follows the lock (a dictation→voice handoff re-labels it), and
+it clears when the runtime lock clears. A `sessions.direct`
+response that lands after the lock leaves the resolved row unselected in the sidebar
+instead of switching. The lock only gates user intent: startup restore (`forceSwitchSession`),
+send-create of a first message, and a chat deleted elsewhere still switch — a live Voice
+conversation is stopped cleanly when its chat is deleted elsewhere, while a Dictation take
+(session-independent) keeps running and commits into the draft. An assistant lookup that settles
+while locked just releases the pending navigation without touching the open thread.
+
+Playback and barge-in come from the `talk-client` package (`createTalkAudioPlayback`,
+`createBargeInDetector`), not from `wednesdayai/plugin-sdk`. Call playback with `preRollMs: 40`
+and `echoSafeSink: true` for Voice. Both options default off (`preRollMs` 0, `echoSafeSink` false),
+which is what the operator console keeps. `preRollMs` delays only the first chunk of a fresh burst.
+`echoSafeSink` routes through a `MediaStreamAudioDestinationNode`
+into an `<audio>` element so echo cancellation has a real media element.
+
+The barge-in detector stays disarmed except while `kind: "speech"` audio is playing. Do not arm it
+for `filler` or `ack`. Re-arm it on `output.audio.resumed` while speech is still active, and do
+not disarm it in the gap between speech chunks. Voice uses a 150 ms minimum burst (the package
+default is 250 ms) at the package's −45 dBFS threshold. On detection, pause playback locally
+before `talk.session.bargeIn`. Those two timestamps are `performance.now()`. Speech
+`talk.session.mark` timestamps are played-audio milliseconds on the turn timeline (0 at the first
+speech sample), attached when the chunk is enqueued, not at `turn.ended`. Realtime sessions
+differ: attach the mark once, at `output.audio.done`, and acknowledge with a session-monotonic
+timestamp that never decreases — per-turn offsets would drop every ack after the first
+(shorter) reply.
+
+If the gateway socket drops, stop the microphone immediately and return Voice to `idle`, including
+when the drop happens while start is still in flight. Do not wait on `talk.session.close`: that
+RPC blocks until the socket is ready again. Dictate stops capture the same way, without waiting
+for a transcript that can no longer arrive.
+
+Frame shapes are in [Talk sessions](/next/admin/gateway/protocol#talk-sessions).
+
+## Composer paste, rich copy and attachment prep
+
+Four composer-side contracts shipped with the 2026-10-25 chat-flow slice. None adds a gateway
+method; they shape what the browser sends on the existing `chat.send` attachments and composer
+draft paths.
+
+### Paste: `use-composer-paste.ts` and `html-to-markdown.ts`
+
+`ui/use-composer-paste.ts` returns the composer's `onPaste` handler with a fixed priority order:
+HTML → markdown at the caret, files → the same `uploadFiles` staging path the picker and drop
+use, anything else → the browser default (the event is not prevented, so paste without
+`text/html` — Shift+Cmd+V — and plain-text paste keep working).
+
+- The HTML conversion resolves asynchronously, so the paste captures the active session key and
+  the draft at paste time (`getSessionKey`) and drops the completion if either changed: a chat
+  switch during the wait would otherwise insert into the destination chat's draft at the source
+  chat's caret.
+- The undo-preserving insert path is `document.execCommand("insertText")` — a real editing
+  transaction that keeps Cmd/Ctrl+Z history and fires `input` for the controlled draft. It needs
+  a focused element and is absent in jsdom, so the fallback writes the controlled value with
+  `setText`: same text and caret, but no undo history. The caret is restored after the inserted
+  text once React has committed (next frame) in both paths.
+- `ui/markdown/html-to-markdown.ts` converts clipboard HTML to GFM markdown: it parses with
+  `DOMParser`, prunes comment nodes plus `script, style, meta, link, title, template, iframe,
+object` (the walker must come from the parsed `Document` itself — a `Document.ownerDocument`
+  is null, so walking a bare node yields no walker and nothing would be pruned), drops images
+  whose `src` is not `http(s)`, then converts through
+  `hast-util-from-dom`/`hast-util-to-mdast`/`mdast-util-to-markdown`/`mdast-util-gfm` with
+  `-` bullets, `_` emphasis and backtick fences, collapsing 3+ newlines.
+
+**Lazy-chunk rule.** `hast-util-from-dom` and `hast-util-to-mdast` load through one `Promise.all`
+of dynamic `import()`s inside `html-to-markdown.ts`; only `import type` references to them may
+appear anywhere else in the app graph. A static import would pull them into the entry chunk and
+break the lazy-chunk budget (V5): they must stay out of `index.html`'s transitive static imports
+and be reachable only via `dynamicImports`. `mdast-util-to-markdown` and `mdast-util-gfm` are
+imported statically, because `remark-gfm` already ships them in the entry chunk and a dynamic
+import of them cannot split (Rolldown reports `INEFFECTIVE_DYNAMIC_IMPORT`).
+
+### Rich copy: `clipboard-html.ts`
+
+- `cleanClipboardHtml(source: DocumentFragment | Element[])` clones the copied prose and strips
+  everything non-semantic: only `href`, `src`, `alt`, `colspan` and `rowspan` survive as
+  attributes, `href`/`src` only for `http(s)` and `mailto:` URLs (`SAFE_URL_PATTERN`), and
+  `button, svg, script, style, [aria-hidden='true'], .cl-msg-actions` chrome is dropped. The
+  result pastes into Outlook or Docs with the structure (headings, lists, tables, bold) and the
+  receiving document's own styling — no colours or fonts from the chat.
+- `writeRichClipboard({ html, text })` writes `text/html` plus `text/plain` through
+  `ClipboardItem` when the browser supports it and falls back to `writeText` when it does not —
+  or when the rich write itself is rejected. Best effort in both directions; a failed copy is
+  never surfaced as an error. The plain slot carries the reply's markdown source, not the
+  rendered text.
+
+### Attachment prep: `image-resize.ts`
+
+`prepareImageAttachment(file, codec?)` runs at the top of `Composer`'s `uploadFiles`, before the
+byte reservation, and returns a possibly re-encoded `File`:
+
+- Only `image/(jpe?g|png|webp|heic|heif|avif)` MIME types are touched; everything else — GIFs
+  included — attaches untouched.
+- A failed decode returns the original file unchanged (the ordinary over-cap checks then apply).
+- Downscale to fit 2048 px on the long edge; never upscale — a small image over the byte cap
+  (a huge 1×1 PNG) re-encodes at its own dimensions.
+- PNG and WebP encode as PNG first; a PNG result still over `CHAT_ATTACHMENT_MAX_BYTES` re-encodes
+  as JPEG at the same size. JPEG quality is 0.85 (`IMAGE_JPEG_QUALITY`).
+- The output keeps the original name with the matching extension (`photo.png` can come back as
+  `photo.jpg`). An over-cap image that no codec run can bring under the cap is returned
+  unchanged and is then rejected by the ordinary checks (finding #1330 tracks a real upload
+  path for those).
+- The codec is injectable (`ImageCodec`) so unit tests pin the policy; `browserImageCodec` decodes
+  with EXIF orientation and uses `OffscreenCanvas` with an HTML-canvas fallback.
+
+## Read aloud
+
+The Read aloud action on assistant messages speaks that reply through the gateway's per-agent TTS
+config (`messages.tts` merged with `agents.list[].tts`; ADR 0102, wire shapes in
+[TTS read aloud](/next/admin/gateway/protocol#tts-read-aloud)). `app/use-read-aloud.ts`
+owns the state: one `tts.readAloud.status` read per runtime, agent and connection, one shared
+`ReadAloudPlayer`, and a `ReadAloudControls {unavailableReason, activeKey, paused, phase, error, toggle, pause, resume, stop}`
+value. `AssistantMessage` takes it as `readAloud` plus `readAloudKeys` from `Thread`: the reply
+block's turn key first, then each of its rows' ids. The buttons target the first key unless
+playback is active under another member (auto-read streams under a row id), and an error or the
+playing state shows on the reply when any of its keys matches.
+
+`unavailableReason` is first match wins: `unavailable while offline` when disconnected,
+`unavailable during Voice mode`, `unavailable on this gateway` when the status reports
+`enabled: false`. A failed status read gates the control off instead of guessing the feature is
+live, and only a status for the current agent counts. When the player reports a
+`read_aloud_disabled` refusal, the hook bumps its status revision so the gate re-reads instead of
+staying stale. Playback stops when the session changes or Voice mode engages; a connection drop
+does not stop it — the player keeps playing across a reconnect, and the manual control still
+reports `unavailable while offline` until the socket is back.
+
+`providers/read-aloud-text.ts` turns the reply into speech chunks:
+
+- `messageMarkdownForSpeech` prefers the message transcript's `text` blocks over the streamed
+  content.
+- `extractSpeakableUnits` parses the markdown with remark (GFM) and keeps one unit per paragraph,
+  heading and list item, recursing into blockquotes, while dropping code blocks, inline and block
+  html, tables, rules and metadata nodes. Unpunctuated units get a trailing period so the voice
+  pauses at the unit end.
+- `packSpeechChunks` joins units with blank lines under the gateway's `maxTextLength`, splitting an
+  oversized unit on sentence boundaries (`Intl.Segmenter`), then on whitespace. Every chunk is
+  1..max characters and no non-whitespace text is lost.
+
+`providers/read-aloud-player.ts` is the framework-free playback engine. `start` runs synchronously
+inside the click handler — it creates and resumes the shared `AudioContext` there, which unlocks
+Safari/iOS playback from the user gesture — then fetches chunk 0 and prefetches the next chunk
+while the current one plays, with at most one `tts.speak` request in flight. `pause()` suspends
+the shared `AudioContext`, freezing the sounding buffer mid-playback so the play loop parks
+instead of ending; `resume()` resumes the context and runs inside a click, satisfying Safari's
+gesture rule. `paused` is a flag separate from the play loop's `phase`, so the loop's own state
+writes can never clear it. `unlock()` is a no-op while paused, so the enabling gestures (turning
+auto-read on, the dictate gesture's unlock) cannot silently un-suspend a paused read. A
+generation counter makes `stop()`, or starting another message, retire in-flight work silently: a
+late synth promise never surfaces audio or errors. `stop()` clears `paused` without resuming the
+context — the next read's `unlock()` does that. A transient synth failure — a socket close,
+`UNAVAILABLE`, or an error the gateway marked `retryable` — is retried up to two extra times with
+500 ms, then 1 s, backoff (honouring `retryAfterMs`), so a blip mid-reply does not end the read;
+`stop()` cancels a waiting retry through the generation counter, and a `read_aloud_disabled`
+refusal is never retried. `describeReadAloudError` maps a
+`read_aloud_disabled` refusal to
+`Read aloud is turned off for this assistant.`, any other gateway error to
+`Couldn't read aloud: <message>`, and a `decodeAudioData` failure to
+`Couldn't play the audio in this browser.` The manual `start` is now built on the same primitives as
+the streaming queue: `startStream(key, agentId)` opens an empty queue, `pushChunks(key, chunks)`
+feeds it (prefetching the next chunk as soon as one exists), and `endStream(key)` closes it once the
+loop has drained. `unlock()` must run synchronously inside the enabling gesture, the same
+AudioContext-resume contract as `start`.
+
+Markup contract:
+
+- The main button carries `data-testid="message-read-aloud"`, `aria-label` and `title` `Read
+aloud` when idle, `Pause reading` while this message reads, and `Resume reading` while the read
+  is paused; `aria-pressed` while active, `aria-busy` while loading, `data-read-aloud-phase` set
+  to `loading` or `playing` while this message reads (`idle` otherwise), and
+  `data-read-aloud-paused="true"` while the read is paused.
+- While this message reads or is paused, a second button `data-testid="message-read-aloud-stop"`
+  labelled and titled `Stop reading` stops the read outright: it clears `paused` without
+  resuming the context, and the next read's `unlock()` resumes it.
+- The actions row gets `data-reading="true"` while this message reads or shows an error.
+- An error renders a `role="status"` span with `data-testid="message-read-aloud-error"`.
+
+## Auto-read (Read replies aloud)
+
+The composer's **Read replies aloud** toggle (`data-testid="composer-auto-read"`, speaker icon,
+`aria-pressed` plus `cl-composer-btn--active` while on) turns streamed read-aloud on. Its props are
+optional (`autoRead`, `onToggleAutoRead`, `autoReadUnavailableReason`), so an unwired composer
+renders it off. When the reason is set it renders through `DisabledControl` with the same reason
+strings the message button uses; when live it plays every new reply of the open chat while it
+streams.
+
+- **Preference.** `providers/auto-read-preference.ts` stores the toggle per gateway URL and client id
+  under `openclaw.web.auto-read:<encodedGatewayUrl>:<clientId>` (`"1"`/`"0"`, default off) - the same
+  scoping rule as the navigation preferences. It is browser-local only; there is no operator default
+  (finding #1347).
+- **Chunking.** `providers/read-aloud-stream.ts` is the incremental counterpart of
+  `packSpeechChunks`: `update(markdown)` returns chunks for every newly completed sentence (one per
+  `extractSpeakableUnits` unit, split by the shared `splitSentences`), holding back the last sentence
+  of a still-growing unit; `finish(markdown)` flushes the remainder. It re-parses only when the
+  appended tail can complete a sentence, survives a markdown reflow that reparses to fewer sentences
+  than already emitted, and packs through the same `packSpeechChunks` — so streamed and manual reads
+  of the same text produce the same speech.
+- **Driver.** `app/auto-read-driver.ts` turns the chat store into `pushChunks` calls. One stream per
+  run: the stream key is the run's first tracked assistant id, and the stream stays open across every
+  assistant message the run appends (a message boundary flushes the previous message's pending
+  sentences into the same stream and replaces only the chunker — a second `startStream` would stop
+  playback and drop the queued tail). At the run boundary it flushes and closes. `reset(seed)` marks
+  every assistant id on screen as known, so a reply that was already streaming when auto-read turned
+  on is never spoken from its beginning; the driver abandons a run the moment the player stops
+  serving its stream (toggle off, chat switch, Voice mode, a manual read).
+- **Gates.** `use-read-aloud.ts` subscribes the driver only while `autoRead` is on, the status
+  reports `enabled` and Voice mode is off — not on the connection: a blip mid-reply must not
+  tear the subscription down, or the reconnect's re-seed would mark the in-flight reply known
+  and silence the rest of it; the cleanup unsubscribes, resets the driver and calls
+  `player.stop()`, so queued speech never outlives the gates. The
+  streaming chunk limits (first chunk 200, later chunks 600 characters) are clamped to the
+  status's `maxTextLength` and refreshed whenever the status or agent changes, so a low gateway
+  limit never produces a `tts.speak` rejection.
+- **Gesture.** Enabling the toggle, and starting Dictate with auto-read on, unlock the audio
+  context synchronously inside the click (`readAloud.unlock()`), keeping Safari/iOS playback
+  audible.
+
+**Stop semantics.** Toggling auto-read off, a chat switch or Voice mode stop playback through
+`player.stop()`, and so does the message's **Stop reading** button: the driver abandons the
+run the moment the player stops serving its stream, so its queued and remaining sentences are never
+spoken. A disconnect does not stop playback; the stream continues across the reconnect. Pressing
+the message's main button during a streaming read only pauses it; **Resume
+reading** continues from the same point. A normal run ending (no stop) flushes the reply's
+remaining sentences into the stream and the queue drains to the end of the reply. An in-flight
+`tts.speak` request is not cancelled on stop; the generation counter retires its result instead of
+surfacing the audio.
+
+## Busy state, unread badges and reply notifications
+
+Three layers, kept separate: the runs projection says which chats have a run in flight, the store
+carries the unread chat keys the sidebar renders, and `use-reply-notifications` owns the
+per-device unread state and turns hidden-tab replies into optional desktop notifications.
+
+### Busy state
+
+- `selectBusySessionKeys(rows)` (`runs/runs-model.ts`) maps the `sessions.runs.list` projection
+  the sidebar already reads to the session keys with a run in flight: rows whose
+  `groupForSessionRunStatus(status)` is `queued` or `running`, excluding `kind === "heartbeat"`
+  (heartbeat output is suppressed in chat; counting it would pulse the busy state on every tick).
+- `useBusySessionKeys(controller)` (`app/use-busy-sessions.ts`) reads the projection with
+  `useSyncExternalStore` and holds a `useRunsLease`, so it stays live while the shell is mounted
+  even when the Sidebar is not.
+- `AppShell` ORs the open chat's key into the composer's streaming state, so Stop sends
+  `chat.abort { sessionKey }` and Enter steers via `sessions.steer` for a run this client never
+  started — one running in the same chat from another device, or one that predates a reload.
+- `ui/TypingIndicator.tsx` is the three-dot indicator: `role="status"` with
+  `aria-label="<assistant> is working"`, the dots `aria-hidden`. `Thread` shows it while its
+  `isBusy` prop is true (not only before the first streamed text) and sets `aria-busy` on the
+  thread element; `EmptyState` shows it while a still-empty chat's first turn runs elsewhere. The
+  sidebar marks busy chats with `sidebar-session-busy` (a pulsing `cl-sb-busy` dot,
+  `role="img"`, `aria-label="Working"`); both pulses are disabled under `prefers-reduced-motion`.
+
+### Unread badges and the title count
+
+- The runtime broadcasts `assistantReply { sessionKey, runId, text, at }` on its events bus for a
+  `chat` `final` that carries non-empty assistant text, once per `runId` (bounded FIFO of 200 run
+  ids), from `handleEvent` before `handleChatEvent` — so a pre-ack buffered final replayed after
+  the send acknowledgement still fires exactly once. Heartbeat finals (`message: undefined`),
+  silent finals and user-role finals never fire. `at` is the gateway-stamped `message.timestamp`
+  of the final, or `null` from a gateway that does not stamp timestamps; unread detection is then
+  live-only.
+- `AppShell`'s `useReplyNotifications` owns unread state per browser or installed app: a chat is
+  unread when an assistant reply arrived after this device last had the chat open. Detection is
+  durable — it compares the session row's `lastReplyAt` (see
+  [Gateway protocol](/next/admin/gateway/protocol#sessions-list-sorting-agent-activity-and-visibility))
+  against a per-device read cursor, and the state survives a reload. It publishes the unread keys
+  to the store (`setUnreadSessions` on `unreadBySession`, rendered as the static
+  `sidebar-session-unread` dot, `aria-label="New reply"`) and clears a chat when it is activated,
+  when the tab becomes visible with it open, or through the top-bar bell's **Mark all as read**.
+  The document title gets a `(N)` prefix counting unread chats against the title captured at
+  mount. Badges and the count run whether or not the notification opt-in is on.
+- `providers/unread-state.ts` is the pure state machine behind that durability (`UNREAD_STATE_STORAGE_KEY`
+  is `openclaw.web.unread.v1`, scoped like every other preference): per chat a seen floor and an
+  unread timestamp, a baseline seeded from the first attention window (replies older than it never
+  light), an optional read-all timestamp, a monotonic cross-tab merge in which a read always beats
+  an unread of the same or older reply, and pruning that sheds the oldest seen entries past 2000
+  keys by raising the baseline. Timestamps only — never message text or titles. A chat deleted
+  elsewhere is dropped by tombstoning it seen and forgetting the key, both from the live
+  `sessionDeleted` event and from a completed read (`completeAt`) whose window no longer lists it.
+- `providers/attention-runtime.ts` is the attention window the unread owner reconciles against.
+  In the default Sessions view it adopts the sidebar's own completed page (`SESSIONS_LIST_LIMIT`, 100
+  rows); anywhere else `refresh()` reads the newest `ATTENTION_LIST_LIMIT` (50) user-facing chats
+  with `includeDerivedTitles`, coalescing to one fetch in flight plus one trailing and never
+  emitting on failure. The runtime publishes `attentionRows { sessions, completeAt }`; `completeAt`
+  is the response `ts` only when the read returned the whole window (`hasMore: false`), so only a
+  complete window can clear chats that vanished from it. A hidden-to-visible resume refetches the
+  sidebar and attention windows at most once per `RESUME_REFRESH_MIN_MS` (10 s).
+- `ui/AttentionMenu.tsx` renders the bell: an icon trigger whose badge caps at `99+`
+  (`aria-label="Notifications, N unread"`) opening a dismissible menu that lists unread chats
+  (assistant colour marker, chat name, an assistant and recency line) and offers
+  **Mark all as read** only when the list is non-empty; an empty menu reads "You're all caught
+  up".
+- Operator decision: nothing from the reply itself may reach the OS. `AssistantReply.text` exists
+  only so empty finals can be skipped — never render it in a notification, a tooltip or a title.
+
+### Desktop notifications (opt-in)
+
+- `providers/reply-notifications.ts` owns the browser seam: `notificationSupport()` (returns
+  `"unsupported"` when there is no `Notification` constructor, else the live permission), the
+  scoped opt-in flag under `openclaw.web.notifications.v1` keyed `${gatewayUrl}|${clientId}`
+  (the same per-connection scoping rule as the theme and display preferences),
+  `formatUnreadTitle(base, total)`, and `showReplyNotification`.
+- A notification is shown only while the tab is hidden, the opt-in is on and permission is
+  `granted`. Its title is `<assistant name> replied` (the chat's agent name when it resolves, else
+  the configured assistant name), its body is the chat's title, and `tag` is the session key, so a
+  newer reply replaces the older notification for that chat. `showReplyNotification` returns
+  `false` when the constructor throws (Android Chrome and iOS throw without a service worker); the
+  caller then records `unsupported` so the account menu stops offering the toggle.
+- `AccountMenu` renders the Notifications radiogroup (`account-menu-notifications-off|on`).
+  `Notification.requestPermission()` runs inside the click handler — it requires a user gesture.
+  A `denied` result keeps the toggle Off and shows `Blocked in browser settings`; an
+  `unsupported` browser renders a `DisabledControl` with
+  `reason="Not supported in this browser"`.
+
+```ts
+// Do this: the event carries only what the badge needs; the text never leaves the client.
+runtime.onAssistantReply(({ sessionKey }) => markUnread(sessionKey));
+
+// Not this: reply text in an OS notification surface.
+new Notification(`${name} replied`, { body: reply.text });
+```
+
+## Stay inside the ADR 0077 allowlist
+
+The client connects with only `operator.sessions.read` and `operator.sessions.write`, and the
+gateway admits a fixed method and event set for them (listed under
+[narrow scope method allowlist](/next/admin/gateway/protocol#narrow-scope-method-allowlist) and
+[event allowlist](/next/admin/gateway/protocol#narrow-scope-event-allowlist); ADR 0077 records the decision; the
+sources of truth are `NARROW_SESSION_READ_METHODS` and `NARROW_SESSION_WRITE_METHODS` in
+`src/gateway/method-scopes.ts` and `NARROW_SESSION_EVENT_ALLOWLIST` in
+`src/gateway/server-broadcast.ts`).
+
+- Methods: reads such as `agents.list`, `sessions.list`, `chat.history`, `sessions.runs.*`,
+  `tasks.runs.*`, `talk.catalog`, and `tts.readAloud.status`; writes `chat.send`, `chat.abort`,
+  `sessions.create`, `sessions.steer`, `sessions.abort`, `sessions.runs.cancel`,
+  `sessions.runs.continue`, `sessions.patch`, `sessions.title.prepare` (ADR 0083),
+  `talk.session.create`, `talk.session.appendAudio`, `talk.session.close`,
+  `talk.session.cancelTurn`, `talk.session.mark`, `talk.session.bargeIn` (ADR 0086), and
+  `tts.speak` (ADR 0102). `sessions.patch` is field-guarded even for this narrow
+  client: only `label`, `model`, `thinkingLevel` and `reasoningLevel` are admitted
+  (`NARROW_SESSION_PATCH_FIELDS`); every other field still needs `operator.admin` and is refused
+  with `missing scope: operator.admin`, the same shape as a fully unlisted method. The patch
+  response is redacted for this client (no `path`, none of the admin-only entry fields), so never
+  read those from a patch result.
+- Events: `chat`, `sessions.changed`, `runs.invalidated`, `talk.event` (this connection's own Talk
+  sessions only), `tick`, `heartbeat`.
+- Not admitted: `talk.realtime.*`, `talk.config`, `talk.mode`, `talk.metrics`, `config.*`,
+  `logs.*`, `cron.*`, `node.*`, `send`, and anything not listed. A method outside the list is
+  refused by the gateway, so a feature that needs one is an ADR amendment, not a client-only
+  change.
+
+Before you add an RPC call, check it against the list. The brand e2e records every frame the
+browser sends and fails if one is outside the allowlist, which catches a stray call even when a
+unit test with a mocked runtime passes.
+
+## Test at the real entry point
+
+Unit tests under `apps/web/src/**` (`pnpm test:web`) prove components in jsdom. They cannot see
+scrolling, fonts, `color-scheme` or gateway frames. For a behaviour change, also drive the built
+bundle in real Chromium against a real gateway using the harness in
+`test/helpers/user-client-web-harness.ts`; see
+[Testing](/next/users/help/testing#web-client-and-brand-e2e-suites) for the suites and their caveats.
+
+## Related
+
+- [Brand tokens](/next/developers/reference/brand-tokens) - the shared tokens and fonts under `client.css`
+- [Web client hosting](/next/admin/web/user-client) - deployment, origins, `config.json`
+- [Using the web client](/next/admin/web/using-the-web-client) - what users see
+- [Gateway protocol](/next/admin/gateway/protocol) - client identity and scopes
