@@ -94,6 +94,10 @@ Restart the gateway afterwards. Once enabled, the sign-in routes live under
   `http://[::1]:<port>/…`). Entries with a fragment, control characters, non-ASCII characters
   (percent-encode them), plain `http` on any other host, or a `javascript:`, `data:`, `file:`,
   `blob:` or `vbscript:` scheme are refused when the config loads.
+- `appleAppIds`: Apple App IDs (`<TEAMID>.<bundle id>`, e.g. `ABCDE12345.com.example.glass`) that
+  may open the `https` entries of `nativeRedirects` as universal links. Default none. When set, an
+  `https` `nativeRedirects` path on the `publicBaseUrl` origin may not contain `*` (Apple reads it
+  as a wildcard). See [iOS universal links](#ios-universal-links).
 - `providers` (at least one): see below. `id` is `[a-z0-9][a-z0-9-]{0,31}`; duplicate ids log an
   error and the later duplicates are skipped. `label` overrides the displayed name.
   `clientSecret` accepts `${ENV_VAR}` secret references. `type: "oidc"` requires an `issuer` and,
@@ -233,3 +237,26 @@ Use the platform's browser session, never an embedded WebView: iOS
 `ASWebAuthenticationSession`, Android Custom Tabs with verified App Links, and on desktop a
 loopback listener on `http://127.0.0.1:<port>`. Google blocks sign-in inside embedded WebViews
 with `403 disallowed_useragent`, and RFC 8252 requires the external user agent for native apps.
+
+### iOS universal links
+
+To return to an iOS app through `https` instead of an app scheme:
+
+1. Add `https://<publicBaseUrl host>/plugins/identity-oidc/native-return` to `nativeRedirects`
+   (keep the app scheme as the fallback for older iOS versions).
+2. Set `appleAppIds` to the app's `<TEAMID>.<bundle id>`.
+
+The gateway then serves `/.well-known/apple-app-site-association` (unauthenticated, JSON). It lists
+the configured app IDs under `applinks` and `webcredentials`, and claims the paths of every `https`
+`nativeRedirects` entry on the `publicBaseUrl` origin. Entries on other hosts are skipped: Apple only
+associates paths with the host that serves the file. Without `appleAppIds` the file is not served.
+
+`/plugins/identity-oidc/native-return` itself answers `GET` with a short "Return to the app" page,
+for when the browser opens the link instead of the app. The setup code is in the URL fragment, so
+it never reaches the gateway.
+
+Apple's CDN fetches the association file from the public internet. A gateway reachable only inside a
+private network (for example over Tailscale Serve) cannot pass that check; use developer-mode
+associated domains (`applinks:<host>?mode=developer`) for development-signed builds, which the
+device fetches directly, or publish the gateway host. See Apple's
+[Supporting associated domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
