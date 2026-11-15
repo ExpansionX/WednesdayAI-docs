@@ -1040,6 +1040,27 @@ message(action="send", channel="discord", target="channel:123", path="/path/to/a
 
   </Accordion>
 
+  <Accordion title="Gateway closed with a fatal code (4004, 4010-4014)">
+
+    Discord closes the gateway with a fatal code when it will not accept the session. The
+    account stops at once, and `wednesdayai channels status` shows `stopped, disconnected
+    (code N)` with `error:gateway closed with code N: <reason>`. The gateway log records
+    `discord: gateway closed with code N (<reason>); stopping the Discord monitor.`
+
+    | Code | Reason in status | What to do |
+    | --- | --- | --- |
+    | 4004 | authentication failed (check the bot token) | Reset the bot token in the Developer Portal and update `channels.discord.token`. |
+    | 4010 | invalid shard | WednesdayAI connects as a single shard; report the code as a bug. |
+    | 4011 | sharding required | The bot is in more guilds than one gateway connection holds; WednesdayAI does not shard. |
+    | 4012 | invalid gateway API version | WednesdayAI pins the API version; report the code as a bug. |
+    | 4013 | invalid intents | WednesdayAI builds the intents from `channels.discord.intents`; report the code as a bug. |
+    | 4014 | missing privileged gateway intents | Enable the intents (see the entry above). |
+
+    The gateway restarts a stopped account with increasing backoff, so a later attempt
+    connects once the cause is fixed.
+
+  </Accordion>
+
   <Accordion title="Status stays disconnected or connecting">
 
     `wednesdayai channels status` reports `connecting` while the gateway session is
@@ -1174,9 +1195,27 @@ High-signal Discord fields:
 - features: `pluralkit`, `execApprovals`, `intents`, `agentComponents`, `heartbeat`, `responsePrefix`, `ackReaction`, `ackReactionScope`, `proxy`, `guilds.*.reactionNotifications`
 
 **Inbox ingestion:** Discord channel config alone never ingests Discord messages into the
-inbox. Inbox ingestion is opt-in per source: set `inbox.sources.discord.enabled: true`
-(default: off). This gates both live dual-write mirroring AND the Discord history scanner;
-existing inbox rows are never removed when the source is disabled or removed from config.
+inbox. An account becomes an inbox source with `mode: "inbox"` (see
+[Account mode](/next/admin/channels/channel-routing#account-mode)); a personal account next to the bot
+account in channel mode is the typical shape:
+
+```json5
+{
+  channels: {
+    discord: {
+      accounts: {
+        default: { token: "${DISCORD_BOT_TOKEN}" }, // bot, channel mode
+        personal: { mode: "inbox" }, // personal, inbox only
+      },
+    },
+  },
+}
+```
+
+An inbox-mode account never chats: no agent replies, no pairing, no allowlist gating, and no
+automatic read receipts. It feeds the inbox through the history scanner (60 s REST polling)
+only, and the scanner walks guild channels — Discord DMs are not ingested. Existing inbox
+rows are never removed when the account leaves inbox mode or is removed from config.
 
 ## Safety and operations
 
