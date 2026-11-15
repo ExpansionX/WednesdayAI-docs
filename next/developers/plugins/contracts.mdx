@@ -21,12 +21,12 @@ re-exported from `wednesdayai/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.45`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
-| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.10`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.46`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.11`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.9`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.21`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.22`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -137,10 +137,43 @@ C4 of `docs/plans/app-login-accessory-scopes.md` (ADR 2242 D4). All changes are 
   (`src/gateway/protocol/connect-error-details.ts`) for an app device connecting without a
   person, or with a pairing older than `appSessionMaxAgeDays`.
 
+### Your devices (gateway 3.22)
+
+A person reads and removes their own devices from any of their own devices (plan C5 of
+`docs/plans/app-login-accessory-scopes.md`, ADR 2600):
+
+- New methods `identity.devices.list` (`operator.read`, narrow-admitted via
+  `operator.sessions.read`) and `identity.devices.remove` (`operator.write`, narrow-admitted via
+  `operator.sessions.write`), with new `ProtocolSchemas` entries
+  `IdentityDevicesListParams`/`Result`, `IdentityDevicesRemoveParams`/`Result` and the shared
+  `IdentityDeviceEntry` row. Additive only; no existing payload changed.
+- `identity.devices.list` returns the paired devices whose stored `ownerPerson` is the caller's
+  person — device id, optional display/client/platform/family fields, `lastActiveAtMs`,
+  `approvedAtMs`, `companionOf`, `current`, and the vouched accessories
+  (`accessoryId`, `kind`, `model?`). No tokens, public keys or scopes cross the wire.
+- `identity.devices.remove` runs the guarded owned-removal cascade: one conditional store
+  mutation re-checks owner, row revision and token fingerprint under the store lock and removes
+  the parent, its companion grants and its companion rows in that transaction (the captured
+  companion ids drive the socket closes). `identity_device_not_owned` is the uniform refusal for
+  another person's device, for an unknown id and for a re-enrollment between the read and the
+  write, and `identity_person_required` refuses a caller with no person.
+
 ### Session-storage Postgres connect timeout (sdk 2.45)
 
 `OpenClawConfig.session.storage` gained the optional `postgres.connectionTimeoutMs` key (#2520).
 It is a `provided` config member, so the change is additive.
+
+### Channel account failed state (sdk 2.46, plugin 2.11)
+
+A channel's `gateway.startAccount` may resolve with `ChannelAccountStartResult`
+(`{ accountFailure: { reason, code?, remediation? } }`). `ChannelAccountStartResult` and
+`ChannelAccountFailure` are exported from `wednesdayai/plugin-sdk`. The channel manager then sets
+`ChannelAccountSnapshot.failure` (`reason`, `code`, `remediation`, `at`) and `lastError`, skips
+the backoff restart, and the health monitor does not restart the account. The account starts
+again only when its resolved config changes, when it resolves disabled or unconfigured, or when
+the gateway restarts. `wednesdayai channels status` prints `failed (code N)` and a warning, and
+`wednesdayai doctor` lists the same warning. `status.defaultRuntime` gains optional `failure`.
+The change is additive only: channels that never return `accountFailure` behave as before.
 
 ## Version semantics
 

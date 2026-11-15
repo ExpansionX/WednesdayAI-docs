@@ -232,11 +232,14 @@ read or write groups later are refused until they are allowlisted.
   the device id comes from the verified connection, never the request body. `device.self` joined
   with ADR 2242 (app device integration): it reads the caller's own device group only. See
   [Device companions and device.self](#device-companions-and-deviceself).
+  `identity.devices.list` joined with the app-login plan (ADR 2600): it reads the caller's own
+  person's devices from any own device. See [Identity RPCs](#identity-rpcs).
 - `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
   `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
-  `talk.session.bargeIn`, `identity.link.claim` and `identity.logout`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
+  `talk.session.bargeIn`, `identity.link.claim`, `identity.logout` and
+  `identity.devices.remove`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
   the one surfaces write, flipping the pinned boolean on a surface the session already owns.
   Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
   and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
@@ -257,6 +260,8 @@ read or write groups later are refused until they are allowlisted.
   ADR 0116 (identity binding at enrollment): redeeming a self-service `/link` code and the
   server-side logout of the calling device. Both take the device id from the verified
   connection, never the request body; behaviour is under [Identity RPCs](#identity-rpcs).
+  `identity.devices.remove` joined with the app-login plan (ADR 2600): a person removes one of
+  their own devices (the lost-phone path). See [Identity RPCs](#identity-rpcs).
   `talk.realtime.*`, `talk.config`
   and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
@@ -2080,15 +2085,17 @@ other client talk to the same seven `identity.*` methods; the flows they serve a
 [Identities](/next/admin/gateway/identity). Linking grants a person's identity, so only `operator.admin` binds
 or unbinds a value.
 
-| Method                | Scope            | Narrow admission          | Serves                                                                                      |
-| --------------------- | ---------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
-| `identity.list`       | `operator.read`  | never                     | the operator's directory view (`identity list`)                                             |
-| `identity.self`       | `operator.read`  | `operator.sessions.read`  | the calling browser's own person and links (the **Linked accounts** dialog)                 |
-| `identity.add`        | `operator.admin` | never                     | create a person (`identity add`)                                                            |
-| `identity.link`       | `operator.admin` | never                     | link a `<namespace>:<id>` value to a person (`identity link`, `pairing approve --identity`) |
-| `identity.unlink`     | `operator.admin` | never                     | remove a value from every person (`identity unlink`)                                        |
-| `identity.link.claim` | `operator.write` | `operator.sessions.write` | redeem a `/link` code (`identity.link.claim` links, then approves the pairing code)         |
-| `identity.logout`     | `operator.write` | `operator.sessions.write` | server-side logout of the calling device (**Log out**)                                      |
+| Method                    | Scope            | Narrow admission          | Serves                                                                                      |
+| ------------------------- | ---------------- | ------------------------- | ------------------------------------------------------------------------------------------- |
+| `identity.list`           | `operator.read`  | never                     | the operator's directory view (`identity list`)                                             |
+| `identity.self`           | `operator.read`  | `operator.sessions.read`  | the calling browser's own person and links (the **Linked accounts** dialog)                 |
+| `identity.add`            | `operator.admin` | never                     | create a person (`identity add`)                                                            |
+| `identity.link`           | `operator.admin` | never                     | link a `<namespace>:<id>` value to a person (`identity link`, `pairing approve --identity`) |
+| `identity.unlink`         | `operator.admin` | never                     | remove a value from every person (`identity unlink`)                                        |
+| `identity.link.claim`     | `operator.write` | `operator.sessions.write` | redeem a `/link` code (`identity.link.claim` links, then approves the pairing code)         |
+| `identity.logout`         | `operator.write` | `operator.sessions.write` | server-side logout of the calling device (**Log out**)                                      |
+| `identity.devices.list`   | `operator.read`  | `operator.sessions.read`  | the caller's person's devices (**Your devices**)                                            |
+| `identity.devices.remove` | `operator.write` | `operator.sessions.write` | remove one of the caller's own devices (**Your devices → Remove**)                          |
 
 - The three narrow methods (`identity.self`, `identity.link.claim`, `identity.logout`) read the
   verified device id from the connection, never from the request body. A connection without one is
@@ -2101,6 +2108,17 @@ or unbinds a value.
   `<value> is already linked to another person; ask them to unlink it first.` — it never names the
   other person to a narrow caller. Claims are serialized per claimed value and rate limited per
   device (5/min) and per person (15/min), with a 5-minute lockout.
+- `identity.devices.list` returns every paired device whose stored `ownerPerson` is the caller's
+  person (app installs, their companions and nodes alike; `companionOf` marks a companion,
+  `current` marks the calling device, `accessories` lists the vouched accessories), and holds no
+  tokens, public keys or scopes. A caller with no person gets an empty list.
+  `identity.devices.remove { deviceId }` runs the same removal cascade as `device.pair.remove`
+  (the target's and its companions' sockets close with 1008 after the response). Refusals carry
+  `details.reason`: `identity_person_required` (the connection is not bound to a person) and
+  `identity_device_not_owned` — the same answer for a device of another person and for an
+  unknown id, so other persons' device ids are never revealed. The web client renders the pair
+  as the account menu's **Your devices** dialog; removing the current device ends in the logout
+  path (ADR 0116 D10).
 
 ## TLS + pinning
 
