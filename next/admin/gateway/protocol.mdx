@@ -2078,6 +2078,37 @@ its own — and traffic rides the app's sockets, tagged with `accessoryId` on th
   run started by a tagged `chat.send` carries `accessoryId` and `kind` in its `chat` events'
   `origin` (next to `deviceId`/`clientId`).
 
+## Alert mutes (push.mute.get / push.mute.set)
+
+A signed-in person reads and changes their own alert mutes from any of their own devices. Mutes
+are durable gateway state per person and apply to every device of that person.
+
+| Method          | Scope            | Narrow admission | Result                     |
+| --------------- | ---------------- | ---------------- | -------------------------- |
+| `push.mute.get` | `operator.read`  | never            | `{mutes: PushAlertMute[]}` |
+| `push.mute.set` | `operator.write` | never            | `{mutes: PushAlertMute[]}` |
+
+A `PushAlertMute` is `{ kind: "chat.final" | "inbox", source?, accountId? }`. A mute matches an
+alert when the kind is equal, `source` is absent or equal to the alert source, and `accountId`
+is absent or equal to the alert account id:
+
+- `{kind:"inbox"}` mutes all inbox alerts, `{kind:"inbox",source:"whatsapp"}` mutes every
+  WhatsApp account, and adding `accountId` mutes one account. `{kind:"chat.final"}` mutes reply
+  alerts.
+- `push.mute.set` takes `{ kind, source?, accountId?, muted }` and is one idempotent toggle, not
+  a snapshot replace: `muted:true` adds the exactly equal entry if absent, `muted:false` removes
+  it if present, so concurrent devices never overwrite each other. Strings are trimmed before
+  matching and storing; matching is exact and case-sensitive. The result is the person's full
+  list after the change, sorted by `kind`, then `source ?? ""`, then `accountId ?? ""`.
+- Approval alerts are never muted and never deduped.
+- The same normalized preview text is pushed to a device at most once per kind and collapse key
+  every 10 minutes, measured from the last successful send. Only digests are kept in memory.
+- Refusals carry `error.details.reason`: `push_mute_person_required` (the connection resolves no
+  person; sign in again), `push_mute_invalid` (`source` or `accountId` empty after trimming,
+  `accountId` without `source`, or `source` with `kind:"chat.final"`), and `push_mute_limit`
+  (adding a 65th entry; at most 64 per person). `kind:"approval"` and unknown fields fail the
+  validator with the standard invalid-params `INVALID_REQUEST`.
+
 ## Identity RPCs
 
 ADR 0116 binds people to their linked accounts at enrollment. The CLI, the web client and every
