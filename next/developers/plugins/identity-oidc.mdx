@@ -98,6 +98,16 @@ Restart the gateway afterwards. Once enabled, the sign-in routes live under
   may open the `https` entries of `nativeRedirects` as universal links. Default none. When set, an
   `https` `nativeRedirects` path on the `publicBaseUrl` origin may not contain `*` (Apple reads it
   as a wildcard). See [iOS universal links](#ios-universal-links).
+- `appSignIn`: `"optional"` (default) or `"required"`. `"required"` makes the WednesdayAI app
+  (`wednesdayai-mobile`, `wednesdayai-desktop`) show sign-in as its only entry: setup codes for
+  the app profiles are refused at `device.bootstrap.issue`, `wednesdayai qr --client …` and at
+  connect for an app device without a person (`app_sign_in_required`). Sign-in itself, other
+  profiles (user-client, Even G2, Mentra) and gateways without this plugin are unchanged. See
+  [Operator runbook](#operator-runbook).
+- `appSessionMaxAgeDays`: optional positive integer. When set, an app device paired more than
+  this many days ago is refused at connect with `app_sign_in_expired` until the app signs in
+  again. Unset (default) means no forced re-auth. The check runs only at gateway connect, so an
+  offline phone keeps working locally.
 - `providers` (at least one): see below. `id` is `[a-z0-9][a-z0-9-]{0,31}`; duplicate ids log an
   error and the later duplicates are skipped. `label` overrides the displayed name.
   `clientSecret` accepts `${ENV_VAR}` secret references. `type: "oidc"` requires an `issuer` and,
@@ -211,27 +221,37 @@ instead of the web client, and receives a setup code only it can redeem.
 2. It opens, in the system browser session,
    `<publicBaseUrl>/plugins/identity-oidc/<providerId>/start` with these query parameters:
 
-   | Parameter               | Value                                                |
-   | ----------------------- | ---------------------------------------------------- |
-   | `redirect`              | one `nativeRedirects` entry, character for character |
-   | `profile`               | `wednesdayai-glass-node` (default `user-client`)     |
-   | `code_challenge`        | the S256 challenge (43 base64url characters)         |
-   | `code_challenge_method` | `S256`                                               |
+   | Parameter               | Value                                                                                                             |
+   | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+   | `redirect`              | one `nativeRedirects` entry, character for character                                                              |
+   | `profile`               | `wednesdayai-mobile`, `wednesdayai-desktop` or `wednesdayai-glass-node` (deprecated alias); default `user-client` |
+   | `code_challenge`        | the S256 challenge (43 base64url characters)                                                                      |
+   | `code_challenge_method` | `S256`                                                                                                            |
 
-   A `redirect` not on the allowlist, an unknown `profile`, the Glass profile without a
+   A `redirect` not on the allowlist, an unknown `profile`, an app profile without a
    `redirect`, a `redirect` without `code_challenge`, or any challenge that is not S256 is refused
-   with HTTP 400 before the sign-in starts.
+   with HTTP 400 before the sign-in starts. The desktop app uses an RFC 8252 loopback redirect
+   (`http://127.0.0.1:<port>/…`) on the same allowlist.
 
 3. After sign-in the browser lands on `<redirect>#setup=<token>`, or `<redirect>#oauthError=<reason>`.
-   The app connects with `client.id = "wednesdayai-glass-node"`, `auth.bootstrapToken = <token>` and
-   `auth.bootstrapCodeVerifier = <verifier>`; without the verifier the gateway refuses the code with
-   `bootstrap_code_verifier_invalid` (see [Gateway protocol](/next/admin/gateway/protocol#client-identity)).
+   The app connects with the client id matching its `profile` (`wednesdayai-mobile`,
+   `wednesdayai-desktop` or the deprecated `wednesdayai-glass-node`), `auth.bootstrapToken = <token>`
+   and `auth.bootstrapCodeVerifier = <verifier>`; without the verifier the gateway refuses the code
+   with `bootstrap_code_verifier_invalid` (see
+   [Gateway protocol](/next/admin/gateway/protocol#client-identity)).
 
-The Glass profile is only minted for a person the operator granted it (`oidc invite …
---enrollment-profile`,
-or `oidc grant`). Anyone else gets `#oauthError=profile_not_granted` on the app link; the flow never
-falls back to a different credential. `oidc revoke` stops future enrollments only: an already
-paired device keeps its pairing until you remove it.
+Before sign-in the app reads `GET /plugins/identity-oidc/providers`, which returns the provider
+list, the resolved `appSignIn` value and, when set, `appSessionMaxAgeDays` (in days). Without the
+plugin, with no usable provider, or while the plugin is disabled the route is absent and the app
+falls back to the setup-code/QR path exactly as before.
+
+The app profiles are minted only for a person the operator granted one (`oidc invite …
+--enrollment-profile`, or `oidc grant`; the three app names are one grant — holding any one of
+them enrolls with any of them). Anyone else gets `#oauthError=profile_not_granted` on the app
+link; the flow never falls back to a different credential. `oidc revoke` stops future enrollments
+only: an already paired device keeps its pairing until you remove it. `wednesdayai-glass-node` is
+the deprecated alias for the same app credential (ADR 2242 D4): prefer
+`wednesdayai-mobile`/`wednesdayai-desktop` in new grants and invites.
 
 Use the platform's browser session, never an embedded WebView: iOS
 `ASWebAuthenticationSession`, Android Custom Tabs with verified App Links, and on desktop a
@@ -260,3 +280,60 @@ private network (for example over Tailscale Serve) cannot pass that check; use d
 associated domains (`applinks:<host>?mode=developer`) for development-signed builds, which the
 device fetches directly, or publish the gateway host. See Apple's
 [Supporting associated domains](https://developer.apple.com/documentation/xcode/supporting-associated-domains).
+
+## Operator runbook
+
+### Require app sign-in
+
+```bash
+wednesdayai config set plugins.entries.identity-oidc.config.appSignIn '"required"'
+# restart the gateway
+```
+
+- Requires at least one configured `providers` entry: with an empty provider list, or while the
+  plugin is disabled, the app keeps the setup-code/QR path (there is no sign-in to force).
+- From then on the app shows sign-in as its only entry; `device.bootstrap.issue` and
+  `wednesdayai qr --client wednesdayai-mobile|wednesdayai-desktop|wednesdayai-glass-node` are
+  refused with `app_sign_in_required`. User-client, Even G2 and Mentra setup codes are unchanged.
+- Already-paired app devices whose record has no person (QR-paired before identity existed) are
+  refused at connect with `app_sign_in_required`; the app shows sign-in and re-pairs as a new
+  device. Prune the stale records afterwards (below).
+
+### Roll back while the IdP is down
+
+`required` mode can lock out people's apps when the identity provider is unreachable (sign-in is
+the only entry and it cannot complete). The gateway itself is not affected — device tokens keep
+working — so operators keep the CLI and Control UI:
+
+```bash
+wednesdayai config set plugins.entries.identity-oidc.config.appSignIn '"optional"'
+# restart the gateway
+```
+
+Set it back to `"required"` once the IdP answers again.
+
+### Force re-sign-in for app devices
+
+```bash
+wednesdayai config set plugins.entries.identity-oidc.config.appSessionMaxAgeDays 30
+# restart the gateway
+```
+
+At connect, an app device paired more than 30 days ago is refused with `app_sign_in_expired` and
+the app shows sign-in again. Unset the key (or remove it) to stop forcing re-auth. The check runs
+only at gateway connect, so an offline phone keeps working locally until it next reaches the
+gateway.
+
+### Remove owner-less QR-paired app devices
+
+App devices that re-paired through sign-in leave their old owner-less QR records behind. Those
+records have no identity, so supersede-based pruning (`devices prune --superseded`) never selects
+them — supersede matching requires the same person and client id. Find and remove them
+explicitly:
+
+```bash
+wednesdayai devices list --json   # app devices whose entry has no "identity" are the stale ones
+wednesdayai devices remove <deviceId>
+```
+
+`devices remove` revokes the record, closes its live sockets and unlinks it (#2307).
