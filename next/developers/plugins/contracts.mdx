@@ -21,12 +21,12 @@ re-exported from `wednesdayai/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.42`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
-| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.9`           | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.45`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.10`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.9`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.19`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.21`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -83,6 +83,64 @@ but suspends and then closes only the device's live connections that hold `role`
 (`"channel" | "inbox"`) are exported. An account resolves to
 `channels.<ch>.accounts.<id>.mode ?? channels.<ch>.mode ?? "channel"`; only `whatsapp`,
 `bluebubbles`, and `discord` can resolve to `"inbox"` (ADR 2572).
+
+### Device accessories (gateway 3.20, sdk 2.43)
+
+A signed-in WednesdayAI app device manages the credential-less accessories vouched for by its own
+record (plan C2 of `docs/plans/app-login-accessory-scopes.md`, ADR 2242 D4):
+
+- New methods `device.accessory.attach` / `device.accessory.detach` / `device.accessory.list`
+  (all own-device, `operator.write` / `operator.write` / `operator.read`, app-profile callers
+  only), with new `ProtocolSchemas` entries `DeviceAccessory*Params` / `DeviceAccessory*Result`.
+- The request frame gains optional `accessoryId` (`RequestFrame.accessoryId`), so
+  `GatewayRequestHandlerOptions.req` carries it; a tagged request is clamped to the accessory's
+  gateway-owned profile after the method-scope check (the clamp only narrows). The change is
+  additive only.
+- A tag admits only the explicit allowlist `ACCESSORY_TAGGABLE_METHODS` (in
+  `src/shared/accessory-profiles.ts`): `node.invoke`, `node.event`, `node.invoke.result`,
+  `chat.send`, `chat.abort`, `chat.history`, `exec.approval.resolve`, `device.self`. Everything
+  else tagged is refused `accessory_method_denied` before any scope check.
+- Refusal reasons (all `INVALID_REQUEST`, in `error.details.reason`): `accessory_forbidden` (the
+  caller is not a signed-in app device — includes device-less connections), `accessory_kind_unknown`,
+  `accessory_id_invalid`, `accessory_limit` (9th accessory), `accessory_not_attached` (unknown or
+  detached tag), `accessory_method_denied` (method not on the taggable allowlist),
+  `accessory_scope_denied` (the kind's profile does not grant the method's required operator
+  scope), `accessory_command_denied` (`node.invoke` command outside the kind's `commands` grants).
+  One further reason travels as `UNAVAILABLE`, not `INVALID_REQUEST`: `accessory_busy` (the
+  device's accessory state is locked by a concurrent connect or mutation; retry).
+- A tagged request that passes the clamp runs its handler with a request-local client view whose
+  `connect.scopes` hold every accessory-profile scope the connection satisfies under the
+  implication rules (never a scope outside the profile); the view's connect delegates to the
+  original connection for person-scope state, so a live suspension or unlink applies to tagged
+  requests too. The socket's client object is never mutated.
+- The tag is attribution plus a ceiling on the accessory's own direct requests — not an isolation
+  boundary against the app or the person's agent: an agent turn started by a tagged `chat.send`
+  runs under the person's tool policy and exec approvals like any untagged app request. For audit
+  and approval display, a run started by a tagged `chat.send` carries `accessoryId` and `kind` in
+  its `chat` events' optional `origin` (next to `deviceId`/`clientId`).
+
+### App sign-in requirement (gateway 3.21, plugin 2.10, sdk 2.44)
+
+C4 of `docs/plans/app-login-accessory-scopes.md` (ADR 2242 D4). All changes are additive:
+
+- `GATEWAY_CLIENT_IDS` gains `WEDNESDAYAI_MOBILE: "wednesdayai-mobile"` and
+  `WEDNESDAYAI_DESKTOP: "wednesdayai-desktop"`, both mapped to the app bootstrap profile (the
+  same object as the deprecated `wednesdayai-glass-node`). `ConnectParams.client`'s id enum and
+  its expanded surfaces therefore widen.
+- `PluginRuntime.identity.issueEnrollment` accepts `profile: "wednesdayai-mobile"` and
+  `"wednesdayai-desktop"`, minting the app bootstrap profile like `wednesdayai-glass-node`.
+- The identity-oidc plugin config gains `appSignIn` (`"required" | "optional"`, default
+  `"optional"`) and `appSessionMaxAgeDays` (optional positive integer); `GET
+/plugins/identity-oidc/providers` returns the resolved `appSignIn` and, when set,
+  `appSessionMaxAgeDays`.
+- Connect refusal detail codes `app_sign_in_required` and `app_sign_in_expired`
+  (`src/gateway/protocol/connect-error-details.ts`) for an app device connecting without a
+  person, or with a pairing older than `appSessionMaxAgeDays`.
+
+### Session-storage Postgres connect timeout (sdk 2.45)
+
+`OpenClawConfig.session.storage` gained the optional `postgres.connectionTimeoutMs` key (#2520).
+It is a `provided` config member, so the change is additive.
 
 ## Version semantics
 

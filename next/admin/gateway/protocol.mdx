@@ -152,11 +152,13 @@ param-level feature flags a client must detect before sending (for example
 
 ## Framing
 
-- **Request**: `{type:"req", id, method, params}`
+- **Request**: `{type:"req", id, method, params, accessoryId?}`
 - **Response**: `{type:"res", id, ok, payload|error}`
 - **Event**: `{type:"event", event, payload, seq?, stateVersion?}`
 
-Side-effecting methods require **idempotency keys** (see schema).
+Side-effecting methods require **idempotency keys** (see schema). An optional `accessoryId` on a
+request frame names an accessory of the calling device; the gateway clamps such requests to that
+accessory's profile ([Device accessories](#device-accessories-deviceaccessoryattach-detach-list)).
 
 ## Roles + scopes
 
@@ -406,16 +408,32 @@ at pairing time:
 | `openclaw-mentra-node`   | `operator`         | `operator.read`, `operator.write`                                                |
 | `openclaw-user-client`   | `operator`         | `operator.sessions.read`, `operator.sessions.write`                              |
 | `wednesdayai-glass-node` | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.write`                          |
+| `wednesdayai-mobile`     | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.write`                          |
+| `wednesdayai-desktop`    | `node`, `operator` | `operator.approvals`, `operator.read`, `operator.write`                          |
 
-`operator.approvals` on a `wednesdayai-glass-node` connection without `operator.admin` covers only
+`wednesdayai-mobile` and `wednesdayai-desktop` mint the identical app credential as the
+deprecated `wednesdayai-glass-node` alias (ADR 2242 D4); the app signs in through
+[identity-oidc](/next/developers/plugins/identity-oidc#native-apps), which is also how its person is set.
+
+`operator.approvals` on an app connection (`wednesdayai-glass-node`, `wednesdayai-mobile` or
+`wednesdayai-desktop`) without `operator.admin` covers only
 exec approvals whose session actor is the app's own linked person (ADR 2242 D5). Such a connection
 receives no `exec.approval.requested`/`exec.approval.resolved` event for any other approval,
 including one with no session or an unowned session, or any approval when its device is not linked
 to a person. `exec.approval.resolve` and `exec.approval.waitDecision` answer for a hidden approval
 exactly as for a missing one. The `learning.*` approval methods are refused with
-`missing scope: operator.admin`. A device paired as `wednesdayai-glass-node` stays bound to that
-client id: a reconnect declaring another id is refused with `details.reason = "metadata-upgrade"`
+`missing scope: operator.admin`. A device paired as one of the app client ids stays bound to that
+app identity: a reconnect declaring a non-app id is refused with `details.reason = "metadata-upgrade"`
 until an administrator approves the new pairing request.
+
+With the identity-oidc plugin configured for `appSignIn: "required"`, a device-token connect of an
+app device whose pairing record has no person is refused with
+`details.code = app_sign_in_required` (and close 1008): the app must sign in, which pairs it as a
+new device with its person. When `appSessionMaxAgeDays` is set, an app device paired more than
+that many days ago is refused with `details.code = app_sign_in_expired`. Setup-code issuance for
+the app profiles is refused the same way over `device.bootstrap.issue` (`details.reason =
+"app_sign_in_required"`). Companions and non-app devices are unaffected; see
+[identity-oidc](/next/developers/plugins/identity-oidc#operator-runbook).
 
 Rules that apply to bootstrap redemption:
 
@@ -470,14 +488,20 @@ operator device token. Setup and device management: [MentraOS Glasses](/next/adm
 
 `openclaw-even-g2-node` pairs the third-party Even G2 node client. It connects as both
 roles: a node socket (role `node`, no scopes, `canvas` capability) that answers the `glass.*` HUD
-command family granted by device family `glasses`, a deprecated alias of the `accessory:g2` cap (`glass.hud.show`, `glass.hud.dismiss`,
-`glass.app.open`, `glass.state.get`), and an operator socket with `operator.read` +
-`operator.write`. It also pulls plugin glance widgets via `glance.widgets.list`.
+command family granted by the device's attached accessories — the `glass.hud.show`,
+`glass.hud.dismiss`, `glass.app.open`, `glass.state.get` commands — and an operator socket with
+`operator.read` + `operator.write`. It also pulls plugin glance widgets via `glance.widgets.list`.
 
 `wednesdayai-glass-node` pairs WednesdayAI Glass (ADR 0107) as both roles. The node socket is role
 `node` with no scopes, `canvas` capability, and answers the `glass.*` family (`glass.hud.show`,
-`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`, plus declared `glass.tool.*`) granted by
-the `accessory:g2` cap; device family `glasses` remains a deprecated alias for one release. The
+`glass.hud.dismiss`, `glass.app.open`, `glass.state.get`, plus declared `glass.tool.*`). Grants
+come from the device's attached accessories (`device.accessory.attach`, profile table
+`ACCESSORY_PROFILES`): the deprecated `accessory:g2` connect cap is accepted for one release as an
+alias that auto-attaches a `cap:glasses` accessory on the verified device (the gateway logs the
+deprecation once per device; a shared-token node without a device keeps the grant from the cap
+itself). Attach and detach refresh the live node session without a reconnect, and
+`gateway.nodes.denyCommands` still wins over any accessory grant. Device family `glasses` remains
+a separate deprecated alias for one release. The
 operator socket has `operator.read`, `operator.write` and own-person `operator.approvals`, and pulls
 `glance.widgets.list`. Its profile mints exactly those three scopes, so setup codes for other client
 ids, including the default `wednesdayai qr` code, cannot be redeemed by it.
@@ -588,6 +612,12 @@ a user message started the run and `false` for cron, heartbeat, and other backgr
 node can apply its own limits to proactive use without inferring the turn from `chat.activity`
 events. Requests from the CLI, operators, and `exec` omit it. It carries no session key or
 identity.
+
+A request tagged with an `accessoryId` narrows the command to what the accessory's kind grants
+(`glass.*` means the `glass.` prefix; any other profile entry is an exact match), checked after the
+command allowlist above so a gateway deny still wins. The refusal carries
+`error.details.reason: accessory_command_denied`. See
+[Device accessories](#device-accessories-deviceaccessoryattach-detach-list).
 
 ## Presence
 
@@ -1975,6 +2005,73 @@ itself. Both methods take `{}` and read the device id from the verified connecti
   re-minted only by a fresh companion setup code. Open sockets are not closed by revocation; the
   companion is refused on its next connect.
 - `openclaw devices list` shows a companion as `<name> (companion of <app name>)`.
+
+### Device accessories (`device.accessory.attach`/`detach`/`list`)
+
+ADR 2242 D4: a signed-in app device vouches for credential-less accessories (glasses, watch,
+earbuds, ring). An accessory is a record under the app device — no credential, no pairing step of
+its own — and traffic rides the app's sockets, tagged with `accessoryId` on the request frame.
+
+| Method                    | Scope            | Narrow admission | Result                                                                |
+| ------------------------- | ---------------- | ---------------- | --------------------------------------------------------------------- |
+| `device.accessory.attach` | `operator.write` | never            | `{accessoryId, kind, model?, attachedAtMs, lastSeenAtMs?, profile}`   |
+| `device.accessory.detach` | `operator.write` | never            | `{accessoryId, detached: true}`                                       |
+| `device.accessory.list`   | `operator.read`  | never            | `{accessories: [...]}` (sorted by `attachedAtMs`, then `accessoryId`) |
+
+- `attach` params are `{accessoryId, kind, model?}` (`accessoryId` ≤ 128 chars; `model` is free
+  text for display only, ≤ 128 chars). `kind` must be one of the closed `ACCESSORY_PROFILES`
+  kinds; the caller never supplies a profile. Re-attaching an existing `accessoryId` updates kind
+  and model to the given values and does not count against the limit.
+- The profile is gateway-owned per kind: `glasses` grants commands `glass.*`, `glass.tool.*` and
+  scopes `operator.read`, `operator.write`, `operator.approvals`; `watch` no commands, the same
+  three scopes; `earbuds` no commands, `operator.read`, `operator.write`; `ring` no commands,
+  `operator.read` only. At most 8 accessories per app device. A kind with commands in its profile
+  grants its node-command family on the device's live node session (plan C3): attach and detach
+  re-derive the session's allowed commands from the node's declared list without a reconnect,
+  and `gateway.nodes.denyCommands` still wins over any accessory grant.
+- The `accessory:<kind>` node connect caps (`accessory:g2`, `accessory:glasses`, `accessory:watch`,
+  `accessory:earbuds`, `accessory:ring`) are a **deprecated** one-release alias for an attached
+  accessory: at node connect the gateway maps each cap to its kind, auto-attaches an accessory
+  with id `cap:<kind>` (idempotent; a re-attach refreshes `lastSeenAtMs`) on the verified paired
+  device, and logs the deprecation once per device. A limit refusal is logged and never fails the
+  handshake, and a node without a paired device (shared token) keeps its grant from the cap kinds
+  directly. Detaching the `cap:<kind>` row revokes the grant until the next connect re-attaches
+  it; the `cap:` accessory-id prefix is reserved for the gateway's auto-attachments.
+- Only the app manages accessories: the caller must carry a verified device id, be connected as
+  the app-profile client it enrolled with (`bootstrapClientId` decides, never a relabelled client
+  id) and hold a live operator token. Every refusal carries `error.details.reason`:
+  `accessory_forbidden` (not a signed-in app device), `accessory_kind_unknown`,
+  `accessory_id_invalid`, `accessory_limit` (the 9th accessory), `accessory_not_attached`
+  (detaching, or tagging, an id that is not attached to the calling device), and — with
+  `UNAVAILABLE` instead of `INVALID_REQUEST` — `accessory_busy` (the device's accessory state is
+  locked by a concurrent connect or mutation; retry the request).
+- The `accessoryId` request tag clamps a call to the accessory's profile, after the method-scope
+  check so it only narrows. The tag must name an accessory of the calling device's own record
+  (else `accessory_not_attached` — companions and other callers can never borrow the app's
+  accessories). A tag admits only an explicit allowlist of core methods — `node.invoke`,
+  `node.event`, `node.invoke.result`, `chat.send`, `chat.abort`, `chat.history`,
+  `exec.approval.resolve`, `device.self` (`ACCESSORY_TAGGABLE_METHODS` in
+  `src/shared/accessory-profiles.ts`); everything else tagged, including every plugin method and
+  `device.accessory.*` itself, is refused with `accessory_method_denied` (checked before the scope
+  check, so a tag can never reach a handler that dispatches node commands of its own, such as
+  `browser.request`). On the allowlist, the method's required operator scope must be in the
+  kind's `scopes` (else `accessory_scope_denied`; admin-only and unclassified methods are
+  refused), and the handler runs with a request-local view whose scopes hold every profile scope
+  the connection satisfies under the implication rules — an extra scope the socket holds (for
+  example a re-approved `operator.admin`) is invisible to the handler while the tag is on, and the
+  view never gains a scope outside the profile. The view's connection binding delegates to the
+  original connection, so a suspension or unlink recorded on it (ADR 2243 suspend-before-close)
+  applies to tagged requests exactly as to untagged ones. A tagged `node.invoke` may only run a
+  command the kind's `commands` grants (`accessory_command_denied`, checked after the node command
+  allowlist so a deny still wins). An untagged request is the app itself and is unchanged (it
+  keeps the connection's full scopes); node-role frames (`node.event`, `node.invoke.result`)
+  accept a tag only when it names an accessory of the node's own device.
+- The tag is **attribution plus a ceiling on the accessory's own direct requests — not an
+  isolation boundary** against the app or the person's agent. An agent turn started by a tagged
+  `chat.send` runs under the person's tool policy and exec approvals like any untagged app
+  request, because a compromised app can omit the tag anyway. For audit and approval display, a
+  run started by a tagged `chat.send` carries `accessoryId` and `kind` in its `chat` events'
+  `origin` (next to `deviceId`/`clientId`).
 
 ## Identity RPCs
 

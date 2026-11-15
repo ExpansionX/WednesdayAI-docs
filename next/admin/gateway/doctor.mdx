@@ -366,10 +366,19 @@ When doctor or the installer finds a legacy unit, the migration:
 1. Copies the legacy unit or plist to the new name. Only the name, the description, and the
    identity environment entries change; your command line, environment, log paths, and systemd
    drop-ins carry over unchanged.
-2. Disables and stops the old unit.
-3. Starts the new unit and checks that it is still running after a few seconds.
-4. If the new unit does not stay up, removes it and restarts the old unit.
+2. Disables and stops the old unit. On macOS it waits until launchd has removed the old gateway
+   job, which can take up to 40 seconds while the gateway drains, and prints
+   `Waiting for legacy LaunchAgent <label> to finish shutting down`.
+3. Starts the new unit and checks that it is still running a few seconds later (on macOS: the
+   same process, so a crash-and-respawn does not count).
+4. If the new unit does not stay up, removes it and restarts the old unit. The old unit counts as
+   restored only once it is running again. If it is not, the error includes why the migration
+   failed first and the exact commands to start the old unit by hand.
 5. Retires the old unit file (launchd moves the plist to the Trash).
+
+One doctor run attempts the migration once. If it fails, the rest of that run leaves the legacy
+unit alone; fix the cause and rerun. A rerun after a failed migration starts clean: the
+replacement label that the rollback disabled is enabled again before it is loaded.
 
 New unit files and plists are written to a unique temporary name first, given the legacy unit's
 file permissions, and only then renamed into place; a failure removes the staged copy.
