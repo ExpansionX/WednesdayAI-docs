@@ -1043,9 +1043,10 @@ message(action="send", channel="discord", target="channel:123", path="/path/to/a
   <Accordion title="Gateway closed with a fatal code (4004, 4010-4014)">
 
     Discord closes the gateway with a fatal code when it will not accept the session. The
-    account stops at once, and `wednesdayai channels status` shows `stopped, disconnected
-    (code N)` with `error:gateway closed with code N: <reason>`. The gateway log records
-    `discord: gateway closed with code N (<reason>); stopping the Discord monitor.`
+    gateway marks the account failed at once, and `wednesdayai channels status` shows
+    `failed (code N), disconnected (code N)` with `error:gateway closed with code N: <reason>`
+    and a warning that names the fix. `wednesdayai doctor` lists the same warning. The gateway
+    log records `discord: gateway closed with code N (<reason>); stopping the Discord monitor.`
 
     | Code | Reason in status | What to do |
     | --- | --- | --- |
@@ -1056,8 +1057,16 @@ message(action="send", channel="discord", target="channel:123", path="/path/to/a
     | 4013 | invalid intents | WednesdayAI builds the intents from `channels.discord.intents`; report the code as a bug. |
     | 4014 | missing privileged gateway intents | Enable the intents (see the entry above). |
 
-    The gateway restarts a stopped account with increasing backoff, so a later attempt
-    connects once the cause is fixed.
+    A failed account is not restarted with backoff or by the health monitor. It starts again
+    when its resolved config changes: you save a config change for that account (for example
+    a new token), or `wednesdayai secrets reload` resolves a new token from a SecretRef (picked
+    up at the next health check). `wednesdayai gateway restart` also starts it. Other accounts
+    keep running. Disabling the account, or removing its token, clears the failed state;
+    status then shows it as disabled or not configured.
+
+    If Discord rejects the bot token at startup (HTTP 401), the account fails the same way
+    with `failed (code 401)` and `authentication failed: Discord rejected the bot token
+    (HTTP 401)`, before it opens a gateway connection.
 
   </Accordion>
 
