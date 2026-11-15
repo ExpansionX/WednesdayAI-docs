@@ -9,7 +9,8 @@ title: "Inbox API"
 # Inbox API
 
 The inbox plugin exposes a versioned, consumer-grade client API over the gateway WebSocket:
-`inbox.v1.list`, `inbox.v1.thread`, `inbox.v1.action`, and `inbox.v1.capabilities`. The
+`inbox.v1.list`, `inbox.v1.thread`, `inbox.v1.action`, and `inbox.v1.capabilities`, plus
+the operator-only `inbox.v1.prefilterStatus`. The
 methods are registered by the inbox plugin (`extensions/inbox`) via
 `api.registerGatewayMethod` and dispatched like any other gateway method.
 
@@ -23,8 +24,9 @@ methods are registered by the inbox plugin (`extensions/inbox`) via
 
 - `inbox.v1.list`, `inbox.v1.thread`, and `inbox.v1.capabilities` require
   `operator.sessions.read` (narrow) or operator scopes; `inbox.v1.action` requires
-  `operator.sessions.write` or operator scopes. Unclassified methods fail closed to
-  `operator.admin`.
+  `operator.sessions.write` or operator scopes. `inbox.v1.prefilterStatus` requires
+  `operator.read` and is never admitted to narrow callers. Unclassified methods fail closed
+  to `operator.admin`.
 - Ownership follows the authorization-binding decision (D8): the inbox store is
   session-less, so each ingesting `(source, account_id)` is bound to a user principal in
   `inbox_account_owners`. Bindings are managed with `wednesdayai inbox owners bind|unbind`
@@ -149,6 +151,20 @@ declaration waits for the next one. Tolerant readers must accept the field's pre
 (and treat an absent `caller` as `null` — older gateways never send it); validators pinned
 to the generated schema cannot read the new field until then.
 
+### `inbox.v1.prefilterStatus`
+
+Params: none (empty object). Operator scopes only.
+
+Result: `{ mode, active, gated }` for the deterministic classification prefilter (ADR 2443):
+
+- `mode`: `"off"`, `"shadow"` or `"on"` (`inbox.classify.prefilter`).
+- `active`: `"all"` or the allowlisted signal ids (`inbox.classify.prefilterSignals`).
+- `gated`: `Array<{ signal, rules: string[] }>` — the active signals that enabled user or
+  correction-learned rules keep from short-circuiting, in signal order. See
+  [Prefilter](/next/users/cli/inbox#prefilter).
+
+`wednesdayai doctor` calls it when the prefilter is `on` and prints the gated signals.
+
 ## Item shape
 
 Every serialized item includes: `id`, `source`, `accountId`, `sourceId`, `threadKey`,
@@ -219,17 +235,18 @@ removes existing rows.
 
 ## Source enablement
 
-Inbox ingestion is opt-in: dual-capable channel sources (e.g. bluebubbles, discord,
-whatsapp-web) ingest into the inbox only with `inbox.sources.<id>.enabled: true`; dedicated
-inbox-only sources (gmail, ms365) are enabled by their existing `hooks.gmail` /
-`inbox.ms365` config block — no `inbox.sources` key is required or read for them.
+Inbox ingestion is opt-in per account: dual-capable channel accounts (whatsapp, bluebubbles,
+discord) ingest into the inbox only with account mode `"inbox"`
+(`channels.<ch>.accounts.<id>.mode: "inbox"` or the channel root `mode`; see
+[Account mode](/next/admin/channels/channel-routing#account-mode)). An inbox-mode account never chats.
+Dedicated inbox-only sources (gmail, ms365) are enabled by their existing `hooks.gmail` /
+`inbox.ms365` config block — no `mode` or `inbox.sources` key applies to them.
 
 At startup the gateway log names the enabled channel sources once:
-`inbox channel-source ingest enabled for: <ids|none>`. A gated-off bluebubbles or discord
-source also logs that its live message ingest and history scanner are off. Dedicated sources
+`inbox channel-source ingest enabled for: <ids|none>`. Dedicated sources
 are not listed on that line.
 
-For whatsapp-web specifically: with the source enabled, every chat on the linked account
+For whatsapp specifically: on an inbox-mode account, every chat on the linked account
 (both live messages and history batches) is ingested, `unread` state tracks the phone
 (read receipts stop for history and group traffic; phone `chats.update` unread-count
 clears are mirrored as chat-level read marks), and `reply` / `mark-read` become available
@@ -257,7 +274,7 @@ classify-on-ingest, no next-turn side effects).
 | Flag        | Notes                                                                            |
 | ----------- | -------------------------------------------------------------------------------- |
 | `--source`  | required: `gmail`, `ms365`, `bluebubbles`, or `whatsapp-web` (alias: `whatsapp`) |
-| `--account` | backfill one account (default: all enabled accounts, walked sequentially)        |
+| `--account` | backfill one account (default: all inbox-mode accounts, walked sequentially)     |
 | `--since`   | ISO timestamp lower bound; only items newer than it are pulled                   |
 | `--all`     | force a fresh full walk (any persisted checkpoint is overwritten)                |
 | `--convert` | re-render stored rows from stored data instead of fetching (gmail, ms365 only)   |
@@ -288,7 +305,9 @@ progress line per account (`pages`, `scanned`, `inserted`) and a final summary p
 account (`scanned`, `inserted`, `updated`, `tombstoned`, `resumed` vs `fresh walk`).
 
 A precondition or fetch failure — source not enabled, source not configured, unknown source,
-account not enabled for the source, invalid `--since`, or a missing transport — prints one
+an account not in inbox mode (channel-backed sources report
+`account "<ch>:<id>" is not in inbox mode`; dedicated sources report
+`account not enabled for the source`), invalid `--since`, or a missing transport — prints one
 line to stderr with no stack trace and exits with status 1 (for example,
 `inbox source bluebubbles is not enabled`). Each committed page advances the checkpoint, so
 the next run resumes where the walk stopped.
@@ -325,7 +344,7 @@ concurrently, the same pair may not (two runs would race the same rows, and two 
 the same checkpoint). Finished runs stay queryable; the last 20 are retained.
 
 Errors: unknown source (names the supported ids), source not enabled, an `accountId`
-outside the enabled list (names the enabled accounts), an invalid `since` timestamp,
+outside the inbox-mode list (names the inbox-mode accounts), an invalid `since` timestamp,
 `since`+`all` together, `mode: "convert"` with `since` or `all`, `mode: "convert"` on a
 source other than gmail or ms365, and a conflict error when the `(source, accountId)` pair
 already has a running run.

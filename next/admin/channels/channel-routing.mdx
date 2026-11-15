@@ -108,6 +108,52 @@ Example:
 }
 ```
 
+## Account mode
+
+Each channel account is exclusively one of two things: a chat channel the agent talks
+through, or an inbox source that only feeds the inbox store. The mode is resolved per
+account:
+
+```
+channels.<ch>.accounts.<id>.mode ?? channels.<ch>.mode ?? "channel"
+```
+
+The channel root is the default account's config, so a channel-level `mode` applies to the
+default account and every account that does not override it.
+
+Supported channels: `whatsapp`, `bluebubbles`, and `discord`. Signal adds inbox mode when it
+ships. Every other built-in channel accepts the `mode` key but rejects `"inbox"` at
+validation; extension channel schemas reject the key entirely.
+
+Note Slack: `channels.slack.mode` selects the socket/http transport. It is not the account
+mode; Slack has no inbox mode.
+
+An account in inbox mode is never a chat route. It has no agent replies, no pairing, no
+allowlist or dm/group gating, no automatic read receipts, no typing indicators, and no
+`message_received` hook. Inbound on that account is ingested by the inbox plugin only:
+
+- WhatsApp ingests live through the channel message feed.
+- BlueBubbles and Discord ingest through the inbox history scanners (60 s REST polling).
+- Discord DMs are not ingested; the scanner only walks guild channels. A Discord inbox
+  account also registers no slash commands, buttons, or voice.
+
+Changing an account's `mode` restarts the gateway, so the channel monitor and the inbox
+plugin switch together.
+
+The three validation errors:
+
+- `channel "<ch>" has no inbox source; mode "inbox" is supported on: whatsapp, bluebubbles, discord`
+- `account "<ch>:<id>" is in inbox mode and cannot be bound to an agent`
+- `defaultAccount "<id>" is in inbox mode; the default account must be a chat channel`
+
+Migration: `inbox.sources.<id>` for channel-backed ids (`whatsapp-web`, `bluebubbles`,
+`discord`, `slack`) is deprecated and ignored. `wednesdayai doctor --fix` converts it: an
+account is switched to inbox mode only when it cannot chat (`dmPolicy` and `groupPolicy`
+both `"disabled"` and no binding names it, and it is not the channel's `defaultAccount`);
+otherwise it stays chat-only with a warning. The gateway applies the same migration at start.
+A key that lives in an `$include` file cannot be rewritten: the gateway warns and you remove
+it by hand. Gmail and ms365 enablement is unchanged.
+
 ## Session storage
 
 Sessions live in SQL session storage under the state directory (default `~/.openclaw`):

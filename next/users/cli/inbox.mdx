@@ -12,8 +12,8 @@ audience: admin
 Query the local inbox message store — the unified, per-source replica of external messages
 (Gmail via the `gog` watch pipeline, BlueBubbles (iMessage), Discord, and WhatsApp; BlueBubbles
 and Discord also backfill history through pull scanners while the gateway runs, and WhatsApp
-feeds the store live from the linked account when `inbox.sources["whatsapp-web"].enabled` is
-set).
+feeds the store live from its inbox-mode account — see
+[Account mode](/next/admin/channels/channel-routing#account-mode)).
 
 `list` and `correct` read the store directly from disk; the gateway does not need to be
 running. `backfill --source whatsapp` fetches history from the linked phone through the
@@ -50,7 +50,9 @@ re-renders stored gmail/ms365 rows whose body predates markdown rendering, from 
 with no source fetch. Flags, checkpoints and per-source behaviour are in
 [Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill).
 A precondition or fetch failure — source not enabled, source not configured, unknown source,
-account not enabled for the source, invalid `--since`, or a missing transport — prints one
+an account not in inbox mode (channel-backed sources report
+`account "<ch>:<id>" is not in inbox mode`; dedicated sources report
+`account not enabled for the source`), invalid `--since`, or a missing transport — prints one
 line to stderr with no stack trace and exits with status 1 (for example,
 `inbox source bluebubbles is not enabled`); committed pages stay checkpointed for the next run.
 
@@ -218,6 +220,26 @@ the provider/model and the output budget:
 
 See the config schema help for `inbox.classify`.
 
+### Retry sweep
+
+Items that stay unclassified (a failed or rejected classification, or backfilled history,
+which is never classified at ingest) are re-attempted by a background sweep every 5 minutes,
+once they are at least 1 minute old:
+
+- The sweep walks the newest messages first (by message time), so live mail is never
+  queued behind a historic backlog.
+- It keeps at most 2 classifications queued or running, leaving the rest of the plugin's 4
+  background analysis slots to live classification. A pass stops starting work after 4
+  minutes, so the next pass begins again at the newest message.
+- Each item gets at most 5 attempts per gateway run, with doubling backoff. When the
+  analysis queue is full the sweep waits for a free slot and spends no attempt; a job the
+  runtime refuses for that item spends one. Attempt state is dropped once the item is
+  classified or deleted, and deleted messages are never swept.
+- A live item the analysis queue refuses is logged
+  (`classify-on-ingest: analysis queue rejected … (<reason>)`) and waits for the sweep. Each
+  pass logs one summary line: `pass enqueued N, prefiltered N, rejected N, queue-full waits N,
+ended: drained|budget|stopped|error`.
+
 ### Prefilter
 
 Before the LLM call, a deterministic pre-classifier (the "prefilter", ADR 2443) evaluates
@@ -247,8 +269,13 @@ mode:
 
 The prefilter is conservative by design:
 
-- It **never preempts** an enabled user or correction-learned rule — any such rule disables
-  every short-circuit (and the bulk hint); shadow logging continues.
+- An enabled user or correction-learned rule **gates** the signals it could collide with:
+  its condition is prose that may claim any message, so every structural signal (`imip`
+  through `gmail-promotions`) stops short-circuiting while it is enabled. The `bulk` hint
+  is gated only by a custom rule named `Needs Reply`. `sender-memory` is never gated: it
+  replays the sender's own earlier verdicts, which were made with the custom rules in the
+  prompt. Gated signals are still shadow-logged; the gateway logs one warning naming them,
+  and `wednesdayai doctor` lists them.
 - It **never overwrites** a non-NULL category, so a manually corrected item stays manual.
 - `sender-memory` replays a sender's earlier verdicts only when they are unanimous (≥ 3
   verdicts, one category) and never replays `Needs Reply`, `Awaiting Reply` or `Unclear`.
@@ -302,6 +329,10 @@ For `bulk`, the verdict class is any category except `Needs Reply`.
 For `sender-memory`, it is any category that memory can replay.
 
 `--json` adds `evaluable`, `notEvaluable`, `recallBase`, and `recall` to each signal.
+
+When an enabled custom rule gates an active signal, the text output ends with one line per
+gated signal, for example `Gated (won't short-circuit in on mode): imip by Invoices`, and
+`--json` lists them under `gates` (`[{ "signal": "imip", "rules": ["Invoices"] }]`).
 
 To add headers to rows stored before a source persisted them, run
 `wednesdayai inbox backfill --source ms365 --all` (or `--source gmail --all`). A re-fetch

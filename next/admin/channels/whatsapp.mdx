@@ -339,7 +339,7 @@ When the linked self number is also present in `allowFrom`, WhatsApp self-chat s
 
     Self-chat turns skip read receipts even when globally enabled.
 
-    Inbox exception: when the whatsapp-web inbox source is enabled (see
+    Inbox exception: when the account runs in inbox mode (see
     [Inbox ingestion](#inbox-ingestion-whatsapp-web-source)), read receipts are
     suppressed for history appends and group messages so the bot never wipes the phone's
     unread state; DMs that pass access control keep their auto receipts.
@@ -441,14 +441,19 @@ Behavior notes:
 
 ## Inbox ingestion (whatsapp-web source)
 
-The inbox plugin can store every chat on the linked account as a `whatsapp-web` inbox
-source. It is opt-in and disabled by default:
+The inbox plugin can store every chat on an account in the inbox. An account becomes an
+inbox source with `mode: "inbox"` (see
+[Account mode](/next/admin/channels/channel-routing#account-mode)); a personal account next to the bot
+account in channel mode is the typical shape:
 
 ```json5
 {
-  inbox: {
-    sources: {
-      "whatsapp-web": { enabled: true },
+  channels: {
+    whatsapp: {
+      accounts: {
+        default: { allowFrom: ["+15555550123"] }, // bot, channel mode
+        personal: { mode: "inbox" }, // personal, inbox only
+      },
     },
   },
   plugins: {
@@ -467,9 +472,10 @@ Restart the gateway for the change to take effect.
 
 Behaviour:
 
-- Every non-status message on the linked account — DMs and groups, live messages and
-  history batches — is ingested into the inbox store; inbox ingestion is governed by its
-  own enablement, not by the channel's `dmPolicy`/`groupPolicy`.
+- Every non-status message on the inbox-mode account — DMs and groups, live messages and
+  history batches — is ingested into the inbox store. The account never chats: no agent
+  replies, no pairing, and no automatic read receipts come from it (see
+  [Account mode](/next/admin/channels/channel-routing#account-mode)).
 - `reply` and `mark-read` are default-deny; list them under the grants above. `reply`
   always asks for operator approval first, and honours the channel's outbound `allowFrom`
   policy — replying to a DM outside `allowFrom` fails with the channel's error. Group
@@ -477,7 +483,7 @@ Behaviour:
 - `mark-read` sends a WhatsApp read receipt for that message on the phone and marks the
   inbox row read.
 - Read receipts the bot would normally send for history appends and group messages are
-  suppressed while the source is enabled, so the phone's own unread state is not wiped;
+  suppressed for an inbox-mode account, so the phone's own unread state is not wiped;
   when the phone marks a chat read, the inbox mirrors that as a chat-level read mark.
 - Read state only moves forward: a message WhatsApp re-delivers after you read it stays
   read in the inbox, and marking a chat unread on the phone is not mirrored.

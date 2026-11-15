@@ -324,20 +324,32 @@ Related global options:
 
 ### Inbox ingestion
 
-Channel config alone never ingests BlueBubbles messages into the inbox. Inbox ingestion is
-opt-in per source: set `inbox.sources.bluebubbles.enabled: true` (default: off). This gates
-both live dual-write mirroring of new messages AND the history scanner. Existing inbox rows
-are never removed when the source is disabled or removed from config.
+Channel config alone never ingests BlueBubbles messages into the inbox. An account becomes
+an inbox source with `mode: "inbox"` (see
+[Account mode](/next/admin/channels/channel-routing#account-mode)); a personal account next to the bot
+account in channel mode is the typical shape:
 
-The live dual-write mirror fires through `message_received`, which runs **after** the channel's
-group gate: group messages dropped by `groupPolicy`/`groupAllowFrom` never reach the live
-mirror. The history scanner (REST polling) is independent of the allowlist and still ingests
-them. To mirror group traffic live, the senders must pass the channel allowlist (or
-`groupPolicy: "open"`).
+```json5
+{
+  channels: {
+    bluebubbles: {
+      accounts: {
+        default: { dmPolicy: "pairing" }, // bot, channel mode
+        personal: { mode: "inbox" }, // personal, inbox only
+      },
+    },
+  },
+}
+```
+
+An inbox-mode account never chats: no agent replies, no pairing, no allowlist gating, and no
+automatic read receipts. It feeds the inbox through the history scanner (REST polling)
+only; there is no live mirror. Existing inbox rows are never removed when the account
+leaves inbox mode or is removed from config.
 
 ### Backfill history
 
-With inbox ingestion enabled, `wednesdayai inbox backfill --source bluebubbles
+With the account in inbox mode, `wednesdayai inbox backfill --source bluebubbles
 [--account <id>] [--since <iso>] [--all]` pulls the server's message history into the
 inbox store — manual, resumable, per-page checkpointed (see
 [Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill)). The agent equivalent is the `inbox.backfill`
@@ -357,10 +369,10 @@ tool.
   equals the current position (nothing newer than the inclusive anchor remains).
   `--since <iso>` seeds the anchor at
   that timestamp; `--all` restarts from the beginning of history.
-- Accounts come from the enabled scan targets (channel root config as the default
-  account, or `channels.bluebubbles.accounts`). The `inbox.sources.bluebubbles.enabled`
-  gate applies here too: with it unset, backfill reports the source as not enabled —
-  channel config alone never implies backfill.
+- Accounts come from the inbox-mode accounts (channel root config as the default
+  account, or `channels.bluebubbles.accounts`). Backfill refuses a channel-mode account
+  with `account "<ch>:<id>" is not in inbox mode` — channel config alone never implies
+  backfill.
 
 ## Addressing / delivery targets
 
