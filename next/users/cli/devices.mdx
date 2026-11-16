@@ -110,14 +110,16 @@ wednesdayai devices clear --yes --pending --json
 
 `clear` needs a running gateway; it is never applied locally.
 
-### `wednesdayai devices prune --stale|--superseded [--dry-run] [--yes]`
+### `wednesdayai devices prune --stale|--superseded|--never-used [--dry-run] [--yes]`
 
-Revoke and archive stale or superseded paired records:
+Revoke and archive stale, superseded or never-used paired records:
 
 ```
 wednesdayai devices prune --stale --dry-run
 wednesdayai devices prune --stale --yes
 wednesdayai devices prune --superseded --yes
+wednesdayai devices prune --never-used
+wednesdayai devices prune --never-used --yes
 wednesdayai devices prune --stale --superseded --yes --json
 ```
 
@@ -126,13 +128,29 @@ wednesdayai devices prune --stale --superseded --yes --json
 - `--superseded` selects records flagged by a newer enrolment (`replaces <n>` in `devices list`).
   A record is kept when its replacement is being pruned in the same run, so a chain of
   re-enrolments retires one link at a time and two records never retire each other.
+- `--never-used` selects records approved longer than `gateway.devices.neverUsedAfterDays`
+  (default 7) ago that have never been active at all: no connection, no token use, no node role
+  (node activity history lives on the node record, not the device), no companions, not a
+  companion of another record, no accessories, not connected now, and not the only device of
+  their person. Every paired record considered appears exactly once — selected, or kept with the
+  first failing check: dry runs print `Kept <id> (<keptBecause>)` lines (`used`, `node-role`,
+  `recent`, `connected`, `token-used`, `has-companions`, `companion`, `has-accessories`,
+  `only-device-of-owner`). Each selected record prints its qualifying reason with its approval
+  age. Companion records die with their primary, so a companion of a selected record counts as
+  removed, never as a person's survivor; when a run would take every device of a person, the most
+  recently approved selection is kept (`only-device-of-owner`). Without `--yes`, `--never-used`
+  behaves as a dry run; nothing is ever archived automatically. In `--json` output a record's
+  `lastActiveAtMs` falls back to its approval time when no activity is recorded; selection never
+  reads that fallback.
 - `--dry-run` prints `Would archive …` lines and changes nothing. Without `--dry-run`, `--yes` is
-  required.
+  required (a lone `--never-used` without `--yes` previews instead of archiving).
 
 Each pruned record has every token revoked, is archived in the session database (pairing archive
 tables, token secrets dropped), is removed from the paired table, and is unlinked from its
 identity. A connected device is never pruned; it is reported as `Skipped connected <id>`. Prune
-needs a running gateway (it reads live connection state and writes config).
+runs are serialized per gateway process, so two requests never interleave one run's selection
+with another run's archive. Prune needs a running gateway (it reads live connection state and
+writes config).
 
 ### `wednesdayai devices approve [requestId] [--latest]`
 
