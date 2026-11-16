@@ -238,14 +238,14 @@ read or write groups later are refused until they are allowlisted.
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
   `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
-  `talk.session.bargeIn`, `identity.link.claim`, `identity.logout` and
+  `talk.session.bargeIn`, `talk.session.update`, `identity.link.claim`, `identity.logout` and
   `identity.devices.remove`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
   the one surfaces write, flipping the pinned boolean on a surface the session already owns.
   Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
   and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
   `sessions.patch`/`sessions.title.prepare` joined with client-chat-v3 P2
   (ADR 0083): `sessions.patch` is field-guarded (below), and `sessions.title.prepare` needs no
-  guard because it changes no session state. The six `talk.session.*` methods joined with ADR
+  guard because it changes no session state. The seven `talk.session.*` methods joined with ADR
   0086/0087/0088 (cascaded voice admission): they let a narrow client run the `stt-tts`,
   `transcription` and (ADR 0103) `realtime` Talk session modes Dictate and Voice mode use.
   Admission is independent of
@@ -308,7 +308,7 @@ every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `ex
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
-is an operator diagnostic. `talk.catalog` and the six `talk.session.*` methods above are the only
+is an operator diagnostic. `talk.catalog` and the seven `talk.session.*` methods above are the only
 `talk.*` methods allowlisted; every other `talk.*` method (`talk.realtime.*`, `talk.config`,
 `talk.mode`, `talk.metrics`) stays refused with `missing scope: operator.read` or
 `missing scope: operator.write`. Behaviour of the admitted methods is in
@@ -1574,6 +1574,12 @@ Params (all required except `provider`):
 | `transport`  | `"gateway-relay"`                               | yes      |
 | `brain`      | `"none"`                                        | yes      |
 | `provider`   | string                                          | no       |
+| `readMode`   | `"literal"`, `"human"`, or `"hybrid"`           | no       |
+| `speed`      | number, 0.75–2 (1 is unchanged)                 | no       |
+
+`readMode` and `speed` apply to `stt-tts` sessions only: they override the speech read mode
+derived from `messages.tts.naturalize` (`literal`/`human`/`hybrid`) and the synthesis speed for
+this session. See [Read modes](/next/users/tts#read-modes).
 
 `brain` stays `"none"` on this method. Voice still runs an agent turn; that pairing is handler
 logic, not a second enum value on create.
@@ -1666,6 +1672,23 @@ must be in `[0, 10000]` or the call is `INVALID_REQUEST`. Omitting either is acc
 stop-latency sample is unmeasured. The call is a no-op when the session is idle or the active turn
 has not yet played reply speech. Server handling does not arm on filler or ack; the web client
 arms its detector only while `kind: "speech"` is playing.
+
+### `talk.session.update`
+
+Params: `sessionId` (string, min length 1), `readMode?` (`"literal" | "human" | "hybrid"`),
+`speed?` (number, 0.75-2). Result: `{}`. ADR 0122 amendment: a mid-session synthesis-settings
+change for a live `stt-tts` session. Send only what changed; a `speed` of 1 is meaningful (it
+overrides a previously set non-1 speed). The change applies from the session's next synthesised
+clause - the open TTS stream is not reopened but receives the new speed live (providers honour it
+for clauses whose synthesis has not started; the clause in flight is not restarted), and a
+one-shot filler/ack synthesised at the old speed is re-synthesised at the new one (the filler/ack
+cache keys on speed). The
+`readMode` is re-resolved against the session's voice agent exactly as `talk.session.create`
+resolves it. An unknown `sessionId`, or a session the connection does not own, fails with the
+same `INVALID_REQUEST` error `talk.session.mark`/`talk.session.bargeIn` produce; a
+`transcription` or session-bound `realtime` session fails with `INVALID_REQUEST`
+(`talk.session.update is only supported for stt-tts sessions`), the established
+unsupported-mode pattern.
 
 ### `talk.event` types
 
@@ -1790,10 +1813,16 @@ changes need a gateway restart.
 
 Params (all required except `agentId`; `additionalProperties: false`):
 
-| Field     | Type                 | Required |
-| --------- | -------------------- | -------- |
-| `text`    | string, min length 1 | yes      |
-| `agentId` | string, min length 1 | no       |
+| Field      | Type                                  | Required |
+| ---------- | ------------------------------------- | -------- |
+| `text`     | string, min length 1                  | yes      |
+| `agentId`  | string, min length 1                  | no       |
+| `readMode` | `"literal"`, `"human"`, or `"hybrid"` | no       |
+| `speed`    | number, 0.75–2 (1 is unchanged)       | no       |
+
+`readMode` overrides the speech read mode derived from `messages.tts.naturalize` for this request
+and `speed` sets a provider-native synthesis speed multiplier; see
+[Read modes](/next/users/tts#read-modes).
 
 Result: `{audioBase64, mimeType, provider, outputFormat}` — one clip of inline base64 audio,
 synthesized with the agent's resolved TTS config. The clip is capped at 16 MiB raw bytes (about

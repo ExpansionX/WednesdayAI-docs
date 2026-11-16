@@ -22,7 +22,8 @@ running gateway.
 ## Usage
 
 ```bash
-wednesdayai inbox list [--source <source>] [--direction in|out] [--account <accountId>] [--limit <n>]
+wednesdayai inbox list [--source <source>] [--direction in|out] [--account <accountId>] [--category <name>] [--review] [--since <when>] [--limit <n>]
+wednesdayai inbox classifications [--since <when>] [--source <source>] [--account <accountId>] [--limit <n>] [--json]
 wednesdayai inbox correct <id> <category>
 wednesdayai inbox prefilter-score [--source <source>] [--since <iso>] [--min-precision <ratio>] [--min-support <n>] [--json]
 wednesdayai inbox ms365 login
@@ -34,16 +35,30 @@ wednesdayai inbox owners unbind <source:accountId>...
 
 ## Flags
 
-| Flag                      | Effect                                                                |
-| ------------------------- | --------------------------------------------------------------------- |
-| `--source <source>`       | Filter by source (e.g. `gmail`).                                      |
-| `--direction <direction>` | Filter by direction: `in` or `out`.                                   |
-| `--account <accountId>`   | Filter by account id (e.g. `me@example.com`).                         |
-| `--limit <n>`             | Maximum rows to return (positive integer; the store defaults to 200). |
+| Flag                      | Effect                                                                                                             |
+| ------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `--source <source>`       | Filter by source (e.g. `gmail`).                                                                                   |
+| `--direction <direction>` | Filter by direction: `in` or `out`.                                                                                |
+| `--account <accountId>`   | Filter by account id (e.g. `me@example.com`).                                                                      |
+| `--category <name>`       | Only items with this category (e.g. `FYI`).                                                                        |
+| `--review`                | Only the review queue: category `Unclear` or any policy flag.                                                      |
+| `--since <when>`          | Only items whose message time is at or after `<when>`: a duration back from now (`24h`, `7d`) or an ISO timestamp. |
+| `--limit <n>`             | Maximum rows to return (positive integer; the store defaults to 200).                                              |
 
-Rows render as a table with id, source, direction, sender, subject, preview, and the source
-event timestamp (ms epoch). Newest first. By default, `inbox list` excludes archived items
-and items the source has deleted (tombstoned in the store; the inbox never erases rows).
+Rows render as a table with id, source, direction, category, how the category was set,
+policy flag, sender, subject, preview, and the source event timestamp (ms epoch). Newest
+first. The category column shows `(pending)` for an item not classified yet and
+`(skipped-history)` for history outside the account's [history policy](#history). The `By`
+column is `model` for a model verdict, `prefilter:<signal>`, `manual` or `policy`. By
+default, `inbox list` excludes archived items and items the source has deleted (tombstoned
+in the store; the inbox never erases rows).
+
+`inbox classifications` lists recent verdicts, newest first: when each item was classified,
+its source and account, category, how it was set, the model (`<provider>/<model>`), policy
+flag, sender and subject. `--since` defaults to `24h` and `--limit` to 200; `--json` prints
+an array of `{ id, source, accountId, category, categorySource, categorySignal, policyFlag,
+model, classifiedAt, ts, sender, subject }`. Items classified by builds before this field
+existed have no classification time and do not appear.
 
 `inbox backfill` pulls older history from a source into the store; `--convert` instead
 re-renders stored gmail/ms365 rows whose body predates markdown rendering, from stored data
@@ -173,12 +188,12 @@ nudge tiers themselves never send anything.
 ## Example
 
 ```text
-Inbox (2)
-┌───────────────────────┬────────┬─────┬──────────────────────┬──────────────────┬────────────────┬───────────────┐
-│ ID                    │ Source │ Dir │ Sender               │ Subject          │ Preview        │ Ts            │
-├───────────────────────┼────────┼─────┼──────────────────────┼──────────────────┼────────────────┼───────────────┤
-│ gmail:me%40x.com:m1 │ gmail  │ in  │ Alice <alice@x.com>  │ Hi               │ hello body     │ 1731213600000 │
-└───────────────────────┴────────┴─────┴──────────────────────┴──────────────────┴────────────────┴───────────────┘
+Inbox (1)
+┌─────────────────────┬────────┬─────┬──────────┬───────┬──────┬─────────────────────┬─────────┬────────────┬───────────────┐
+│ ID                  │ Source │ Dir │ Category │ By    │ Flag │ Sender              │ Subject │ Preview    │ Ts            │
+├─────────────────────┼────────┼─────┼──────────┼───────┼──────┼─────────────────────┼─────────┼────────────┼───────────────┤
+│ gmail:me%40x.com:m1 │ gmail  │ in  │ FYI      │ model │      │ Alice <alice@x.com> │ Hi      │ hello body │ 1731213600000 │
+└─────────────────────┴────────┴─────┴──────────┴───────┴──────┴─────────────────────┴─────────┴────────────┴───────────────┘
 ```
 
 ## Classification
@@ -194,16 +209,21 @@ the provider/model and the output budget:
       // model: "…", // explicit override — wins over both tiers
       smallModel: "low", // default; prompts under tierThresholdChars
       mediumModel: "medium", // default; prompts at or over the threshold
-      tierThresholdChars: 32768, // default; prompt-length boundary between the tiers
+      tierThresholdChars: 32768, // explicit boundary; default derives from the small model's contextWindow
       // maxOutputTokens: 2048, // explicit budget — wins over the vocabulary rule
     },
   },
 }
 ```
 
-- Prompts shorter than `tierThresholdChars` (default 32 768 chars) use `smallModel` (default
-  `"low"`); prompts at or over the threshold use `mediumModel` (default `"medium"`). An
-  explicit `model` overrides both tiers.
+- Prompts shorter than the tier threshold use `smallModel` (default `"low"`); prompts at or
+  over it use `mediumModel` (default `"medium"`). An explicit `model` overrides both tiers.
+  The threshold is `tierThresholdChars` when set. Otherwise, when `models.providers` declares
+  the small model with a `contextWindow`, it is `(contextWindow - 2048) * 2` chars (28 672
+  for a 16k window); else 32 768.
+- A classify model that `models.providers` declares no entry for on its provider is reported
+  by `wednesdayai doctor` and logged at gateway start. Nothing is rerouted: items routed to it
+  stay pending.
 - The classifier prompt carries sender, subject and, for gmail/ms365 rows with a rendered
   body, a markdown excerpt of the body: images become their alt text, `data:` URIs are
   dropped, link targets longer than 80 characters shrink to their hostname, and bare and
@@ -220,25 +240,67 @@ the provider/model and the output budget:
 
 See the config schema help for `inbox.classify`.
 
+### History
+
+Linking an account backfills its history, and by default none of it is classified. An
+inbound item is classified only when its message time is at or after the moment the inbox
+first ingested anything for its account, minus a 10-minute grace. Older rows stay
+unclassified at no cost and show as `(skipped-history)` in `inbox list` and
+"History, not classified" in the web inbox.
+
+Opt in per account (`"<source>:<accountId>"`), per source (`"<source>"`), or for every
+account (`default`); the account key wins over the source key, which wins over the default:
+
+```json5
+{
+  inbox: {
+    classify: {
+      history: {
+        default: { mode: "live" }, // the built-in default
+        accounts: {
+          "ms365:default": { mode: "window", days: 30 }, // also the last 30 days
+          gmail: { mode: "all" }, // every gmail account, all history
+        },
+      },
+    },
+  },
+}
+```
+
+- `live`: only items sent after the account was linked.
+- `window`: also items from the last `days` days. `days` is required with `window` and
+  rejected with any other mode.
+- `all`: every stored item.
+
+The policy is applied at the start of every sweep pass. Widening it moves the newly covered
+rows back to pending, and the sweep classifies them on that and later passes; narrowing it
+parks unclassified rows again. Rows that already have a category are never touched.
+`wednesdayai doctor` prints each account's policy with its pending, skipped-history and done
+counts.
+
 ### Retry sweep
 
-Items that stay unclassified (a failed or rejected classification, or backfilled history,
-which is never classified at ingest) are re-attempted by a background sweep every 5 minutes,
-once they are at least 1 minute old:
+Items that stay unclassified (a failed or rejected classification, or history inside the
+account's history policy, which is never classified at ingest) are re-attempted by a
+background sweep every 5 minutes, once they are at least 1 minute old:
 
 - The sweep walks the newest messages first (by message time), so live mail is never
   queued behind a historic backlog.
 - It keeps at most 2 classifications queued or running, leaving the rest of the plugin's 4
   background analysis slots to live classification. A pass stops starting work after 4
   minutes, so the next pass begins again at the newest message.
-- Each item gets at most 5 attempts per gateway run, with doubling backoff. When the
-  analysis queue is full the sweep waits for a free slot and spends no attempt; a job the
-  runtime refuses for that item spends one. Attempt state is dropped once the item is
-  classified or deleted, and deleted messages are never swept.
+- Each item gets at most 5 attempts per gateway run. After an attempt finishes without a
+  category (a failed run, an `empty` result, or a refusal), the item waits 5 minutes, then
+  10, 20 and 40, counted from when that attempt finished, so an attempt never repeats on the
+  next pass. When the analysis queue is full the sweep waits for a free slot and spends no
+  attempt; a job the runtime refuses for that item spends one. Attempt state is dropped once
+  the item is classified or deleted, and deleted messages are never swept.
 - A live item the analysis queue refuses is logged
   (`classify-on-ingest: analysis queue rejected … (<reason>)`) and waits for the sweep. Each
   pass logs one summary line: `pass enqueued N, prefiltered N, rejected N, queue-full waits N,
-ended: drained|budget|stopped|error`.
+ended: drained|budget|stopped|error`, and one line per account whose rows the history policy
+  moved: `classify history: <source>:<accountId> policy <mode> marked N skipped-history,
+  restored N pending`.
 
 ### Prefilter
 
