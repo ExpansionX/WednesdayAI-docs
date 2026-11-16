@@ -42,6 +42,55 @@ You can use either:
 
 Bifrost decides which backend and model to use. WednesdayAI does not influence routing.
 
+## Model guidance overlay
+
+The bifrost plugin can prepend a small system-prompt block to every run whose Bifrost alias is
+mapped to a model family, so per-model guidance reaches chat, sub-agents, and automation
+without editing agent prompts. Enable it per alias under
+`plugins.entries.bifrost.config.guidance`:
+
+```json
+{
+  "plugins": {
+    "entries": {
+      "bifrost": {
+        "config": {
+          "guidance": {
+            "families": { "low": "glm", "medium": "glm" }
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+`families` maps a Bifrost alias to a family key. The built-in family `glm` ships default text,
+chosen by role:
+
+- `primary` — normal chat turns
+- `subagent` — sub-agent sessions
+- `automation` — heartbeat, cron, and hook runs (also heartbeat/cron triggers inside a main session)
+
+Override the text per family and role with `guidance.prompts` (empty or blank text falls back
+to the built-in default; a family with no defaults needs every role you use spelled out):
+
+```json
+"guidance": {
+  "families": { "low": "glm" },
+  "prompts": { "glm": { "subagent": "You are a sub-agent. Return only the result." } }
+}
+```
+
+The overlay applies only to `bifrost`-provider runs whose alias is listed in `families`. When
+Bifrost reroutes an alias to a non-GLM model, remove it from `families` — the overlay turns
+off for that alias. The text is fixed per alias and role and sits above the prompt-cache
+boundary, so consecutive turns of the same role keep their cached prefix.
+
+Only agent runs get the block, because it is added at the `context.collect` hook. Direct plugin
+`runtime.analysis` calls do not pass through that hook, so they get no guidance even on a
+mapped alias.
+
 ## Usage dashboard
 
 Cost arrives in-band as `extra_fields.cost` on `/v1/chat/completions`. This needs a Bifrost
