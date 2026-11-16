@@ -22,7 +22,7 @@ re-exported from `wednesdayai/plugin-sdk`.
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
 | `sdk`      | `SDK_CONTRACT_VERSION`      | `2.46`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
-| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.12`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.13`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.9`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
@@ -192,9 +192,20 @@ account, from the app (device settings C4, ADR 2242 D2):
 - Refusals carry `error.details.reason`: `push_mute_person_required` (the connection resolves no
   person), `push_mute_invalid` (bad or inconsistent `source`/`accountId`), `push_mute_limit`
   (more than 64 mutes per person).
-- The same normalized preview text is pushed to a device at most once per kind and collapse key
-  every 10 minutes (`PERSON_ALERT_PREVIEW_DEDUPE_MS`); approvals are never deduped. Only
-  digests are kept in memory.
+- Superseded in plugin 2.13: dedupe is by event id, not preview text (see below).
+
+### Alert event dedupe (plugin 2.13)
+
+- `RuntimePushAlertInput` gains optional `eventId`, a stable id of the event the alert is for
+  (the inbox plugin passes its row id, the percent-encoded `source:accountId:sourceId`; reply
+  alerts use the run id). Additive only.
+- A repeat with the same `eventId` is pushed to a device at most once per kind every 10 minutes
+  (`PERSON_ALERT_EVENT_DEDUPE_MS`). Identical text never suppresses a distinct event; only the
+  30-second per-collapse-key rate limit (`PERSON_ALERT_MIN_INTERVAL_MS`) applies.
+  Without `eventId` nothing is deduped. Approvals are never deduped. Only digests are kept in
+  memory.
+- Replaces the gateway 3.23 / plugin 2.12 preview-text dedupe, which dropped the second of two
+  different mails sharing a subject.
 
 ## Version semantics
 

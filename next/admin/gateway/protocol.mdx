@@ -1918,12 +1918,29 @@ configured; it reports gate state only, never a secret. A handler failure is `UN
   registration), `connected`, `stale` (inactive longer than `gateway.devices.staleAfterDays`, never
   while connected) and `supersedes` (ids of older records this enrolment replaces). `node.list`
   paired entries add `firstRegisteredAtMs`, `lastActiveAtMs` and `stale`.
-- `device.pair.prune` (`operator.pairing`), params `{stale?, superseded?, dryRun?}`: at least one of
-  `stale` or `superseded` must be `true`. It revokes every token of each selected record, archives
+- `device.pair.prune` (`operator.pairing`), params `{stale?, superseded?, neverUsed?, dryRun?}`: at
+  least one of `stale`, `superseded` or `neverUsed` must be `true`. Runs are serialized per
+  gateway process, so two prune requests never interleave one run's selection with another run's
+  archive. It revokes every token of each
+  selected record, archives
   it in the session database pairing archive tables (token secrets dropped), removes it, and
   unlinks its identity. Connected records are never selected and are
-  listed under `skippedConnected`. Response:
-  `{dryRun, staleAfterDays, devices: [{deviceId, displayName?, reason, supersededBy?, firstRegisteredAtMs, lastActiveAtMs, revokedRoles, unlinkedFrom}], nodes: [{nodeId, displayName?, firstRegisteredAtMs, lastActiveAtMs}], skippedConnected}`.
+  listed under `skippedConnected`. A record selected by any selector of the run appears exactly
+  once — in `devices`, never also in `kept` — and a record whose replacement the same run archives
+  is kept instead (across all selectors). Companion records cascade with their primary, so they
+  count as removed, never as a person's survivor. With `neverUsed: true`, candidates (no
+  `lastActiveAtMs`, no
+  token `lastUsedAtMs`) older than `gateway.devices.neverUsedAfterDays` are selected only when they
+  are not connected, hold no node role (role, roles or node token), hold no companions, are not a
+  companion of another record, have no accessories and are not their person's
+  only device; the full check re-runs against the locked pairing snapshot inside the archive
+  transaction, and a run never takes a person's last device (the most recently approved selection
+  survives). Every paired record considered is listed either as selected or under
+  `kept: [{deviceId, keptBecause}]` with the first failing check (`used`, `node-role`, `recent`,
+  `connected`, `token-used`, `has-companions`, `companion`, `has-accessories`,
+  `only-device-of-owner`). Response:
+  `{dryRun, staleAfterDays, devices: [{deviceId, displayName?, reason, supersededBy?, firstRegisteredAtMs, approvedAtMs, lastActiveAtMs, revokedRoles, unlinkedFrom}], kept?, nodes: [{nodeId, displayName?, firstRegisteredAtMs, lastActiveAtMs}], skippedConnected}`
+  with `reason` `stale`, `superseded` or `never-used`.
   `dryRun: true` writes nothing.
 - `device.bootstrap.issue` (`operator.admin`): issue a bootstrap enrolment token for a setup code.
   Params `{profile: {roles, scopes}, identity?, codeChallenge?}`; result
@@ -1976,10 +1993,11 @@ Migration target:
 ADR 2242 D1 lets a signed-in WednesdayAI app device hand the person's browser a credential tied to
 itself. Both methods take `{}` and read the device id from the verified connection.
 
-| Method                   | Scope            | Narrow admission         | Result                          |
-| ------------------------ | ---------------- | ------------------------ | ------------------------------- |
-| `device.companion.issue` | `operator.write` | never                    | `{bootstrapToken, expiresAtMs}` |
-| `device.self`            | `operator.read`  | `operator.sessions.read` | `{self, linked}`                |
+| Method                   | Scope            | Narrow admission          | Result                          |
+| ------------------------ | ---------------- | ------------------------- | ------------------------------- |
+| `device.companion.issue` | `operator.write` | never                     | `{bootstrapToken, expiresAtMs}` |
+| `device.companion.adopt` | `operator.write` | `operator.sessions.write` | `{primaryDeviceId}`             |
+| `device.self`            | `operator.read`  | `operator.sessions.read`  | `{self, linked}`                |
 
 - `device.companion.issue` answers only a device enrolled by an app-profile bootstrap
   (`wednesdayai-glass-node`; renaming the client id on a later connect does not count), connected
@@ -1988,6 +2006,14 @@ itself. Both methods take `{}` and read the device id from the verified connecti
   `companionOf: <app deviceId>`. Refusals carry `error.details.reason`:
   `device_companion_forbidden` (not a signed-in app device) or `device_companion_person_required`
   (no linked person).
+- `device.companion.adopt` takes `{bootstrapToken}` and is answered on an already-paired
+  `openclaw-user-client` connection: the calling record becomes the code's app's companion in
+  place (same device id, no new enrollment, no token, role or scope change) when its owner, the
+  code's person and the connection's person are all the same and the app is still live. The code
+  is consumed either way a grant is made; refusals write nothing and carry
+  `error.details.reason`: `companion_code_invalid` (unknown, expired, consumed, not a companion
+  code, or the app is gone) or `companion_adopt_refused` (unknown device, not a user-client
+  record, or the record, code and connection are not the same person).
 - `device.self` returns the caller as `self` (`relation: "self"`) and, in `linked`, its app device
   (`relation: "primary"`) or its companions (`relation: "companion"`), only when they are linked to
   the caller's own person. Each entry carries `deviceId`, `online` (a live node connection), sorted
@@ -2101,8 +2127,9 @@ is absent or equal to the alert account id:
   matching and storing; matching is exact and case-sensitive. The result is the person's full
   list after the change, sorted by `kind`, then `source ?? ""`, then `accountId ?? ""`.
 - Approval alerts are never muted and never deduped.
-- The same normalized preview text is pushed to a device at most once per kind and collapse key
-  every 10 minutes, measured from the last successful send. Only digests are kept in memory.
+- A repeat of the same event (inbox item, reply run) is pushed to a device at most once per kind
+  every 10 minutes, measured from the last successful send. Distinct events are never deduped by
+  text. Only digests are kept in memory.
 - Refusals carry `error.details.reason`: `push_mute_person_required` (the connection resolves no
   person; sign in again), `push_mute_invalid` (`source` or `accountId` empty after trimming,
   `accountId` without `source`, or `source` with `kind:"chat.final"`), and `push_mute_limit`
