@@ -465,6 +465,8 @@ provider module per concern, each testable without a gateway connection.
 | Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                                               | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
 | Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                                                         | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
 | Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                                                     | `tts.readAloud.status`, `tts.speak`                                                                        |
+| Read selection                   | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`                                                                                                                       | `tts.speak` (selected text only)                                                                           |
+| Voice & audio settings           | `ui/VoiceAudioSettings.tsx`, `ui/PlaybackMenu.tsx`, `ui/AccountMenu.tsx`, `providers/voice-audio-preference.ts`                                                          | `tts.speak {readMode, speed}`, `talk.session.create {readMode, speed}`                                     |
 | Auto-read (Read replies aloud)   | `ui/Composer.tsx` (`composer-auto-read`), `app/auto-read-driver.ts`, `providers/read-aloud-stream.ts`, `providers/auto-read-preference.ts`                               | `tts.readAloud.status`, `tts.speak`                                                                        |
 | Dictation auto-send pause        | `ui/AutoSendDelayMenu.tsx`, `providers/auto-send-delay-preference.ts`, `app/use-dictate.ts`                                                                              | none; browser-local preference                                                                             |
 | Screen wake lock                 | `app/use-screen-wake-lock.ts`                                                                                                                                            | none; browser Screen Wake Lock API                                                                         |
@@ -1077,6 +1079,21 @@ feeds it (prefetching the next chunk as soon as one exists), and `endStream(key)
 loop has drained. `unlock()` must run synchronously inside the enabling gesture, the same
 AudioContext-resume contract as `start`.
 
+`use-read-aloud.ts` sends the user's voice-and-audio settings with every request: the explicitly
+chosen `readMode` (absent is never sent - the gateway's `messages.tts.naturalize` decides, see
+[Read modes](/next/users/tts#read-modes)) and `speed` when it is not 1, plus `player.setGain` on every
+volume change. The settings ride refs, not closure state, so a change between requests applies
+without re-creating the hook.
+
+**Read selection.** When the user's selection sits inside one assistant reply's prose
+(`AssistantMessage` checks `document.getSelection()` against its own container on
+`selectionchange`, capturing the text because some browsers collapse the selection when a button
+is pressed), the reply's actions row grows a **Read selection** button
+(`aria-label`/`title` `Read selection`). It calls the hook's `readText(key, text)` - the same
+engine as the manual read, but with `packSpeechChunks` over only the selected text, under the
+stream key `selection:<messageKey>`. There is no separate per-heading control: reading a section
+means selecting it.
+
 Markup contract:
 
 - The main button carries `data-testid="message-read-aloud"`, `aria-label` and `title` `Read
@@ -1089,6 +1106,38 @@ aloud` when idle, `Pause reading` while this message reads, and `Resume reading`
   resuming the context, and the next read's `unlock()` resumes it.
 - The actions row gets `data-reading="true"` while this message reads or shows an error.
 - An error renders a `role="status"` span with `data-testid="message-read-aloud-error"`.
+
+## Voice & audio settings
+
+The account menu's **Voice & audio** section and the composer's playback chip share one component
+and one preference store:
+
+- **Preference.** `providers/voice-audio-preference.ts` stores the settings per gateway URL and
+  client id under `openclaw.web.voice-audio:<encodedGatewayUrl>:<clientId>`, the same scope-key
+  shape as the auto-read preference: JSON `{readMode?, gain, speed}`, browser-local only, never
+  synced to the account. Missing, invalid or unreadable storage loads the defaults (`gain` 1,
+  `speed` 1, no `readMode`); saved values are clamped on load and save (`gain` 0.5 to 3, `speed`
+  0.75 to 2, an unknown `readMode` is dropped). A failed write still applies in memory for the
+  session.
+- **Controls.** `ui/VoiceAudioSettings.tsx` renders a read-mode radio group (**Literal**, **Human**
+  (default), **Hybrid** with a one-line hint), a volume boost slider (50 to 300 percent, step 10)
+  and a speed slider (0.75 to 2, step 0.25). An absent `readMode` renders as Human, because that
+  is what the server default resolves to, and is never sent: only an explicitly chosen mode rides
+  `tts.speak` / `talk.session.create` as `readMode`, otherwise the gateway's
+  `messages.tts.naturalize` decides (see [Read modes](/next/users/tts#read-modes)). `showReadMode={false}`
+  (the playback chip) hides the read-mode group.
+- **Playback chip.** `ui/PlaybackMenu.tsx` is a composer chip beside the auto-send pause chip,
+  labelled with the current speed (`1×`) and opening a menu with volume and speed only; the
+  account menu's section (`ui/AccountMenu.tsx`) renders the full control set.
+- **Gain path.** `AppShell` loads the preferences once per runtime and pushes every change to the
+  read-aloud player (`player.setGain`) and the voice playback chain, which clamp and ramp the
+  gain through a limiter chain (see [Read aloud](#read-aloud)), so a 300 percent boost stays
+  unclipped.
+- **Speed path.** Read aloud sends `speed` on every `tts.speak` request, so a change applies from
+  the next synthesized chunk. Voice mode sends `readMode` and `speed` only on
+  `talk.session.create` (`providers/voice-conversation.ts`), so a speed change takes effect for
+  the next voice session. Speed is provider-native with natural pitch: the Kokoro provider
+  forwards it to Kokoro-FastAPI, other providers ignore it.
 
 ## Auto-read (Read replies aloud)
 

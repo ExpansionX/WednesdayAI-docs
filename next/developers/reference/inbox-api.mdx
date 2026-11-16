@@ -155,15 +155,28 @@ to the generated schema cannot read the new field until then.
 
 Params: none (empty object). Operator scopes only.
 
-Result: `{ mode, active, gated }` for the deterministic classification prefilter (ADR 2443):
+Result: the deterministic classification prefilter state (ADR 2443) plus the classification
+health fields (ADR 2637):
 
 - `mode`: `"off"`, `"shadow"` or `"on"` (`inbox.classify.prefilter`).
 - `active`: `"all"` or the allowlisted signal ids (`inbox.classify.prefilterSignals`).
 - `gated`: `Array<{ signal, rules: string[] }>` — the active signals that enabled user or
   correction-learned rules keep from short-circuiting, in signal order. See
   [Prefilter](/next/users/cli/inbox#prefilter).
+- `history`: `{ default: { mode, days? }, accounts: Array<{ source, accountId, key, mode,
+days?, linkedAt, pending, skippedHistory, done }> }` — each known account's resolved
+  history policy (`key` is the matched `inbox.classify.history.accounts` key or `"default"`),
+  the time the inbox first ingested it (`linkedAt`, ms epoch), and its inbound,
+  non-deleted item counts per classify state. See [History](/next/users/cli/inbox#history).
+- `models`: `Array<{ role, provider, model, status, contextWindow? }>` — `role` is `model`,
+  `smallModel` or `mediumModel`; `status` is `ok`, `unknown-model` (the provider is declared
+  in `models.providers` without this model) or `unverified` (the provider is not declared).
+- `tierThreshold`: `{ chars, basis }` — the small/medium tier boundary and where it came
+  from: `config`, `context-window` or `default`.
 
-`wednesdayai doctor` calls it when the prefilter is `on` and prints the gated signals.
+Older gateways return only `mode`, `active` and `gated`. `wednesdayai doctor` calls the
+method whenever the gateway is healthy, prints the gated signals when the prefilter is `on`,
+and prints the classification note.
 
 ## Item shape
 
@@ -171,10 +184,19 @@ Every serialized item includes: `id`, `source`, `accountId`, `sourceId`, `thread
 `direction` (`in` / `out`), `sender`, `recipient`, `subject`, `preview`, `labels`
 (source-native label names, e.g. Gmail's — distinct from `category`, the inbox
 classification taxonomy), `ts` (ms epoch), `sourceReadState`, `category`, `policyFlag`,
+`categorySource` (`rule` for a model verdict, `prefilter`, `manual`, `policy`, or `null`),
+`categorySignal` (the prefilter signal, or `null`), `classifyState` (`pending`,
+`skipped-history` or `done`), `classifiedAt` (ms epoch of the verdict, or `null` when not
+yet classified or classified before the field existed), `classifyModel`
+(`"<provider>/<model>"` of a model verdict, or `null`),
 `deleted` (boolean — the source deleted this item; the row is retained as a tombstone,
 never erased), `deletedAt` (first tombstone timestamp, ms epoch, or `null`), `archived`
 (boolean — this item is archived; archived items are excluded from `unreadTotal` and
 `caller.accounts[].unread`), and `availableActions: string[]`.
+
+Wire-schema note: the five classification provenance fields (`categorySource` through
+`classifyModel`) are declared as optional properties of `InboxItemDto` (gateway contract
+3.27). Gateways before 3.27 omit them; readers should treat an absent field as `null`.
 
 `sender`, `recipient`, `subject`, and `preview` are raw sender-controlled UTF-8. Any
 consumer feeding them into a model context MUST apply its own untrusted-content fencing —
@@ -371,11 +393,14 @@ before a backfilled id is inserted applies at upsert, so the row lands deleted w
 tombstone timestamp (counted as `tombstoned` in progress). Backfill itself never calls
 source deletion APIs.
 
-Backfilled inbound rows land unclassified and are picked up by the existing classify
-retry sweep — unchanged: rows older than 60 seconds become eligible, whole-backlog
-passes keyset-page 200 rows at a time, and a full analysis queue ends a pass without
-consuming any item's attempt budget. After a large backfill, live classification
-degrades to the sweep's cadence until the backlog drains; no item is lost.
+Backfilled inbound rows land unclassified. By default they are history (message `ts` before
+the account's first ingest minus 10 minutes): the next sweep pass marks them
+`skipped-history`, and they are never sent to a model. `inbox.classify.history` opts an
+account or source in (see [History](/next/users/cli/inbox#history)). Opted-in rows are picked up by the
+classify retry sweep: rows older than 60 seconds become eligible, passes keyset-page 200 rows
+at a time, and a full analysis queue makes the pass wait for a free slot without consuming
+any item's attempt budget. After a large opted-in backfill, live classification degrades to
+the sweep's cadence until the backlog drains; no item is lost.
 
 ## Versioning
 

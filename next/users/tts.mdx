@@ -339,6 +339,45 @@ The rules also turn underscores into spaces, read parentheticals as comma-delimi
 (`Restart (after saving) now` becomes "Restart, after saving, now"), and capitalise the first
 letter after a sentence end.
 
+### Numbers, filenames and acronyms (always on)
+
+After the URL cleanup, a deterministic normaliser runs on every speech unit, in both
+`naturalize.enabled: true` and `false`. It turns numbers, identifiers and machine text into
+already-spoken words before any provider sees them, because different providers' text-to-grapheme
+stages disagree: some read four-digit numbers as years, a hyphen-prefixed number as "minus", an
+all-caps word as one shouted word, or skip codes the dictionary does not know. Its output forms:
+
+| Written                    | Spoken                                                             |
+| -------------------------- | ------------------------------------------------------------------ |
+| `Saved report_2265000.pdf` | "Saved report two two six five zero zero zero dot pdf"             |
+| `Ref 2265000 is attached`  | "Ref two two six five zero zero zero is attached"                  |
+| `22,650,000 users`         | "twenty-two million six hundred and fifty thousand users"          |
+| `2265000 users`            | "two million two hundred and sixty-five thousand users"            |
+| `Revenue rose in Q1`       | "Revenue rose in Q one"                                            |
+| `FY26 plan`                | "F.Y. twenty-six plan"                                             |
+| `AMD shares`               | "A.M.D. shares"                                                    |
+| `NASA launch`              | "NASA launch" (acronyms that are said as words stay)               |
+| `INVOICE-3145 is due`      | "invoice three thousand one hundred and forty-five is due"         |
+| `PR #2515`                 | "P.R. number two thousand five hundred and fifteen"                |
+| `Total $1,250.50`          | "Total one thousand two hundred and fifty dollars and fifty cents" |
+| `Up 12.5%`                 | "Up twelve point five percent"                                     |
+| `In 2026 we`               | "In 2026 we" (years 1900 to 2099 are left to the provider)         |
+| `It was -5 today`          | "It was -5 today" (signed numbers are left to the provider)        |
+| `NOTE: done`               | "note: done"                                                       |
+
+File names that contain a digit or an underscore keep their extension with a spoken "dot". A
+digit-free name such as `report.pdf` is left as written, and so are decimals, versions, times and
+dates (`3.14159`, `v1.2.3`, `10:30`, `2026-11-16`). Short letter-prefixed codes like `Q1` and
+`H2` speak the letter and then the number. Acronyms of two to four letters are spelled with
+dotted letters (`A.M.D.`), except a small list of well-known spoken acronyms (NASA, NATO, GIF,
+JSON and similar) which stay as written, and common all-caps English words (NONE, NOTE, TOTAL,
+URGENT and similar) which are spoken as lowercase words. Standalone numbers of five or more
+digits are read digit by digit unless the next word names a quantity (users, rows, records,
+dollars and similar), in which case they are read as a full quantity. Money and percentages are
+read as words. A reply unit that is exactly one of the silent sentinels `NONE`, `NO_REPLY` or
+`HEARTBEAT_OK` speaks nothing at all, in both naturalize settings. Email addresses are never
+rewritten.
+
 ### Turning it off or changing it
 
 `messages.tts.naturalize` controls the pass globally and `agents.list[].tts.naturalize` overrides
@@ -359,6 +398,29 @@ model call adds cost and latency per clip and sends reply text to that model.
   falls back to the rules text and logs a warning (never the text itself).
 - The model is `naturalize.model`, defaulting to `messages.tts.summaryModel`, then the default
   agent model. A local model keeps reply text on your machine.
+
+### Read modes
+
+Every synthesis request carries a read mode that selects how much rewriting happens before the
+provider speaks. Three modes, plus two optional per-request parameters on `tts.speak` (Read
+aloud) and `talk.session.create` (Voice conversation):
+
+- **`literal`**: only the structural cleanup runs. No English word substitutions, no code-block
+  announcement, no model rewrite. Code blocks are dropped silently.
+- **`human`** (default): the English speech lexicon rules and the normaliser above run. This is
+  what the rules pass did before read modes.
+- **`hybrid`**: `human` plus the LLM spoken rewrite (`naturalize.mode: "llm"`). The model rewrite
+  is added only on the batch paths, Read aloud, `/tts audio` and automatic voice replies. Voice
+  mode treats `hybrid` as `human`: a model call per streamed clause adds too much latency.
+
+The server default derives from the existing `messages.tts.naturalize` setting, so there is no
+new config key: `enabled: false` reads literal, `mode: "llm"` reads hybrid, anything else reads
+human. A `readMode` parameter on the request overrides the derived default for that request.
+
+The second optional parameter is `speed`, a synthesis speed multiplier from 0.75 to 2, where 1 is
+unchanged. Speed is provider-native, so pitch stays natural. The Kokoro plugin forwards it to
+Kokoro-FastAPI's `/audio/speech` (Kokoro honours it); other providers ignore it for now and speak
+at their normal rate. A speed change takes effect from the next chunk the provider synthesizes.
 
 ### Voice mode
 
