@@ -21,7 +21,7 @@ re-exported from `wednesdayai/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.49`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.51`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
 | `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.13`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.9`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
@@ -220,6 +220,19 @@ Inbox classification is live-only by default, and history is opt-in per account 
   `default` and `accounts` (keyed `"<source>:<accountId>"` or `"<source>"`), each a policy
   `{ mode: "live" | "window" | "all", days? }`. It is a `provided` config member, so the change
   is additive.
+
+### People seam (sdk 2.51)
+
+A process-scoped seam between the people-graph plugin and the inbox plugin, which never import
+each other (`src/plugin-sdk/people.ts`):
+
+- `registerPeopleResolver` / `getPeopleResolver` with the `PeopleResolver` type: people-graph
+  registers it; inbox calls `resolveSenders` and `resolveEmails` for display names and
+  `recordInboxItems` / `recordCalendarEvents` for touch points.
+- `registerPeopleHistorySource` / `getPeopleHistorySource` with `PeopleHistorySource`: inbox
+  registers read-only paging over its own history, so people-graph backfills never read inbox
+  tables (ADR 0099).
+- Each register returns an unregister that removes only its own registration. All additive.
 
 ## Version semantics
 
