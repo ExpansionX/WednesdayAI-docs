@@ -1437,6 +1437,35 @@ frames whose `sessionKey` is `agent:main:main`. A `chat.subscribe` naming a sess
 see (another person's, or any person's for a node with no linked person) is answered
 `INVALID_REQUEST` with `details.reason: "session_not_found"` and subscribes nothing.
 
+### Suppressed finals and the clearing delta
+
+A `final` or `aborted` `chat` event with no `message` means the run's reply was suppressed (a
+`NO_REPLY` or `HEARTBEAT_OK` sentinel, or a display transform that rewrote it into one) or was
+empty: nothing renders. This matches upstream protocol v4; there is no `silent` field.
+
+- When the suppressed message had already offered text in deltas, a zero-text delta arrives in
+  session order right before the terminal: `state: "delta"`,
+  `message.content: [{ type: "text", text: "" }]`, and the same `seq`, `turnSeq`, `trigger` and
+  `origin` as the terminal. It means "retract this message's streamed text", and it is never
+  dropped under backpressure. An `error` terminal never clears.
+- The clearing delta retracts the run's latest message on the client. That is always the
+  suppressed one: a message's first delta is never dropped under backpressure either (later
+  deltas of the same message may be), so a client has seen every message a clear can target.
+- No clearing delta is sent when the suppressed message's first shown text repeats, extends or
+  (ignoring surrounding whitespace) equals the shown text of the run's previous message (for example, the same sentence again after a tool
+  step). v3 deltas start a new message only when the text stops extending the last one, so a
+  client renders both messages as one bubble, and a retraction would remove the earlier message
+  too. That text stays visible. A previous message that offered nothing (a held `No`) protects
+  nothing, so the clear is sent as usual.
+- An aborted partial uses the deltas' sentinel view: a trailing lead fragment such as `NO_RE` and
+  standalone edge sentinel lines are removed, and a sentinel-only partial ships with no `message`.
+- `hello-ok.features.capabilities` contains `"chat.final.silent"` when the gateway guarantees the
+  clearing delta. With it, a client may render deltas immediately and retract on the clearing
+  delta. Without it (older gateways), a client keeps holding sentinel-prefix text and ignores a
+  zero-text delta.
+- The capability is WednesdayAI-only and protocol-v3-only. Protocol v4 adoption retires it and
+  adds upstream's `deltaText: ""` and `replace: true` to the clearing delta.
+
 ### The chat error event
 
 A dispatched turn that fails without an assistant reply ends with a `chat` broadcast event
