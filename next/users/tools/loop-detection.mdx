@@ -11,9 +11,9 @@ read_when:
 # Tool-loop detection
 
 WednesdayAI can keep agents from getting stuck in repeated tool-call patterns.
-The guard is **disabled by default**.
+Most of the guard is **disabled by default**; enable it only where needed, because strict settings can block legitimate repeated calls.
 
-Enable it only where needed, because it can block legitimate repeated calls with strict settings.
+One detector, `sameErrorRepeat`, is **on by default**, as upstream OpenClaw's repeat guard is. It blocks a tool that keeps failing with the same error even when its arguments change. To turn it off, set `detectors.sameErrorRepeat: false`, or set `enabled: false` to turn off every detector.
 
 ## Why this exists
 
@@ -35,9 +35,10 @@ Global defaults:
       criticalThreshold: 20,
       globalCircuitBreakerThreshold: 30,
       detectors: {
-        repeatedFailure: true,
-        knownPollLoop: true,
-        repeatingNoProgress: true,
+        genericRepeat: true,
+        knownPollNoProgress: true,
+        pingPong: true,
+        sameErrorRepeat: true,
       },
     },
   },
@@ -67,20 +68,21 @@ Per-agent override (optional):
 
 ### Field behavior
 
-- `enabled`: Master switch. `false` means no loop detection is performed.
+- `enabled`: Master switch for `genericRepeat`, `knownPollNoProgress`, `pingPong` and the global circuit breaker (default: false). When unset, only `sameErrorRepeat` runs. An explicit `false` turns every detector off.
 - `historySize`: number of recent tool calls kept for analysis (default: 30).
 - `warningThreshold`: warning threshold before a warning-only loop classification (default: 10). Must be lower than `criticalThreshold`.
 - `criticalThreshold`: critical threshold for blocking repetitive loops (default: 20). Must be lower than `globalCircuitBreakerThreshold`.
 - `globalCircuitBreakerThreshold`: global no-progress breaker threshold (default: 30).
-- `detectors.repeatedFailure`: detects repeated failed attempts on the same call path.
-- `detectors.knownPollLoop`: detects known polling-like loops.
-- `detectors.repeatingNoProgress`: detects high-frequency repeated calls without state change.
+- `detectors.genericRepeat`: warns when the same tool is called with the same arguments `warningThreshold` times.
+- `detectors.knownPollNoProgress`: warns, then blocks, known polling tools whose output stops changing.
+- `detectors.pingPong`: warns, then blocks, alternating `A/B/A/B` calls that make no progress.
+- `detectors.sameErrorRepeat`: warns at `warningThreshold` and blocks at `criticalThreshold` when one tool fails with the same error that many times in the current run, even if its arguments change. Only failures still within the last `historySize` tool calls count, so the block lifts once other tool calls push them out of that window. A success of that tool resets the count, and a new run starts from zero.
 
 ## Recommended setup
 
 - Start with `enabled: true`, defaults unchanged.
 - If false positives occur:
-  - raise `repeatThreshold` and/or `criticalThreshold`
+  - raise `warningThreshold` and/or `criticalThreshold`
   - disable only the detector causing issues
   - reduce `historySize` for less strict historical context
 
@@ -96,4 +98,4 @@ This protects users from runaway token spend and lockups while preserving normal
 
 - `tools.loopDetection` is merged with agent-level overrides.
 - Per-agent config fully overrides or extends global values.
-- If no config exists, guardrails stay off.
+- If no config exists, only `sameErrorRepeat` runs.
