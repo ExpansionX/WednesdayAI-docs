@@ -9,6 +9,7 @@ sources:
   - src/plugins/runtime/types-analysis.ts
   - src/plugins/runtime/runtime-analysis.ts
   - src/plugins/runtime/runtime-analysis-direct.ts
+  - src/plugins/runtime/runtime-analysis-coalesce.ts
   - src/plugins/runtime/types-core.ts
   - src/plugins/runtime/analysis-limits.ts
   - src/plugins/loader.ts
@@ -142,6 +143,46 @@ builds its own agent system prompt; on that path `systemPrompt` is folded into t
 This divergence is intentional. Keep tool-enabled analysis prompts self-contained and treat the
 tool-less path as the one with strict payload guarantees.
 
+## Direct-path coalescing and retry
+
+Tool-less calls that are identical and in flight at the same time share one provider call.
+"Identical" is decided by a coalescing key over who is asking — runtime `identity`, `turn`,
+`sessionKey` (opaque, never parsed), `pluginId`, the resolved `agentId`, and `authProfileId` —
+and over the effective request exactly as dispatched: the built system prompt, the messages,
+the effective thinking level, temperature, and max output tokens after config resolution,
+`responseFormat` (including a `json_schema` body), and `purpose`. The key is built from the same
+dispatch plan the leader sends, so a config reload that changes the effective request stops
+coalescing. Requests that differ in any of these never coalesce.
+
+- The first caller (the leader) runs as usual and is the one billed for the shared call.
+- Later identical callers (followers) do not occupy analysis-lane slots. Each receives a copy of
+  the shared result with its own `jobId` and `elapsedMs`, plus a `coalescedWith` field naming the
+  leader job that ran the shared call.
+- Exactly one subscriber reports the shared call's spend: the leader if it is still subscribed
+  when the call settles, otherwise the earliest surviving follower. That subscriber carries the
+  `usage`, `usageState`, and cost of the real provider call; every other follower reports
+  `usageState: "not_attempted"` with no `usage` and no cost, so the spend ledger counts the
+  provider call exactly once.
+- Cancellation stays per caller: one caller's abort or timeout ends only that caller's wait and
+  never affects the shared run while others remain. The shared provider call is aborted only
+  after every caller has left; if the last subscribed caller aborts a call that was already
+  dispatched, its own result follows the normal abort contract (`status: "timeout"`,
+  `usageState: "unavailable"`). The shared run's deadline is the latest deadline among live
+  callers.
+- Nothing is cached after the shared run settles. The next identical call starts a new run.
+
+When the gateway replays a truncated cached stream, pi-ai fails the call with
+`Stream ended without finish_reason`. The direct transport retries that call exactly once and
+asks the provider plugin for a cache bypass on the retry attempt (Bifrost: a fresh
+`wai-bypass-<uuid>` `x-bf-cache-key` plus `x-bf-cache-no-store: true`; see
+[Providers → Bifrost](/next/admin/providers/bifrost) and ExpansionX/bifrost#401). Any other error is not
+retried. A retried result carries `transportAttempts: 2`. Usage is summed across both attempts
+when the first reported real usage; in-band gateway cost is summed only when both attempts
+reported it — otherwise attempt 2's value stands for the known part. When the first attempt's
+spend is unknown (a truncated stream sends no usage chunk, so nothing billable is evidenced
+for it), the result keeps attempt 2's usable verdict and usage but flags the gap with
+`unaccountedAttempts: 1`: `usage` and `costUsd` are a lower bound, not the attempt total.
+
 By default, analysis runs are LLM-only. The v1 runtime only supports read-only memory
 tools in analysis runs. If a plugin needs memory access, pass a small explicit tool
 allow-list:
@@ -243,21 +284,25 @@ text that failed JSON parsing. Callers should branch on `result.status` first an
 
 `run(...)` resolves to an `AnalysisResult`:
 
-| Field           | Type                                                   | Notes                                                                                                                                                          |
-| --------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `status`        | `string`                                               | One of: `ok`, `empty`, `timeout`, `error`, `rejected`. Branch on this before reading model output.                                                             |
-| `text`          | `string`                                               | Model text output. Undefined for system-level failures.                                                                                                        |
-| `json`          | `unknown`                                              | Parsed output when `responseFormat` is `"json"` or `json_schema`.                                                                                              |
-| `error`         | `string`                                               | Rejection, timeout, provider, parse, or runtime error detail.                                                                                                  |
-| `provider`      | `string`                                               | Provider used for the analysis run, when known.                                                                                                                |
-| `model`         | `string`                                               | Model used for the analysis run, when known.                                                                                                                   |
-| `usage`         | `{ input?, output?, cacheRead?, cacheWrite?, total? }` | Token/cache accounting reported by the provider path, when available.                                                                                          |
-| `usageState`    | `string`                                               | `not_attempted` (never reached a provider), `available` (completed with usage), or `unavailable`.                                                              |
-| `costUsd`       | `number`                                               | Set by the Gateway only when `usageState` is `available`: the in-band gateway cost when the provider gateway reported one, otherwise the model-entry estimate. |
-| `costOrigin`    | `string`                                               | Provenance of `costUsd`: `gateway` (in-band, e.g. Bifrost `extra_fields.cost`) or `estimate` (computed from `models.providers`).                               |
-| `responseModel` | `string`                                               | Resolved model reported by the provider response, when present (e.g. a gateway answered with `gpt-4o` while `model` names the proxy id).                       |
-| `elapsedMs`     | `number`                                               | Wall-clock runtime for the analysis attempt.                                                                                                                   |
-| `jobId`         | `string`                                               | Present for queued jobs and generated runs where correlation needs it.                                                                                         |
+| Field                 | Type                                                   | Notes                                                                                                                                                          |
+| --------------------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `status`              | `string`                                               | One of: `ok`, `empty`, `timeout`, `error`, `rejected`. Branch on this before reading model output.                                                             |
+| `text`                | `string`                                               | Model text output. Undefined for system-level failures.                                                                                                        |
+| `json`                | `unknown`                                              | Parsed output when `responseFormat` is `"json"` or `json_schema`.                                                                                              |
+| `error`               | `string`                                               | Rejection, timeout, provider, parse, or runtime error detail.                                                                                                  |
+| `provider`            | `string`                                               | Provider used for the analysis run, when known.                                                                                                                |
+| `model`               | `string`                                               | Model used for the analysis run, when known.                                                                                                                   |
+| `usage`               | `{ input?, output?, cacheRead?, cacheWrite?, total? }` | Token/cache accounting reported by the provider path, when available.                                                                                          |
+| `usageState`          | `string`                                               | `not_attempted` (never reached a provider), `available` (completed with usage), or `unavailable`.                                                              |
+| `truncated`           | `boolean`                                              | Present when the provider signalled an output-length stop; `text` may be partial.                                                                              |
+| `transportAttempts`   | `number`                                               | Provider attempts behind this result; `2` after the transport's one cache-bypass retry.                                                                        |
+| `unaccountedAttempts` | `number`                                               | Dispatched attempts whose spend is unknown (e.g. a truncated first attempt with no usage chunk). `usage` and `costUsd` are a lower bound.                      |
+| `coalescedWith`       | `string`                                               | Leader `jobId` of the shared direct run this result joined. The one accountable subscriber carries `usage` and cost instead.                                   |
+| `costUsd`             | `number`                                               | Set by the Gateway only when `usageState` is `available`: the in-band gateway cost when the provider gateway reported one, otherwise the model-entry estimate. |
+| `costOrigin`          | `string`                                               | Provenance of `costUsd`: `gateway` (in-band, e.g. Bifrost `extra_fields.cost`) or `estimate` (computed from `models.providers`).                               |
+| `responseModel`       | `string`                                               | Resolved model reported by the provider response, when present (e.g. a gateway answered with `gpt-4o` while `model` names the proxy id).                       |
+| `elapsedMs`           | `number`                                               | Wall-clock runtime for the analysis attempt.                                                                                                                   |
+| `jobId`               | `string`                                               | Present for queued jobs and generated runs where correlation needs it.                                                                                         |
 
 `usageState` is authored by the transport, never guessed. `unavailable` means the call was
 dispatched but its usage may be missing or synthesized (an error, an abort, or a provider that
@@ -276,7 +321,8 @@ exactly like a model with no config entry. A model whose `cost` block is all zer
 Pass `signal` (an `AbortSignal`) to cancel a call. A job still waiting in the plugin admission
 queue or the shared analysis lane is removed and resolves `rejected` with
 `usageState: "not_attempted"`; an in-flight provider call is aborted and resolves with
-`usageState: "unavailable"`.
+`usageState: "unavailable"`. On the coalescing direct path, cancelling your call never affects
+another caller's shared run — see [Direct-path coalescing and retry](#direct-path-coalescing-and-retry).
 
 `enqueue(...)` returns an `AnalysisJob` immediately:
 

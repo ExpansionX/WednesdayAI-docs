@@ -107,11 +107,17 @@ Bifrost's prompt cache optimisation and semantic cache run on the bifrost side.
 WednesdayAI does not send `cache_control` markers to bifrost — bifrost's
 `CacheOptimizer` analyses request structure autonomously.
 
-WednesdayAI sends only `x-bf-conversation-id` (stickiness, log grouping, affinity).
-It never adds `x-bf-cache-key` on its own. Agent-turn response caching is controlled
-only by the operator's Bifrost semantic-cache config (`default_cache_key`) or an
-explicit `x-bf-cache-key` set in `models.providers.bifrost.headers`, which passes
-through unchanged.
+WednesdayAI sends `x-bf-conversation-id` (stickiness, log grouping, affinity) on every
+request. It never adds `x-bf-cache-key` on its own. Agent-turn response caching is controlled
+only by the operator's Bifrost semantic-cache config (`default_cache_key`) or an explicit
+`x-bf-cache-key` set in `models.providers.bifrost.headers`, which passes through unchanged.
+
+One exception: when a tool-less plugin analysis call fails because the gateway replayed a
+truncated cached stream (pi-ai `Stream ended without finish_reason`, ExpansionX/bifrost#401),
+WednesdayAI retries that call exactly once and sends a unique
+`x-bf-cache-key: wai-bypass-<uuid>` plus `x-bf-cache-no-store: true` on the retry attempt.
+Those two headers override an operator-pinned `x-bf-cache-key` for that one attempt only, so
+the poisoned cache entry is neither read nor re-written.
 
 ## Timeout
 
