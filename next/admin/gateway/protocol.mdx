@@ -1097,6 +1097,13 @@ is authorized (see [Narrow scope method allowlist](#narrow-scope-method-allowlis
   provenance omit the field. Per ADR 0120, the field is also omitted when the source agent is
   internal (`userFacing: false`) — user clients never learn internal agent ids. The web client
   renders the field as the **From \<assistant\>** label on the row.
+- Every row also carries `__openclaw.trigger` when its stored `triggerSource` is set - the system
+  origin of the turn that wrote it: `user`, `heartbeat`, `cron`, `subagent` or `acp`. Rows written
+  before the field existed (a null `trigger_source` column) omit the key. The internal
+  `__openclaw.ingress` carrier stays stripped (above), so this projection is the only provenance a
+  client sees: a client can hide system-origin exchanges (heartbeat/cron prompts and their replies)
+  by this field, never by message text. Clients detect support from
+  `hello-ok.features.capabilities` containing `"chat.history.trigger"`.
 - `chat.send` (`operator.write`; narrow-admitted) takes
   `{sessionKey, message, idempotencyKey, thinking?, deliver?, attachments?, timeoutMs?, replyToId?, replyToTranscriptId?, expectedLeafEntryId?, dictated?, location?}`
   and answers `{ runId, status: "started" }` (`"in_flight"` when the same `idempotencyKey` is still
@@ -1383,7 +1390,9 @@ Heartbeat and system-event agent-turn output delivered to the session chat (an e
 `chat` `final` event so live clients see it without re-reading history. These finals
 carry a `runId` prefixed with `session-chat-` (for example `session-chat-<uuid>`) and
 reuse the standard display pipeline, so they look like any other assistant reply.
-`chat.inject` is unchanged.
+`chat.inject` is unchanged. The final's `message.model` is `"delivery-mirror"`, the same model
+the appended row stores, so a client can pair the live copy with the raw system reply it
+duplicates, as it does for history rows.
 
 ### Chat event transcript positions
 
@@ -1411,6 +1420,15 @@ the run with `chat.send`, `sessions.steer`, a talk session turn or `agent`, or o
 `origin.deviceId` with its own device id to recognise replies to its own turns. The field is absent
 when the starting connection presented no device identity, and for runs the gateway started itself
 (heartbeat, cron, channel inbound). A replayed idempotency key never re-tags a run.
+
+The inverse marking is `trigger`: `chat` events (`delta`, `final`, `error`, `aborted`) of a
+system-origin run carry optional `trigger: "heartbeat" | "cron" | "subagent" | "acp"`, the same
+values `chat.history` projects as `__openclaw.trigger`. It comes from the run's registered
+context, never from session-key text (ADR 0081): `heartbeat` and `cron` from the reply run's
+trigger, `subagent` from the spawn-declared subagent lane on the `agent` request, and `acp` from
+the ACP control-plane turn. A person typing into a child session starts an untagged user run. A
+client can hide the live system turn by provenance: its deltas, reasoning and aborted partial are
+internal, and its final is the run's user-facing result unless a delivery-mirror final follows.
 
 A `role: "node"` connection receives `chat`, `chat.activity` and `agent` events only for sessions
 it subscribed to with `node.event` `chat.subscribe`; the operator broadcast of those events never
