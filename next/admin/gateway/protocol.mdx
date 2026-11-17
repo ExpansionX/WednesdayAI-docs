@@ -115,6 +115,33 @@ param-level feature flags a client must detect before sending (for example
 `"chat.history.spanTranscripts"` — see the `chat.history` params). Older gateways omit
 `capabilities`, so its absence means the feature is unavailable.
 
+### Protocol admission (role floors)
+
+`minProtocol`/`maxProtocol` must admit the gateway's current protocol version. The floors are
+role-keyed (`src/gateway/server/ws-connection/connect-admission.ts`):
+
+- a node-role connect with `mode: "node"` is admitted down to `MIN_NODE_PROTOCOL_VERSION` (3),
+  so legacy v3 nodes keep working after the protocol-4 cut (ADR 2691);
+- a `mode: "probe"` connect is admitted down to `MIN_PROBE_PROTOCOL_VERSION` (3);
+- every other client (operators, UIs) must include the current `PROTOCOL_VERSION` (3 today, 4
+  after the cut).
+
+A refused connect answers the request with `ok: false`, `error.code: "INVALID_REQUEST"`, and
+`error.details` carrying the `PROTOCOL_MISMATCH` shape: `clientMinProtocol`,
+`clientMaxProtocol`, `expectedProtocol`, the server's `minProtocol`/`maxProtocol` window, and
+`reloadRequired: true` for `control_ui` clients (reload the web app; do not reconnect blind).
+The socket then closes with `1002`. One `gateway/protocol` log line per successful connect
+records `{role, mode, clientId, clientVersion, min, max}`, and an operator connection with
+`maxProtocol < 4` warns that the protocol-4 cut will refuse it.
+
+### Plugin surface URLs (canvas)
+
+`hello-ok` carries optional `pluginSurfaceUrls`: a record of surface name to scoped URL. The
+only surface today is `canvas` — the same per-node capability-scoped URL the legacy
+`canvasHostUrl` field carries. The legacy field is deprecated and is removed at protocol 4
+(ADR 2691); protocol 3 keeps both so existing nodes are unaffected. Clients that support
+protocol 4 read `pluginSurfaceUrls.canvas` first and fall back to `canvasHostUrl`.
+
 ### Node example
 
 ```json
@@ -632,6 +659,12 @@ command allowlist above so a gateway deny still wins. The refusal carries
 
 ### Node helper methods
 
+- Nodes may call `node.pluginSurface.refresh` with `{ surface: "canvas" }` to rotate their
+  canvas capability and get a fresh scoped URL; the response is
+  `{ pluginSurfaceUrls: { canvas: <scoped url> } }`. An unknown or missing surface fails with
+  `INVALID_REQUEST`. The deprecated `node.canvas.capability.refresh` (empty params) returns the
+  same rotation as `{ canvasHostUrl, canvasCapability, canvasCapabilityExpiresAtMs }` and is
+  removed at protocol 4 (ADR 2691).
 - Nodes may call `skills.bins` to fetch the current list of skill executables
   for auto-allow checks.
 - Nodes may send `node.event` with `event: "device.context"` to publish live device state.
@@ -647,6 +680,11 @@ command allowlist above so a gateway deny still wins. The refusal carries
 
 ### Operator helper methods
 
+- Operators may call `health` to fetch the status summary. With the `operator.admin` scope the
+  response also carries `protocolClients`: the live connection inventory grouped by
+  `{ role, mode, maxProtocol, clientVersion, count }` (ADR 2691). The protocol-4 cut reads
+  this inventory, so an operator socket that sent `maxProtocol < 4` stays visible there until
+  it reconnects or is closed.
 - Operators may call `tools.catalog` (`operator.read`) to fetch the runtime tool catalog for an
   agent. The response includes grouped tools and provenance metadata:
   - `source`: `core` or `plugin`
@@ -1411,6 +1449,17 @@ reconstructing it from arrival order:
 - For a run remapped to a client-supplied run id, the gateway stamps the recorded seq of the
   client id when it has one and falls back to the source run id otherwise.
 
+### Chat deltas (`deltaText`/`replace`)
+
+Every `chat` delta carries `deltaText`: the text added since the previous broadcast delta of
+the run (a run's first delta carries the full text). When the new assistant text is not an
+extension of the already-streamed prefix (a restart or rewrite), the delta resends the full
+text with `replace: true` — "replace the streamed prefix with this text"; otherwise `replace`
+is absent and the client appends. The cumulative `message` field stays on every delta for
+clients that have not switched to `deltaText`. Under protocol 4 (ADR 2691) the flat `chat`
+event becomes a per-state union whose delta arm requires `deltaText`, and a clearing delta is
+`{ deltaText: "", replace: true }`.
+
 ### Chat run origin
 
 `chat` events (`delta`, `final`, `error`, `aborted`) of a run started from a device carry optional
@@ -1917,6 +1966,19 @@ configured; it reports gate state only, never a secret. A handler failure is `UN
   `x-schema-name`. The npm tarball ships it at `dist/contracts/gateway-protocol.schema.json`,
   with the exec and system-run parity fixtures under `dist/contracts/fixtures/` for the native
   clients' parity tests.
+- `pnpm protocol:gen` also writes the **protocol-4 preview** next to the live snapshot:
+  `src/gateway/protocol/gateway-protocol.v4.schema.json`, shipped as
+  `dist/contracts/gateway-protocol.v4.schema.json`. It is the target registry of the
+  protocol-4 cut (ADR 2691) — `x-protocol-version: 4`, `ChatEvent` as the per-state union
+  (`ChatDeltaEvent`/`ChatFinalEvent`/`ChatAbortedEvent`/`ChatErrorEvent`), `hello-ok` with
+  `pluginSurfaceUrls` only, and `node.pluginSurface.refresh` params — published so client
+  generators (P2) build and test against the final shape before the cut. The live wire
+  protocol stays version 3 until the cut.
+- **Deprecated at protocol 3, removed for protocol 4 sessions** (ADR 2691): `hello-ok.canvasHostUrl`
+  (→ `pluginSurfaceUrls.canvas`), `node.canvas.capability.refresh` (→
+  `node.pluginSurface.refresh`), and the flat `chat` event members — the flat shape becomes the
+  per-state union above. Legacy v3 node sessions (admitted under `MIN_NODE_PROTOCOL_VERSION = 3`)
+  keep `canvasHostUrl` and `node.canvas.capability.refresh` until that floor rises to 4.
 - Swift models are generated in the
   [WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository from the synced
   snapshot (`npm run contracts:sync`).
