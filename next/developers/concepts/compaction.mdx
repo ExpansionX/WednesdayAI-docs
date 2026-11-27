@@ -25,22 +25,33 @@ Use the `agents.defaults.compaction` object in your `openclaw.json` to control c
 
 ### Fields
 
-| Field                                   | Type                                | Default       | Description                                                                                                                                                                                            |
-| --------------------------------------- | ----------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `enabled`                               | boolean                             | `true`        | Master switch. Set to `false` to skip both safeguard and direct compaction entirely.                                                                                                                   |
-| `mode`                                  | `"default"` \| `"safeguard"`        | `"safeguard"` | Compaction strategy. `"safeguard"` applies stricter guardrails to preserve recent context.                                                                                                             |
-| `reserveTokens`                         | number                              | —             | Token headroom reserved for reply generation after compaction.                                                                                                                                         |
-| `keepRecentTokens`                      | number                              | —             | Minimum token budget preserved from the most recent conversation window.                                                                                                                               |
-| `reserveTokensFloor`                    | number                              | —             | Minimum floor enforced for `reserveTokens` in the Pi compaction path (0 disables).                                                                                                                     |
-| `maxHistoryShare`                       | number (0.1–0.9)                    | `0.5`         | Maximum fraction of the context budget allowed for retained history.                                                                                                                                   |
-| `identifierPolicy`                      | `"strict"` \| `"off"` \| `"custom"` | `"strict"`    | Controls whether compaction summaries include opaque-identifier preservation instructions. `"strict"` prepends built-in guidance, `"off"` omits it, `"custom"` uses `identifierInstructions`.          |
-| `identifierInstructions`                | string                              | —             | Custom preservation text used when `identifierPolicy` is `"custom"`.                                                                                                                                   |
-| `summaryTimeoutMs`                      | number                              | `300000`      | `safeguard` mode: per-call timeout (ms) for each summarization request. A stalled provider stream cancels the compaction instead of holding the run until its timeout. Raise it for slow local models. |
-| `memoryFlush.enabled`                   | boolean                             | `true`        | Run a silent pre-compaction memory flush turn before heavy context reduction.                                                                                                                          |
-| `memoryFlush.softThresholdTokens`       | number                              | —             | How close to the compaction threshold (in tokens) to trigger the flush.                                                                                                                                |
-| `memoryFlush.forceFlushTranscriptBytes` | number \| string                    | —             | Force flush when serialized conversation entries in SQL reach this size (e.g. `"2mb"`). Set to `0` to disable.                                                                                         |
-| `memoryFlush.prompt`                    | string                              | —             | Custom user-prompt for the memory flush turn.                                                                                                                                                          |
-| `memoryFlush.systemPrompt`              | string                              | —             | System-prompt override for the memory flush turn.                                                                                                                                                      |
+| Field                                   | Type                                | Default       | Description                                                                                                                                                                                                                                                               |
+| --------------------------------------- | ----------------------------------- | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`                               | boolean                             | `true`        | Master switch. Set to `false` to skip core compaction (safeguard and direct, including run-loop overflow recovery) **and** pi's internal auto-compaction; a context overflow then surfaces as a turn error.                                                               |
+| `mode`                                  | `"default"` \| `"safeguard"`        | `"safeguard"` | Compaction strategy. `"safeguard"` applies stricter guardrails to preserve recent context.                                                                                                                                                                                |
+| `reserveTokens`                         | number                              | —             | Token headroom reserved for reply generation after compaction.                                                                                                                                                                                                            |
+| `keepRecentTokens`                      | number                              | —             | Minimum token budget preserved from the most recent conversation window.                                                                                                                                                                                                  |
+| `reserveTokensFloor`                    | number                              | —             | Minimum floor enforced for `reserveTokens` in the Pi compaction path (0 disables).                                                                                                                                                                                        |
+| `maxHistoryShare`                       | number (0.1–0.9)                    | `0.5`         | Maximum fraction of the context budget allowed for retained history.                                                                                                                                                                                                      |
+| `identifierPolicy`                      | `"strict"` \| `"off"` \| `"custom"` | `"strict"`    | Controls whether compaction summaries include opaque-identifier preservation instructions. `"strict"` prepends built-in guidance, `"off"` omits it, `"custom"` uses `identifierInstructions`.                                                                             |
+| `identifierInstructions`                | string                              | —             | Custom preservation text used when `identifierPolicy` is `"custom"`.                                                                                                                                                                                                      |
+| `summaryTimeoutMs`                      | number                              | `300000`      | `safeguard` mode: per-call timeout (ms) for each summarization request. A stalled provider stream cancels the compaction instead of holding the run until its timeout. Raise it for slow local models.                                                                    |
+| `memoryFlush.enabled`                   | boolean                             | `true`        | Run a silent pre-compaction memory flush turn before heavy context reduction.                                                                                                                                                                                             |
+| `memoryFlush.softThresholdTokens`       | number                              | —             | How close to the compaction threshold (in tokens) to trigger the flush.                                                                                                                                                                                                   |
+| `memoryFlush.forceFlushTranscriptBytes` | number \| string                    | —             | Force flush when serialized conversation entries in SQL reach this size (e.g. `"2mb"`). Set to `0` to disable.                                                                                                                                                            |
+| `memoryFlush.prompt`                    | string                              | —             | Custom user-prompt for the memory flush turn.                                                                                                                                                                                                                             |
+| `memoryFlush.systemPrompt`              | string                              | —             | System-prompt override for the memory flush turn.                                                                                                                                                                                                                         |
+| `summaryDag.model`                      | string (`"provider/modelId"`)       | —             | Preferred summarizer for summary-DAG production (an auxiliary summary tree built after compaction). When unset, production falls back to the session's active model; the backfill CLI additionally falls back to the last model stored on the session.                    |
+| `summaryDag.turnTrigger`                | boolean                             | `true`        | Run the per-turn summary-DAG leaf trigger in addition to compaction. Override per agent with `agents.list[].summaryDag.turnTrigger`.                                                                                                                                      |
+| `summaryDag.toolPayloadStubTokens`      | number                              | `25000`       | Tool results estimated above this many tokens are replaced with a short stub in the summary-DAG summarizer input; the threshold is clamped to the leaf chunk budget (a payload the budget can hold whole is never stubbed) and the full payload stays in the session log. |
+
+### Summarizer model
+
+Core compaction summarizes with the session's own model — the provider and model the run uses.
+There is no built-in fallback model: when no provider/model can be resolved for the session,
+compaction fails with `compaction skipped: no provider/model resolved` (recorded in the
+compaction diagnostics row) rather than silently substituting a default. If you hit this, set
+`agents.defaults.model` so the session has an active model.
 
 ### Examples
 
@@ -92,6 +103,28 @@ You’ll see:
 - `🧹 Auto-compaction complete` in verbose mode
 - `/status` showing `🧹 Compactions: <count>`
 
+### Who recovers a context overflow
+
+When compaction is enabled, an eligible embedded agent run hands a just-streamed
+**same-model context-overflow error** (the model reports the prompt exceeded its own
+window) to WednesdayAI's run loop: pi's own overflow branch is cancelled, and the run loop
+runs core compaction (recorded in the compaction ledger) and schedules background
+summary-DAG production, then retries the prompt.
+
+The handoff is not registered for `analysis` runs, runs without a session file, or runs
+with `disablePluginHooks`, `skipTranscriptSync`, or `suppressTranscriptPersistence`. Those
+runs recover inside pi and write no compaction-ledger row.
+
+Two pi-internal compactions keep running inside the attempt when compaction is enabled:
+pi's **threshold** auto-compaction (context nearing the window after a turn) and pi's
+**pre-prompt preflight** (compacting a previous turn's unresolved overflow before the new
+prompt is sent). Neither writes the compaction ledger; the run-loop overflow recovery
+does.
+
+With `enabled: false`, none of these run: core compaction refuses (the run surfaces the
+overflow as a turn error instead of retrying) and pi's internal auto-compaction is
+switched off through its settings.
+
 Before compaction, WednesdayAI can run a **silent memory flush** turn to store
 durable notes to disk. See [Memory](/next/developers/concepts/memory) for details and config.
 
@@ -126,6 +159,53 @@ For operators:
 - A claimed session can still hit its context window if the owner never compacts; monitor owned
   sessions through the owner's own reporting rather than WednesdayAI's compaction counters.
 - Unclaimed (core-owned) sessions behave exactly as described in the sections above.
+
+## Summary-DAG per-turn trigger
+
+Independent of who owns compaction, every successful turn schedules a background
+summary-DAG production (the leaf summaries over the session history's uncovered span). The
+reply never waits on it and never fails from it; a prune veto or a compaction-stage owner
+does not suppress it, and compaction-triggered production is fire-and-forget too — compaction
+schedules it and moves on. Heartbeat runs skip the turn trigger. Turn it off per agent with
+`agents.list[].summaryDag.turnTrigger: false` (default `true`), or globally with
+`agents.defaults.compaction.summaryDag.turnTrigger: false`.
+
+### Which model summarizes
+
+Each production resolves its summarizer in this order and logs
+`summary-DAG summarizer: <label> (source: config|session|stored)` once per production run:
+
+1. `summaryDag.model` (`source: config`) — the dedicated summarizer, as `"provider/modelId"`.
+2. The session's active model (`source: session`).
+3. The last model stored on the session rows — `source: stored`, backfill only.
+
+When none of the three resolves, production is skipped for that trigger and the uncovered
+span stays raw until a later production covers it. A configured but unresolvable model does
+not silently swap to a later tier: resolution stops there and production skips.
+
+### What the summary-DAG summarizer never sees
+
+Leaf planning runs ingest hygiene on the planning view only — stored session rows are
+never modified. Before spans are planned:
+
+- **Heartbeat entries** (`trigger_source='heartbeat'`) are dropped from the summarizer
+  input entirely — heartbeat runs exist to keep a session alive, and their ticks and
+  alerts are not conversation worth summarizing. The legacy hidden-ack marker
+  (`openclaw:heartbeat-hidden`) still drops ack exchanges from runs that predate the
+  column. Heartbeat entries also never count toward the protected fresh tail.
+- **Injected context** on user rows (memory recall and similar) is stripped.
+- **Byte-identical replays** of a message inside the same planning input are dropped.
+- **Oversized tool payloads** (over `summaryDag.toolPayloadStubTokens`, default `25000`,
+  clamped to the leaf chunk budget) are replaced by a short stub line
+  (`[tool payload stubbed: tool=… | N bytes | seq …]`) plus the configured head
+  (`summaryDag.toolPayloadStubHeadChars`, default `500`); the full payload stays
+  recoverable from the session log by seq. An oversize user/assistant message is never
+  stubbed — the planner stops before it instead.
+
+Batches written under these rules are marked `planner: "rendered-v2"` in their metadata,
+so a future recovery can tell them apart from older batches. Every `summaryDag.*` sizing
+key (chunk budget, fanouts, sweep caps, fresh tail, narration targets, advisor deadline)
+is documented in [Gateway configuration reference](/next/admin/gateway/configuration-reference).
 
 ## Context window source
 
@@ -178,7 +258,11 @@ The summary may be larger than expected, or recent messages alone already exceed
 The default `identifierPolicy: "strict"` adds built-in guidance, but identifiers buried deep in tool output may not survive. Switch to `"custom"` and provide explicit `identifierInstructions` naming the identifier patterns you care about (for example `"Preserve all PROJ-* ticket IDs exactly"`). Confirm with `/compact Focus on ticket IDs and branch names`.
 
 **`enabled: false` still seems to compact**
-Config is read at gateway start. Restart the gateway after changing `compaction.enabled`. Also verify the config is under `agents.defaults.compaction`, not a top-level key.
+`enabled: false` stops core compaction and pi's internal auto-compaction alike; what it
+does **not** stop is compaction performed by a compaction-stage context owner plugin, and
+the summary-DAG per-turn trigger (which produces summaries without compacting). Config is
+read at gateway start — restart the gateway after changing `compaction.enabled`, and
+verify the config is under `agents.defaults.compaction`, not a top-level key.
 
 **Memory flush runs unexpectedly or too often**
 The flush fires when serialized conversation entries in SQL reach `memoryFlush.forceFlushTranscriptBytes`. Set it to `0` to disable size-based triggers, or increase the value. Set `memoryFlush.enabled: false` to turn off pre-compaction memory flushes entirely.

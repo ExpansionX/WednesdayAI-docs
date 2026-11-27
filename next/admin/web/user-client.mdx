@@ -142,6 +142,15 @@ prefix: `/client/`, `/client/config.json`, `/client/assets/...`. A request for t
 redirects to `/client/`, and paths outside the prefix are not handled at all. The bundle uses
 relative asset URLs, so no rebuild is needed.
 
+The index also answers deep client routes such as `/client/apps/notes/full`. There, the relative
+URLs would resolve under `/client/apps/notes/`, and the page would fail to load. So the server
+adds `<base href="/client/" />` to the top of `<head>` on every index response. The value is the
+configured base path, never anything from the request. For the browser to honour that element,
+the `Content-Security-Policy` sends `base-uri 'self'` instead of `'none'`. This relaxes nothing
+beyond the page's own origin: a `<base>` can point only at this origin, and `script-src 'self'` is
+unchanged. The gateway route does the same under its base path. A CDN or nginx host must do both
+too (see [Rules the host must follow](#rules-the-host-must-follow)).
+
 ## Container
 
 The image builds the bundle and runs the standalone server. Build from the **repository root**, not
@@ -212,6 +221,10 @@ console at the gateway root. Restart the gateway after changing `gateway.webClie
   named window and read its granted permission either. Verify with:
   `curl -sI https://gateway.example.com/v2/client/ | grep -i permissions-policy` (shows
   `geolocation=(self)`) versus the same request to the canvas host (shows `geolocation=()`).
+- The index, on every client route under `basePath`, carries `<base href="<basePath>/" />`, and
+  the route's `Content-Security-Policy` sends `base-uri 'self'` instead of `'none'`, so a reload
+  of a deep route such as `/v2/client/apps/notes/full` still loads the bundle (see
+  [Serving under a subpath](#serving-under-a-subpath)). The Control UI keeps `base-uri 'none'`.
 
 <Note>
 **Upgrading from an earlier build.** The default `basePath` used to be `/client`. On a deployment
@@ -788,13 +801,12 @@ enabling the preference shows nothing because the transcript has no reasoning co
 
 Some controls are drawn but switched off, with a tooltip naming the tracked finding that enables
 them. Selecting one sends nothing to the gateway. They are: the **Feedback** and **Regenerate**
-actions on replies; **Settings** and **Keyboard shortcuts** in the account menu. **Add extension**
-cites the extension marketplace item (GitHub #1331) instead; **Feedback**, **Regenerate**,
-**Settings** and **Keyboard shortcuts** cite their own tracked finding (GitHub #696-#700) instead.
-**Memory** and **Calendar** are no longer fixed to this list: they turn on when the operator
-allowlists a chat UI plugin that provides those panels - see
-[Chat UI plugins](/next/developers/plugins/chat-ui). Without such a plugin they stay dimmed, citing the chat
-panels item (GitHub #634). The assistant picker, per-assistant colour,
+actions on replies; **Settings** and **Keyboard shortcuts** in the account menu. Each cites its
+own tracked finding (GitHub #696-#700). The sidebar draws no switched-off entries (ADR 2916): its
+**Apps** list shows only what the gateway provides, in one A–Z order by name: **Inbox** when the
+gateway serves the inbox family, **Orca** when the user holds an enabled Orca grant, and the
+panels of allowlisted chat UI plugins - see [Chat UI plugins](/next/developers/plugins/chat-ui). Installing
+extensions from the client (the marketplace) stays GitHub #1331. The assistant picker, per-assistant colour,
 session filter and search, paging past the first page, the model switcher and Think, queue/steer
 while a reply streams, rename and Suggest, and replying to a message are live (client-chat-v3
 P2). Replies appearing on every open device without a reload, the busy and unread indicators,
@@ -850,7 +862,7 @@ If you serve the bundle yourself (CDN, nginx, object storage), reproduce what
 | Path                                                                               | Response                                                                                                                                           |
 | ---------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `/config.json`                                                                     | your generated config, `Cache-Control: no-store`                                                                                                   |
-| `/index.html` and SPA routes                                                       | `index.html`, `Cache-Control: no-cache`                                                                                                            |
+| `/index.html` and SPA routes                                                       | `index.html` with `<base href="<mount>/" />` first in `<head>`, `Cache-Control: no-cache`                                                          |
 | `/assets/*` (hashed filenames)                                                     | the file, `Cache-Control: public, max-age=31536000, immutable`                                                                                     |
 | `/assets/*` that does not exist                                                    | `404` - never the SPA shell                                                                                                                        |
 | `/manifest.webmanifest`, `/icon-192.png`, `/icon-512.png`, `/apple-touch-icon.png` | the file from the bundle root - the manifest as `application/manifest+json`, the icons as `image/png`; a missing one is `404`, never the SPA shell |
@@ -864,12 +876,18 @@ with everything else and keep the manifest's `application/manifest+json` media t
 tablet home screen (see
 [Using the web client](/next/admin/web/using-the-web-client#install-the-web-client-on-your-home-screen)).
 
+Whatever the mount point (`/` at the root, `/client/` under a prefix), the `<base href>` in
+`index.html` must name it, ending in `/`: a reload of a deep route such as `/apps/notes/full`
+otherwise loads `assets/` and `config.json` from the wrong directory.
+
 Send these headers on every response:
 
 - `Content-Security-Policy` with `frame-ancestors 'none'`, `script-src 'self'`, `font-src 'self'`
-  (the bundled fonts load from the same origin), and `connect-src` listing `'self'` plus the
-  gateway origin with its `ws:`/`wss:` scheme and its `http:`/`https:` one - attachments upload
-  over `POST /v2/uploads` (see [Attachment uploads over HTTP](#attachment-uploads-over-http))
+  (the bundled fonts load from the same origin), `base-uri 'self'` (so the browser honours the
+  index's `<base>`; see [Serving under a subpath](#serving-under-a-subpath)), and `connect-src`
+  listing `'self'` plus the gateway origin with its `ws:`/`wss:` scheme and its `http:`/`https:`
+  one - attachments upload over `POST /v2/uploads` (see
+  [Attachment uploads over HTTP](#attachment-uploads-over-http))
 - `X-Frame-Options: DENY`
 - `X-Content-Type-Options: nosniff`
 - `Referrer-Policy: no-referrer`

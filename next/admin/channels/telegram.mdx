@@ -273,6 +273,8 @@ Two resilience guards run automatically:
 - a stall watchdog restarts the polling cycle if a `getUpdates` request stops making progress for 90 seconds (log line `Polling stall detected`); frequent stalls point to a stuck socket or proxy between the gateway and `api.telegram.org`
 - on gateway shutdown or restart, the in-flight `getUpdates` request is aborted immediately, so a restarting gateway does not collide with its own previous long poll and raise `409`
 
+Every polling lifecycle line is tagged `[telegram] [<accountId>]`; after each start or restart the first successful `getUpdates` logs one `polling ready` line, three failed calls before that log one `polling not ready` line with the last error class, and a `Polling runner stop timed out` line names what was still pending (`getUpdates in flight`, `runner.stop()`, `bot.stop()`). Before polling, setup requests run with a 30 s bound each: webhook cleanup (`deleteWebhook`) until it first succeeds, or again after a 409 conflict, and bot init (`getMe`) on every (re)start. A hung or failing step logs `webhook cleanup (deleteWebhook) failed` or `bot init (getMe) failed`, retires that bot's requests and backs off, instead of leaving the runner unable to poll.
+
 ### Multi-bot fleet
 
 One gateway instance can run a fleet of Telegram bot accounts. Define shared defaults under
@@ -905,7 +907,7 @@ wednesdayai message send --channel telegram --target @name --message "hi"
   <Accordion title="deleteWebhook failed at startup">
 
     - Polling accounts call `deleteWebhook` before the first `getUpdates`. Recoverable failures are retried with backoff.
-    - Each recoverable failure logs once as `Telegram webhook cleanup failed for account "<id>": ...; retrying in ...`, including the transport cause when available. A later success logs `[telegram] webhook cleanup for account "<id>" succeeded after N attempts`.
+    - Each recoverable failure, or an attempt still pending after 30 s, logs once as `[telegram] [<accountId>] webhook cleanup (deleteWebhook) failed: <ErrorClass>: ...; polling not started; retrying in ...`, including the transport cause when available. A later success logs `[telegram] [<accountId>] webhook cleanup succeeded after N attempts`.
     - Non-recoverable failures log `telegram deleteWebhook for account "<id>" failed: ...` and stop startup for that account.
     - Failures followed by a success line recovered automatically. If failures persist, read the logged error: transport errors (`UND_ERR_*`, `ECONNRESET`, `ETIMEDOUT`) point to DNS, IPv6, or proxy routing (see the next section); Telegram API errors need action matching the returned status and description.
 

@@ -20,33 +20,33 @@ generated: 2026-10-14
 
 # Session Management
 
-WednesdayAI treats **one direct-chat session per agent** as primary. Direct chats collapse to `agent:<agentId>:<mainKey>` (default `main`), while group/channel chats get their own keys. `session.mainKey` is honored.
+WednesdayAI resolves **one direct-chat session per agent+person pair** (`agent:<agentId>:direct:<person>`; #2824). `agent:<agentId>:<mainKey>` (default `main`) is the system session (heartbeat, cron); group/channel chats get their own keys. `session.mainKey` is honored. The system session is not a chat destination: human turns naming it (`chat.send`, `sessions.steer`, talk, the `agent` method, the HTTP endpoints) are refused, and the TUI and `wednesdayai agent` default to the caller's per-pair conversation. A `session.scope: "global"` install keeps its single shared `global` session for these defaults, as before.
 
 Use `session.dmScope` to control how **direct messages** are grouped:
 
-- `main` (default): all DMs share the main session for continuity.
+- `main` (default): direct DMs resolve per agent+person pair automatically (#2824).
 - `per-peer`: isolate by sender id across channels.
-- `per-channel-peer`: isolate by channel + sender (recommended for multi-user inboxes).
+- `per-channel-peer`: isolate by channel + sender (pre-#2824 installs keep byte-identical keys).
 - `per-account-channel-peer`: isolate by account + channel + sender (recommended for multi-account inboxes).
   Use `session.identityLinks` to map provider-prefixed peer ids to a canonical identity so the same person shares a DM session across channels when using `per-peer`, `per-channel-peer`, or `per-account-channel-peer`. Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each account to the person with `wednesdayai identity link <name> <value>` (or the self-service `/link` code) so their web chats resolve to the same identity. See [Identities](/next/admin/gateway/identity).
 
-## Secure DM mode (recommended for multi-user setups)
+## Multi-user DM isolation
 
-> **Security Warning:** If your agent can receive DMs from **multiple people**, you should strongly consider enabling secure DM mode. Without it, all users share the same conversation context, which can leak private information between users.
+Since #2824, direct DMs resolve per agent+person pair under every `dmScope`, so the shared-context leak below cannot happen for new turns; `agent:<id>:main` stays system-only (heartbeat, cron) and pre-#2824 transcripts there are readable from operator connections only (D-061).
 
-**Example of the problem with default settings:**
+**The historical problem before per-pair resolution:**
 
 - Alice (`<SENDER_A>`) messages your agent about a private topic (for example, a medical appointment)
 - Bob (`<SENDER_B>`) messages your agent asking "What were we talking about?"
-- Because both DMs share the same session, the model may answer Bob using Alice's prior context.
+- Because both DMs shared the same session, the model could answer Bob using Alice's prior context.
 
-**The fix:** Set `dmScope` to isolate sessions per user:
+**Explicit per-sender scoping** keys sessions by channel + sender and keeps byte-identical keys for pre-#2824 installs:
 
 ```json5
 // ~/.openclaw/openclaw.json
 {
   session: {
-    // Secure DM mode: isolate DM context per channel + sender.
+    // Isolate DM context per channel + sender.
     dmScope: "per-channel-peer",
   },
 }
@@ -61,7 +61,7 @@ Use `session.dmScope` to control how **direct messages** are grouped:
 
 Notes:
 
-- Default is `dmScope: "main"` for continuity (all DMs share the main session). This is fine for single-user setups.
+- Default is `dmScope: "main"`: DMs resolve per agent+person pair automatically (#2824); the `main` session itself is system-only.
 - Local CLI onboarding writes `session.dmScope: "per-channel-peer"` by default when unset (existing explicit values are preserved).
 - For multi-account inboxes on the same channel, prefer `per-account-channel-peer`.
 - If the same person contacts you on multiple channels, link all of their accounts to one identity (`wednesdayai identity link <name> <value>`; see [Identities](/next/admin/gateway/identity)) so their DM sessions collapse into that canonical identity.

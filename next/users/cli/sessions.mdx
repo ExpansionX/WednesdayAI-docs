@@ -7,6 +7,8 @@ sources:
   - src/cli/commands/sessions.ts
   - src/cli/program/register.status-health-sessions.ts
   - src/commands/sessions-claims-status.ts
+  - src/commands/sessions-summary-backfill.ts
+  - src/commands/sessions-summary-recover.ts
   - src/gateway/server-methods/sessions.ts
   - src/gateway/session-utils.ts
   - src/config/sessions/store.ts
@@ -173,6 +175,64 @@ nothing.
 With `--dry-run`, `pruned` and `capped` are the index keys that would be retired; nothing changes.
 `storePath` identifies the agent's session index; under SQL storage no `sessions.json` file is
 read or written.
+
+## Summary-DAG backfill
+
+Produce or plan the eternal-context summary-DAG nodes (leaf and condensed summaries) for stored
+sessions:
+
+```bash
+wednesdayai sessions summary-backfill --dry-run
+wednesdayai sessions summary-backfill --apply
+wednesdayai sessions summary-backfill --apply --agent work
+wednesdayai sessions summary-backfill --apply --all-agents
+wednesdayai sessions summary-backfill --dry-run --all-agents --json
+```
+
+- Exactly one of `--dry-run` or `--apply` must be passed; with neither or both the command exits
+  with `pass exactly one of --dry-run or --apply`.
+- `--dry-run` plans per session — planned leaf spans, planned source tokens, and ingest-hygiene
+  counts — with no writes and no model calls.
+- `--apply` produces leaf and condensed nodes for every uncovered span (at most 8 leaf spans per
+  produce call, looping until a call publishes nothing). Reruns are no-ops: planning resumes from
+  the covered prefix, so already-summarized history is never re-summarized.
+- Sessions are skipped (and reported) when `agents.defaults.compaction.summaryDag.model` is not
+  configured or the configured model cannot be resolved. No cloud fallback: an unavailable local
+  model leaves the span raw and the next run retries.
+- A per-session failure is logged and reported; the run continues with the next session.
+- The command routes through the running gateway (`sessions.maintenance.run`) when one is
+  reachable, or takes session-storage ownership and runs in-process otherwise.
+
+## Summary-DAG recovery
+
+Supersede — never delete — summary-DAG nodes written by the old truncating planner (and the
+`rendered-v1` interim), then rebuild them with the fixed planner:
+
+```bash
+wednesdayai sessions summary-recover --dry-run
+wednesdayai sessions summary-recover --apply
+wednesdayai sessions summary-recover --apply --agent work
+wednesdayai sessions summary-recover --dry-run --all-agents --json
+```
+
+- Exactly one of `--dry-run` or `--apply` must be passed; with neither or both the command exits
+  with `pass exactly one of --dry-run or --apply`.
+- Identification is exact: every current leaf is matched to its producing published batch by the
+  node-id formula, and a leaf is affected when that batch has no `planner` marker or carries
+  `rendered-v1`. `rendered-v2` batches (and everything above them only when doomed) are left
+  alone.
+- `--dry-run` plans the rebuild per session, reports the source-integrity audit (raw
+  `ctx_session_entries` rows present vs the affected leaves' seq ranges, plus the recorded batch
+  fingerprints), and splits affected batches at the old-code cutoff as a cross-check — with no
+  writes and no model calls. Deleted or archived sessions (tombstone or `meta.__deleted`) are
+  reported in their own section and are never rebuilt.
+- `--apply` refuses a session whose affected leaves cannot be rebuilt honestly (missing rows or
+  rewritten sources), then supersedes the affected suffix in ONE transaction per session
+  (coverage reverts to the last good leaf; superseded rows stay intact under a `recovery:<runId>`
+  marker) and rebuilds it through the same capped produce loop the backfill uses. A crashed run
+  resumes from its pending markers; a rerun after completion is a no-op.
+- The command routes through the running gateway (`sessions.maintenance.run`) when one is
+  reachable, or takes session-storage ownership and runs in-process otherwise.
 
 ## Claims status
 

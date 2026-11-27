@@ -1,0 +1,200 @@
+---
+summary: "Open, read and settle gateway questions from a plugin: the canonical question lifecycle API (ADR 2657)"
+read_when:
+  - Your plugin or coordinator needs to ask a person a question and get the answer back
+  - You need to mirror questions into another store (TheFactory) without owning a second queue
+  - You want the `api.questions.*` method signatures and the `Q-<n>` mirror file mapping
+title: "Questions API"
+audience: developer
+sources:
+  - src/plugin-sdk/questions.ts
+  - src/plugins/types.ts
+  - src/plugins/registry.ts
+  - src/gateway/server-methods/questions.ts
+  - docs/superpowers/specs/2026-11-16-question-lifecycle-contract.md
+generated: 2026-11-16
+---
+
+# Questions API
+
+There is **one** question lifecycle for the whole system (ADR 2657). The gateway's `ctx_questions`
+table is the only store of record; plugins read and settle the same records people answer from
+web, Glass, voice, watch or any channel. The plugin surface is `api.questions`
+(`PluginQuestionsApi`, from `wednesdayai/plugin-sdk/questions`); the normative contract is
+`docs/superpowers/specs/2026-11-16-question-lifecycle-contract.md` (§7 is this API, §8 is the
+mirror below).
+
+```ts
+export type PluginQuestionsApi = {
+  open: (input: QuestionOpenInput) => Promise<QuestionRecord>;
+  get: (idOrRef: string) => Promise<QuestionRecord | null>;
+  list: (filter?: QuestionListFilter) => Promise<QuestionRecord[]>;
+  answer: (
+    idOrRef: string,
+    answer: { optionIds?: string[]; otherText?: string },
+    provenance: { by: string; via: QuestionAnswer["via"]; channel?: string; confirmed: boolean },
+  ) => Promise<QuestionRecord>;
+  supersede: (questionId: string, replacement?: QuestionOpenInput) => Promise<QuestionRecord>;
+  onChanged: (cb: (question: QuestionRecord) => void) => () => void;
+};
+```
+
+## Opening questions
+
+- `mode` is always `"async"`. A **blocking** question (one whose agent run waits for the answer)
+  is opened only by the core `ask_user` tool; plugins can never open one. There is no public
+  `questions.open` gateway method, so clients cannot fabricate questions.
+- `source` is `{ kind: "coordinator" | "plugin", agentId, sessionKey? }`. The host binds your
+  plugin id to the record; you never pass one. `sessionKey` stays an opaque bucket id (ADR 0081)
+  — never parsed, never derived from.
+- `directedTo.persons` lists the ADR 2243 person ids who may answer and who get notified. Every
+  question has at least one directed person.
+- `prompt` is at most 2,000 characters and is refused when the core secret scan would redact
+  anything (§11) — the scan runs the built-in pattern set explicitly, so it applies even with
+  `logging.redactSensitive: "off"`.
+- `options` are 0–8 `QuestionOption`s: a stable `id` (`[a-z0-9_-]{1,32}`, unique per question —
+  it is what surfaces send back), a `label` (≤ 80), an optional `description` (≤ 200, dropped by
+  HUD and watch renderers) and at most one `recommended` per question.
+- `selection` is `"single"` (default) or `"multi"` (any subset of options is a valid answer).
+- `allowOther` admits a free-text "Other" answer (labelled `otherLabel`, ≤ 40, default "Other")
+  and must be true when `options` is empty.
+- `sensitive: true` asks for the sensitive treatment; sensitivity is **one-way up** (§3): the
+  gateway forces `sensitive` and adds a reason when the question is linked to an exec approval,
+  when the prompt or any option carries code, or when the secret scan matches anything in it.
+  Sensitivity gates speech only: a sensitive question shows in full on the Glass HUD and other
+  screens, while spoken output follows the audio-route privacy rules (§6a).
+- An async question opened without `expiresAt` gets the same default expiry window as blocking
+  (30–3600 s, default 900), so an unclosed open always self-settles to `expired`.
+- Opens are rate-limited and capped per source (per `pluginId`/`agentId` and per directed
+  person); the open is refused with a capacity error when the cap is hit, so no single source can
+  outrun the shared change-feed counter.
+
+The record you get back (and every record the other methods return) is the gateway's
+`QuestionRecord`: `questionId` (`q_<ULID>`), human `ref` (`Q-<n>`, allocated by the gateway in
+the insert transaction — nobody else allocates ids), `status` (`open` → `answered` |
+`superseded` | `expired` with `statusReason` `timeout` / `asker_gone` / `withdrawn` /
+`replaced`), `mode`, `source`, `directedTo`, `prompt`, `options`, `selection`, `allowOther`,
+`otherLabel?`, `urgency`, `sensitivity` + `sensitivityReasons`, `createdAt`, `expiresAt`,
+`answer?` (`optionIds[]`, `otherText?`, `by`, `via`, `channel?`, `at`, `confirmed`,
+`redactedByScan?`), `supersededBy?`, `ownerInstanceId?`, `revision`, `changeSeq`, `updatedAt`.
+Answers carry option **ids** — there is no `optionIndex` anywhere.
+
+## Reading and settling
+
+- `get` accepts a `questionId` or a human `ref`; it returns `null` when no such record exists.
+  The plugin surface is in-process trusted code, so it applies no connection scoping — answer
+  authority is enforced where it belongs, on the directed-`by` check of `answer` (§11).
+- `list` filters by `status`, pages after a `changeSeq` cursor (`afterChangeSeq`) and is always
+  ordered by `changeSeq` — the cluster-wide commit order (§10). A row carries its **latest**
+  `changeSeq` (one row per question), so a scan returns each question's current state, coalesced
+  the way §8 writes are; a status-filtered list scans to fill the limit, so a cursor advanced to
+  the last returned row never skips a later matching row. Retention (§10): an explicit
+  `afterChangeSeq` below the deletion floor rejects with `QuestionResyncRequiredError`
+  (`pruneFloorSeq` set) — snapshot-reconcile and resume at the floor. A call without a cursor,
+  or paged with `snapshotAfterSeq` (rows after that seq; mutually exclusive with
+  `afterChangeSeq`), is a snapshot from the start and is NEVER floor-refused — page the open
+  snapshot to the end with `snapshotAfterSeq = <last row's changeSeq>` even when earlier rows
+  were deleted.
+- `answer` settles the same record people answer from any surface: one conditional update on
+  `status = 'open'`, so exactly one settlement wins on any gateway; the loser of a race gets
+  `QuestionAlreadyResolvedError` (code `ALREADY_RESOLVED`, carrying the stored record). It is for
+  **trusted relays**: `provenance.by` must be a directed person id (resolved, never a raw channel
+  id — a non-directed `by` is refused with `INVALID_REQUEST`), and `confirmed` mirrors the
+  surface's explicit confirm step (§6a) — voice and glass always set true, and the gateway refuses
+  a voice or glass answer without it. `otherText` is scanned at settlement; a redacted answer is
+  stored redacted with `answer.redactedByScan: true`.
+- `supersede` withdraws (`statusReason: "withdrawn"`) or replaces (`"replaced"`, the new
+  question's id lands in `supersededBy`). It is the **asker only** (§5): a plugin may supersede
+  records whose stamped `source.pluginId` is its own — anything else (including `agent_tool`
+  questions) is refused. The replacement re-runs the open checks: ≤ 2,000 chars, secret scan, the
+  §3 option rules, directedTo resolution.
+- Terminal states are final. A late answer to an expired or superseded question is refused and
+  never reopens it.
+
+## Tool mapping for coordinators
+
+Morgan's relay calls `question_answer(id, answer, provenance)`; the mapping is one call:
+
+```ts
+await api.questions.answer(id, answer, provenance); // via + channel are the provenance
+```
+
+- `answer` is `{ optionIds?, otherText? }` — option **ids**, never positions (a channel user's
+  `2` is resolved to an option id by core, below).
+- `provenance` is `{ by, via, channel?, confirmed }`. `by` is the **resolved ADR 2243 person id**
+  the relay's channel identity maps to — never the raw channel id; a `by` outside `directedTo` is
+  refused. `via` is `"channel"` and `channel` names the channel the answer arrived on.
+- Races are normal for a relay (at-least-once delivery): catch `QuestionAlreadyResolvedError` and
+  treat it as success-with-the-stored-record.
+- A relay never parses channel replies. A channel message starting with `Q-<n>:` is answered by
+  the **core reply matcher** on the inbound dispatch path (`src/gateway/questions/reply-matcher.ts`):
+  the sender's person is resolved with `resolveCanonicalIdentity` (SenderId-first, the storage
+  rule), the ref is answered only when that person is in `directedTo` — matched by 1-based number,
+  option id or exact label, comma-separated for multi, free text as `otherText` when `allowOther`
+  — and the next message in a blocking question's own direct session answers it under the same
+  directed check. Group, channel and main sessions have no next-message rule; an unresolvable
+  sender is never consumed. A reply about a terminal ref gets the constant "`Q-<n>` is closed".
+- The channel text rendering of a question (`Q-<n>: prompt`, numbered options, the reply hint) is
+  also core's, `renderQuestionChannelText` in the same module — deliver it verbatim; do not
+  re-render the record into your own format.
+
+## `onChanged` is cluster-wide
+
+`onChanged` delivers every question's state changes from any gateway in the cluster, blocking or
+async, at least once, through the change feed (§10), so a question opened on gateway A and
+answered on gateway B reaches your running callback on A with no restart. Transitions made on
+your gateway arrive one by one, the open included; transitions made on another gateway arrive as
+that question's latest revision, so a question opened and answered there between two polls
+reaches you once, already answered. Delivery is at-least-once: **dedupe on
+`(questionId, revision)`**, and treat a revision jump as catch-up. Only
+scan-clean records are delivered (§11).
+
+## TheFactory mirror (factory-record)
+
+`extensions/factory-record` mirrors the lifecycle one-way into TheFactory `questions/Q-<n>.md`.
+The mirror is **human-readable only**: nothing reads state back from it, editing a mirror file by
+hand does not answer a question, and the next revision overwrites the file.
+
+- factory-record subscribes to `onChanged` (cluster-wide, §10), so a question opened on one
+  gateway and answered over WhatsApp on another updates the running mirror with no restart.
+- It persists a **reconciliation cursor** that advances only from completed ordered scans: after
+  a `questions.list { afterChangeSeq: <cursor> }` page is fully written, the cursor moves to that
+  page's last `changeSeq`. Writes made from `onChanged` (fast path or poll) never move it,
+  because `onChanged` can deliver seq 11 before seq 10 (§10 local fast path) — otherwise a
+  restart before 10 arrives would lose 10. It scans on start and every 60 s, and never relies on
+  timestamps.
+- Writes are idempotent on `(questionId, revision)`, and a lower revision never overwrites a
+  higher one. Several revisions of one question queueing up are coalesced: only the highest is
+  written — one git revision per burst, not per transition.
+- Only records that passed the settlement scan are written; an answer redacted by the scan is
+  written redacted (`answer.redactedByScan: true`), never raw.
+- Mirror-only fields (`notified_at`, `surfaces`) belong to factory-record and are never read by
+  the gateway.
+- A mirror failure (git, lock or secret scan) is logged and retried from the cursor. It never
+  blocks or changes the lifecycle.
+
+Front-matter mapping from the record (§8):
+
+| Front-matter key | Record field                                                                      |
+| ---------------- | --------------------------------------------------------------------------------- |
+| `id`             | `questionId`                                                                      |
+| `ref`            | `ref` (also the filename: `questions/Q-<n>.md`)                                   |
+| `status`         | `status`                                                                          |
+| `status_reason`  | `statusReason`                                                                    |
+| `mode`           | `mode`                                                                            |
+| `asked_by`       | `source.kind` / `source.agentId`                                                  |
+| `session`        | `source.sessionKey`                                                               |
+| `directed_to`    | `directedTo.persons`                                                              |
+| `answer`         | `answer.optionIds[]` + `answer.otherText` (redacted when `answer.redactedByScan`) |
+| `answered_by`    | `answer.by`                                                                       |
+| `answered_via`   | `answer.via` (`answer.channel` when set)                                          |
+| `answered_at`    | `answer.at`                                                                       |
+| `revision`       | `revision` (idempotency key with `id`)                                            |
+
+## Status
+
+Shipped (PQ.4). The gateway methods (`questions.list/get/answer/supersede`) and both events
+(`question.requested`, `question.changed`) are live, and `api.questions` is the store-backed
+implementation (`createPluginQuestionsApi` in `src/gateway/questions/plugin-api.ts`) wired into
+every plugin api with the plugin id stamped by core. `createQuestionsApiStub` remains exported
+from `wednesdayai/plugin-sdk/testing` for tests that need the rejecting shape.

@@ -728,6 +728,36 @@ Gateway methods:
 - `tts.providers`
 - `tts.speak` (on-demand read aloud, inline audio)
 - `tts.readAloud.status` (whether read aloud is available)
+- `tts.pronunciation.get` / `tts.pronunciation.set` / `tts.pronunciation.remove` (the
+  pronunciation dictionary)
+
+## Pronunciation dictionary
+
+Every signed-in person can teach the assistant how to pronounce words in **their** speech
+output. An entry is one written word (`word`, for example "Kubernetes") and the pronounce-as
+form (`spoken`, for example "koo ber net ees"). Entries live in the gateway's SQL session
+storage (SQLite and Postgres), so an edit from one device applies to every device of that
+person — and to every synthesis seam (read aloud, auto-TTS replies, `/tts audio`, the `tts`
+tool, Voice mode clauses, phone calls) — and to every gateway in a cluster.
+
+- A small, curated set of **default pronunciations** ships with the core (nginx, kubectl,
+  PostgreSQL, Kubernetes, YAML and friends — standardised spoken forms for common tech terms
+  engines mispronounce). Defaults apply to everyone, including operator tools and scheduled
+  jobs where no person resolves; `messages.tts.pronunciation.defaults: false` turns them off.
+  Your own entry with the same word overrides the default.
+- Matching is one whole-word pass per spoken sentence, longest form first: a term's words may
+  be joined by spaces or one of `-_./`, so "kube control", "kube-control" and "kubeControl"
+  all match a "kube control" entry, and "Kubernetes" is never matched inside "KubernetesAPI".
+  The spoken form is written exactly as entered and is never re-scanned — one entry's spoken
+  form cannot trigger another entry — and the LLM rewrite and summary passes never re-apply
+  the dictionary.
+- `word` is 1–64 and `spoken` 1–128 characters after trimming, with no newlines or control
+  characters; other characters (including "AT&T") are ordinary text and providers escape them
+  where their API needs it. Up to 128 entries per person; a word can be defined once
+  (case-insensitively).
+- The dictionary affects spoken output only. Voice input (dictation, STT) never reads it.
+
+Wire shapes and refusals are documented in the [gateway protocol](/next/admin/gateway/protocol#ttspronunciationget--ttspronunciationset--ttspronunciationremove).
 
 ## Troubleshooting
 

@@ -59,7 +59,7 @@ Client → Gateway:
   "method": "connect",
   "params": {
     "minProtocol": 3,
-    "maxProtocol": 3,
+    "maxProtocol": 4,
     "client": {
       "id": "cli",
       "version": "1.2.3",
@@ -92,7 +92,7 @@ Gateway → Client:
   "type": "res",
   "id": "…",
   "ok": true,
-  "payload": { "type": "hello-ok", "protocol": 3, "policy": { "tickIntervalMs": 30000 } }
+  "payload": { "type": "hello-ok", "protocol": 4, "policy": { "tickIntervalMs": 30000 } }
 }
 ```
 
@@ -115,32 +115,38 @@ param-level feature flags a client must detect before sending (for example
 `"chat.history.spanTranscripts"` — see the `chat.history` params). Older gateways omit
 `capabilities`, so its absence means the feature is unavailable.
 
+`capabilities` also carries the web-client layout the operator chose with
+`gateway.webClient.shell`: `"web.shell.v2"` when it is `"v2"`, and `"web.shell.classic.locked"`
+when it is `"force-classic"`; neither is sent for `"classic"` or when it is unset. The web client
+picks its layout from them at every hello.
+
 ### Protocol admission (role floors)
 
 `minProtocol`/`maxProtocol` must admit the gateway's current protocol version. The floors are
 role-keyed (`src/gateway/server/ws-connection/connect-admission.ts`):
 
 - a node-role connect with `mode: "node"` is admitted down to `MIN_NODE_PROTOCOL_VERSION` (3),
-  so legacy v3 nodes keep working after the protocol-4 cut (ADR 2691);
+  so legacy v3 nodes keep working (ADR 2691) — such a session is a legacy-node session;
 - a `mode: "probe"` connect is admitted down to `MIN_PROBE_PROTOCOL_VERSION` (3);
-- every other client (operators, UIs) must include the current `PROTOCOL_VERSION` (3 today, 4
-  after the cut).
+- every other client (operators, UIs) must include the current `PROTOCOL_VERSION` (4).
 
 A refused connect answers the request with `ok: false`, `error.code: "INVALID_REQUEST"`, and
 `error.details` carrying the `PROTOCOL_MISMATCH` shape: `clientMinProtocol`,
 `clientMaxProtocol`, `expectedProtocol`, the server's `minProtocol`/`maxProtocol` window, and
 `reloadRequired: true` for `control_ui` clients (reload the web app; do not reconnect blind).
 The socket then closes with `1002`. One `gateway/protocol` log line per successful connect
-records `{role, mode, clientId, clientVersion, min, max}`, and an operator connection with
-`maxProtocol < 4` warns that the protocol-4 cut will refuse it.
+records `{role, mode, clientId, clientVersion, min, max}`, with `legacyNode: true` on a legacy
+v3 node session.
 
 ### Plugin surface URLs (canvas)
 
 `hello-ok` carries optional `pluginSurfaceUrls`: a record of surface name to scoped URL. The
 only surface today is `canvas` — the same per-node capability-scoped URL the legacy
-`canvasHostUrl` field carries. The legacy field is deprecated and is removed at protocol 4
-(ADR 2691); protocol 3 keeps both so existing nodes are unaffected. Clients that support
-protocol 4 read `pluginSurfaceUrls.canvas` first and fall back to `canvasHostUrl`.
+`canvasHostUrl` field carries. Since the protocol-4 cut (ADR 2691), a v4 session's
+`hello-ok` carries `pluginSurfaceUrls` only; the deprecated `canvasHostUrl` field is sent to
+legacy v3 node sessions (admitted under `MIN_NODE_PROTOCOL_VERSION = 3`) until that floor
+rises to 4. Clients that support protocol 4 read `pluginSurfaceUrls.canvas` first and fall
+back to `canvasHostUrl`.
 
 ### Node example
 
@@ -151,7 +157,7 @@ protocol 4 read `pluginSurfaceUrls.canvas` first and fall back to `canvasHostUrl
   "method": "connect",
   "params": {
     "minProtocol": 3,
-    "maxProtocol": 3,
+    "maxProtocol": 4,
     "client": {
       "id": "ios-node",
       "version": "1.2.3",
@@ -261,12 +267,16 @@ read or write groups later are refused until they are allowlisted.
   [Device companions and device.self](#device-companions-and-deviceself).
   `identity.devices.list` joined with the app-login plan (ADR 2600): it reads the caller's own
   person's devices from any own device. See [Identity RPCs](#identity-rpcs).
+  `questions.list` and `questions.get` joined with the question lifecycle (ADR 2657): the web
+  client's question cards read the lifecycle; row filtering against `directedTo` is
+  handler-guarded. See [Questions](#questions-adr-2657).
 - `operator.sessions.write`: `chat.send`, `chat.surfaces.pin`, `chat.abort`, `sessions.create`, `sessions.steer`,
   `sessions.abort`, `sessions.runs.cancel`, `sessions.runs.continue`, `sessions.patch`,
   `sessions.title.prepare`, `talk.session.create`, `talk.session.appendAudio`,
   `talk.session.close`, `talk.session.cancelTurn`, `talk.session.mark`,
-  `talk.session.bargeIn`, `talk.session.update`, `identity.link.claim`, `identity.logout` and
-  `identity.devices.remove`. `chat.surfaces.pin` joined with ADR 0106 (assistant UI surfaces): it is
+  `talk.session.bargeIn`, `talk.session.update`, `identity.link.claim`, `identity.logout`,
+  `identity.devices.remove`, `questions.answer` and `questions.supersede`. `chat.surfaces.pin`
+  joined with ADR 0106 (assistant UI surfaces): it is
   the one surfaces write, flipping the pinned boolean on a surface the session already owns.
   Submitting a form or choice is not this method - it is a `chat.send` with a `uiAction` param,
   and the turn is command-inert (see [Assistant UI surfaces](#assistant-ui-surfaces)).
@@ -289,6 +299,12 @@ read or write groups later are refused until they are allowlisted.
   connection, never the request body; behaviour is under [Identity RPCs](#identity-rpcs).
   `identity.devices.remove` joined with the app-login plan (ADR 2600): a person removes one of
   their own devices (the lost-phone path). See [Identity RPCs](#identity-rpcs).
+  `questions.answer` joined with the question lifecycle (ADR 2657): a directed person answers
+  from web or Glass; authorization against `directedTo` is handler-guarded. `questions.supersede`
+  joined the narrow write list (contract §5 path (ii)): a connection that may write the asking
+  session — the same person gate as `chat.send` — supersedes from web or Glass, and the handler
+  enforces the asker-only rule (the asker plugin/agent, a session-writer connection, or
+  `operator.admin`) on every call. See [Questions](#questions-adr-2657).
   `talk.realtime.*`, `talk.config`
   and `talk.mode` stay operator-only, as do every other `tts.*` method.
 
@@ -331,7 +347,9 @@ there is no server-side filter for it, clients filter.
 A narrow connection never receives the admin-only session fields: the `sessions.patch` echo and
 every `sessions.list` / `sessions.describe` row omit `execHost`, `execNode`, `execSecurity`,
 `execAsk`, `sendPolicy`, `spawnedBy`, `spawnDepth`, `elevatedLevel`, `verboseLevel`,
-`responseUsage` and `groupActivation`. Write and admin connections receive them unchanged.
+`responseUsage` and `groupActivation`, and the `chat.history` response omits its `verboseLevel`
+the same way (the rest of the payload is unchanged) (#1940). Write and admin connections receive
+them unchanged.
 
 `health` and `status` return the existing non-admin redacted projection for these scopes, and
 `health` with `probe: true` is refused (`missing scope: operator.read`) because a forced live probe
@@ -348,22 +366,26 @@ A connection that either carries a narrow session scope, or presents the bounded
 `openclaw-user-client` id, and in either case does not satisfy `operator.read`, receives only these
 events:
 
-| Event              | Requires                 |
-| ------------------ | ------------------------ |
-| `chat`             | `operator.sessions.read` |
-| `chat.activity`    | `operator.sessions.read` |
-| `sessions.changed` | `operator.sessions.read` |
-| `runs.invalidated` | `operator.sessions.read` |
-| `talk.event`       | `operator.sessions.read` |
-| `tick`             | none                     |
-| `heartbeat`        | none                     |
+| Event                | Requires                 |
+| -------------------- | ------------------------ |
+| `chat`               | `operator.sessions.read` |
+| `chat.activity`      | `operator.sessions.read` |
+| `sessions.changed`   | `operator.sessions.read` |
+| `runs.invalidated`   | `operator.sessions.read` |
+| `talk.event`         | `operator.sessions.read` |
+| `question.requested` | `operator.sessions.read` |
+| `question.changed`   | `operator.sessions.read` |
+| `tick`               | none                     |
+| `heartbeat`          | none                     |
 
 `talk.event` joined this table with ADR 0086/0088: a narrow connection receives it only for its own
 Talk sessions, never another connection's.
 
 Everything else, including `presence`, `health`, `cron`, `exec.approval.*`, `device.pair.*`,
 `node.pair.*`, `node.invoke.request`, `talk.mode`, `agent`, `sessions.runsUpdate` and any event
-registered later, is not delivered. Operator connections are unaffected.
+registered later, is not delivered. Operator connections are unaffected. `exec.approval.list`
+applies the same gate: a narrow connection calling it gets an empty `approvals` list, matching
+what the live broadcast would have delivered it.
 
 Chat events are not filtered per session owner: every session stays visible to every operator-role
 connection on a gateway.
@@ -453,7 +475,7 @@ exec approvals whose session actor is the app's own linked person (ADR 2242 D5).
 receives no `exec.approval.requested`/`exec.approval.resolved` event for any other approval,
 including one with no session or an unowned session, or any approval when its device is not linked
 to a person. `exec.approval.resolve` and `exec.approval.waitDecision` answer for a hidden approval
-exactly as for a missing one. The `learning.*` approval methods are refused with
+exactly as for a missing one, and `exec.approval.list` omits it. The `learning.*` approval methods are refused with
 `missing scope: operator.admin`. A device paired as one of the app client ids stays bound to that
 app identity: a reconnect declaring a non-app id is refused with `details.reason = "metadata-upgrade"`
 until an administrator approves the new pairing request.
@@ -663,8 +685,9 @@ command allowlist above so a gateway deny still wins. The refusal carries
   canvas capability and get a fresh scoped URL; the response is
   `{ pluginSurfaceUrls: { canvas: <scoped url> } }`. An unknown or missing surface fails with
   `INVALID_REQUEST`. The deprecated `node.canvas.capability.refresh` (empty params) returns the
-  same rotation as `{ canvasHostUrl, canvasCapability, canvasCapabilityExpiresAtMs }` and is
-  removed at protocol 4 (ADR 2691).
+  same rotation as `{ canvasHostUrl, canvasCapability, canvasCapabilityExpiresAtMs }`; since
+  the protocol-4 cut (ADR 2691) it stays for legacy v3 node sessions until the node floor
+  rises to 4.
 - Nodes may call `skills.bins` to fetch the current list of skill executables
   for auto-allow checks.
 - Nodes may send `node.event` with `event: "device.context"` to publish live device state.
@@ -682,9 +705,9 @@ command allowlist above so a gateway deny still wins. The refusal carries
 
 - Operators may call `health` to fetch the status summary. With the `operator.admin` scope the
   response also carries `protocolClients`: the live connection inventory grouped by
-  `{ role, mode, maxProtocol, clientVersion, count }` (ADR 2691). The protocol-4 cut reads
-  this inventory, so an operator socket that sent `maxProtocol < 4` stays visible there until
-  it reconnects or is closed.
+  `{ role, mode, clientId, maxProtocol, clientVersion, count }` (ADR 2691; `clientId` lets the
+  gate exclude legacy app clients). The P2 gate that read this inventory before the
+  protocol-4 cut is closed; the inventory itself stays as the live protocol census.
 - Operators may call `tools.catalog` (`operator.read`) to fetch the runtime tool catalog for an
   agent. The response includes grouped tools and provenance metadata:
   - `source`: `core` or `plugin`
@@ -952,16 +975,19 @@ command allowlist above so a gateway deny still wins. The refusal carries
   1..1000 (default 200). `before` is the opaque `cursor` of an earlier response; without it the call
   returns the newest page. The response carries `sessionKey`, `sessionId`, `messages`,
   `thinkingLevel`, `verboseLevel` and `hasMore`, plus `cursor` when `hasMore` is true: pass that
-  value back as `before` to fetch the next older page. When the gateway's response size budget
-  drops older rows from a page, `hasMore` is forced true and `cursor` points at the oldest row that
-  was kept, so the next `before` call resumes exactly at the first dropped message. `maxChars`
+  value back as `before` to fetch the next older page. Narrow (`operator.sessions.*`) connections
+  receive no `verboseLevel` field — the narrow-field rule above — and fall back to their own
+  default; `operator.read`/`operator.write`/`operator.admin` connections still receive it. When the
+  gateway's response size budget drops older rows from a page, `hasMore` is forced true and
+  `cursor` points at the oldest row that was kept, so the next `before` call resumes exactly at the
+  first dropped message. `maxChars`
   (1..500000) is applied last, to the finished page: it keeps the newest messages whose text fits
   and drops older ones whole (the newest message is always kept), and it does not move `cursor`, so
   messages it drops are not revisited by paging. An undecodable cursor, or one issued by a
   different session store backend, returns `INVALID_REQUEST` with
   `details.reason = "invalid_cursor"`.
-- `spanTranscripts` (optional boolean, `apps/web` and the Control UI v2 console today) pages
-  across the session key's
+- `spanTranscripts` (optional boolean, `apps/web`, the Control UI v2 console and the TUI today)
+  pages across the session key's
   earlier transcripts - idle, daily and explicit resets each start a new transcript under the
   same key. Rows then carry `__openclaw.transcriptId` and `__openclaw.rowId` becomes
   `"<sessionId>:<seq>"` (placeholder chunk ids derive from it); `__openclaw.seq` stays
@@ -1394,6 +1420,11 @@ from the key's `agent:<id>:` prefix, or the default agent for keys without one (
 it for store routing. Clients must not parse the key to recover the agent (ADR 0081); read this
 field instead.
 
+`sessions.direct` resolves the calling device's per agent+person pair key: under a `main`
+`dmScope` it returns the per-pair shape (`agent:<id>:direct:<person|device:…>`), never the
+system `agent:<id>:main` bucket, which stays reserved for heartbeat, cron and a2a turns
+(#2824). The key stays opaque (ADR 0081): clients never parse it.
+
 For example, these are complete RPC `params` objects; they require no imports:
 
 ```json
@@ -1456,9 +1487,9 @@ the run (a run's first delta carries the full text). When the new assistant text
 extension of the already-streamed prefix (a restart or rewrite), the delta resends the full
 text with `replace: true` — "replace the streamed prefix with this text"; otherwise `replace`
 is absent and the client appends. The cumulative `message` field stays on every delta for
-clients that have not switched to `deltaText`. Under protocol 4 (ADR 2691) the flat `chat`
-event becomes a per-state union whose delta arm requires `deltaText`, and a clearing delta is
-`{ deltaText: "", replace: true }`.
+clients that have not switched to `deltaText`. Since the protocol-4 cut (ADR 2691) the flat
+`chat` event IS a per-state union whose delta arm requires `deltaText`, and a clearing delta
+is `{ deltaText: "", replace: true }`.
 
 ### Chat run origin
 
@@ -1478,6 +1509,13 @@ trigger, `subagent` from the spawn-declared subagent lane on the `agent` request
 the ACP control-plane turn. A person typing into a child session starts an untagged user run. A
 client can hide the live system turn by provenance: its deltas, reasoning and aborted partial are
 internal, and its final is the run's user-facing result unless a delivery-mirror final follows.
+
+A `final` carries optional `replyAlert: true` only on the connections of devices the gateway
+alerts about it: devices of the session's owner, when the session is that person's direct chat
+(`sessions.direct`) with a user-facing agent, or when the device follows the session
+(`chat.subscribe` from its node). Other connections get the same final without the field, and node
+subscribers never get it. It marks eligibility, not a push: the device may also get an APNs alert
+for the same reply. Duplicates are possible.
 
 A `role: "node"` connection receives `chat`, `chat.activity` and `agent` events only for sessions
 it subscribed to with `node.event` `chat.subscribe`; the operator broadcast of those events never
@@ -1508,12 +1546,16 @@ empty: nothing renders. This matches upstream protocol v4; there is no `silent` 
   nothing, so the clear is sent as usual.
 - An aborted partial uses the deltas' sentinel view: a trailing lead fragment such as `NO_RE` and
   standalone edge sentinel lines are removed, and a sentinel-only partial ships with no `message`.
-- `hello-ok.features.capabilities` contains `"chat.final.silent"` when the gateway guarantees the
-  clearing delta. With it, a client may render deltas immediately and retract on the clearing
-  delta. Without it (older gateways), a client keeps holding sentinel-prefix text and ignores a
-  zero-text delta.
-- The capability is WednesdayAI-only and protocol-v3-only. Protocol v4 adoption retires it and
-  adds upstream's `deltaText: ""` and `replace: true` to the clearing delta.
+- `hello-ok.features.capabilities` contained `"chat.final.silent"` while the wire was protocol
+  3 (a WednesdayAI-only temporary capability): with it, a client may render deltas immediately
+  and retract on the clearing delta. The protocol-4 cut (ADR 2691) retired it — the clearing
+  delta itself (`{ deltaText: "", replace: true }` before the message-less terminal) is the
+  guarantee upstream's v4 clients get. A protocol-3 gateway still advertises it, so a client
+  keeps rendering unheld and retracting against a rolled-back v3 gateway that carries PR C's
+  silent finals; without the capability on a v3 gateway, a client keeps holding
+  sentinel-prefix text and ignores a zero-text delta. A protocol-4 `hello-ok.protocol` makes
+  the web client treat silence as authoritative: it drops the `NO_REPLY` prefix hold entirely
+  and keeps only the exact heartbeat-ack hide.
 
 ### The chat error event
 
@@ -1949,36 +1991,158 @@ Params: `{agentId?}` (string, min length 1; `additionalProperties: false`). Resu
 when the read-aloud gate is on **and** at least one provider in the resolved provider order is
 configured; it reports gate state only, never a secret. A handler failure is `UNAVAILABLE`.
 
+### `tts.pronunciation.get` / `tts.pronunciation.set` / `tts.pronunciation.remove`
+
+`operator.read` for `get`; `operator.write` for `set` and `remove`; never narrow-admitted. The
+person is resolved server-side from the connection (like `push.mute.*`), never from params, so
+an edit from any one of a person's devices applies to every device they own — and to every
+synthesis seam that speaks for them (see [TTS](/next/users/tts#pronunciation-dictionary)).
+
+- `tts.pronunciation.get` `{}` → `{entries: PronunciationEntry[], defaults}` — the person's
+  own entries plus the shipped default pronunciations (read-only `{word, spoken}` rows that
+  apply to everyone; a user entry with the same word overrides a default at synthesis time).
+- `tts.pronunciation.set` `{entry: {id?, word, spoken}}` → `{entry: PronunciationEntry}`. An
+  absent `id` adds with a server-assigned id; a present `id` edits that entry. `word` is the
+  written form ("Kubernetes"), `spoken` the pronounce-as form.
+- `tts.pronunciation.remove` `{id}` → `{ok: true, removed}`; `removed: false` when the person
+  holds no such entry (idempotent). `set` and `remove` apply only to the person's own entries;
+  the shipped defaults are read-only.
+- A `PronunciationEntry` is `{id, word, spoken}`. `word` is 1–64 and `spoken` 1–128 characters
+  after trimming, with no newlines or control characters; at most 128 entries per person.
+
+Errors carry `error.details.reason`: `pronunciation_person_required` (the connection resolves no
+person — sign in again), `pronunciation_invalid` (empty after trimming, over the bound, or a
+newline/control character), `pronunciation_duplicate` (another entry already holds that word,
+case-insensitively; on an edit the entry's own id is excluded), `pronunciation_not_found` (an
+edit or removal named an id the person does not hold) and `pronunciation_limit` (the person
+already holds 128 entries). Every successful `set` and removing `remove` broadcasts
+`pronunciation.changed` with `{person}` so a second signed-in surface can refetch; the word and
+spoken form are never logged.
+
 ## Exec approvals
 
 - When an exec request needs approval, the gateway broadcasts `exec.approval.requested`.
 - Operator clients resolve by calling `exec.approval.resolve` (requires `operator.approvals` scope).
+- `exec.approval.list` (`operator.approvals`, params `{}`) returns the still-pending (unresolved,
+  unexpired) approvals as `{approvals: [{id, request, createdAtMs, expiresAtMs}, …]}` — the same
+  per-item shape as the `exec.approval.requested` payload. It applies the same visibility rules as
+  that broadcast — the broadcaster's connection eligibility gate (scope guard and the narrow
+  client exclusion above: a narrow connection gets an empty list) plus the owner/person audience
+  filter — so an approval the caller would not have received as a live broadcast is omitted, and
+  resolved or expired approvals drop out. A client that connects after an approval opened, or
+  that missed the one-shot broadcast, recovers the pending set with it.
 - For `host=node`, `exec.approval.request` must include `systemRunPlan` (canonical `argv`/`cwd`/`rawCommand`/session metadata). Requests missing `systemRunPlan` are rejected.
+
+## Questions (ADR 2657)
+
+One canonical question lifecycle (normative contract:
+`docs/superpowers/specs/2026-11-16-question-lifecycle-contract.md`): an agent's `ask_user` tool
+(mode `blocking`, a run waits) and the coordinator/plugins (mode `async`, nothing waits) open
+questions in the gateway's `ctx_questions` store; people answer them from any surface, and the
+open and every transition emit one event. There is **no public `questions.open` method** —
+questions are opened only by `ask_user` and by the plugin API
+([docs/plugins/questions.md](/next/developers/plugins/questions)), so clients cannot fabricate them.
+
+Every question is one `QuestionRecord`: `questionId` (`q_<ULID>`), a human `ref` (`Q-<n>`),
+`status` (`open` → `answered` | `superseded` | `expired`, with `statusReason` `timeout` /
+`asker_gone` / `withdrawn` / `replaced`), `mode`, `source` (kind + `agentId` + opaque
+`sessionKey` / `sessionRunId` / `pluginId`), `directedTo.persons` (ADR 2243 person ids: who may
+answer and who is notified), `prompt` (≤ 2,000 chars, secret-scanned), `options`
+(`QuestionOption[]`: `id` `[a-z0-9_-]{1,32}` unique, `label` ≤ 80, `description?` ≤ 200,
+`recommended?` — 0–8 options, at most one recommended), `selection` (`single` | `multi`),
+`allowOther` (a free-text "Other" answer; required true when options is empty) with `otherLabel?`
+(≤ 40, default "Other"), `urgency` (`low` | `normal` | `high`), `sensitivity` (`normal` |
+`sensitive`, one-way up, with `sensitivityReasons[]` `agent` / `approval` / `command` /
+`secret_scan`), `expiresAt`, `answer` (`optionIds[]`, `otherText?`, `by`, `via` (`web` | `glass` |
+`voice` | `watch` | `channel`), `channel?`, `at`, `confirmed`, `redactedByScan?`), `supersededBy?`,
+`ownerInstanceId?` (blocking only), `revision` (+1 per transition), `changeSeq` (commit-ordered
+cluster feed position) and `createdAt` / `updatedAt`. There is no `optionIndex` anywhere:
+answers carry option **ids**, never positions.
+
+Methods (all classified `operator.read` for the reads and `operator.write` for the writes):
+
+- `questions.list {status?, directedToMe?, sessionKey?, afterChangeSeq?, limit?, cursor?}` →
+  `{questions: QuestionRecord[], nextCursor?}` — only rows the caller may answer or see, ordered
+  by `changeSeq`. An explicit `afterChangeSeq` (or a "feed" continuation cursor) below the
+  retention deletion floor is refused `RESYNC_REQUIRED` with `details.pruneFloorSeq`: rows below
+  the floor may be gone, so the reader snapshot-reconciles and resumes at the floor. A call
+  without a token is a snapshot from the start and is never refused; its continuation cursors are
+  opaque "snapshot" tokens that page the snapshot to the end without hitting the floor. Retention
+  is two-stage: terminal
+  rows compact to tombstones (prompt/options/answer cleared; id, ref, status, revision and
+  `change_seq` intact) after 24h, and tombstones are deleted after 90d while `pruneFloorSeq`
+  tracks the highest deleted `change_seq` — the `Q-<n>` ref counter and the feed counter never
+  reset.
+- `questions.get {questionId | ref}` → `{question: QuestionRecord}` — the two identity fields are
+  individually optional and the handler enforces exactly-one (the typebox rules forbid a union
+  schema); a non-directed `get` answers the same `NOT_FOUND` as a missing ref, so there is no
+  existence oracle.
+- `questions.answer {questionId | ref, optionIds?, otherText?, via, confirmed}` →
+  `{question: QuestionRecord}` — answers from a directed person settle the record with one
+  conditional update; a second answer is refused `ALREADY_RESOLVED`. `via` names the surface and
+  is required; voice and glass always run the explicit confirm step, so the handler refuses
+  `via: "voice" | "glass"` with `confirmed: false` (§6a). Free text (`otherText`) is
+  secret-scanned at settlement; a redacted answer is stored redacted with
+  `answer.redactedByScan: true` and is never broadcast or mirrored raw.
+- `questions.supersede {questionId, replacement?}` → `{question: QuestionRecord}` — the asker's
+  method: the plugin/agent that opened the question, a connection that may write the asking
+  session, or `operator.admin`. `replacement` is the §7 `open` input shape and re-runs the open
+  checks (≤ 2,000 chars, secret scan, the §3 option rules, directedTo resolution); `withdrawn`
+  when absent, `replaced` (with `supersededBy`) otherwise.
+
+Events: `question.requested {role: "question", question: QuestionRecord}` fires once at open —
+every surface renders it as a question, and blocking questions append the same `role: "question"`
+entry to the asking session's transcript so chat history shows a question card, not prose (§9).
+`question.changed {question: QuestionRecord}` fires on every later transition (answered,
+superseded, expired), so every surface can close its card. Both follow the same delivery rules:
+narrow user-client connections receive them under `operator.sessions.read` (narrow event
+allowlist above); operator connections under `operator.read`. Delivery is additionally gated at
+the emit site to directed persons (plus session visibility for blocking questions in shared
+sessions) and fails closed on config failure (ADR 2243 residual: an unlinked, non-admin
+connection sees all questions).
 
 ## Versioning
 
-- `PROTOCOL_VERSION` lives in `src/gateway/protocol/schema/protocol-schemas.ts` and is exported
-  from `src/gateway/protocol/schema.ts`.
-- Clients send `minProtocol` + `maxProtocol`; the server rejects mismatches.
+- `PROTOCOL_VERSION` (4), `MIN_CLIENT_PROTOCOL_VERSION` (4), `MIN_NODE_PROTOCOL_VERSION` (3)
+  and `MIN_PROBE_PROTOCOL_VERSION` (3) live in `src/gateway/protocol/version.ts` and are
+  exported from `src/gateway/protocol/schema.ts`. Every client bundle advertises
+  `[CLIENT_MIN_SUPPORTED_PROTOCOL, CLIENT_MAX_SUPPORTED_PROTOCOL]` = `[3, 4]` — independent of
+  the server floors, so a deployed client survives both the cut and a one-revert rollback to a
+  v3 gateway (ADR 2691).
+- Clients send `minProtocol` + `maxProtocol`; the server rejects mismatches (see the admission
+  floors above).
 - Core generates the JSON Schema snapshot from the TypeBox definitions and commits it at
   `src/gateway/protocol/gateway-protocol.schema.json` (`pnpm protocol:check` guards it); the
-  schema root carries `x-protocol-version` and `x-error-codes`, and reused definitions carry
-  `x-schema-name`. The npm tarball ships it at `dist/contracts/gateway-protocol.schema.json`,
-  with the exec and system-run parity fixtures under `dist/contracts/fixtures/` for the native
-  clients' parity tests.
-- `pnpm protocol:gen` also writes the **protocol-4 preview** next to the live snapshot:
-  `src/gateway/protocol/gateway-protocol.v4.schema.json`, shipped as
-  `dist/contracts/gateway-protocol.v4.schema.json`. It is the target registry of the
-  protocol-4 cut (ADR 2691) — `x-protocol-version: 4`, `ChatEvent` as the per-state union
-  (`ChatDeltaEvent`/`ChatFinalEvent`/`ChatAbortedEvent`/`ChatErrorEvent`), `hello-ok` with
-  `pluginSurfaceUrls` only, and `node.pluginSurface.refresh` params — published so client
-  generators (P2) build and test against the final shape before the cut. The live wire
-  protocol stays version 3 until the cut.
-- **Deprecated at protocol 3, removed for protocol 4 sessions** (ADR 2691): `hello-ok.canvasHostUrl`
-  (→ `pluginSurfaceUrls.canvas`), `node.canvas.capability.refresh` (→
-  `node.pluginSurface.refresh`), and the flat `chat` event members — the flat shape becomes the
-  per-state union above. Legacy v3 node sessions (admitted under `MIN_NODE_PROTOCOL_VERSION = 3`)
-  keep `canvasHostUrl` and `node.canvas.capability.refresh` until that floor rises to 4.
+  schema root carries `x-protocol-version` (4) and `x-error-codes`, and reused definitions
+  carry `x-schema-name`. The npm tarball ships it at
+  `dist/contracts/gateway-protocol.schema.json`, with the exec and system-run parity fixtures
+  under `dist/contracts/fixtures/` for the native clients' parity tests. The pre-cut v4
+  preview snapshot (`gateway-protocol.v4.schema.json`) that P2 generators built against was
+  deleted with the cut.
+- **Deprecated at protocol 3, retired by the protocol-4 cut** (ADR 2691): the flat `chat`
+  event members — the wire schema is now the per-state union above — and the temporary
+  `chat.final.silent` hello capability. `hello-ok.canvasHostUrl` (→ `pluginSurfaceUrls.canvas`)
+  and `node.canvas.capability.refresh` (→ `node.pluginSurface.refresh`) stay for legacy v3
+  node sessions (admitted under `MIN_NODE_PROTOCOL_VERSION = 3`) until that floor rises to 4;
+  a v4 session's `hello-ok` carries no `canvasHostUrl`.
+
+### v3 → v4 migration
+
+| v3 shape                                                    | v4 shape (ADR 2691)                                                                                                         |
+| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `hello-ok.protocol: 3`                                      | `hello-ok.protocol: 4`                                                                                                      |
+| `hello-ok.canvasHostUrl: <url>`                             | absent on v4 sessions — read `pluginSurfaceUrls.canvas`; legacy v3 node sessions keep the field                             |
+| flat `chat` event: `state` + optional `deltaText`/`replace` | four-arm closed union (`ChatDeltaEvent`/`ChatFinalEvent`/`ChatAbortedEvent`/`ChatErrorEvent`); a delta requires `deltaText` |
+| delta without `deltaText` (cumulative `message` only)       | invalid; a delta names its own increment, or resends the full text with `replace: true`                                     |
+| clearing delta under `chat.final.silent`                    | no capability; the clearing delta is `{ deltaText: "", replace: true, message: <empty-text assistant message> }`            |
+| `node.canvas.capability.refresh`                            | `node.pluginSurface.refresh { surface: "canvas" }`; the legacy method stays for legacy v3 node sessions                     |
+| operator connect at `maxProtocol: 3`                        | refused: `PROTOCOL_MISMATCH` details, close 1002 (`reloadRequired` for `control_ui`)                                        |
+
+Glass mobile `3.5.0` advertises `maxProtocol: 3` on its operator socket: at the cut the
+gateway refuses it with `PROTOCOL_MISMATCH` (the node socket is unaffected — legacy nodes stay
+admitted at 3). An operator build advertising `[3, 4]` is required; the TestFlight build
+1794900322 sends `[3, 4]`.
+
 - Swift models are generated in the
   [WednesdayAI-apps](https://github.com/ExpansionX/WednesdayAI-apps) repository from the synced
   snapshot (`npm run contracts:sync`).
@@ -2206,7 +2370,19 @@ its own — and traffic rides the app's sockets, tagged with `accessoryId` on th
   handshake, and a node without a paired device (shared token) keeps its grant from the cap kinds
   directly. Detaching the `cap:<kind>` row revokes the grant until the next connect re-attaches
   it; the `cap:` accessory-id prefix is reserved for the gateway's auto-attachments.
-- Only the app manages accessories: the caller must carry a verified device id, be connected as
+- A cold first pairing no longer waits for the operator to attach (#2804, gateway 4.3): a
+  node-role connection may call `device.accessory.attach` against its own verified paired
+  device — same `{accessoryId, kind, model?}` params, closed kind table, persistence and
+  accessory-lock discipline as the app path. The attached kinds grant the device's node session
+  at hello and on every later reconnect, and refresh the live session without a reconnect. The
+  node caller names no device: the target is always the calling device's own record, so a node
+  can never attach to, or inherit a grant from, another device. The mutation revalidates the
+  caller inside the accessory lock — device still paired, its node token not revoked, the
+  connection not suspended — so a `device.token.revoke` that lands while an attach is queued
+  persists nothing and is refused with `accessory_forbidden`. `detach`/`list` stay
+  operator-only.
+- Only the app manages accessories (`detach`, `list`, and `attach` from any non-node caller): the
+  caller must carry a verified device id, be connected as
   the app-profile client it enrolled with (`bootstrapClientId` decides, never a relabelled client
   id) and hold a live operator token. Every refusal carries `error.details.reason`:
   `accessory_forbidden` (not a signed-in app device), `accessory_kind_unknown`,
@@ -2219,7 +2395,7 @@ its own — and traffic rides the app's sockets, tagged with `accessoryId` on th
   (else `accessory_not_attached` — companions and other callers can never borrow the app's
   accessories). A tag admits only an explicit allowlist of core methods — `node.invoke`,
   `node.event`, `node.invoke.result`, `chat.send`, `chat.abort`, `chat.history`,
-  `exec.approval.resolve`, `device.self` (`ACCESSORY_TAGGABLE_METHODS` in
+  `exec.approval.resolve`, `exec.approval.list`, `questions.answer`, `device.self` (`ACCESSORY_TAGGABLE_METHODS` in
   `src/shared/accessory-profiles.ts`); everything else tagged, including every plugin method and
   `device.accessory.*` itself, is refused with `accessory_method_denied` (checked before the scope
   check, so a tag can never reach a handler that dispatches node commands of its own, such as

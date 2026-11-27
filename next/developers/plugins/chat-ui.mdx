@@ -1,7 +1,7 @@
 ---
-summary: "Ship a chat UI plugin: a browser entry module that adds panels to the web client sidebar, with per-user data via plugins.chatUi.request"
+summary: "Ship a chat UI plugin: a browser entry module that adds panels to the web client sidebar's Apps list, with per-user data via plugins.chatUi.request"
 read_when:
-  - You want to add a Memory, Calendar or Extensions panel to the web client from a plugin
+  - You want to add a panel to the web client sidebar's Apps list from a plugin
   - Your panel shows end-user data and you need the chatUser handler contract
   - The web client does not load your chat UI and you need the failure rules
 title: "Chat UI plugins"
@@ -14,6 +14,7 @@ sources:
   - src/config/types.gateway-consoles.ts
   - apps/web/src/plugins/chat-ui-store.ts
   - apps/web/src/plugins/chat-ui-host.ts
+  - apps/web/src/apps/registry.ts
 generated: 2026-11-12
 ---
 
@@ -21,11 +22,10 @@ generated: 2026-11-12
 
 A chat UI plugin ships **one browser ES module**. After the operator allowlists the plugin, the
 web client imports the module, calls its `activate(host)`, and the plugin mounts its own DOM into
-the right-panel slot shared with Canvas and Inbox. A panel registered for the `memory` slot
-enables the Sidebar's **Memory** entry (the `calendar` slot enables **Calendar** the same way);
-other panels list under an **Extensions** sidebar group. The **Add extension** entry stays
-disabled: installing new plugins from the client is not part of this tier (ADR 0634, amending
-ADR 0113).
+the right-panel slot shared with Canvas and Inbox. Each registered panel joins the sidebar's
+**Apps** list, which holds the built-in apps and the plugin panels in one A–Z order; the panel's
+slot picks its icon. The sidebar has no disabled entries: installing new plugins from the client
+is not part of this tier (ADR 0634, amending ADR 0113; ADR 2916).
 
 The contract is deliberately small, like `plugin-sdk/control-ui` for the operator console, and
 the two are not compatible: chat panels are single-slot and scoped to the signed-in **end user**,
@@ -147,11 +147,14 @@ user, so a chat panel must re-query through `request` when it needs fresh data.
 
 ### Slots and the sidebar
 
-| Slot        | Sidebar effect                                                                                |
-| ----------- | --------------------------------------------------------------------------------------------- |
-| `memory`    | The previously disabled **Memory** entry becomes a live button that opens the panel.          |
-| `calendar`  | The previously disabled **Calendar** entry becomes a live button that opens the panel.        |
-| `extension` | A button under the **Extensions** sidebar group, before the disabled **Add extension** entry. |
+| Slot        | Sidebar effect                                    |
+| ----------- | ------------------------------------------------- |
+| `memory`    | Joins the **Apps** list with the `memory` icon.   |
+| `calendar`  | Joins the **Apps** list with the `calendar` icon. |
+| `extension` | Joins the **Apps** list with the `puzzle` icon.   |
+
+The Apps list orders every entry A–Z by label, ignoring case, and breaks ties by key (ADR 2916):
+a panel's place follows its label, not the order plugins register.
 
 All panels render in the right-panel slot shared with Canvas and Inbox; opening a chat panel
 closes Canvas or Inbox and vice versa.
@@ -191,6 +194,83 @@ If the signed-in device has no linked identity, the dispatcher answers
 side sees a rejected `request`, not your data. Scoping data to `chatUser.person` is your
 responsibility: the gateway injects identity, it does not sandbox your Node side.
 
+### The optional `scope` (ADR 2661)
+
+A v2 app may name one concrete assistant session per call: `host.request(method, params, { scope })` sends `plugins.chatUi.request` a `scope` of exactly the `{agentId, sessionKey}` pair. The dispatcher validates the shape (`INVALID_REQUEST` otherwise)
+and rules the caller's person against that session with `connectionMaySeeSession` (ADR 2243):
+another person's session answers `NOT_FOUND` — a no-existence-oracle refusal, before your
+handler runs. A passing scope arrives in your handler options beside `chatUser`:
+
+```ts
+opts.scope; // { agentId: "main", sessionKey: "..." } | undefined — set only when the call carried one
+```
+
+Without `scope`, nothing changes: the request resolves the caller's linked person exactly as
+apiVersion 1 always did. The scope never replaces `chatUser` — keep scoping reads to the
+person, and use `scope.sessionKey` only for the per-assistant slice of your data.
+
+## Apps: `apiVersion: 2` (ADR 2661)
+
+`defineChatUiPluginV2` registers an **app** with panel and optional full-page views, a fixed
+icon, and the scopes it understands. The v1 contract above is unchanged — not overloaded, not
+retyped — and `registerPanel` keeps working forever as the v1 path; `apiVersion` is the
+opt-in: a plugin module that declares `apiVersion: 2` gets the v2 host, everything else stays
+on apiVersion 1. App ids and panel ids share the plugin's one id namespace — both project to
+the same registry key (`pluginId/id`) — so registering a panel with an id an app already
+claims, or the reverse, is refused.
+
+```js
+import { defineChatUiPluginV2 } from "wednesdayai/plugin-sdk/chat-ui";
+
+export default defineChatUiPluginV2({
+  id: "acme-apps", // must equal the plugin manifest id, as in v1
+  apiVersion: 2,
+  activate(host) {
+    return host.ui.registerApp({
+      id: "notes", // panel id rules apply (lowercase, 1-48 label)
+      label: "Acme notes",
+      icon: "notes", // fixed set; omit for the generic "puzzle" glyph
+      scopes: ["assistant", "all"], // which scopes the app understands
+      panel(el, ctx) {
+        /* imperative DOM in el, like a v1 mount */
+      },
+      full(el, ctx) {
+        /* optional full-page view */
+      },
+    });
+  },
+});
+```
+
+- `ctx` is `{host, signal, scope, onScopeChange, openFull, close}`. `scope` is the app view's
+  scope — `{kind: "assistant", agentId, sessionKey}` or `{kind: "all"}`; `onScopeChange(cb)`
+  subscribes to shell scope changes and returns the unsubscribe disposer. The registry never
+  hands a view a scope outside its declared `scopes`: an app that declares only `["all"]` is
+  mounted with `{kind: "all"}` no matter what the shell's active scope is, and an app that
+  declares only `["assistant"]` is never mounted person-wide — a mount or scope switch
+  carrying `{kind: "all"}` is refused or dropped, and the view keeps its last supported
+  scope. A plugin that wants person-wide rendering must declare `all`.
+- A scope names a concrete session only when the app decides a call needs one:
+  `host.request(m, p, {scope: {agentId, sessionKey}})`. The SDK never auto-injects `ctx.scope`
+  — only the app knows whether a method is person-wide or per-assistant. The gateway
+  person-gates every scoped call (see the `scope` section above).
+- Both views receive an `AbortSignal`; the imperative mount/dispose lifecycle is the v1 one.
+  `full` is optional: without it the app is panel-only.
+- v1 panels keep appearing as apps: a `registerPanel` claimant surfaces in the app registry
+  under `${pluginId}/${panel.id}` with `legacySlot` set, so the deployed inbox Calendar panel
+  (slot `calendar`) keeps its exclusive slot and its entry in the sidebar's Apps list.
+
+### Scope semantics
+
+A v2 shell mounts an app with the scope of the conversation it is opened from
+(`{kind: "assistant", agentId, sessionKey}`) or person-wide (`{kind: "all"}`). An app that does
+not declare `"assistant"` is always mounted person-wide, even from a scoped conversation — the
+registry coerces, plugins never guess. `ctx.onScopeChange(cb)` notifies a mounted app when its
+scope changes; re-render in place, do not remount. The scope is an opaque wire pair — never
+parse `sessionKey` for identity (ADR 0081); gate assumptions stay server-side. The built-in
+Inbox and Orca apps are person-wide (`scopes: ["all"]`); Canvas accepts both and keys its
+surface reads by `scope.sessionKey` when mounted assistant-scoped.
+
 ## Same-origin only
 
 Chat plugin modules load only when the web client is **served by the gateway** (the gateway's
@@ -216,8 +296,8 @@ state kept across activations.
 
 ## Troubleshooting
 
-**The Memory entry stays disabled.** No plugin registered a `memory` panel: the gateway does not
-advertise `plugins.chatUi.list` (older gateway), no plugin is allowlisted under
+**Your panel is not in the Apps list.** No plugin registered it: the gateway does not advertise
+`plugins.chatUi.list` (older gateway), the plugin is not allowlisted under
 `gateway.webClient.pluginUi.allow`, or the plugin's activation failed.
 
 **`request` rejects with `identity_unlinked`.** The signed-in device has no linked person. Link
