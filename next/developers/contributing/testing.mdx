@@ -88,7 +88,7 @@ The per-job command list for every parked workflow lives in `.github/workflows-d
 These stay enabled:
 
 - **Deterministic Security**: a weekly (Tuesday 04:17 UTC) and on-demand gitleaks and semgrep full-repo scan; PRs are scanned locally.
-- **release-please**, **npm-publish**: releases need the npm OIDC trusted-publishing identity, which exists only in GitHub Actions; **npm-parity** is the daily registry watchdog that opens issues.
+- **release-please** (docs-only pushes are skipped, ADR 2857), **npm-publish**: releases need the npm OIDC trusted-publishing identity, which exists only in GitHub Actions; **npm-parity** is the weekly registry watchdog (Mondays 06:23 UTC, baselined at the registry's published `latest`) that opens issues.
 - **docs-site-links**: a weekly live-site link check against `docs.wednesdayai.dev`; it opens a `docs site link gaps` issue.
 - **CodeRabbit**: a GitHub App that reviews PRs. It is configured in `.coderabbit.yaml` and uses no Actions minutes.
 
@@ -103,6 +103,7 @@ No CI catches breakage between PRs: after merging a batch, run `pnpm check` on `
 - `pnpm install` points `core.hooksPath` at `git-hooks/`, except under `CI=true`.
 - pre-commit fixes lint and format on staged files.
 - pre-push runs the gitleaks scan of unpushed commits, then `pnpm check`, then the advisory local review.
+- On a shared host with a test-lane wrapper, the hook runs `pnpm check` through it, so a push waits for the lane instead of running beside another gate. It uses `OPENCLAW_TEST_LANE` when set (`off` disables it), else `test-lane` on `PATH`, else `bin/test-lane` under `HOME` or under the login user's home from the passwd database (so a temporary `HOME` still finds it). A caller that already holds the lane sets `OPENCLAW_TEST_LANE_HELD=1`, because the wrapper's lock is not re-entrant.
 - Install gitleaks with `brew install gitleaks` (or a release binary). Without it the push goes ahead with a warning.
 - A false positive goes into `.gitleaksignore` by Fingerprint.
 - `OPENCLAW_SKIP_PREPUSH=1` skips the hook for WIP pushes.

@@ -38,8 +38,8 @@ Per-agent override: `agents.list[].tools.profile`.
 Profiles:
 
 - `minimal`: `session_status` only
-- `coding`: `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `image`
-- `messaging`: `group:messaging`, `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `session_status`
+- `coding`: `group:fs`, `group:runtime`, `group:sessions`, `group:memory`, `ask_user`, `image`
+- `messaging`: `group:messaging` (includes `ask_user`), `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `session_status`
 - `full`: no restriction (same as unset)
 
 Example (messaging-only by default, allow Slack + Discord tools too):
@@ -152,7 +152,7 @@ Available groups:
 - `group:automation`: `cron`, `gateway`
 - `group:messaging`: `message`
 - `group:nodes`: `nodes`
-- `group:device`: every [device tool](#device-tools) of the run's linked nodes
+- `group:device`: every [device tool](#device-tools) of the run's linked nodes (user-started runs only, unless a run config explicitly allows the group)
 - `group:openclaw`: all built-in WednesdayAI tools (excludes provider plugins)
 
 Example (allow only file tools + browser):
@@ -417,16 +417,29 @@ a second tool with the same name, are skipped with a warning. The tool's paramet
 
 A run sees a node's device tools only when:
 
+- the run was started by the user: an inbound channel message, a client acting as the user
+  (gateway `chat.send`, or the `agent` RPC from a user-scoped client or the CLI), the CLI
+  `agent` command, or an inline skill command from a user message. Automatic turns fail closed —
+  heartbeat, cron, automation, completion HTTP and other SDK entry points, announce/completion
+  delivery, `sessions_send`-delivered turns, spawned sub-agents, compaction,
+  preview and HTTP `tools/invoke` get none unless the run explicitly opts in with `group:device`
+  (via `tools.alsoAllow`, `heartbeat.toolsAllow`, or the per-run tool allowlist; a spawned
+  sub-agent can also use `tools.subagents.tools.alsoAllow`);
 - the node's device is linked to the run's person in `session.identityLinks` (`device:<nodeId>`);
 - the command passes the node command allowlist (`gateway.nodes.allowCommands` /
   `gateway.nodes.denyCommands`);
 - for a descriptor with `proactive: false`, the turn is user-initiated (not cron, heartbeat, or
-  other background turns).
+  other background turns) — an explicit `group:device` opt-in on a background run does not lift
+  this per-command gate.
 
 Device tools then pass the normal tool policy (profile, allow/deny, per-agent, sandbox) and
 `before_tool_call` hooks. `group:device` names all of them: `tools.deny: ["group:device"]` removes
 them, and a restrictive profile such as `coding` drops them unless `tools.alsoAllow` includes
-`group:device`; `group:plugins` does not include them. Calls go through the gateway `node.invoke`, which validates the arguments against
+`group:device`; `group:plugins` does not include them. Operator-scope connections count as
+user-started when they act for the session's linked person (ADR 2802, option A): operator scope is
+full trust, so automations MUST NOT run on operator tokens — scheduled and unattended work uses
+the heartbeat, cron, and automation surfaces plus the `group:device` opt-in instead. Calls go
+through the gateway `node.invoke`, which validates the arguments against
 the descriptor and applies per-node limits (see
 [Command descriptors](/next/admin/gateway/protocol#command-descriptors-node)) before the node sees the call.
 The `nodes` tool stays available for commands without a descriptor.
@@ -482,6 +495,19 @@ Notes:
 - `send` routes WhatsApp via the Gateway; other channels go direct.
 - `poll` uses the Gateway for WhatsApp and MS Teams; Discord polls go direct.
 - When a message tool call is bound to an active chat session, sends are constrained to that session’s target to avoid cross-context leaks.
+
+### `ask_user`
+
+Ask the person a structured question (options, multi-select, Other) and pause the run until it
+is answered, superseded or it expires; on expiry proceed with best judgment
+(`No answer arrived; proceed with best judgment.`). One canonical lifecycle with
+[`api.questions`](/next/developers/plugins/questions): the question is delivered as a `question.requested`
+event and a `role: "question"` transcript entry — never assistant prose — and every surface
+(web, Glass, voice, watch, channels via `Q-<n>:`) answers the same record. Cancelling or
+restarting the run settles the open question `expired/asker_gone`; timeouts default to 900 s
+(30–3 600 s window).
+
+Full behavior, surfaces and the privacy gate: [Ask User Tool](/next/users/tools/ask-user).
 
 ### `cron`
 

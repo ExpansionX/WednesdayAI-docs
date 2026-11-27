@@ -10,7 +10,8 @@ audience: admin
 # `wednesdayai inbox`
 
 Query the local inbox message store — the unified, per-source replica of external messages
-(Gmail via the `gog` watch pipeline, BlueBubbles (iMessage), Discord, and WhatsApp; BlueBubbles
+(Gmail via the `gog` watch pipeline, BlueBubbles (iMessage), Discord, WhatsApp, and Microsoft
+365 mailboxes added as accounts by the agent; BlueBubbles
 and Discord also backfill history through pull scanners while the gateway runs, and WhatsApp
 feeds the store live from its inbox-mode account — see
 [Account mode](/next/admin/channels/channel-routing#account-mode)).
@@ -25,8 +26,9 @@ running gateway.
 wednesdayai inbox list [--source <source>] [--direction in|out] [--account <accountId>] [--category <name>] [--review] [--since <when>] [--limit <n>]
 wednesdayai inbox classifications [--since <when>] [--source <source>] [--account <accountId>] [--limit <n>] [--json]
 wednesdayai inbox correct <id> <category>
+wednesdayai inbox presets revert --migration <id>
 wednesdayai inbox prefilter-score [--source <source>] [--since <iso>] [--min-precision <ratio>] [--min-support <n>] [--json]
-wednesdayai inbox ms365 login
+wednesdayai inbox ms365 accounts list|add <account> --owner <person>|signin <account>|status [<account>]|remove <account> [--json]
 wednesdayai inbox backfill --source <source> [--account <id>] [--since <iso> | --all | --convert]
 wednesdayai inbox owners list [--json]
 wednesdayai inbox owners bind <identity> <source:accountId>...
@@ -71,25 +73,66 @@ an account not in inbox mode (channel-backed sources report
 line to stderr with no stack trace and exits with status 1 (for example,
 `inbox source bluebubbles is not enabled`); committed pages stay checkpointed for the next run.
 
-## `ms365 login`
+## `ms365 accounts`
+
+```bash
+wednesdayai inbox ms365 accounts list [--json]
+wednesdayai inbox ms365 accounts add <account> --owner <person> [--json]
+wednesdayai inbox ms365 accounts signin <account> [--json]
+wednesdayai inbox ms365 accounts status [<account>] [--json]
+wednesdayai inbox ms365 accounts remove <account> [--json]
+```
+
+Manages the Microsoft 365 accounts of this deployment: several mailboxes, one slot label
+each, stored in the inbox database. `<account>` is a slot label — lowercase letters, digits
+and hyphen, at most 32 characters, starting with a letter or digit. See
+[Microsoft 365 inbox source](/next/developers/reference/inbox-ms365#4-add-sign-in-and-remove-accounts) for
+the Entra app setup and the account model. These commands talk to the **running gateway**
+(unlike `list` and `correct`, which read the store directly); start the gateway first.
+
+- `list` renders one row per account with five columns: account (slot label), state,
+  username, owner and failure reason. Without an argument, `status` prints the same table.
+- `add` registers a new slot and starts its device-code sign-in. `--owner` names the person
+  the account belongs to (an existing identity name, as with `owners bind`). The name is
+  matched case-insensitively and stored as the configured identity key; an unknown name is
+  refused with `unknown-owner` and nothing is written. The owner binding for mail and
+  calendar is written with the account, before any mail is ingested.
+- `signin` starts (or restarts) the device-code sign-in for the slot. It prints the
+  verification URL and the code, then polls the account status every 5 seconds until the
+  account is `active`, signed out again, or the code expired. Ctrl-C ends the polling
+  without affecting the sign-in. A re-consent of an already signed-in account (for example
+  after adding `Calendars.Read` to `inbox.ms365.scopes`) polls until its flow completes.
+  `add` and `signin` exit 0 only when the account ends `active`; any other end state, a
+  refusal, or (with `--json`) a non-ok outcome exits 1. With `--json`, stdout is one JSON
+  document — the call's outcome, including the device code — and the command then waits
+  silently for the same end state. Without `--json`, an already-pending sign-in whose code
+  has arrived is not a refusal: the command prints that code and polls as above.
+- `status <account>` reports one account. The rendered table shows the same five columns
+  as `list` — the pending device-code URL, code and expiry are NOT printed there; use
+  `status <account> --json` to read them from the view's `pendingSignin` field.
+- `remove` stops syncing the slot and deletes its stored sign-in. Mail already ingested is
+  kept, and the slot can be re-added later by signing in as the same identity.
+
+`add` and `signin` require the `inbox.ms365.clientId` config key. In app-only mode, `signin`
+runs no device code: it re-verifies the configured mailbox with the configured client
+secret.
+
+Sign-in always starts from an operator: these commands, the Control UI (**Channels →
+Microsoft 365** panel), or the approval-gated `inbox.ms365_accounts` agent tool. The gateway
+never starts one in the background. While an account is signed out it makes no calls to
+Microsoft and sends one nudge per episode.
+
+### `ms365 login` (deprecated)
 
 ```bash
 wednesdayai inbox ms365 login
 ```
 
-Signs the Microsoft 365 inbox source in (delegated mode) through a device-code flow. It prints
-a verification URL and a code; open the URL, enter the code and sign in as the mailbox user.
-Run it on the gateway host: the tokens go to `inbox.ms365.tokenStorePath`, and the running
-gateway picks them up on its next eligible poll, normally within 15 minutes. An existing
-failure cooldown can delay that poll.
-
-Sign-in always starts from an operator: this command, the Control UI (**Channels → Microsoft
-365 inbox → Start sign-in**), or the approval-gated `inbox.ms365_signin` agent tool. The
-gateway never starts one in the background. While signed out it makes no calls to Microsoft
-and sends a single nudge that names these options. In app-only mode it silently loads a token,
-using an unexpired cache when available; it does not start device authorization or force a
-client-secret check. Requires the `inbox.ms365` config block (`tenantId`, `clientId`). See
-[Microsoft 365 inbox source](/next/developers/reference/inbox-ms365#4-sign-in-delegated).
+Deprecated alias for `inbox ms365 accounts signin <legacy account>`, where the legacy
+account is the single mailbox this deployment used before accounts moved into the inbox
+database (the `inbox.ms365.mailbox` slot when set, otherwise `default`). It prints
+`inbox ms365 login is deprecated; use: wednesdayai inbox ms365 accounts signin <account>`
+and then behaves like `signin`.
 
 ## `owners`
 
@@ -145,10 +188,10 @@ The **last stdout line** is the JSON payload (all diagnostics go to stderr):
   eligible items. `text` is sender-controlled content wrapped as untrusted context, so it is
   never rendered as trusted gateway text.
 
-Eligible items are inbound rows in the digest categories (`Newsletter`, `Notifications` until
-the classifier lands) with no policy flag, newer than the stored cursor. A fresh uncategorized
-row inside the 30-minute settlement grace clamps the digest so a soon-to-be-classified item is
-never double-surfaced.
+Eligible items are inbound rows in the digest categories (`Notification`, `To Read` on email
+and `Transactions` on chat, ADR 2734) with no policy flag, newer than the stored cursor. A
+fresh uncategorized row inside the 30-minute settlement grace clamps the digest so a
+soon-to-be-classified item is never double-surfaced.
 
 The command is **read-only against the main cursor**: it never advances
 `inbox_cursors(source='digest', scope='heartbeat')`. On a wake it durably writes the candidate
@@ -316,34 +359,59 @@ mode:
   category without an LLM call. The result is stored with `category_source='prefilter'` and
   the matched signal in `category_signal`.
 
-| Signal              | Verdict                                                     |
-| ------------------- | ----------------------------------------------------------- |
-| `imip`              | `Calendar/Meeting`                                          |
-| `delivery-report`   | `Notifications`                                             |
-| `mailer-daemon`     | `Notifications`                                             |
-| `auto-replied`      | `FYI`                                                       |
-| `auto-generated`    | `Notifications`                                             |
-| `tool-notification` | `Notifications`                                             |
-| `discord-bot`       | `Notifications`                                             |
-| `gmail-promotions`  | `Marketing/Cold`                                            |
-| `sender-memory`     | the sender's prior verdict                                  |
-| `bulk`              | no category — removes `Needs Reply` from the LLM vocabulary |
+| Signal              | Verdict                                                                    |
+| ------------------- | -------------------------------------------------------------------------- |
+| `imip`              | `Meetings` (email rows) / `FYI` (chat rows)                                |
+| `delivery-report`   | `Notification`                                                             |
+| `mailer-daemon`     | `Notification`                                                             |
+| `auto-replied`      | `To Read` (email rows) / `FYI` (chat rows)                                 |
+| `auto-generated`    | `Notification`                                                             |
+| `tool-notification` | `Notification`                                                             |
+| `discord-bot`       | `Transactions`                                                             |
+| `gmail-promotions`  | `Sales & Marketing`                                                        |
+| `sender-memory`     | the sender's prior verdict                                                 |
+| `bulk`              | no category — removes `To Respond` / `Needs Reply` from the LLM vocabulary |
 
 The prefilter is conservative by design:
 
 - An enabled user or correction-learned rule **gates** the signals it could collide with:
   its condition is prose that may claim any message, so every structural signal (`imip`
   through `gmail-promotions`) stops short-circuiting while it is enabled. The `bulk` hint
-  is gated only by a custom rule named `Needs Reply`. `sender-memory` is never gated: it
+  is gated only by a custom rule named `To Respond` or `Needs Reply`. `sender-memory` is never gated: it
   replays the sender's own earlier verdicts, which were made with the custom rules in the
   prompt. Gated signals are still shadow-logged; the gateway logs one warning naming them,
   and `wednesdayai doctor` lists them.
 - It **never overwrites** a non-NULL category, so a manually corrected item stays manual.
 - `sender-memory` replays a sender's earlier verdicts only when they are unanimous (≥ 3
-  verdicts, one category) and never replays `Needs Reply`, `Awaiting Reply` or `Unclear`.
+  verdicts, one category) and never replays `To Respond`, `Needs Reply`, `Awaiting Reply` or
+  `Unclear`.
 - In `on` mode, `inbox.classify.prefilterSignals` allowlists which signals may
   short-circuit (unset = all). Add a signal only after `inbox prefilter-score` reports
   PASS for it — the bar is precision ≥ 0.8 over ≥ 50 scored rows.
+
+### First pass
+
+After the prefilter declines and before the full classifier, `inbox.classify.firstPass`
+(ADR 2734) runs one small JSON call asking whether the message is an automated notification
+or transactional message sent by a system rather than written by a person. The row's preset
+scope decides which category a `true` verdict writes: `Notification` for email rows,
+`Transactions` for chat rows, stored with `category_source='rule'` and
+`category_signal='first-pass'` — and the full classifier call is skipped.
+
+- `off` — the probe is skipped entirely.
+- `shadow` (default) — the probe runs, the full classifier still owns the write, and the
+  agreement between the two is logged: `first-pass shadow: item <id> notification <bool> llm
+<verdict> agree|disagree`.
+- `on` — a `true` verdict writes the notification rule directly. Anything else — `false`,
+  unparseable output, or any non-ok result — falls through to the full classifier, so an
+  unavailable model still surfaces as unavailable.
+
+The probe costs no extra attempt: the retry sweep still counts one admitted attempt per
+item, with the full call chained behind the probe's completion. A refused chained call
+leaves the item pending for the sweep. The prompt vocabulary itself is scoped per row:
+email rows see the email preset rules, chat rows the chat preset ones (ADR 2734 §1), and
+the prompt carries the row's source, chat kind, group title and owner-addressing level
+inside the data fence.
 
 Data limits: Gmail watch-push rows carry no message headers, so header-based signals fire
 only for full-fetched Gmail rows. A Gmail reconcile pass adds the headers to the watch rows
@@ -387,7 +455,7 @@ The output is one row per signal:
 
 A signal with 0 evaluable rows has no data to read; its 0 fires are not proof that the
 messages are absent. A signal with evaluable rows and 0 fires never fired on that data.
-For `bulk`, the verdict class is any category except `Needs Reply`.
+For `bulk`, the verdict class is any category except `To Respond` / `Needs Reply`.
 For `sender-memory`, it is any category that memory can replay.
 
 `--json` adds `evaluable`, `notEvaluable`, `recallBase`, and `recall` to each signal.
@@ -426,6 +494,26 @@ written. On success the command prints `Corrected <id> → <category>` and the c
 Errors are loud and write nothing: an unknown item id fails with
 `no inbox item with id "<id>"`; an unknown or disabled category fails before any write —
 the item is unchanged and no correction row is written.
+
+## Reverting a category migration: `inbox presets revert`
+
+```bash
+wednesdayai inbox presets revert --migration d2-presets-v1
+```
+
+The D2 category presets (ADR 2734) remapped existing rows once, on the first store open: old
+starter categories moved to the preset names (`Newsletter` → `To Read` on email, `FYI` on
+chat; `Marketing/Cold` → `Sales & Marketing` / `Promotions`; `Receipts/Finance` →
+`Invoices & Receipts` / `Transactions`; `Notifications` → `Notification` / `Transactions`;
+`Calendar/Meeting` → `Meetings` / `FYI`; `Needs Reply` → `To Respond` on email), old starter
+rules outside the presets were disabled, `Travel` became a user rule, and thread reply states
+were recomputed. Every original value was logged before it changed.
+
+`presets revert` undoes that migration in one transaction and prints the restored counts
+(`N items, N rules, N threads restored`). It restores only values the migration itself
+wrote: an item recategorized after the remap keeps its newer category, and log rows are
+never deleted. A `__reverted__` marker keeps the next store open from re-applying the
+migration. Email rows are `gmail`/`ms365`; every other source is chat.
 
 ## Storage configuration
 

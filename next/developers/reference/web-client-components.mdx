@@ -160,15 +160,12 @@ The contract:
   transcription provider and the gate on, Voice additionally needs a configured streaming speech
   provider.
 - The props are a union: pass **exactly one** of `phase`, `finding` or `reason`. Use `finding` for controls that wait on a tracked finding rather
-  than a phase: Calendar and Memory cite `"F1, GitHub #634"` (their fallback while no chat UI
-  plugin provides those panels), Add extension cites the extension marketplace item
-  `"F1, GitHub #1331"`, and the P2 retags (message
+  than a phase: the P2 retags (message
   feedback, message regenerate, account-menu settings, account-menu keyboard shortcuts, composer
   search) each cite their own finding (`"F-2026-09-29-1x, GitHub #69x"`, ADR 0085 M9); the
   `finding` tooltip wording is fixed, so it reads "coming with the extension panel SDK" whichever
-  finding it cites. Memory and Calendar render as live sidebar buttons instead when a chat UI
-  plugin registers those slots; the DisabledControl is the fallback while no plugin is
-  allowlisted (see [Chat UI plugins](/next/developers/plugins/chat-ui)). Use `reason` for capability-driven
+  finding it cites. The sidebar has no disabled entries: its Apps list (`SidebarApps`) renders
+  only what the gateway and chat UI plugins provide (ADR 2916). Use `reason` for capability-driven
   unavailability that is not roadmap work:
   the `reason` text is rendered verbatim after the label, so it names why this connection cannot
   use the control — Dictate and Voice mode pass `"unavailable on this gateway"` when `talk.catalog`
@@ -275,7 +272,7 @@ sees as chats.
 | Reply                        | `replyChip` in the store (`composer-reply`), `message-reply`, `message-reply-quote`; `chat.send` `replyToId`                                                                                                                                                 |
 | Picked assistants            | `SessionListRuntime.selectAgent` records `pickedAgentIds` (session-only); `Sidebar` always lists them past the activity window                                                                                                                               |
 | Assistant order              | `ui/assistant-order.ts`: `sortAssistants` (`RECENT_ASSISTANT_WINDOW_MS` 24 h, `Intl.Collator` base sensitivity, id fallback), `useAssistantOrder` freezes the order; `SessionListState.assistantOrderEpoch`                                                  |
-| Inbox                        | Sidebar entry `sidebar-inbox` (badge `sidebar-inbox-unread`) is the only entry point; `AppShell.openInboxPanel` opens `InboxPanel` in the shared right-panel slot and `inbox-panel-close` closes it; hidden unless hello-ok advertises the `inbox.v1` family |
+| Inbox                        | Apps entry `sidebar-app:inbox` (badge `sidebar-app-badge:inbox`) is the only entry point; `useChatPluginPanels` `openBuiltin` opens `InboxPanel` in the shared right-panel slot, `inbox-panel-close` closes it; hidden unless hello-ok advertises `inbox.v1` |
 | Steer, Queue                 | `handleSteer`, `handleQueue` in `use-chat-queue.ts`, `message-queued-badge`; `sessions.steer`                                                                                                                                                                |
 | This chat changed elsewhere  | `chatChangedNotice` (`chat-changed-notice`), `ActiveLeafChangedError`; first refusal auto-resends (`sendChatMessageOnce`); gateway `active-leaf-changed`                                                                                                     |
 
@@ -318,10 +315,11 @@ GatewayConnection --frames--> WebClientRuntime --events bus--> AppShell --> zust
   `Thread` announces each newly drawn tool step in a visually hidden `aria-live="polite"` region
   (`data-testid="tool-step-announcer"`): the tool name only, no status cues, and nothing while
   the display hides tools.
-- `app/AppShell.tsx` subscribes to the events seam once per runtime, writes into the store
-  (`state/chat.ts`, `useChatStore`) and composes the hooks described under
-  [Chat controls and hooks](#chat-controls-and-hooks). Components read the store or receive props;
-  they do not subscribe to the connection themselves.
+- `app/use-chat-runtime-events.ts` subscribes to the events seam once per runtime and writes into
+  the store (`state/chat.ts`, `useChatStore`). `app/AppShell.tsx` calls it, the other chat hooks
+  (`use-active-chat.ts`, `use-app-services.ts`, `use-chat-surface.ts`) and the ones described
+  under [Chat controls and hooks](#chat-controls-and-hooks), and keeps only the layout. Components
+  read the store or receive props; they do not subscribe to the connection themselves.
 - The seam interfaces are kept in the shape of their upstream Saturday origin, including members
   the web client no-ops (desktop context, accessibility). Provenance is in `apps/web/NOTICE`.
   The Saturday-era seams with no web client consumer are gone, not no-oped: the events seam's
@@ -461,7 +459,7 @@ provider module per concern, each testable without a gateway connection.
 | History, older pages, chat leaf  | `app/use-chat-history.ts`, `app/completed-history-matching.ts`, `app/completed-history-reconcile.ts`, `app/completed-history-placement.ts`, `providers/leaf-tracking.ts` | `chat.history {before}`                                                                                    |
 | Chat list filter, search, paging | `providers/session-list-runtime.ts`, `providers/navigation-preferences.ts`                                                                                               | `sessions.list {agentId, search, includeInternal, sortBy, sortOrder, includeAgentActivity, offset, limit}` |
 | Assistant colours                | `ui/assistant-color.ts`, `providers/gateway-mappers.ts`                                                                                                                  | `agents.list` `identity.color`                                                                             |
-| Assistant names and avatars      | `app/AppShell.tsx`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                                                 | `agents.list` `identity.name`, `identity.emoji`                                                            |
+| Assistant names and avatars      | `app/use-active-chat.ts`, `ui/assistant-avatar.ts`, `ui/Thread.tsx`, `ui/AssistantMessage.tsx`                                                                           | `agents.list` `identity.name`, `identity.emoji`                                                            |
 | Dictate                          | `ui/Composer.tsx` (`composer-dictate`), `app/use-dictate.ts`, `ui/use-dictate-autosend.ts`                                                                               | `talk.catalog`, `talk.session.*` mode `transcription`                                                      |
 | Voice mode                       | `ui/Composer.tsx` (`composer-voice`), `ui/VoiceCaptions.tsx`, `app/use-voice.ts`                                                                                         | `talk.catalog`, `talk.session.*` mode `stt-tts` or `realtime`                                              |
 | Read aloud                       | `ui/AssistantMessage.tsx`, `app/use-read-aloud.ts`, `providers/read-aloud-player.ts`                                                                                     | `tts.readAloud.status`, `tts.speak`                                                                        |
@@ -632,16 +630,16 @@ Contracts worth keeping when you change them:
   final for a run this client did not start never settles the leaf directly; it schedules a
   transcript re-read (`settleThenRefreshRows`), and that `foreign-turn` /
   `foreign-turn-preserve-local` page does note the leaf — only the own-run `completed-turn`
-  reconcile opts out (`AppShell` sets `skipLeafNoteRef` for `completed-turn` alone) — so a client
-  that has shown the other device's turn stops tripping the guard, while an unseen turn is still
-  caught. Returning to a visible tab with a tracked leaf, an active chat and no own turn in flight
-  reads the leaf once and emits `foreign-turn` when it moved. On a first `active-leaf-changed`
-  refusal the send is still accepted (VAL-LEAF-002 reversal): the runtime re-learns the leaf
-  (`refreshAfterUnseenChanges`), merges the unseen rows while keeping the optimistic user row
-  (`foreign-turn-preserve-local`, no notice), and resends once automatically with a fresh
-  `idempotencyKey` (`sendChatMessageOnce(params, "leaf-retry")`); switching chats while that
-  refresh is in flight cancels the resend (`selectionSupersededError`) and the caller restores the
-  draft. Only a second consecutive refusal takes the pre-reversal path —
+  reconcile opts out (`use-chat-runtime-events.ts` sets `skipLeafNoteRef` for `completed-turn`
+  alone) — so a client that has shown the other device's turn stops tripping the guard, while an
+  unseen turn is still caught. Returning to a visible tab with a tracked leaf, an active chat and no
+  own turn in flight reads the leaf once and emits `foreign-turn` when it moved. On a first
+  `active-leaf-changed` refusal the send is still accepted (VAL-LEAF-002 reversal): the runtime
+  re-learns the leaf (`refreshAfterUnseenChanges`), merges the unseen rows while keeping the
+  optimistic user row (`foreign-turn-preserve-local`, no notice), and resends once automatically
+  with a fresh `idempotencyKey` (`sendChatMessageOnce(params, "leaf-retry")`); switching chats while
+  that refresh is in flight cancels the resend (`selectionSupersededError`) and the caller restores
+  the draft. Only a second consecutive refusal takes the pre-reversal path —
   `recoverFromActiveLeafConflict`, the thread reload, `activeLeafConflict` (the
   `chat-changed-notice` banner) and `ActiveLeafChangedError`, whose draft restore `useChatSend`
   owns — so two back-to-back foreign appends cannot loop.
@@ -764,8 +762,8 @@ assistant: …`. Picking an assistant in the picker and first-send `sessions.dir
   32-bit of the agent id modulo 8 picks one, so an unconfigured assistant keeps its colour across
   reloads and devices. The `--wai-assistant-<name>` and `-fg` tokens are in
   `packages/brand-tokens/tokens.css`; ADR 0084 section 6 records the contrast guarantee.
-- **Names and avatars follow the open chat.** `AppShell` derives the active chat's assistant once
-  (`activeAssistantName`/`activeAssistantAvatar`): the top bar, the thread's bubbles and typing
+- **Names and avatars follow the open chat.** `useActiveChat` derives the active chat's assistant
+  once (`activeAssistantName`/`activeAssistantAvatar`): the top bar, the thread's bubbles and typing
   indicator, the empty state, both composers and the reply-chip sender all take it, and an agent
   with no configured name shows its id. While the chat's assistant cannot be resolved
   (`agents.list` still loading, or a session key with no agent id) those surfaces fall back to the
@@ -828,7 +826,7 @@ for its acquisition, so a hung `getUserMedia` cannot leave the take recording; t
 a fresh create.
 
 **One-tap dictation (`useDictate(runtime, { autoSend, autoSendDelayMs })`).** Both options are
-take-start snapshots: `autoSend` is the auto-read preference (`AppShell` passes
+take-start snapshots: `autoSend` is the auto-read preference (`useChatSurface` passes
 `readAloud.autoRead`) and `autoSendDelayMs` is the persisted auto-send pause
 (`providers/auto-send-delay-preference.ts`). `DictateCommit.autoSend` records that value, so
 toggling either option mid-take cannot change what happens to text the take already produced.
@@ -860,8 +858,8 @@ While `autoSend` is true at take start:
   `{ dictated: true }` provenance like a manual send after dictation.
 
 **Barge-in pauses read aloud.** Pressing **Dictate** while a reply is being read aloud pauses the
-read instead of stopping it: `AppShell`'s dictate toggle runs `readAloud.unlock()` inside the
-click (the AudioContext gesture unlock, which auto-read also needs) and then, when a take is
+read instead of stopping it: `useChatSurface`'s dictate toggle runs `readAloud.unlock()` inside
+the click (the AudioContext gesture unlock, which auto-read also needs) and then, when a take is
 starting and a read is active, `readAloud.pause()`. Stopping the take never touches playback, so
 the read stays paused; only the message control's **Resume reading**, or starting another read,
 continues it.
@@ -985,8 +983,10 @@ of dynamic `import()`s inside `html-to-markdown.ts`; only `import type` referenc
 appear anywhere else in the app graph. A static import would pull them into the entry chunk and
 break the lazy-chunk budget (V5): they must stay out of `index.html`'s transitive static imports
 and be reachable only via `dynamicImports`. `mdast-util-to-markdown` and `mdast-util-gfm` are
-imported statically, because `remark-gfm` already ships them in the entry chunk and a dynamic
-import of them cannot split (Rolldown reports `INEFFECTIVE_DYNAMIC_IMPORT`).
+imported statically by the lazy `html-to-markdown-convert.ts` (the only serialize-side consumer)
+but must not be statically imported by anything eager: since #2522 the app's remark plugins use
+the parse-only `gfm-parse-only.ts` plugin, so the serialize half ships only in the lazy paste
+chunk (an eager static import of either package would pull it back into the entry chunk).
 
 ### Rich copy: `clipboard-html.ts`
 
@@ -1129,8 +1129,8 @@ and one preference store:
 - **Playback chip.** `ui/PlaybackMenu.tsx` is a composer chip beside the auto-send pause chip,
   labelled with the current speed (`1×`) and opening a menu with volume and speed only; the
   account menu's section (`ui/AccountMenu.tsx`) renders the full control set.
-- **Gain path.** `AppShell` loads the preferences once per runtime and pushes every change to the
-  read-aloud player (`player.setGain`) and the voice playback chain, which clamp and ramp the
+- **Gain path.** `useAppServices` loads the preferences once per runtime and pushes every change to
+  the read-aloud player (`player.setGain`) and the voice playback chain, which clamp and ramp the
   gain through a limiter chain (see [Read aloud](#read-aloud)), so a 300 percent boost stays
   unclipped.
 - **Speed path.** Read aloud sends `speed` on every `tts.speak` request, so a change applies from
@@ -1204,7 +1204,7 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
 - `useBusySessionKeys(controller)` (`app/use-busy-sessions.ts`) reads the projection with
   `useSyncExternalStore` and holds a `useRunsLease`, so it stays live while the shell is mounted
   even when the Sidebar is not.
-- `AppShell` ORs the open chat's key into the composer's streaming state, so Stop sends
+- `useChatSurface` ORs the open chat's key into the composer's streaming state, so Stop sends
   `chat.abort { sessionKey }` and Enter steers via `sessions.steer` for a run this client never
   started — one running in the same chat from another device, or one that predates a reload.
 - `ui/TypingIndicator.tsx` is the three-dot indicator: `role="status"` with
@@ -1223,8 +1223,8 @@ per-device unread state and turns hidden-tab replies into optional desktop notif
   silent finals and user-role finals never fire. `at` is the gateway-stamped `message.timestamp`
   of the final, or `null` from a gateway that does not stamp timestamps; unread detection is then
   live-only.
-- `AppShell`'s `useReplyNotifications` owns unread state per browser or installed app: a chat is
-  unread when an assistant reply arrived after this device last had the chat open. Detection is
+- `useAppServices`' `useReplyNotifications` owns unread state per browser or installed app: a chat
+  is unread when an assistant reply arrived after this device last had the chat open. Detection is
   durable — it compares the session row's `lastReplyAt` (see
   [Gateway protocol](/next/admin/gateway/protocol#sessions-list-sorting-agent-activity-and-visibility))
   against a per-device read cursor, and the state survives a reload. It publishes the unread keys

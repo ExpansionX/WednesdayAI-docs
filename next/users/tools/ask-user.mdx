@@ -1,0 +1,122 @@
+---
+summary: "The ask_user agent tool: structured questions a run waits on, answered from every surface (ADR 2657)"
+read_when:
+  - Building an agent that needs a person's decision mid-run
+  - Wiring a new answer surface (web, Glass, voice, watch, channel) for questions
+  - Tuning question timeouts, sensitivity or multi-select behavior
+title: "Ask User Tool"
+---
+
+# `ask_user`
+
+`ask_user` asks the person a **structured** question and pauses the run until it is answered,
+superseded, or it expires. It is the agent-tool face of the one canonical question lifecycle
+(ADR 2657): the same record a coordinator plugin opens through
+[`api.questions`](/next/developers/plugins/questions), settled by the same `questions.answer` RPC from web,
+Glass, voice, watch or any channel. There is no second queue and no second state machine.
+
+```json5
+{
+  question: "Ship the release now, wait for the smoke run, or abort?",
+  options: [
+    { label: "Ship it", description: "Tag and deploy to production now", recommended: true },
+    { label: "Wait for the smoke run" },
+    { label: "Abort the pipeline" },
+  ],
+  selection: "multi",
+  allowOther: false,
+  timeoutSeconds: 600,
+}
+```
+
+## Parameters
+
+| Parameter        | Type                              | Notes                                                                                                                                                             |
+| ---------------- | --------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `question`       | string (1–2 000 chars)            | The prompt. Refused when the built-in secret scan would redact it.                                                                                                |
+| `options`        | array, ≤ 8                        | `{ id?, label (≤ 80), description? (≤ 200), recommended? }`. A missing `id` is derived from position (`o1`, `o2`, …). At most one option is `recommended`.        |
+| `selection`      | `"single"` \| `"multi"`           | Default `"single"`. Multi accepts any subset of options.                                                                                                          |
+| `allowOther`     | boolean                           | Permits a free-text "Other" answer; implied `true` when `options` is empty.                                                                                       |
+| `otherLabel`     | string (≤ 40)                     | Label of the Other field; default `Other`.                                                                                                                        |
+| `urgency`        | `"low"` \| `"normal"` \| `"high"` | Default `"normal"`.                                                                                                                                               |
+| `sensitive`      | boolean                           | A request, never a downgrade: the gateway also forces `sensitive` when the prompt or an option carries inline/fenced code (`command`) or matches the secret scan. |
+| `timeoutSeconds` | 30–3 600                          | Default 900. The question expires when nobody answers in the window.                                                                                              |
+
+The question is directed to the asking session's owner persons; an unowned (shared, main)
+session is directed to every configured identityLinks person, so any linked person may answer.
+
+## Result
+
+The tool result carries the settled record:
+
+```json
+{
+  "status": "answered",
+  "ref": "Q-12",
+  "optionIds": ["o1", "o3"],
+  "labels": ["Ship it", "Abort the pipeline"],
+  "otherText": null
+}
+```
+
+- `answered` — `optionIds` and `labels` of the chosen options; `otherText` when the Other field
+  was used.
+- `superseded` — someone other than the waiting run withdrew or replaced the question
+  (`questions.supersede`); `optionIds` and `labels` are empty.
+- `expired` — nobody answered in time:
+
+  ```json
+  { "status": "expired", "ref": "Q-12", "text": "No answer arrived; proceed with best judgment." }
+  ```
+
+  The agent should proceed with its best judgment, never re-ask in a loop. A late answer to the
+  expired question is refused (`ALREADY_RESOLVED`); terminal states are final.
+
+## Delivery and surfaces
+
+Opening the question emits `question.requested {role: "question"}` to the directed persons and
+appends a `role: "question"` entry to the session transcript — a question card in chat history,
+**never** assistant prose. Every later transition emits `question.changed` so each surface can
+close its card.
+
+| Surface         | Renders                                                                                         | Answer                                     |
+| --------------- | ----------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Web chat / Home | Prompt, option buttons (recommended marked), descriptions, checkboxes for multi, an Other field | Tap, or tick then Send (`confirmed: true`) |
+| Voice           | Reads the prompt and option labels, then reads back the spoken choice to confirm                | Spoken yes sends (`confirmed: true`)       |
+| Glass HUD       | Full prompt and option labels, paged, select then confirm                                       | `confirmed: true`                          |
+| Watch           | Option picker, pick then confirm                                                                | `confirmed: true`                          |
+| Channels        | Core text rendering: `Q-<n>: prompt`, numbered options, reply hint                              | Reply `Q-<n>: <choice>` (see below)        |
+
+Privacy gate: sensitivity gates speech only. A `sensitive` question shows in full on the Glass HUD
+(paged, never truncated) and on web, the app and the watch, and may be answered on any of them;
+voice only announces that a private question exists unless the audio route is private. Voice and HUD answers always require the explicit confirm step —
+`questions.answer {via: "voice" | "glass", confirmed: false}` is refused with `INVALID_REQUEST`.
+
+Channels answer by replying `Q-<n>:` followed by a 1-based option number, the option id or the
+exact label (comma-separated for multi); anything else is stored as the Other text when
+`allowOther` is set, otherwise the sender gets the numbered options again. `Q-<n>:` only
+settles the question when the sender's resolved person is directed; a reply about a closed ref
+gets the constant text "`Q-<n>` is closed".
+
+## Lifecycle rules
+
+- **Expiry.** The owning gateway's timer settles an unanswered question at `expiresAt`
+  (`timeout`); the waiting run receives the `expired` result and proceeds with best judgment.
+- **Cancellation and restart.** Cancelling or interrupting the run — a user stop, a gateway
+  restart, or a gateway that died — settles its open blocking question `expired/asker_gone`,
+  so no run is ever stuck waiting on a question nobody can answer. A gateway that restarts
+  settles a dead prior boot's pending questions at startup, before runs resume.
+- **Supersede.** Only the asker (the asking session's writer, or an operator admin) can
+  withdraw the question or replace it. A replacement goes through the same checks (length,
+  secret scan, option rules).
+- **Transcript.** The question and its answer live in the `role: "question"` entry and the
+  settled tool result; the prompt is never written as reply text.
+
+## Availability
+
+`ask_user` is a core tool in the Messaging and Coding profiles
+(`group:messaging`); deny it with `tools.deny: ["ask_user"]`. It requires a session run to bind
+to (a session key and run id), so it is unavailable in bare model calls without one.
+
+The full wire surface — `questions.list/get/answer/supersede`, the events, the plugin API and
+the TheFactory mirror — is documented in [Questions API](/next/developers/plugins/questions).

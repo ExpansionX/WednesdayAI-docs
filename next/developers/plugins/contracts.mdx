@@ -21,12 +21,12 @@ re-exported from `wednesdayai/plugin-sdk`.
 
 | Contract   | Constant                    | Current version | Root types                                                                                                                                                                                                                                                                                                         | You implement                                                                                       |
 | ---------- | --------------------------- | --------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------- |
-| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.52`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
-| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.13`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
+| `sdk`      | `SDK_CONTRACT_VERSION`      | `2.56`          | The public `wednesdayai/plugin-sdk` barrel and its declared subpaths                                                                                                                                                                                                                                               | nothing — core provides all of it                                                                   |
+| `plugin`   | `PLUGIN_CONTRACT_VERSION`   | `2.15`          | `OpenClawPluginApi`, `OpenClawPluginDefinition` (`src/plugins/types.ts`), `PluginManifest` (`src/plugins/manifest.ts`), `PluginRuntime` (`src/plugins/runtime/types.ts`), `ChannelPlugin` (`src/channels/plugins/types.plugin.ts`), `ChannelCapabilities` and `ChannelMeta` (`src/channels/plugins/types.core.ts`) | `OpenClawPluginDefinition`, `PluginManifest`, `ChannelPlugin`, `ChannelCapabilities`, `ChannelMeta` |
 | `hooks`    | `HOOKS_CONTRACT_VERSION`    | `1.4`           | Every `PluginHook*` type in `src/plugins/types.ts`                                                                                                                                                                                                                                                                 | the `PluginHook*Result` payloads your handlers return                                               |
 | `ingress`  | `INGRESS_CONTRACT_VERSION`  | `1.9`           | `MsgContext` (`src/auto-reply/templating.ts`), `InboundUserContext` (`src/auto-reply/reply/inbound-meta.ts`), `PluginRuntimeChannel` (`src/plugins/runtime/types-channel.ts`), `ChannelGatewayAdapter` and `ChannelGatewayContext` (`src/channels/plugins/types.ts`)                                               | `MsgContext`, `ChannelGatewayAdapter`                                                               |
 | `delivery` | `DELIVERY_CONTRACT_VERSION` | `1.0`           | `ChannelOutboundAdapter`, `ChannelOutboundContext`, `ChannelPollContext` and `ChannelPollResult` (`src/channels/plugins/types.ts`), `ChannelOutboundPayloadContext` (`src/channels/plugins/types.adapters.ts`), `OutboundDeliveryResult` (`src/infra/outbound/deliver.ts`)                                         | `ChannelOutboundAdapter`, `ChannelPollResult`, `OutboundDeliveryResult`                             |
-| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.28`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
+| `gateway`  | `GATEWAY_CONTRACT_VERSION`  | `3.34`          | Every exported wire type in `src/gateway/protocol/schema/types.ts`, plus the `ProtocolSchemas` registry (`src/gateway/protocol/schema/protocol-schemas.ts`)                                                                                                                                                        | request `*Params` payloads and `RequestFrame`                                                       |
 
 Each root type carries a direction, and the snapshot records it per entry:
 
@@ -98,8 +98,9 @@ record (plan C2 of `docs/plans/app-login-accessory-scopes.md`, ADR 2242 D4):
   additive only.
 - A tag admits only the explicit allowlist `ACCESSORY_TAGGABLE_METHODS` (in
   `src/shared/accessory-profiles.ts`): `node.invoke`, `node.event`, `node.invoke.result`,
-  `chat.send`, `chat.abort`, `chat.history`, `exec.approval.resolve`, `device.self`. Everything
-  else tagged is refused `accessory_method_denied` before any scope check.
+  `chat.send`, `chat.abort`, `chat.history`, `exec.approval.resolve`, `exec.approval.list`,
+  `questions.answer`, `device.self`. Everything else tagged is refused `accessory_method_denied`
+  before any scope check.
 - Refusal reasons (all `INVALID_REQUEST`, in `error.details.reason`): `accessory_forbidden` (the
   caller is not a signed-in app device — includes device-less connections), `accessory_kind_unknown`,
   `accessory_id_invalid`, `accessory_limit` (9th accessory), `accessory_not_attached` (unknown or
@@ -241,6 +242,105 @@ each other (`src/plugin-sdk/people.ts`):
 - New subpath `wednesdayai/plugin-sdk/reply-sentinels`: the client-safe sentinel rules
   (`REPLY_SENTINEL_TOKENS`, `isSilentReplyText`, `isSilentReplyLeadFragment`,
   `stripEdgeSentinelLines` and siblings).
+
+### Todos task system (sdk 2.55, plugin 2.15, gateway 3.33)
+
+The one user task system behind `api.runtime.todos` (ADR 2712, `dev-docs/adr/2712-todos-task-contract.md`).
+The interface name is Tasks; the code and wire namespace is `todos`, so the internal
+backbone `tasks.*` pipeline keeps its name. All changes are additive:
+
+- `PluginKind` gains `"todos"` and `plugins.slots.todos` selects the exclusive provider
+  slot. There is no default slot value, so the system is off until configured, and `"none"`
+  disables todos providers outright. The slot implies its plugin is enabled, like
+  `contextEngine`.
+- A provider plugin calls `api.registerTodoProvider(provider)`. Registration is
+  single-owner: the plugin named by the slot registers, a second registration is refused,
+  and a registration from a plugin whose manifest kind is not `todos` is refused. The
+  registry stores the `{ pluginId, provider }` pair and the runtime resolves it at call
+  time, so reloads swap providers.
+- The SDK barrel re-exports the contract (`TODO_STATUSES`, `TODO_PRIORITIES`, `Todo`,
+  `TodoLink`, `TodoProvider`, `TodoService`, `TodoError` and siblings), and
+  `wednesdayai/plugin-sdk/testing` exports `createMemoryTodoProvider` and
+  `runTodoProviderConformance`, the conformance suite every provider must pass.
+- `PluginRuntime` gains `todos: TodoService`, the scoped service that owns visibility,
+  principal validation, input limits and per-caller idempotency namespacing. Every method
+  except `status()` throws `TodoError`; a missing or invisible row is uniformly `not-found`.
+  Consumers (agent tool, inbox convert-to-task, chat panel, glance, Home feed) call only
+  this service, never a provider directly.
+- Gateway 3.33 adds the operator surface `todos.v1.*` with `ProtocolSchemas` entries
+  `TodosV1*Params` / `TodosV1*Result` (`src/gateway/protocol/schema/todos.ts`): five reads
+  in `READ_SCOPE`, four writes in `WRITE_SCOPE`, nothing narrow-admitted, no
+  `PROTOCOL_VERSION` change. `todos.chat.*` travels through `plugins.chatUi.request` and
+  stays unclassified, like `inbox.calendar.chat.upcoming`.
+- Gateway 3.34 extends the `inbox.v1.action` result with optional `todoId` and `created`,
+  so convert-to-task reports the created todo, and adds `convert-to-task` to the advertised
+  `INBOX_V1_ITEM_ACTIONS` values. Additive only.
+- SDK 2.56 exports `listAgentIds` so providers can validate configured agent ids.
+
+### Inbox chat kind and addressing (gateway 4.1, sdk 2.57)
+
+Inbox items carry derived conversation context (ADR 2734 §6, people-media P4). All changes
+are additive:
+
+- `ChannelFeedMessage` gains optional `mentionsSelf`, `replyToSelf`, `quotedMessageId`,
+  `groupName` and `groupSize`. WhatsApp sets the mention/reply fields from the message
+  payload (mentions matched against the account's own jids, pn and LID) and the group fields
+  from the group-metadata cache — for live messages only, never a history batch.
+- `InboxItemInput` gains optional `addressing` (`{ mentionsOwner?, replyToOwner?, groupSize? }`)
+  and `groupName`. The inbox store derives `chatKind` (`direct`/`group`/`channel`/`email`,
+  from source + thread key) and `addressLevel` at upsert: `directly` for a DM, an @mention of
+  the owner, a reply to an owner message, or an email with the owner in To; `possibly` for Cc;
+  otherwise `ambient`; `none` when the owner's email address is unknown. BlueBubbles reads the group name/size from the chat scan join
+  (`chat.participants`); no extra REST call.
+- Gateway 4.1 extends `InboxItemDto` with optional `chatKind` and `addressing` (the stored
+  addressing record plus its computed `addressLevel`; null for rows predating the columns or
+  sources with no derivable kind). Additive only.
+
+### First-pairing node accessory attach (gateway 4.3)
+
+A node-role connection may now call `device.accessory.attach` against its own verified paired
+device (#2804), so a cold first pairing grants the device's own accessory kinds without the
+deprecated `accessory:<kind>` connect caps and without an operator round-trip. No wire schema
+changes: the params and result types are the app path's, `detach`/`list` stay operator-only, and
+the authorization table gains one dual-role method (`role-policy.ts` `DUAL_ROLE_METHODS`). The
+attach revalidates the node caller inside the accessory lock (pairing, node token, suspension),
+so a revoke racing the queued attach refuses with `accessory_forbidden` and persists nothing.
+
+### Summary-DAG recovery (gateway 4.5)
+
+`sessions.maintenance.run` gains the `summary-dag-recover` task and the result gains an optional
+`summaryDagRecovery` block (per-session supersede/rebuild report, source-integrity audit,
+pending crash-resume runs, and a deleted-sessions section). All changes are additive:
+
+- `task` widens with the `summary-dag-recover` literal (pure string-literal union widening).
+- The new result member is optional; omitting it leaves every older shape unchanged.
+
+### Pending exec approval catch-up (gateway 4.8)
+
+New read-only method `exec.approval.list` (scope `operator.approvals`, empty params). It returns
+`{ approvals }`, the pending exec approvals the caller is eligible to see, each shaped like the
+`exec.approval.requested` event payload, so a client that reconnects after a broadcast can still
+resolve it. Additive only: a new method and new schemas, and no existing shape changes.
+
+### Reply alert mark (gateway 4.9)
+
+The `chat` event's `final` state gains optional `replyAlert: true` (#2893). The gateway sets it
+only on the connections of devices it alerts about that reply: the owner's devices in their direct
+chat, else the owner's devices that follow the session. Additive only: other connections and older
+gateways omit it.
+
+### Refused delivery targets (sdk 2.67)
+
+The barrel exports `DeliveryError` and the `DeliveryErrorCode` type, and the code gains
+`"target_refused"` (#1911). A channel's `outbound.resolveTarget` returns, and its send path
+throws, a `DeliveryError` with that code for a destination that can never succeed (a target that
+does not parse, an unknown peer, a peer with no send address). Callers classify by `code`, never
+by message text or `instanceof` (a plugin's SDK bundle has its own class), and never queue or
+retry such a send. The gateway `send` RPC returns a `DeliveryError`'s code as `details.code`:
+`INVALID_REQUEST` with `details: { code: "target_refused" }` for a refused target, and
+`UNAVAILABLE` with the code for one thrown during delivery. Other failures carry no `details`.
+Additive only: a new code, new exports and new optional error details (the wire `details` is
+already untyped, so the gateway contract is unchanged).
 
 ## Version semantics
 
@@ -601,5 +701,12 @@ like `PluginHookName|"context.collect"`) and generated union-constituent keys
 (`<Root>|kind="a".member`, `<Root>|m:<digest>.member`, `<Root>|v:<digest>`, `<Root>|<n>.member`),
 whose prefix changes whenever that constituent's shape changes. Both still require the major bump
 when an entry disappears, and ordinary payload properties are never exempt.
+
+Gateway wire methods are tracked too: every name in `GATEWAY_METHODS`
+(`src/gateway/server-methods-list.ts`) is a `GATEWAY_METHODS.<name>` entry under the gateway
+contract, so removing an advertised method is a removal like any other — it needs the major bump
+and a released snapshot in which the method's list element carried its `@deprecated` JSDoc.
+Deprecate the element (add the tag) and ship that as a minor bump first; dropping the name while
+it was never released as deprecated fails `deprecation.alias-release-required`.
 
 See the general policy in [Release](/next/developers/contributing/release#deprecation-policy).

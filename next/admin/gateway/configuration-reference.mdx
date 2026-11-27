@@ -116,6 +116,7 @@ valid in both packaged installs and source checkouts.
       mediaMaxMb: 50,
       sendReadReceipts: true, // blue ticks (false in self-chat mode)
       syncFullHistory: false, // request full history at the next QR re-link
+      fullSyncDaysLimit: 3650, // optional; days of FULL history to request at pairing (1–4294967295; unset = phone default ~365)
       groups: {
         "*": { requireMention: true },
       },
@@ -158,7 +159,7 @@ valid in both packaged installs and source checkouts.
 - Outbound commands default to account `default` if present; otherwise the first configured account id (sorted).
 - Optional `channels.whatsapp.defaultAccount` overrides that fallback default account selection when it matches a configured account id.
 - Legacy single-account Baileys auth dir is migrated by `wednesdayai doctor` into `whatsapp/default`.
-- Per-account overrides: `channels.whatsapp.accounts.<id>.sendReadReceipts`, `channels.whatsapp.accounts.<id>.syncFullHistory`, `channels.whatsapp.accounts.<id>.dmPolicy`, `channels.whatsapp.accounts.<id>.allowFrom`.
+- Per-account overrides: `channels.whatsapp.accounts.<id>.sendReadReceipts`, `channels.whatsapp.accounts.<id>.syncFullHistory`, `channels.whatsapp.accounts.<id>.fullSyncDaysLimit`, `channels.whatsapp.accounts.<id>.dmPolicy`, `channels.whatsapp.accounts.<id>.allowFrom`.
 
 </Accordion>
 
@@ -1142,7 +1143,7 @@ Periodic heartbeat runs.
 - `wakeGate`: optional command/model gate checked before the heartbeat turn; on a positive gate the isolated heartbeat turn is enqueued and the main session is additionally nudged (`kind` nudge). Default `timeoutMs` is 30000. Gates the heartbeat producer only.
 - `activeHours`: optional window (`start`/`end`/`timezone`) — heartbeat ticks outside the window are skipped.
 - `lightContext`: when true, runs the heartbeat turn with a reduced context payload (isolated `:heartbeat` sessions only — shared-session heartbeats keep the session's full bootstrap) and swaps the default heartbeat prompt for the light variant; a configured `prompt` always wins.
-- `toolsAllow`: exact tool names an isolated heartbeat may use (`[]` = no tools; matching is case- and alias-insensitive; when set the skills list is also omitted and skill-declared environment overrides are not applied; only with `isolatedSession: true` — ignored with a warn on a shared-session heartbeat; can only narrow the tool surface, policy `tools.allow` still applies; an entry matching no tool logs a `toolsAllow names matched no tool` warn; unset keeps the full tool surface).
+- `toolsAllow`: exact tool names an isolated heartbeat may use (`[]` = no tools; matching is case- and alias-insensitive; when set the skills list is also omitted and skill-declared environment overrides are not applied; only with `isolatedSession: true` — ignored with a warn on a shared-session heartbeat; can only narrow the tool surface, policy `tools.allow` still applies; an entry matching no tool logs a `toolsAllow names matched no tool` warn; unset keeps the full tool surface). The `group:device` entry opts the heartbeat into the linked nodes' device tools (background runs otherwise get none; `proactive: false` commands stay user-only).
 - `suppressToolErrorWarnings`: when true, suppresses tool error warning payloads during heartbeat runs.
 - `directPolicy`: direct/DM delivery policy. `allow` (default) permits direct-target delivery. `block` suppresses direct-target delivery and emits `reason=dm-blocked`.
 - `to`: optional recipient override (channel-specific id, e.g. E.164 for WhatsApp or a Telegram chat id; Telegram topics use `<chatId>:topic:<threadId>`).
@@ -1169,6 +1170,9 @@ Periodic heartbeat runs.
           systemPrompt: "Session nearing compaction. Store durable memories now.",
           prompt: "Write any lasting notes to memory/YYYY-MM-DD.md; reply with NO_REPLY if nothing to store.",
         },
+        summaryDag: {
+          model: "bifrost/local", // preferred summary-tree summarizer; falls back to the session model, then the stored model (backfill only)
+        },
       },
     },
   },
@@ -1179,6 +1183,27 @@ Periodic heartbeat runs.
 - `identifierPolicy`: `strict` (default), `off`, or `custom`. `strict` prepends built-in opaque identifier retention guidance during compaction summarization.
 - `identifierInstructions`: optional custom identifier-preservation text used when `identifierPolicy=custom`.
 - `memoryFlush`: silent agentic turn before auto-compaction to store durable memories. Skipped when workspace is read-only.
+- `summaryDag`: summary-tree (summary DAG) production. `model` (`"provider/modelId"`) is the preferred summarizer — when unset, production falls back to the session's active model; the backfill CLI additionally falls back to the last model stored on the session. `turnTrigger` (default `true`) runs the per-turn leaf trigger; override per agent with `agents.list[].summaryDag.turnTrigger`. See [Compaction](/next/developers/concepts/compaction).
+  - `toolPayloadStubTokens` (default `25000`): tool results estimated above this many tokens are stubbed in the summarizer input; the full payload stays in the session log.
+  - `toolPayloadStubHeadChars` (default `500`): leading characters of a stubbed payload kept after the stub line.
+  - `maxCompletionTokens` (default `8192`, max `131072`): hard ceiling on summary completion tokens. Per call the budget is `min(this, the model's own cap, max(minCompletionTokens, 4x the summary target + the attribution-list allowance))` — the allowance is the input's attribution lists (condensed: the children's serialized lists; leaf: 5% of source tokens), because lists roll forward and the output must be able to hold them. A completion that ends on `stopReason=length` retries once with a tighter target and a shorter-no-reasoning correction; if that also exhausts, the condensed node falls back deterministically to the child envelopes.
+  - `minCompletionTokens` (default `4096`, max `131072`): floor for the summary completion budget — the budget never drops below today's behaviour, so reasoning-heavy summarizers do not starve. Must be at most `maxCompletionTokens` (effective bounds validated with omitted-field defaults).
+  - `turnTriggerMaxLeafSpans` (default `4`): max leaf spans one per-turn trigger may plan.
+  - `backfillMaxLeafSpans` (default `8`): max leaf spans one backfill produce call may plan.
+  - `freshTailMessages` (default `64`): newest messages the planner keeps out of leaf spans.
+  - `leafChunkTokenCap` (default `40000`): hard cap on the leaf chunk token budget.
+  - `chunkBudgetRatio` (default `0.4`): share of the model context window feeding the leaf chunk budget, strictly between 0 and 1.
+  - `summarizationOverheadTokens` (default `4096`): tokens reserved from the ratio share for summarization overhead.
+  - `leafFanout` (default `8`, minimum 2): fanout for the top summary level.
+  - `condensedFanout` (default `4`, minimum 2): fanout for the condensed level.
+  - `pressureFanout` (default `2`, minimum 2): fanout for the pressure hard-flush level.
+  - `maxCondensedSweepDepth` (default `32`): max depth of the condensed sweep.
+  - `maxPressureSweepPasses` (default `12`): max pressure sweep passes per produce run.
+  - `summaryPrefixFloorTokens` (default `600`): floor for the condensed summary-prefix target tokens.
+  - `leafTargetRatio` (default `0.05`): leaf summary target as a share of source tokens, no greater than 1.
+  - `leafTargetMinTokens` (default `80`): minimum leaf summary target tokens; must be at most `leafTargetMaxTokens` (the default `600` when that is unset).
+  - `leafTargetMaxTokens` (default `600`): maximum leaf summary target tokens; must be at least `leafTargetMinTokens` (the default `80` when that is unset).
+  - `adviseDeadlineMs` (default `250`): deadline in milliseconds for context advisor calls.
 
 ### `agents.defaults.contextPruning`
 
@@ -1799,9 +1824,9 @@ See [Multi-Agent Sandbox & Tools](/next/users/tools/multi-agent-sandbox-tools) f
 <Accordion title="Session field details">
 
 - **`dmScope`**: how DMs are grouped.
-  - `main`: all DMs share the main session.
+  - `main`: direct DMs resolve per agent+person pair automatically (#2824); `agent:<id>:main` stays the system session (heartbeat, cron).
   - `per-peer`: isolate by sender id across channels.
-  - `per-channel-peer`: isolate per channel + sender (recommended for multi-user inboxes).
+  - `per-channel-peer`: isolate per channel + sender (pre-#2824 installs keep byte-identical keys).
   - `per-account-channel-peer`: isolate per account + channel + sender (recommended for multi-account).
 - **`identityLinks`**: map canonical ids to provider-prefixed peers for cross-channel session sharing. The keys are also the value space for cron-job and heartbeat `identity` attribution (matched case-insensitively; the run carries the stored key casing as its canonical identity). Keys starting with `raw~` are rejected at config validation — that prefix is reserved for contained unlinked-sender session buckets (see [Sessions](/next/developers/concepts/session)). Gateway clients (web client, Control UI) send their turns as `device:<deviceId>`; link each device to a person with `wednesdayai devices link <deviceId> --identity <key>`, or pair it already linked with `wednesdayai identity link <key> --qr` (see [Identities](/next/admin/gateway/identity)). Get ids from `wednesdayai devices list --json` (`deviceId` on each `paired` entry). Agents with [workspace lanes](/next/developers/concepts/workspace-lanes) deny unlinked devices.
 - **`reset`**: primary reset policy. `daily` resets at `atHour` local time; `idle` resets after `idleMinutes`. When both configured, whichever expires first wins.
@@ -2117,19 +2142,19 @@ Local onboarding defaults new local configs to `tools.profile: "messaging"` when
 
 ### Tool groups
 
-| Group              | Tools                                                                                                    |
-| ------------------ | -------------------------------------------------------------------------------------------------------- |
-| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                            |
-| `group:fs`         | `read`, `write`, `edit`, `delete`, `apply_patch`                                                         |
-| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status` |
-| `group:memory`     | `memory_search`, `memory_get`                                                                            |
-| `group:web`        | `web_search`, `web_fetch`                                                                                |
-| `group:ui`         | `browser`, `canvas`                                                                                      |
-| `group:automation` | `cron`, `gateway`                                                                                        |
-| `group:messaging`  | `message`                                                                                                |
-| `group:nodes`      | `nodes`                                                                                                  |
-| `group:device`     | Device tools (`node_<id>_<command>`) of the run's linked nodes; see [Device tools](/next/users/tools#device-tools)  |
-| `group:openclaw`   | All built-in tools (excludes provider plugins)                                                           |
+| Group              | Tools                                                                                                                                                                                    |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `group:runtime`    | `exec`, `process` (`bash` is accepted as an alias for `exec`)                                                                                                                            |
+| `group:fs`         | `read`, `write`, `edit`, `delete`, `apply_patch`                                                                                                                                         |
+| `group:sessions`   | `sessions_list`, `sessions_history`, `sessions_send`, `agents_nudge`, `sessions_spawn`, `session_status`                                                                                 |
+| `group:memory`     | `memory_search`, `memory_get`                                                                                                                                                            |
+| `group:web`        | `web_search`, `web_fetch`                                                                                                                                                                |
+| `group:ui`         | `browser`, `canvas`                                                                                                                                                                      |
+| `group:automation` | `cron`, `gateway`                                                                                                                                                                        |
+| `group:messaging`  | `message`                                                                                                                                                                                |
+| `group:nodes`      | `nodes`                                                                                                                                                                                  |
+| `group:device`     | Device tools (`node_<id>_<command>`) of the run's linked nodes; only in user-started runs unless a run config explicitly allows `group:device` (see [Device tools](/next/users/tools#device-tools)) |
+| `group:openclaw`   | All built-in tools (excludes provider plugins)                                                                                                                                           |
 
 `tools.fs.workspaceOnly: true` restricts `read`/`write`/`edit`/`apply_patch` paths to the agent
 workspace. `delete` is always workspace-contained: it deletes one file at a time, refuses
@@ -3035,6 +3060,7 @@ See [Network egress policy](/next/admin/gateway/security/network-egress-policy) 
 - `webClient.imageOrigins`: exact `https://host[:port]` origins that remote markdown images may load from in the gateway-served web client, extended into its CSP `img-src`. Default empty: remote images render as links and never auto-load, so agent output cannot turn them into a tracking or exfiltration channel. Each entry must be an exact https origin with no path, query or fragment. See [Web client hosting](/next/admin/web/user-client).
 - `webClient.accountLinking`: lets a linked web-client user link their own chat accounts with `/link` codes (web client Account menu → Linked accounts → `identity.link.claim`). Default `true`. Set `false` to keep all linking operator-only: `/link` and the claim RPC both answer `Account linking is turned off on this gateway.` Operator commands (`identity add/link/unlink`, `devices link`, `pairing approve`) are unaffected. See [Identities](/next/admin/gateway/identity).
 - `webClient.pluginUi.allow`: plugin ids whose chat UI browser module (manifest `chatUi.entry`) the web client may load. Default **none**: an unlisted plugin contributes no chat panels and its UI assets answer 404. Plugin chat UI calls are dispatched per user (`plugins.chatUi.request` injects the signed-in user's identity); allow only plugins you trust. Take effect when the gateway applies the config, plus a web client reload. See the developer guide [Chat UI plugins](/next/developers/plugins/chat-ui).
+- `webClient.shell`: which web-client layout this gateway offers, sent to the client in every hello. Default `"classic"` (also when unset): the current layout. `"v2"`: the new layout (Home, Chat, Apps and Me tabs along the bottom on phones, a side rail on wider screens) for every device whose user has not picked a layout; a user who picked one keeps it. `"force-classic"`: the rollback - every device gets the classic layout whatever its user picked or the address says, and the layout switches are hidden. A change reaches open pages at their next reconnect, where the layout switches in place and keeps any unsent message. Users can also open the client with `?shell=v2` or `?shell=classic` for one visit. See [Using the web client](/next/admin/web/using-the-web-client#the-new-layout-preview).
 - `controlUiV2.enabled`: serve the control UI v2 operator console from this gateway, same-origin, at `controlUiV2.basePath`. Default `true`: the v2 console is the daily console and owns the gateway root. Set it to `false` to serve no operator console. The classic console was removed (ADR 1771), so `gateway.controlUi` is admission-only and `controlUiV2` is the only console mount. The console connects as the `openclaw-control-ui` client, so admission, scopes and auth modes are governed by `controlUi.allowedOrigins` and friends; there is no separate allowlist. A non-loopback bind with the console enabled still requires `controlUi.allowedOrigins` at startup. See [Control UI v2](/next/admin/web/control-ui-v2).
 - `controlUiV2.basePath`: public path the console is mounted under. Default: the gateway root; the v2 console mounts at `/v2/control` instead when an enabled `webClient` explicitly claims `/` with its `basePath`, so a config that pinned the removed classic console to the root now serves v2 at the root. Must be a single-slash path: it must start with `/`, and a `//` prefix, backslashes, whitespace or control characters, `.` or `..` segments, and query or fragment characters are rejected when the config loads. It may not equal, contain, or be contained by another active SPA mount (`webClient.basePath`); a collision is rejected when the config loads, naming both keys. `gateway.*` changes need a gateway restart.
 - `controlUiV2.root`: directory holding the built console (`index.html` plus `assets/`). Optional: unset, the gateway serves the bundle packaged with this install (`dist/control-ui-v2`) and answers `503` naming `pnpm control:build:packaged` only when that is missing too. An explicit `root` always wins - including when it is broken, which answers `503` with that reason.

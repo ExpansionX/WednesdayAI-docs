@@ -1,16 +1,19 @@
 ---
-summary: "Configure Microsoft 365 inbox authentication, operator sign-in, subscriptions and throttling"
+summary: "Configure Microsoft 365 mail for the inbox: one Entra app, several accounts in the inbox database, per-account sign-in and recovery"
 read_when:
   - You are connecting a Microsoft 365 mailbox to the inbox
-  - The Microsoft 365 inbox source needs sign-in or is backing off
+  - You want to add, sign in or remove a Microsoft 365 inbox account
+  - A Microsoft 365 inbox account is signed out, throttled or failing
 title: "Microsoft 365 inbox source"
 audience: admin
 ---
 
 # Inbox MS365 — Entra ID setup
 
-How to connect a Microsoft 365 mailbox as an inbox source. The credentials below live in
-the `inbox.ms365` config block; token handling is automatic after initial sign-in.
+How to connect Microsoft 365 mailboxes as inbox sources. A deployment configures one Entra app
+registration once (`inbox.ms365.clientId`); after that, accounts are added, signed in and
+removed by the agent, the CLI or the Control UI — adding a mailbox never edits
+`openclaw.json`. Accounts live in the inbox database, one row per mailbox.
 
 :::warning
 Never commit real tenant ids, client ids/secrets, or token files to the repo. Put secrets
@@ -21,44 +24,42 @@ in environment-managed secret management and reference them from config.
 
 1. In the [Azure portal → Microsoft Entra ID → App registrations](https://portal.azure.com/#view/Microsoft_AAD_RegisteredApps/ApplicationsListBlade),
    choose **New registration**.
-2. Name it (e.g. `openclaw-inbox`). Supported account type: **single tenant** is the
-   normal case.
+2. Name it (e.g. `wednesdayai-inbox`). Supported account type: **Accounts in any
+   organizational directory** (multi-tenant). Choose **Accounts in any organizational
+   directory and personal Microsoft accounts** instead to also allow outlook.com mailboxes.
 3. No redirect URI is required for the device-code flow.
 4. Under **Authentication → Advanced settings**, set **Allow public client flows** to
    **Yes** and save. Device-code sign-in runs WITHOUT a client secret, so Entra rejects
    it unless the app is enabled as a public client — skipping this step leaves the first
    sign-in failing.
-5. Copy the **Application (client) ID** and the **Directory (tenant) ID/domain** — these
-   become `inbox.ms365.clientId` and `inbox.ms365.tenantId`.
+5. Add **delegated** Graph permissions: `Mail.ReadWrite`, `Mail.Send`, `Calendars.Read`,
+   `offline_access`, `openid`, `profile`. Grant admin consent if your tenant requires it.
+6. Copy the **Application (client) ID** — it becomes `inbox.ms365.clientId`, set once for the
+   whole deployment.
 
-## 2. Pick an auth mode
+A public client has no client secret. The refresh token is the secret, and it is stored
+sealed in the inbox database (see [Token key](#token-key)). `inbox.ms365.clientSecret` is
+only needed for the legacy app-only mailbox (below).
 
-| Mode                  | Use when                                                       | Graph surface                                            |
-| --------------------- | -------------------------------------------------------------- | -------------------------------------------------------- |
-| `delegated` (default) | You want one specific, signed-in user's mailbox.               | `/me/...` endpoints on behalf of the signed-in user      |
-| `appOnly`             | No interactive user; a service identity polls a fixed mailbox. | `/users/{mailbox}/...` endpoints with client credentials |
+## 2. Accounts in the inbox database
 
-**Application-permission blast radius:** app-only tokens carry _application_ permissions
-that can read every mailbox in the tenant, not just the configured one. Restrict the
-app's data access with an [application access policy](https://learn.microsoft.com/en-us/graph/auth-limit-app-privileges)
-in Exchange Online (e.g. `New-ApplicationAccessPolicy -AppId <clientId> ...`). This is a
-documented limitation of the Graph application model — the configured `mailbox` key
-selects the mailbox the source reads, but it does not narrow the token itself.
+Every mailbox is one row in the `ms365_accounts` table of the inbox database (SQLite or
+Postgres, the same database `inbox.storage` selects). The row is keyed by a **slot label** —
+`work`, `home`, `invoices`, anything you like — and that label is also the account id of the
+mail it ingests (`ms365:work:<message id>`) and of its owner binding. Slot labels are
+lowercase letters, digits and hyphen, at most 32 characters, starting with a letter or digit.
 
-### Delegated
+The row holds the tenant id and user object id read from the sign-in `id_token`, the client
+id, the username, the account state, the last failure reason, the last-verified time and the
+token set, sealed with AES-256-GCM. The owning person is stored in the inbox owner bindings:
+adding an account writes the binding for both `ms365:<slot>` and `ms365-calendar:<slot>`
+before any mail is ingested. The owner must be a configured identity (`session.identityLinks`
+key, matched case-insensitively and stored in its configured case); an unknown owner is
+refused with `unknown-owner`.
 
-- Add **delegated** Graph permissions: `Mail.ReadWrite`, `Mail.Send`, plus
-  `offline_access` (usually granted by default) and `User.Read`.
-- Grant admin consent if your tenant requires it for these scopes.
-- No client secret is needed for device-code sign-in.
-
-### App-only
-
-- Add **application** Graph permissions: `Mail.ReadWrite`, `Mail.Send`.
-- Grant **admin consent** (required for application permissions).
-- Create a **client secret** under _Certificates & secrets_ — this becomes
-  `inbox.ms365.clientSecret` (sensitive; keep it out of committed config).
-- Set `inbox.ms365.mailbox` to the mailbox Graph should operate on.
+Each account has its own Graph client and its own subscription service, so a throttled or
+failing account never delays another. Delta cursors, subscription state, backfill
+checkpoints and calendar state are all account-scoped.
 
 ## 3. Configure
 
@@ -66,8 +67,8 @@ selects the mailbox the source reads, but it does not narrow the token itself.
 {
   inbox: {
     ms365: {
-      tenantId: "contoso.onmicrosoft.com",
       clientId: "<application (client) id>",
+      // tenantId: "organizations", // authority for NEW sign-ins; optional, see below
       // appOnly only:
       authMode: "appOnly",
       mailbox: "ops@contoso.com",
@@ -80,61 +81,190 @@ selects the mailbox the source reads, but it does not narrow the token itself.
 The `inbox.ms365` block is also the inbox enablement: ms365 is a dedicated inbox-only
 source, so no `inbox.sources.ms365` key is required or read.
 
-Optional keys:
+| Key                           | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `inbox.ms365.clientId`        | The Entra application (client) id, once per deployment. Required.                                                                                                                                                                                                                                                                                                                                                      |
+| `inbox.ms365.tenantId`        | The authority used for **new** sign-ins: a tenant GUID or domain, `organizations` (default), `common` or `consumers`. Optional. Each account then refreshes against its **own** tenant, read from the sign-in `id_token` and stored on its row — changing this key never affects existing accounts.                                                                                                                    |
+| `inbox.ms365.authMode`        | `"delegated"` (default) or `"appOnly"`.                                                                                                                                                                                                                                                                                                                                                                                |
+| `inbox.ms365.scopes`          | Delegated OAuth scopes. Default `["Mail.ReadWrite","Mail.Send","offline_access"]`; `openid profile offline_access` are always added. Keep `offline_access`: the Microsoft identity v2 endpoint issues refresh tokens **only when the initial token request grants `offline_access`**. Add `Calendars.Read` here for calendar sync. App-only mode ignores this key and requests `https://graph.microsoft.com/.default`. |
+| `inbox.ms365.notificationUrl` | Full public HTTPS URL of the ms365 webhook route (e.g. `https://gateway.example.com/plugins/inbox/ms365-graph`). When unset, the source runs delta-poll-only.                                                                                                                                                                                                                                                          |
+| `inbox.ms365.mailbox`         | App-only only: the mailbox Graph should operate on.                                                                                                                                                                                                                                                                                                                                                                    |
+| `inbox.ms365.clientSecret`    | App-only only: the client secret for client-credential tokens (sensitive; keep it out of committed config).                                                                                                                                                                                                                                                                                                            |
+| `inbox.ms365.tokenStorePath`  | **Deprecated.** Tokens live in the inbox database (`ms365_accounts`). The key only names the legacy token file the one-time migration reads (default `<stateDir>/inbox/ms365-token.json`); remove it. The plugin logs a warning per deprecated key at load.                                                                                                                                                            |
 
-- `inbox.ms365.authMode` — `"delegated"` (default) or `"appOnly"`.
-- `inbox.ms365.scopes` — delegated OAuth scopes. Default
-  `["Mail.ReadWrite","Mail.Send","offline_access"]`. Keep `offline_access`: the Microsoft
-  identity v2 endpoint issues refresh tokens **only when the initial token request
-  grants `offline_access`**; without it every token expiry requires a fresh device-code
-  sign-in. App-only mode ignores this key and always requests
-  `https://graph.microsoft.com/.default`.
-- `inbox.ms365.tokenStorePath` — token cache file. Default
-  `<stateDir>/inbox/ms365-token.json`, written with `0600` permissions. Protect the state
-  directory accordingly.
-- `inbox.ms365.notificationUrl` — full public HTTPS URL of the ms365 webhook route
-  (e.g. `https://gateway.example.com/plugins/inbox/ms365-graph`). When set, the source
-  creates Graph change-notification subscriptions against that URL; when unset, no
-  subscriptions are created and the source runs delta-poll-only (works fine for
-  credential-less/dev setups, at the cost of polling latency).
+### Authority semantics
 
-## 4. Sign in (delegated)
+- New sign-ins go to `https://login.microsoftonline.com/<tenantId>` with `<tenantId>` the
+  configured authority (default `organizations`).
+- After sign-in, the account refreshes and re-signs-in against
+  `login.microsoftonline.com/<its own tenant id>`, read from the `id_token`.
+- A personal Microsoft account always uses the `consumers` authority, whatever `tenantId`
+  says.
+- An app registration set to **single tenant** fails new sign-ins with AADSTS50194 when
+  `tenantId` is `organizations` or `common`. Either keep `tenantId` at your home tenant
+  (new accounts in that tenant only) or switch the app to multi-tenant and set
+  `tenantId: "organizations"`.
 
-Sign-in is always something you start. The gateway never starts a sign-in by itself. You can
-start it three ways; each shows a verification URL and a short code.
+### Token key
 
-- **Control UI.** Open **Channels**. The **Microsoft 365 inbox** panel shows the sign-in state.
-  Select **Start sign-in**, then open the URL in any browser and enter the code. The panel needs
-  an operator connection with `operator.admin`.
-- **Ask the agent.** Ask it to sign the inbox in to Microsoft 365. The `inbox.ms365_signin`
-  tool asks you to approve the request, then replies with the URL and code. Only the owner can
-  use the tool, and it starts nothing if you deny the approval or let it time out.
+The token key encrypts the stored refresh and access tokens.
+
+- `OPENCLAW_INBOX_TOKEN_KEY`, when set, wins: base64 or base64url of exactly 32 bytes.
+  Anything else fails with `OPENCLAW_INBOX_TOKEN_KEY must be 32 bytes, base64-encoded`.
+- Otherwise the key file `<stateDir>/inbox/ms365-token.key` is used: 32 random bytes,
+  created `0600` on first start and reused after that.
+
+Set the env var on **every** process that touches the inbox database (gateway, CLI, cluster
+nodes); a process with a different key reads every account as `token-unreadable` until it
+signs in again. The sealing protects database dumps, backups, `storage export` and SQL-level
+reads on a shared Postgres host. It does not protect against an attacker who can read files
+on the gateway host: such an attacker can read both the key file and a co-located SQLite
+database.
+
+### App-only mode
+
+| Mode                  | Use when                                                           | Graph surface                                  |
+| --------------------- | ------------------------------------------------------------------ | ---------------------------------------------- |
+| `delegated` (default) | Interactive accounts added and signed in by the agent or operator. | `/me/...` on behalf of the signed-in user      |
+| `appOnly`             | One fixed, unattended mailbox; a service identity polls it.        | `/users/{mailbox}/...` with client credentials |
+
+**Application-permission blast radius:** app-only tokens carry _application_ permissions
+that can read every mailbox in the tenant, not just the configured one. Restrict the
+app's data access with an [application access policy](https://learn.microsoft.com/en-us/graph/auth-limit-app-privileges)
+in Exchange Online (e.g. `New-ApplicationAccessPolicy -AppId <clientId> ...`). This is a
+documented limitation of the Graph application model — the configured `mailbox` key
+selects the mailbox the source reads, but it does not narrow the token itself.
+
+App-only mode additionally needs **application** Graph permissions (`Mail.ReadWrite`,
+`Mail.Send`) with admin consent, and a client secret. App-only accounts appear as one
+account row and re-verify with the configured secret instead of device-code sign-in.
+
+## 4. Add, sign in and remove accounts
+
+Sign-in is always something a person starts. The gateway never starts a sign-in by itself.
+Every mutating action asks the operator for approval when driven by the agent, and needs an
+admin (operator) connection when driven by the gateway methods or CLI.
+
+- **Ask the agent.** Ask it to add or sign in an account. The `inbox.ms365_accounts` tool
+  (actions `list`, `add`, `signin`, `status`, `remove`) is owner-only and asks you to
+  approve `add`, `signin` and `remove` on every call. It replies with the verification URL
+  and code; open the URL in any browser, enter the code and sign in as the mailbox user.
 - **CLI on the gateway host.**
 
   ```bash
-  wednesdayai inbox ms365 login
+  wednesdayai inbox ms365 accounts list
+  wednesdayai inbox ms365 accounts add work --owner <person>
+  wednesdayai inbox ms365 accounts signin work
+  wednesdayai inbox ms365 accounts status work
+  wednesdayai inbox ms365 accounts remove work
   ```
 
-Open the verification URL in a browser, enter the code, and sign in as the mailbox user. The
-access and refresh tokens are cached at `inbox.ms365.tokenStorePath` and renewed automatically
-after that. The gateway picks up the sign-in on its next eligible poll, normally within 15
-minutes. An existing failure cooldown can delay that poll.
+  `add` and `signin` print the URL and code, then poll the account status every 5 seconds
+  until the account is active, signed out again, or the code expired. Every subcommand takes
+  `--json`. See [`ms365 accounts`](/next/users/cli/inbox#ms365-accounts).
 
-Only one sign-in runs at a time. Starting another while a code is pending is refused, and the
-refusal carries the pending code. A code expires after about 15 minutes; start again after
-that. The gateway methods behind the panel are `inbox.ms365.signin.start` and
-`inbox.ms365.signin.status`, both `operator.admin`.
+- **Control UI.** Open **Channels**. The **Microsoft 365** panel lists every account with its
+  state, username, last-verified time and failure reason, and has **Sign in** and **Remove**
+  per row. The panel needs an operator connection with `operator.admin`. Adding accounts
+  stays on the agent and the CLI, because `add` needs an owner person.
 
-App-only mode needs no interactive sign-in; `login` loads a token silently, reusing an unexpired
-cached token or acquiring one with client credentials, and the panel shows no start button.
+A device code expires after about 15 minutes; start again after that. One sign-in runs per
+account at a time (a second start for the same slot returns the pending code); different
+accounts can have pending codes at the same time.
 
-In delegated mode without cached credentials, the source **makes no calls to Microsoft**.
-If Microsoft rejects a refresh token, that one failed refresh removes the rejected grant;
-subsequent polls make no network calls until you sign in. The source never starts sign-ins
-in the background. On entering the signed-out state, it requests an agent **nudge** that says:
+After the code is accepted, the account is verified with one Graph call
+(`GET /me/mailFolders/inbox?$select=id`) before it starts syncing. On success the account is
+`active`, a nudge confirms the sign-in, and new mail syncs within 15 minutes. Older mail is
+imported only on request: `wednesdayai inbox backfill --source ms365 --account <slot>`.
+A re-added or re-consented account that already has a stored identity must sign in as the
+same identity and reach the same mailbox; otherwise the sign-in is refused (`duplicate-account`
+or `account-mismatch`).
+
+In app-only mode, `signin` runs no device code: it re-verifies the configured mailbox with
+the configured client secret (so fixing `inbox.ms365.clientSecret` plus a `signin`, or a
+gateway restart, recovers the account).
+
+Removing an account stops its syncing, deletes its stored sign-in and best-effort deletes
+its Graph subscriptions. Mail already ingested, its threads and its owner bindings are kept;
+the slot can be re-added later, but only by signing in as the same identity and reaching the
+same mailbox.
+
+### Account states
+
+| State            | Delta poll + subscriptions | Calendar sync                                                              | Backfill                       | Graph calls allowed                                          |
+| ---------------- | -------------------------- | -------------------------------------------------------------------------- | ------------------------------ | ------------------------------------------------------------ |
+| `registered`     | no                         | no                                                                         | refused (needs-sign-in result) | none                                                         |
+| `pending-signin` | no                         | no                                                                         | refused                        | token endpoint only (device-code poll)                       |
+| `verifying`      | no                         | no                                                                         | refused                        | one verification call per attempt, under per-account backoff |
+| `active`         | yes (per-account service)  | yes, when calendar sync is enabled and the scopes include `Calendars.Read` | yes, on request                | all                                                          |
+| `needs-reauth`   | stopped                    | skipped                                                                    | refused                        | none                                                         |
+| `removing`       | no                         | no                                                                         | refused                        | only the best-effort subscription delete                     |
+| `removed`        | stopped                    | skipped                                                                    | refused                        | none                                                         |
+
+`inbox.ms365_accounts` with action `status` (or `accounts status` on the CLI, or the Control
+UI panel) shows the state, and while a device-code flow is pending also the URL, code and
+expiry.
+
+### Failure reasons and recovery
+
+A failed account stops polling and surfaces its reason through the tool result, the account
+notice and one agent nudge. `failureReason` is one of:
+
+| Reason                        | Meaning                                                                                            | Recovery                                                                |
+| ----------------------------- | -------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- |
+| `refresh-rejected`            | Microsoft rejected the refresh token (`invalid_grant`).                                            | Sign in again.                                                          |
+| `consent-revoked`             | Consent was withdrawn (AADSTS 65001).                                                              | Sign in again and re-consent.                                           |
+| `interaction-required`        | Entra wants a fresh interactive round (AADSTS 50076, 50079 or `interaction_required`).             | Sign in again; a fresh device code resolves it.                         |
+| `auth-errors`                 | Three consecutive Graph 401s, after one forced refresh-and-retry.                                  | Sign in again.                                                          |
+| `mailbox-unavailable`         | The verification call returned 403 or 404 (for example the mailbox is not enabled for Graph REST). | Check the mailbox licence and REST enablement, then sign in again.      |
+| `account-mismatch`            | The credentials now reach a different mailbox than the stored fingerprint.                         | Remove the account, then add it again under a (new) slot.               |
+| `duplicate-account`           | The same Entra identity is already bound to another slot.                                          | Use the existing slot instead.                                          |
+| `token-unreadable`            | The stored token cannot be decrypted (key changed, or the ciphertext does not match).              | Sign in again.                                                          |
+| `client-credentials-rejected` | App-only client secret rejected (`invalid_client`).                                                | Fix `inbox.ms365.clientSecret`, then `signin` (or restart the gateway). |
+
+The failure detail carries the OAuth error and the first AADSTS error code, never token or
+address text. Transient token-endpoint problems (5xx, throttling, network) change no state;
+the account's own cooldown applies.
+
+### What the agent sees
+
+Graph-touching tools (`inbox.read` when a body must be fetched, `inbox.act`,
+`inbox.fetch_attachment`, `inbox.backfill` with source `ms365`) return a typed result
+instead of touching Microsoft:
+
+```json
+{
+  "ok": false,
+  "reason": "ms365-needs-signin",
+  "account": "work",
+  "state": "needs-reauth",
+  "failureReason": "refresh-rejected",
+  "since": "2026-11-17T09:00:00.000Z",
+  "instruction": "Microsoft 365 account \"work\" is signed out (refresh-rejected) and has stopped syncing. Ask the user whether to sign it in again now. If they agree, call inbox.ms365_accounts with action \"signin\" and account \"work\", then relay the URL and code.",
+  "signin": { "tool": "inbox.ms365_accounts", "action": "signin", "account": "work" }
+}
+```
+
+The `reason` field maps from the account state: `ms365-needs-signin` for `registered` and
+`needs-reauth`, `ms365-account-not-ready` for `pending-signin` and `verifying` (sign-in in
+progress; check with `status`), `ms365-account-removed` for `removing` and `removed`
+(the result points at `add`), `ms365-gateway-not-running` when the manager is not running,
+and `ms365-account-unknown` for an unknown slot (the result points at `list`).
+
+Store-only tools (`inbox.list`, `inbox.list_unread`, `inbox.search`, stored-body
+`inbox.read`, `inbox.calendar.list`, `inbox.calendar.read`) attach an `accountNotices` array
+when their results involve an account that is not active or signed in. Each notice carries
+`source`, `account`, `state`, `failureReason` and `instruction`. Removed accounts get no
+notice.
+
+### Nudges
+
+Entering `needs-reauth` sends the agent one nudge per episode per account, offering the
+sign-in. The episode counter is stored with the account, so a gateway restart does not send
+the same nudge again. On first activation the agent gets one confirmation nudge:
 
 ```text
-ms365 sign-in required. Tell the operator to start it from the Control UI (Channels → Microsoft 365 inbox → Start sign-in) or run `wednesdayai inbox ms365 login` on the gateway host. Use the inbox.ms365_signin tool only if the operator asks you to.
+Microsoft 365 inbox account "work" is signed in and verified; new mail syncs within 15 minutes. Older mail is imported only if the user asks (inbox.backfill with source "ms365" and accountId "work").
 ```
 
 The nudge requires the `agentTurn.agents` grant for the inbox plugin. The bundled inbox
@@ -151,20 +281,90 @@ overrides the manifest default, and an empty list turns the nudge off:
 
 If the nudge is denied or cannot be queued, a warning records the reason.
 
-### Polling backoff
+## 5. Migration from a single account
 
-The delta poll runs every 15 minutes. After a failed pass (Graph 5xx, network, token
-endpoint) the source waits longer before the next attempt. The wait doubles from 15 minutes
-up to a cap of 2 hours, with some randomness so attempts don't line up, and is never shorter
-than a Graph `Retry-After`. These waits are minimum cooldowns: the next attempt runs on the
-first 15-minute poll after the cooldown ends, so actual spacing can include another poll
-interval. Each failure logs one warning with the earliest retry time. Renewal has its own
-cooldown, so delta failures do not suppress the daily renewal. A failed renewal is retried
-at its next daily tick. A successful pass resets its own cooldown. A Graph `429` pauses every Graph
-call (live ingest, actions, backfill) until the `Retry-After` window ends, so nothing retries
-while the mailbox is throttled.
+A deployment that configured the single legacy mailbox keeps everything on first start
+after this feature lands:
 
-### First sync
+- The mailbox becomes an account row named by the legacy id — `inbox.ms365.mailbox` when
+  set, otherwise `default` — so item ids, cursors and owner bindings are untouched.
+- Delta and subscription cursors are renamed to the account-scoped forms
+  (`ms365-delta:<account>:<folder>`, `ms365-subscriptions:<account>`) in the same
+  transaction as the row.
+- The legacy token file (default `<stateDir>/inbox/ms365-token.json`) is sealed into the row
+  and then **deleted**. A bound file whose refresh token was already rejected is not
+  deleted; the account lands in `needs-reauth` and the file is kept. A file bound to a
+  different configuration (tenant or client id changed before the migration) imports
+  nothing: the import stays retryable until the original configuration is restored. No
+  legacy token file means the account starts as `registered`.
+- A marker in the inbox cursors makes the import and the file deletion resumable across
+  restarts; the deletion is retried on the next start if it fails.
+
+The successful import logs one line:
+
+```text
+ms365 account "default" imported into the inbox database; legacy token file removed
+```
+
+The deprecated surfaces keep working against the migrated account for one release: the
+`inbox.ms365_signin` agent tool, the `inbox.ms365.signin.start` / `inbox.ms365.signin.status`
+gateway methods, and the `wednesdayai inbox ms365 login` command. The plugin service id
+`inbox-ms365-subscriptions` is likewise deprecated for one release: it stays registered as a
+silent no-op alias of `inbox-ms365-accounts` (it logs nothing and never starts a second
+manager).
+
+### Runbook for an existing single-account deployment
+
+Generic steps, with no tenant or account values:
+
+1. Deploy the new build. The gateway log shows the import line above.
+2. Run `wednesdayai inbox ms365 accounts list`; the legacy slot shows `active`.
+3. Check the stored item count for the account: unchanged, plus new mail.
+4. To add accounts in other tenants, switch the Entra app registration to **multi-tenant**
+   (and add personal accounts to the audience if wanted), then set the authority:
+   `wednesdayai config set inbox.ms365.tenantId organizations` — or `common` to admit
+   personal accounts. Existing accounts are unaffected; they refresh against their own
+   stored tenant.
+5. Add a second account through the agent or CLI; confirm delta polling, calendar sync and
+   backfill for it. For a personal account, also confirm subscriptions and delta (see
+   [Personal Microsoft accounts](#personal-microsoft-accounts)).
+
+Set `OPENCLAW_INBOX_TOKEN_KEY` in the process environment before the first start on a
+multi-process or clustered deployment, so every process seals and opens rows with the same
+key.
+
+## Personal Microsoft accounts
+
+Personal accounts (outlook.com) work when the app registration audience includes personal
+accounts and `inbox.ms365.tenantId` is `common` or `consumers`; the account itself always
+signs in against `consumers`. A personal account has to sign in once more on the device
+page. Delta polling, change-notification subscriptions and calendar delta on personal
+accounts are **unverified** — confirm them on a live account before relying on them.
+
+## Consent across tenants
+
+Microsoft blocks user consent, in tenants other than the app home tenant, for an unverified
+multi-tenant app registered after 2020-11-08 that requests more than basic profile
+permissions, when risk-based step-up consent is enabled. A user in such a tenant cannot
+complete the device-code sign-in. The recovery is one admin consent for the app in that
+tenant, or publisher verification of the app. Sign-ins inside the app home tenant are
+unaffected. With a single-tenant app, new sign-ins only work against the app home tenant
+(AADSTS50194 otherwise).
+
+## Polling backoff
+
+Each active account polls its folders every 15 minutes. After a failed pass (Graph 5xx,
+network, token endpoint) that account waits longer before the next attempt. The wait doubles
+from 15 minutes up to a cap of 2 hours, with some randomness so attempts do not line up, and
+is never shorter than a Graph `Retry-After`. These waits are minimum cooldowns: the next
+attempt runs on the first 15-minute poll after the cooldown ends, so actual spacing can
+include another poll interval. Each failure logs one warning with the earliest retry time.
+Renewal has its own cooldown, so delta failures do not suppress the daily renewal. A
+successful pass resets its own cooldown. A Graph `429` pauses every Graph call for that
+account (live ingest, actions, backfill) until the `Retry-After` window ends; other accounts
+keep polling. A signed-out account makes no Graph calls at all.
+
+## First sync
 
 A folder's first delta round is a **baseline**. It pages the folder's existing mail with slim
 requests, stores the delta checkpoint, and ingests none of that history. The baseline ingests
@@ -173,8 +373,8 @@ the folder's first page, so a retry after a failed first page keeps it. Mail rec
 that point on reaches the live ingest, so a first sync never floods consumers with push
 alerts, classification or nudges for old messages. Mail that
 already exists in the mailbox is imported separately with
-`openclaw inbox backfill --source ms365`, which never fans out as live signal. When the
-baseline completes, the log records it:
+`wednesdayai inbox backfill --source ms365 --account <slot>`, which never fans out as live
+signal. When the baseline completes, the log records it:
 
 ```text
 ms365 delta baseline established; existing mail is not imported (run: openclaw inbox backfill --source ms365)
@@ -183,19 +383,7 @@ ms365 delta baseline established; existing mail is not imported (run: openclaw i
 If Graph later resets the folder's sync state, the next round resyncs deletion-free and
 re-ingests only mail received since the last sync point minus 10 minutes.
 
-## 5. Verify
-
-- The configured tenant/client id parse and the token file appears under the state dir
-  after sign-in.
-- `inbox.list` / `inbox.search` return ms365 items alongside other sources.
-- With `notificationUrl` set, Graph subscription renewal should log no duplicate
-  subscriptions on restart.
-- On first sync, the delta poll logs
-  `ms365 delta baseline established; existing mail is not imported (run: openclaw inbox backfill --source ms365)`
-  for each folder, and no mail received more than 10 minutes before the baseline started
-  reaches the live ingest.
-
-## 6. Change notifications (webhook route)
+## Change notifications (webhook route)
 
 When `inbox.ms365.notificationUrl` is set, the source registers the Graph notification
 route at **`/plugins/inbox/ms365-graph`** (exact match, plugin auth — Graph cannot
@@ -203,24 +391,27 @@ present a gateway token; the per-subscription `clientState` secret is the route'
 mechanism). Point `notificationUrl` at the full public HTTPS URL of that route, e.g.
 `https://gateway.example.com/plugins/inbox/ms365-graph`.
 
-Behavior:
+Every active account creates and renews its own subscriptions against the same route, and
+each notification entry is dispatched to the account that owns its subscription id:
 
 - **Validation handshake** — `POST ?validationToken=...` is answered `200 text/plain`
   echoing the URL-decoded token (Graph webhook contract).
-- **Change notifications** — every entry's `clientState` is verified against the
-  persisted per-subscription secret BEFORE any dispatch; missing/mismatched entries are
-  rejected without ingest or reconciliation.
+- **Change notifications** — every entry's `clientState` is verified against the owning
+  account's persisted per-subscription secret BEFORE any dispatch; missing/mismatched
+  entries are rejected without ingest or reconciliation. A batch in which nothing was valid
+  is answered 401.
 - **Lifecycle notifications** — `reauthorizationRequired` triggers renewal,
-  `subscriptionRemoved` triggers recreate, `missed` triggers a delta resync pass.
+  `subscriptionRemoved` triggers recreate, `missed` triggers a delta resync pass, all on the
+  owning account only.
 - **Renewal** — subscriptions are renewed daily against Graph's 7-day maximum lifetime
-  (10,080 minutes); subscription id, resource, and `clientState` persist in the inbox
+  (10,080 minutes); subscription id, resource, and `clientState` persist in the account's
   cursor rows so restarts resume without duplicates. A 409 on create (lost create
   response) is recovered by adopting the ownership-verified existing subscription, never
   by creating a duplicate.
-- **Delta fallback** — each folder is polled in slim paged rounds: delta requests select
-  `isRead,categories,parentFolderId,receivedDateTime` and carry
+- **Delta fallback** — each folder of each account is polled in slim paged rounds: delta
+  requests select `isRead,categories,parentFolderId,receivedDateTime` and carry
   `Prefer: odata.maxpagesize=100`, and one page is fetched per request. Every page commits its
-  checkpoint to the folder's own cursor row as JSON
+  checkpoint to the account-scoped cursor row as JSON
   `{"link":...,"mode":"baseline"|"resync"|"live","since":...}` (mid-round checkpoints also
   carry the round's `"started"` time; a baseline whose first page has been fetched but not yet
   committed stores `"link":null`, so a retry keeps the baseline's start), so a failed page
@@ -231,20 +422,24 @@ Behavior:
   40X `syncStateNotFound`/`resyncRequired`) restarts the folder once as a deletion-free resync
   that re-ingests only mail received since the last sync point minus 10 minutes (legacy bare
   cursors take the full deletion-free resync). Folders fail independently. An ordinary error
-  on one folder does not block the others, and it still arms the polling cooldown. A signed-out
-  account or a Graph `429` stops the pass at once, because the sign-in gate and the throttle
-  window own those cases. A signed-out skip does not arm the cooldown.
+  on one folder does not block the others, and it still arms the polling cooldown. A
+  signed-out or throttled account stops its own pass at once, because the sign-in gate and
+  the throttle window own those cases; a signed-out skip does not arm the cooldown.
 
 With `notificationUrl` unset, no subscriptions are created (one warn at startup) and the
 source runs delta-poll-only.
 
 ## Backfill
 
-`wednesdayai inbox backfill --source ms365 [--account <id>] [--since <iso>] [--all]` pulls
+`wednesdayai inbox backfill --source ms365 [--account <slot>] [--since <iso>] [--all]` pulls
 mailbox history into the inbox store with the manual, resumable, per-page checkpointed
 contract described in [Inbox API](https://docs.wednesdayai.dev/developers/reference/inbox-api#backfill). The ms365-specific
 behavior:
 
+- **Accounts** — `--account <slot>` selects one account; without it every `active` account
+  is walked. A slot that is not `active` ends the run at once with a typed needs-sign-in
+  error naming the account and the sign-in options; a rejected refresh in the CLI process is
+  recorded on the account row, and the gateway nudge follows within one reconcile pass.
 - **Folder coverage** — the walk covers **Inbox** and then **Sent Items** — the same
   folder set the **delta poll** covers. That parity holds for delta polling only: with
   delegated auth and `notificationUrl` configured, the live change-notification
@@ -257,14 +452,13 @@ behavior:
   server-side `$filter=receivedDateTime ge <since>`; a client-side timestamp guard under
   that filter drops anything older that a `$skiptoken` boundary still returns.
 - **Checkpoints** — the opaque resume position is JSON
-  `{"f":<folder index>,"link":<nextLink|null>}` in the `backfill:<account>` cursor row:
-  the walk exhausts Inbox, advances to Sent Items, then reports done.
-- **Throttling and sign-in**: pages use the same Graph client rules as the live delta poll.
-  The client retries once after a `Retry-After` of up to 30 s. A longer wait ends the run with
-  a typed throttling error and pauses that client until the window passes. The checkpoint
-  lets the next run resume from the last committed page. Backfill never starts a sign-in. When
-  signed out, the run stops at once with
-  ``ms365 sign-in required — start it from the Control UI (Channels → Microsoft 365 inbox) or run `wednesdayai inbox ms365 login` on the gateway host``.
+  `{"f":<folder index>,"link":<nextLink|null>}` in the account-scoped `backfill:<account>`
+  cursor row: the walk exhausts Inbox, advances to Sent Items, then reports done.
+- **Throttling and sign-in**: pages use the same per-account Graph client rules as the live
+  delta poll. The client retries once after a `Retry-After` of up to 30 s. A longer wait
+  ends the run with a typed throttling error and pauses that client until the window passes.
+  The checkpoint lets the next run resume from the last committed page. Backfill never
+  starts a sign-in; a signed-out account stops the run with the needs-sign-in error.
 - **Message shape** — backfill pages and the live `GET /me/messages/{id}` fetch send the same
   explicit `$select` (`MS365_MESSAGE_SELECT`, including `internetMessageHeaders`), so backfilled
   rows carry the same `raw_json` fields as live-ingested ones. Attachment metadata is hydrated
@@ -272,7 +466,26 @@ behavior:
   rows stored before the select carried them; it never replaces a stored `raw_json` field
   (#2544).
 
-Enablement is the `inbox.ms365` config block itself (`tenantId` + `clientId` required):
-the CLI fails with `inbox source ms365 is not configured`, and in the agent tool an
-unconfigured ms365 is simply not a registered backfill source. The walk is single-mailbox
-— the configured mailbox — matching the source's account model.
+Enablement is the `inbox.ms365` config block itself (`clientId` required): the CLI fails
+with `inbox source ms365 is not configured`, and in the agent tool an unconfigured ms365 is
+simply not a registered backfill source.
+
+## Verify
+
+- `wednesdayai inbox ms365 accounts list` shows each account `active` with a recent
+  `lastVerifiedAt`; `status <slot>` names a failure reason when one is signed out.
+- `inbox.list` / `inbox.search` return ms365 items per account (`ms365:<slot>:<message id>`)
+  alongside other sources.
+- After a migration, the gateway log shows the import line and the legacy token file is gone.
+- On first sync, the delta poll logs
+  `ms365 delta baseline established; existing mail is not imported (run: openclaw inbox backfill --source ms365)`
+  for each folder, and no mail received more than 10 minutes before the baseline started
+  reaches the live ingest.
+- With `notificationUrl` set, Graph subscription renewal should log no duplicate
+  subscriptions on restart.
+
+## Related
+
+- CLI reference for the account commands: [`inbox ms365 accounts`](/next/users/cli/inbox#ms365-accounts)
+- Gmail push ingest setup: [Gmail Pub/Sub](/next/users/automation/gmail-pubsub)
+- Webhook endpoints that feed the inbox: [Webhooks](/next/users/automation/webhook)
